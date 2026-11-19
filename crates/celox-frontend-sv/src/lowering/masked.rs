@@ -71,3 +71,65 @@ pub(super) fn dynamic_four_state(
             .map_err(slt_error)
     }
 }
+
+/// The bits of `forced` where the two-state `mask` is set and of `value`
+/// elsewhere, all `width` bits wide. A four-state merge selects the value
+/// and the X/Z planes apart, so a selected Z stays Z.
+pub(super) fn select_masked<A: std::hash::Hash + Eq + Clone>(
+    arena: &mut SLTNodeArena<A>,
+    mask: NodeId,
+    forced: NodeId,
+    value: NodeId,
+    width: usize,
+    four_state: bool,
+) -> Result<NodeId, celox_slt::SLTNodeFactsError> {
+    let merge = |arena: &mut SLTNodeArena<A>, mask: NodeId, forced: NodeId, value: NodeId| {
+        let keep = arena.alloc(SLTNode::Unary(UnaryOp::BitNot, mask))?;
+        let taken = arena.alloc(SLTNode::Binary(forced, BinaryOp::And, mask))?;
+        let kept = arena.alloc(SLTNode::Binary(value, BinaryOp::And, keep))?;
+        arena.alloc(SLTNode::Binary(kept, BinaryOp::Or, taken))
+    };
+    if !four_state {
+        return merge(arena, mask, forced, value);
+    }
+    let words = width.next_multiple_of(64);
+    let pad = |arena: &mut SLTNodeArena<A>, node: NodeId| {
+        if words == width {
+            return Ok(node);
+        }
+        let zero = arena.alloc(SLTNode::Constant(
+            BigUint::default(),
+            BigUint::default(),
+            words - width,
+            false,
+        ))?;
+        arena.alloc(SLTNode::Concat(vec![(zero, words - width), (node, width)]))
+    };
+    let mask = pad(arena, mask)?;
+    let forced = pad(arena, forced)?;
+    let value = pad(arena, value)?;
+    let forced = arena.alloc(SLTNode::Unary(UnaryOp::ToPlanes, forced))?;
+    let value = arena.alloc(SLTNode::Unary(UnaryOp::ToPlanes, value))?;
+    let mut planes = Vec::new();
+    for lsb in [words, 0] {
+        let access = BitAccess::new(lsb, lsb + words - 1);
+        let new = arena.alloc(SLTNode::Slice {
+            expr: forced,
+            access,
+        })?;
+        let old = arena.alloc(SLTNode::Slice {
+            expr: value,
+            access,
+        })?;
+        planes.push((merge(arena, mask, new, old)?, words));
+    }
+    let planes = arena.alloc(SLTNode::Concat(planes))?;
+    let merged = arena.alloc(SLTNode::Unary(UnaryOp::FromPlanes, planes))?;
+    if words == width {
+        return Ok(merged);
+    }
+    arena.alloc(SLTNode::Slice {
+        expr: merged,
+        access: BitAccess::new(0, width - 1),
+    })
+}

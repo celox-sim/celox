@@ -615,11 +615,6 @@ impl Ff<'_, '_> {
                     | SIRInstruction::CombCaptureEnableIfChanged { .. } => {
                         return Err(Reason::HostRequest);
                     }
-                    SIRInstruction::ExternCall { func, .. }
-                        if *func != celox_sir::extern_abi::HEAP_HELPER_ID =>
-                    {
-                        return Err(Reason::HostRequest);
-                    }
                     SIRInstruction::Call { function, .. } => {
                         callees.push(function.0 as usize);
                         continue;

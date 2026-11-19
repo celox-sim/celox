@@ -25,7 +25,6 @@ impl Parameter {
             has_declared_type,
             is_local,
             signed_element_depth: None,
-            enum_domain: None,
         }
     }
 
@@ -46,27 +45,87 @@ impl Parameter {
         if self.floating.is_some() {
             return None;
         }
-        let mut value =
-            substitute_typed_parameter_literals(self.value()?.clone(), constants, parameter_types);
-        if self.declared_is_2state {
-            value = ConstExpr::Unary {
-                op: UnaryOp::ToTwoState,
-                expr: Box::new(value),
-            };
-        }
-        let value: crate::ir::ConstExpr = value.into();
+        let value: crate::ir::ConstExpr = parameters::substitute_array_parameter_arguments(
+            substitute_typed_parameter_literals(self.value()?.clone(), constants, parameter_types),
+            constants,
+        )
+        .into();
         let environment = const_functions::Environment {
             constants,
             functions,
         };
-        let mut value = if self.has_declared_type && typecheck::const_expr_has_real_type(&value) {
-            // An explicitly integral parameter supplies an integer assignment
-            // context. Untyped real parameters retain their floating type.
+        let mut value = if (self.has_declared_type || self.declared_width.is_some())
+            && typecheck::const_expr_has_real_type(&value)
+        {
+            // An explicitly integral parameter, or one with a range, supplies
+            // an integer assignment context (IEEE 1800-2023 6.20.2). Untyped
+            // real parameters retain their floating type.
             typecheck::round_real_to_i128(typecheck::eval_real_const_expr(&value, &environment)?)
         } else {
-            typecheck::eval_const_expr_in_env(&value, &environment)?
+            // A typed parameter is assigned its value (6.20.2): the declared
+            // width is the context of the context-determined operands, which
+            // are extended before they are evaluated (11.6.1, 11.8.2). The
+            // value keeps its own signedness until it is converted (11.8.1).
+            let two_state = |value| {
+                if self.declared_is_2state {
+                    crate::ir::ConstExpr::Unary {
+                        op: crate::ir::UnaryOp::ToTwoState,
+                        expr: Box::new(value),
+                    }
+                } else {
+                    value
+                }
+            };
+            let signed = self.declared_signed.unwrap_or(false);
+            let assigned = |value, width| {
+                two_state(crate::ir::ConstExpr::Resize {
+                    expr: Box::new(value),
+                    width,
+                    signed,
+                })
+            };
+            match self.declared_width {
+                None => typecheck::eval_const_expr_in_env(&two_state(value), &environment)?,
+                Some(width) if width <= 128 => {
+                    typecheck::eval_const_expr_in_env(&assigned(value, width), &environment)?
+                }
+                Some(width) => {
+                    if let Some(literal) = typecheck::eval_const_integral_literal_in_env(
+                        &assigned(value.clone(), width),
+                        &environment,
+                        &|_| None,
+                    ) {
+                        // A wider value is numeric only as a sign-extended
+                        // i128; the literal resolution keeps any other.
+                        typecheck::wide_integral_literal_as_i128(&literal)?
+                    } else {
+                        let number =
+                            typecheck::eval_const_expr_in_env(&two_state(value), &environment)?;
+                        // A number holds a value wider than 128 bits by its
+                        // low 128 bits, extended by their sign. An unsigned
+                        // value with bit 127 set is extended by zeros instead
+                        // (IEEE 1800-2023 10.7), which only the literal of
+                        // the declared width can hold; so is one whose sign
+                        // is not known here, such as a function result.
+                        if number < 0
+                            && !infer_parameter_value_type(self.value()?, true, parameter_types)
+                                .is_some_and(|r#type| r#type.signed)
+                        {
+                            return None;
+                        }
+                        number
+                    }
+                }
+            }
         };
-        if let Some(width) = self.declared_width {
+        // A signing without a range applies to the range of the final value
+        // (IEEE 1800-2023 6.20.2).
+        let width = self.declared_width.or_else(|| {
+            self.declared_signed?;
+            infer_parameter_value_type(self.value()?, self.has_declared_type, parameter_types)
+                .map(|r#type| r#type.width)
+        });
+        if let Some(width) = width {
             value =
                 coerce_const_parameter_value(value, width, self.declared_signed.unwrap_or(false));
         }
@@ -311,11 +370,27 @@ impl Port {
             unresolved_net: false,
             net_resolution: NetResolution::Wire,
             default: None,
+            expression: None,
         }
     }
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The expression of an explicitly named port.
+    pub(crate) fn expression(&self) -> Option<celox_sv_syntax::ExprId> {
+        self.expression
+    }
+
+    pub(crate) fn with_expression(mut self, expression: Option<celox_sv_syntax::ExprId>) -> Self {
+        self.expression = expression;
+        self
+    }
+
+    /// Give the port of an explicit port expression the expression's type.
+    pub(crate) fn set_type(&mut self, r#type: Type) {
+        self.r#type = r#type;
     }
 
     pub fn direction(&self) -> PortDirection {

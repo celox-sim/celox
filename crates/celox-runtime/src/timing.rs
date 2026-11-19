@@ -264,6 +264,43 @@ pub struct ProcessRefs {
 }
 
 impl ProcessRefs {
+    /// The bytes this description holds, its vectors' capacities included.
+    pub fn bytes(&self) -> usize {
+        use std::mem::size_of;
+        size_of::<Self>()
+            + self.wait_sites.capacity() * size_of::<Vec<TermRefs>>()
+            + self
+                .wait_sites
+                .iter()
+                .map(|site| site.capacity() * size_of::<TermRefs>())
+                .sum::<usize>()
+            + self.nba_sites.capacity() * size_of::<NbaSiteRefs>()
+            + self.host_requests.capacity() * size_of::<celox_design::HostRequestSite<SignalRef>>()
+            + self
+                .host_requests
+                .iter()
+                .map(|site| {
+                    (site.args.capacity() + site.results.capacity())
+                        * size_of::<celox_design::HostRequestValue<SignalRef>>()
+                        + site.strings.capacity() * size_of::<String>()
+                        + site.strings.iter().map(String::capacity).sum::<usize>()
+                })
+                .sum::<usize>()
+            + self.frame.as_ref().map_or(0, |frame| {
+                (frame.private.capacity() + frame.locals.capacity()) * size_of::<SignalRef>()
+                    + frame.event_probes.capacity()
+                        * size_of::<celox_design::ProcessEventProbe<SignalRef>>()
+                    + frame
+                        .event_probes
+                        .iter()
+                        .map(|probe| {
+                            (probe.inputs.capacity() + probe.scratch.capacity())
+                                * size_of::<SignalRef>()
+                        })
+                        .sum::<usize>()
+            })
+    }
+
     /// A process without wait or nonblocking sites.
     pub fn new(status: SignalRef, delay: SignalRef) -> Self {
         Self {

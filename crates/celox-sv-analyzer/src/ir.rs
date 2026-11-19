@@ -83,6 +83,12 @@ impl Ir {
         &self.modules
     }
 
+    /// The module `name`, to supply it what its analysis left to the caller
+    /// (see [`Module::import_subroutines`]).
+    pub fn module_mut(&mut self, name: &str) -> Option<&mut Module> {
+        self.modules.iter_mut().find(|module| module.name == name)
+    }
+
     /// The modules, to lower them from their own bodies.
     /// See [`Module::expand_instances`], for each module.
     pub fn expand_instances(&mut self, expansion: &InstanceExpansion<'_>) {
@@ -137,6 +143,9 @@ pub struct InterfaceHandle {
     pub port: bool,
     /// The signal or port of the module that holds each member.
     pub members: Vec<(String, String)>,
+    /// The generate blocks that hold the instance, outermost first, each as
+    /// a hierarchical name spells it (see [`crate::InterfaceBodyScope::blocks`]).
+    pub blocks: Vec<String>,
 }
 
 impl Module {
@@ -475,6 +484,23 @@ impl Module {
         &self.subroutines
     }
 
+    /// Supply the module the body of a subroutine of another instance that
+    /// its hierarchical names call (see [`crate::ast::HierarchicalSubroutine`]),
+    /// with the signals and locals the body names: the signals denote objects
+    /// of other instances or packages, the locals belong to the module.
+    pub fn import_subroutines(
+        &mut self,
+        subroutines: Vec<Subroutine>,
+        signals: Vec<Signal>,
+        locals: Vec<LocalVariable>,
+        dpi_imports: Vec<DpiImport>,
+    ) {
+        self.subroutines.extend(subroutines);
+        self.signals.extend(signals);
+        self.locals.extend(locals);
+        self.dpi_imports.extend(dpi_imports);
+    }
+
     pub fn id(&self) -> ModuleId {
         self.id
     }
@@ -631,6 +657,23 @@ pub enum ForceRole {
     Enable,
     /// The forced value.
     Value,
+    /// Whether a released target that an `always_comb`, `always_latch` or
+    /// `always @*` procedure assigns still holds the forced value: until
+    /// the procedure executes again (IEEE 1800-2023 10.6.2, 9.2.2.2), its
+    /// writes store the forced value as while forced.
+    Hold,
+}
+
+/// The name of the force control `role` of target `target`: one name for
+/// each target, which no declaration can have, so that a module forcing
+/// the target through a hierarchical name can name the control too.
+pub fn force_control_name(role: &ForceRole, target: &str) -> String {
+    let role = match role {
+        ForceRole::Enable => "enable",
+        ForceRole::Value => "value",
+        ForceRole::Hold => "hold",
+    };
+    format!("%force_{role}:{target}")
 }
 
 /// The force control a hidden variable is (see [`ForceRole`]).
@@ -658,6 +701,13 @@ impl Signal {
             hierarchical: None,
             force_control: None,
         }
+    }
+
+    /// A signal `name` of type `r#type` that denotes the object of another
+    /// instance hierarchical name `name` names (see [`Self::hierarchical`]).
+    pub fn hierarchical_alias(name: String, r#type: Type, is_net: bool) -> Self {
+        let path = name.clone();
+        Self::new(name, r#type, is_net).with_hierarchical(Some(&path))
     }
 
     pub(crate) fn with_force_control(mut self, control: Option<&ForceControl>) -> Self {
@@ -710,6 +760,11 @@ impl Signal {
 
     pub fn is_net(&self) -> bool {
         self.is_net
+    }
+
+    /// Whether this is a generic interconnect net (6.6.8).
+    pub fn is_interconnect(&self) -> bool {
+        self.is_net && self.net_resolution == crate::ast::NetResolution::Interconnect
     }
 
     /// Whether this is an unresolved, single-driver `uwire` net (6.6.2).
@@ -793,6 +848,11 @@ impl Port {
 
     pub fn is_net(&self) -> bool {
         self.is_net
+    }
+
+    /// Whether this is a generic interconnect port (6.6.8).
+    pub fn is_interconnect(&self) -> bool {
+        self.is_net && self.net_resolution == crate::ast::NetResolution::Interconnect
     }
 
     /// Whether this is an unresolved, single-driver `uwire` net (6.6.2).
@@ -1029,6 +1089,10 @@ pub struct Type {
     /// array of them, whose members a name of the variable from another
     /// scope selects (IEEE 1800-2023 7.2, 23.6).
     packed_structure: Option<std::sync::Arc<ast::Type>>,
+    /// The declared type of an enumeration, or of a packed array of them,
+    /// whose named values a name of the variable from another scope has
+    /// (IEEE 1800-2023 6.19, 23.6).
+    enumeration: Option<std::sync::Arc<ast::Type>>,
 }
 
 /// Shared metadata, allocated only for unpacked structure types. Ordinary
@@ -1044,6 +1108,12 @@ impl Type {
     /// array of them (see [`ast::Type::with_members_of`]).
     pub fn packed_structure(&self) -> Option<&ast::Type> {
         self.packed_structure.as_deref()
+    }
+
+    /// The declared type of an enumeration, or of a packed array of them
+    /// (see [`ast::Type::with_enumeration_of`]).
+    pub fn enumeration(&self) -> Option<&ast::Type> {
+        self.enumeration.as_deref()
     }
 
     /// Nominal identity of a non-storage unpacked structure declaration.
@@ -1115,6 +1185,38 @@ impl Type {
     /// does not have.
     pub fn packed_bounds(&self) -> Option<&[(i128, i128)]> {
         self.packed_bounds.as_deref()
+    }
+
+    /// This type with its packed and unpacked bounds evaluated by `bound` in
+    /// the scope that declares it, as literals, so that another scope, whose
+    /// constants differ, can declare a variable of it (see
+    /// [`Module::import_subroutines`]). `None` if a bound does not evaluate.
+    pub fn with_literal_bounds(&self, bound: &dyn Fn(&ConstExpr) -> Option<i128>) -> Option<Self> {
+        let literal = |value: i128| ConstExpr::Literal(value.to_string());
+        let packed = match self.packed_bounds() {
+            Some(bounds) => bounds.to_vec(),
+            None => self
+                .packed_ranges
+                .iter()
+                .map(|range| Some((bound(range.left())?, bound(range.right())?)))
+                .collect::<Option<Vec<_>>>()?,
+        };
+        let mut ty = self.clone();
+        ty.packed_ranges = packed
+            .iter()
+            .map(|&(left, right)| PackedRange::new(literal(left), literal(right)))
+            .collect();
+        ty.packed_bounds = Some(packed.into_boxed_slice());
+        for range in &mut ty.unpacked_ranges {
+            let (left, right) = match range.resolved_bounds {
+                Some(bounds) => bounds,
+                None => (bound(&range.left)?, bound(&range.right)?),
+            };
+            range.left = literal(left);
+            range.right = literal(right);
+            range.resolved_bounds = Some((left, right));
+        }
+        Some(ty)
     }
 
     /// This type with resolved packed bounds `bounds` (see
@@ -1200,12 +1302,14 @@ impl Type {
             chandle: false,
             container: None,
             packed_structure: None,
+            enumeration: None,
         }
     }
 
     pub(crate) fn from_ast(
         r#type: ast::Type,
         constants: &dyn typecheck::ConstantEnvironment,
+        class: &dyn Fn(&ast::Type) -> Option<String>,
     ) -> Self {
         let structure = r#type.structure_identity().map(|identity| {
             std::sync::Arc::new(StructureType {
@@ -1213,14 +1317,14 @@ impl Type {
                 leaves: r#type
                     .structure_leaves()
                     .into_iter()
-                    .map(|(name, ty)| (name, Self::from_ast(ty, constants)))
+                    .map(|(name, ty)| (name, Self::from_ast(ty, constants, class)))
                     .collect(),
             })
         });
         let tagged_identity = r#type.tagged_identity().map(str::to_owned);
         let kind = r#type.kind().into();
         let is_signed = r#type.is_signed();
-        let class = r#type.class().map(str::to_owned);
+        let class = class(&r#type);
         let signed_element_depth = r#type.signed_element_depth();
         let chandle = r#type.is_chandle();
         // The declaration's bounds, resolved where its constant functions
@@ -1237,6 +1341,8 @@ impl Type {
         });
         let packed_structure = (r#type.has_packed_members() && container.is_none())
             .then(|| std::sync::Arc::new(r#type.clone()));
+        let enumeration = (r#type.has_enumeration() && container.is_none())
+            .then(|| std::sync::Arc::new(r#type.clone()));
         let (packed_ranges, unpacked_ranges, resolved_width) = convert_type(r#type, constants);
         Self {
             structure,
@@ -1252,6 +1358,7 @@ impl Type {
             chandle,
             container,
             packed_structure,
+            enumeration,
         }
     }
 }
@@ -1464,14 +1571,26 @@ impl Assignment {
 }
 
 /// The bits `lsb..=msb` of a variable that a run-time select stays within:
-/// those of the packed structure member the select is written on. The
-/// select's positions count from bit 0 of the variable, as those of a
-/// constant select of the member do; what it selects outside the window
-/// reads X and is not written (IEEE 1800-2023 11.5.1), as outside a vector.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// those of the packed structure member or the array element the select is
+/// written on. The select's positions count from bit 0 of the variable, as
+/// those of a constant select of the member do; what it selects outside the
+/// window reads X and is not written (IEEE 1800-2023 11.5.1), as outside a
+/// vector.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SelectWindow {
     pub lsb: u32,
     pub msb: u32,
+    /// For the member or bits of an array element at a run-time index: the
+    /// position of the element's bit 0, which `lsb` and `msb` then count
+    /// from; past the variable for an index outside the array.
+    pub at: Option<Box<ConstExpr>>,
+}
+
+impl SelectWindow {
+    /// The constant window of bits `lsb..=msb` of the variable.
+    pub fn bits(lsb: u32, msb: u32) -> Self {
+        Self { lsb, msb, at: None }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1969,7 +2088,7 @@ impl Expr {
 
     /// `self` as a select position: a value whose operands are such
     /// values, or `None`.
-    fn to_const(&self) -> Option<ConstExpr> {
+    pub fn to_const(&self) -> Option<ConstExpr> {
         let go = |expr: &Expr| expr.to_const().map(Box::new);
         Some(match self {
             Expr::Ident(name) => ConstExpr::Ident(name.clone()),
@@ -2103,6 +2222,65 @@ fn reads_only(callee: &Callee) -> bool {
 }
 
 impl ConstExpr {
+    /// The expression with each identifier `name` replaced by `f(name)`.
+    pub(crate) fn map_idents(self, f: &mut impl FnMut(String) -> ConstExpr) -> ConstExpr {
+        let mut boxed = |expr: Box<ConstExpr>| Box::new(expr.map_idents(&mut *f));
+        match self {
+            ConstExpr::Ident(name) => f(name),
+            ConstExpr::Literal(value) => ConstExpr::Literal(value),
+            ConstExpr::SelectRange {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => ConstExpr::SelectRange {
+                expr: boxed(expr),
+                msb: boxed(msb),
+                lsb: boxed(lsb),
+                signed,
+            },
+            ConstExpr::Select { expr, bit } => ConstExpr::Select {
+                expr: boxed(expr),
+                bit: boxed(bit),
+            },
+            ConstExpr::Function { callee, args, site } => ConstExpr::Function {
+                callee,
+                args: args
+                    .into_iter()
+                    .map(|arg| arg.map_idents(&mut *f))
+                    .collect(),
+                site,
+            },
+            ConstExpr::Resize {
+                expr,
+                width,
+                signed,
+            } => ConstExpr::Resize {
+                expr: boxed(expr),
+                width,
+                signed,
+            },
+            ConstExpr::Unary { op, expr } => ConstExpr::Unary {
+                op,
+                expr: boxed(expr),
+            },
+            ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
+                left: boxed(left),
+                op,
+                right: boxed(right),
+            },
+            ConstExpr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => ConstExpr::Mux {
+                condition: boxed(condition),
+                then_expr: boxed(then_expr),
+                else_expr: boxed(else_expr),
+            },
+        }
+    }
+
     fn operands(&self) -> Vec<&ConstExpr> {
         match self {
             ConstExpr::Literal(_) | ConstExpr::Ident(_) => Vec::new(),
@@ -2135,7 +2313,7 @@ impl ConstExpr {
     }
 
     /// `self` with each identifier `name` replaced by `value`.
-    fn substitute(&self, name: &str, value: &ConstExpr) -> ConstExpr {
+    pub fn substitute(&self, name: &str, value: &ConstExpr) -> ConstExpr {
         let go = |expr: &ConstExpr| Box::new(expr.substitute(name, value));
         match self {
             ConstExpr::Ident(ident) if ident == name => value.clone(),
@@ -2428,6 +2606,26 @@ impl From<ast::Assignment> for Assignment {
     }
 }
 
+impl From<ast::SelectWindow> for SelectWindow {
+    fn from(window: ast::SelectWindow) -> Self {
+        SelectWindow {
+            lsb: window.lsb,
+            msb: window.msb,
+            at: window.at.map(|at| Box::new((*at).into())),
+        }
+    }
+}
+
+impl From<SelectWindow> for ast::SelectWindow {
+    fn from(window: SelectWindow) -> Self {
+        ast::SelectWindow {
+            lsb: window.lsb,
+            msb: window.msb,
+            at: window.at.map(|at| Box::new((*at).into())),
+        }
+    }
+}
+
 impl From<ast::LValue> for LValue {
     fn from(value: ast::LValue) -> Self {
         match value {
@@ -2447,7 +2645,7 @@ impl From<ast::LValue> for LValue {
                 lsb: lsb.into(),
                 array_slice_width: array_slice_width.map(|width| Box::new(width.into())),
                 array_slice_reversed,
-                window,
+                window: window.map(Into::into),
             },
         }
     }
@@ -2929,6 +3127,9 @@ pub struct DpiImport {
     name: String,
     c_name: String,
     pure: bool,
+    /// Declared `context` (IEEE 1800-2023 35.5.3): the C code may call
+    /// exported subroutines and reach the SystemVerilog state of the scope.
+    context: bool,
     return_type: Option<DpiType>,
     arguments: Vec<DpiArgument>,
     builtin: Option<DpiBuiltin>,
@@ -2954,10 +3155,22 @@ impl DpiImport {
             name,
             c_name,
             pure,
+            context: false,
             return_type,
             arguments,
             builtin: None,
         }
+    }
+
+    /// This import declared `context` if `context`.
+    pub(crate) fn with_context(mut self, context: bool) -> Self {
+        self.context = context;
+        self
+    }
+
+    /// Whether the import is declared `context`.
+    pub fn is_context(&self) -> bool {
+        self.context
     }
 
     /// This import bound to a function Celox provides.
@@ -3192,14 +3405,58 @@ mod virtual_instances {
                 }
                 Expr::Ident(member_name(&name, interface, id).unwrap_or(name))
             }
+            // A select's bounds may read the members too, as `a[i]` does at
+            // run time.
+            Expr::Select {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => Expr::Select {
+                expr: Box::new(for_instance(*expr, interface, id)),
+                msb: const_for_instance(msb, interface, id),
+                lsb: const_for_instance(lsb, interface, id),
+                signed,
+            },
             expr => map_operands(expr, &mut |child| for_instance(child, interface, id)),
         }
+    }
+
+    /// The bounds `expr` of a select for instance `id` of `interface`, as
+    /// [`for_instance`] makes an expression.
+    fn const_for_instance(expr: ConstExpr, interface: DefinitionId, id: u32) -> ConstExpr {
+        expr.map_idents(&mut |name| {
+            if instance(&Expr::Ident(name.clone())).is_some_and(|of| of == interface) {
+                return ConstExpr::Literal(format!("{WIDTH}'d{id}"));
+            }
+            ConstExpr::Ident(member_name(&name, interface, id).unwrap_or(name))
+        })
     }
 
     fn lvalue_for_instance(lvalue: &mut LValue, interface: DefinitionId, id: u32) {
         let (LValue::Ident(name) | LValue::Select { name, .. }) = lvalue;
         if let Some(renamed) = member_name(name, interface, id) {
             *name = renamed;
+        }
+        if let LValue::Select {
+            msb,
+            lsb,
+            array_slice_width,
+            ..
+        } = lvalue
+        {
+            let rename = |expr: &mut ConstExpr| {
+                *expr = const_for_instance(
+                    std::mem::replace(expr, ConstExpr::Literal(String::new())),
+                    interface,
+                    id,
+                );
+            };
+            rename(msb);
+            rename(lsb);
+            if let Some(width) = array_slice_width {
+                rename(width);
+            }
         }
     }
 

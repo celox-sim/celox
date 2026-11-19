@@ -188,8 +188,8 @@ fn unit_stores<'a>(
 }
 
 /// Whether a unit makes host calls, whose effects on the state are unknown.
-fn opaque(unit: &Unit) -> bool {
-    instructions(unit).any(makes_host_calls)
+fn opaque(unit: &Unit, functions: &[celox_design::ExternFunction]) -> bool {
+    instructions(unit).any(|inst| makes_opaque_calls(inst, functions))
 }
 
 /// Whether no design code writes a storage: neither RTL logic, a kernel

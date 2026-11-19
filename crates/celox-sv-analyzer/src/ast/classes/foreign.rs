@@ -343,6 +343,7 @@ fn build_inner(session: &mut Session, name: &str, caller: Option<&ScopeSymbols>)
         foreign: std::mem::take(&mut session.foreign),
         types: std::mem::take(&mut session.types),
         virtual_interfaces: session.virtual_interfaces.clone(),
+        virtual_interface_calls: session.virtual_interface_calls.clone(),
         next_call_site: session.next_call_site,
         ..Session::default()
     };
@@ -350,6 +351,7 @@ fn build_inner(session: &mut Session, name: &str, caller: Option<&ScopeSymbols>)
     session.foreign = scope.foreign;
     session.types = scope.types;
     session.next_call_site = scope.next_call_site;
+    session.virtual_interfaces = scope.virtual_interfaces.take();
     let mut symbols = result?;
     let table = &session.types;
     let registry = &mut session.foreign;
@@ -484,6 +486,12 @@ fn specialize(
             }
         }
     }
+    // So may it call their tasks and functions, also those built for the
+    // design: of a specialization of a parameterized interface, or whose
+    // hierarchical names each instance resolves.
+    let mut imports = Arc::new(imports);
+    crate::ast::virtual_interface_calls::import_specializations(session, &mut imports);
+    let imports = Arc::unwrap_or_clone(imports);
     // The classes whose specializations may extend a class of the scopes
     // that ask for them, when nothing else hides a name the package
     // qualifies with its own.
@@ -1052,7 +1060,8 @@ mod tests {
         // `\v%foo@8`; the package that takes the method may have named
         // locals of its own so too. The method's must not become those,
         // whatever their spelling holds.
-        let logic = crate::ir::Type::from_ast(Type::new(TypeKind::Logic), &HashMap::default());
+        let logic =
+            crate::ir::Type::from_ast(Type::new(TypeKind::Logic), &HashMap::default(), &|_| None);
         let local = |name: &str, source: &str, owned: bool| LocalVariable {
             name: name.into(),
             source_name: source.into(),

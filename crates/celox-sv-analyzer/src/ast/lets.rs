@@ -9,6 +9,10 @@
 //! other names resolve where the `let` is declared: the element's items. A
 //! call in a nested scope that declares one of them again would resolve it
 //! otherwise, and is rejected. A `let` declared elsewhere is rejected.
+//!
+//! Nothing is expanded in what follows the name of a covergroup, which the
+//! element does not bind: a name there may be a formal, a coverpoint or
+//! `item` (19.3, 19.5.1.1, 19.6.1).
 
 use super::*;
 use celox_sv_syntax::{
@@ -129,9 +133,14 @@ fn plan(
             _ => None,
         })
         .collect::<HashSet<_>>();
+    // What follows the name of a covergroup is not the element's to bind.
+    let covergroups = &tree.spans().covergroups;
     for (id, node) in native.expression_nodes() {
         let at = node.tokens;
-        if !contains(unit.tokens, at) || children.iter().any(|child| contains(*child, at)) {
+        if !contains(unit.tokens, at)
+            || children.iter().any(|child| contains(*child, at))
+            || covergroups.contain(at)
+        {
             continue;
         }
         let (callee, arguments) = match &node.kind {

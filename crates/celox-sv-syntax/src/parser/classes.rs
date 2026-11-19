@@ -157,6 +157,18 @@ impl Parser<'_> {
                 ),
             ));
         }
+        // The lifetime of a class method is automatic; declaring it static
+        // is illegal (IEEE 1800-2023 8.6).
+        if self.subroutines[id.0].lifetime.as_deref() == Some("static") {
+            return Err(self.error_at(
+                self.subroutines[id.0].tokens,
+                format!(
+                    "method `{}` of class `{}` declared with a static lifetime",
+                    self.subroutines[id.0].name.value(),
+                    class.name.value()
+                ),
+            ));
+        }
         if let Some(class) = self.class_stack.last_mut() {
             class.methods.push(ClassMethod {
                 qualifiers,
@@ -166,8 +178,8 @@ impl Parser<'_> {
         Ok(())
     }
 
-    /// Record a parameter or type declaration that is an item of the
-    /// innermost open class.
+    /// Record a parameter or type declaration or a covergroup that is an
+    /// item of the innermost open class.
     pub(super) fn class_item(&mut self, kind: &BodyItemKind) {
         let Some(class) = self.class_stack.last_mut() else {
             return;
@@ -175,14 +187,16 @@ impl Parser<'_> {
         match kind {
             BodyItemKind::Parameter(id) => class.parameters.push(*id),
             BodyItemKind::TypeAlias(id) => class.type_aliases.push(*id),
+            BodyItemKind::Covergroup(id) => class.covergroups.push(*id),
             _ => {}
         }
     }
 
     /// Complete the innermost open class at its `endclass`; `package` is
     /// the package unit that declares it, if any.
-    pub(super) fn finish_class(&mut self, package: Option<String>) {
+    pub(super) fn finish_class(&mut self, package: Option<String>) -> Result<()> {
         if let Some(mut class) = self.class_stack.pop() {
+            self.reject_duplicate_class_names(&class)?;
             class.tokens = TokenRange {
                 start: class.tokens.start,
                 end: self.indices[self.at - 1] + 1,
@@ -196,6 +210,72 @@ impl Parser<'_> {
             self.classes.push(class);
             self.class_scopes.push(scope);
         }
+        Ok(())
+    }
+
+    /// Reject two declarations of one name in the scope of `class`: its
+    /// parameters, typedefs, properties, the members of the enumerations
+    /// they declare, and its methods (IEEE 1800-2023 8.3, 6.19, 23.9).
+    fn reject_duplicate_class_names(&self, class: &ClassDeclaration) -> Result<()> {
+        let mut names = Vec::<(&Name, TokenRange)>::new();
+        fn enumeration<'a>(
+            types: &'a [DataType],
+            names: &mut Vec<(&'a Name, TokenRange)>,
+            id: TypeId,
+        ) {
+            let data = &types[id.0];
+            if let DataTypeKind::Enum { items, .. } = &data.kind {
+                names.extend(items.iter().map(|item| (&item.name, data.tokens)));
+            }
+        }
+        for id in class.parameter_ports.iter().chain(&class.parameters) {
+            let declaration = &self.parameter_declarations[id.0];
+            names.extend(
+                declaration
+                    .parameters
+                    .iter()
+                    .map(|parameter| (&parameter.name, parameter.tokens)),
+            );
+        }
+        for id in &class.type_aliases {
+            // A forward typedef precedes the typedef of its name (6.18).
+            let alias = &self.type_aliases[id.0];
+            if matches!(alias.target, TypeAliasTarget::Forward(_)) {
+                continue;
+            }
+            names.push((&alias.name, alias.tokens));
+            if let TypeAliasTarget::DataType(id) = alias.target {
+                enumeration(&self.types, &mut names, id);
+            }
+        }
+        for property in &class.properties {
+            let declaration = &property.declaration;
+            names.extend(
+                declaration
+                    .variables
+                    .iter()
+                    .map(|variable| (&variable.name, declaration.tokens)),
+            );
+            enumeration(&self.types, &mut names, declaration.data_type);
+        }
+        for method in &class.methods {
+            let subroutine = &self.subroutines[method.subroutine.0];
+            names.push((&subroutine.name, subroutine.tokens));
+        }
+        let mut seen = fxhash::FxHashSet::default();
+        for (name, tokens) in names {
+            if !seen.insert(name.value()) {
+                return Err(self.error_at(
+                    tokens,
+                    format!(
+                        "`{}` is declared more than once in class `{}`",
+                        name.value(),
+                        class.name.value()
+                    ),
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn class_header(&mut self) -> Result<Vec<BodyItemId>> {
@@ -271,6 +351,7 @@ impl Parser<'_> {
             type_aliases: Vec::new(),
             properties: Vec::new(),
             methods: Vec::new(),
+            covergroups: Vec::new(),
             tokens: TokenRange { start, end: start },
         });
         Ok(items)

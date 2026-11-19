@@ -271,3 +271,33 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "handle 01 00\n"))
+
+; A select of an element of a fixed-size array or queue class property,
+; `data_array[i][31:0]` or `h.q[0][i+:4]`, selects the element's value
+; (IEEE 1800-2023 7.4.6, 11.5.1).
+(case property_element_selects
+  (source "property_element_selects.sv" #"
+module Top(output bit done);
+    class C;
+        bit [63:0] data_array[10];
+        logic [15:0] q[$];
+        function void show();
+            int i = 1;
+            $display("this %h %h %b", data_array[i][31:0], data_array[i][63:32], data_array[2][0]);
+        endfunction
+    endclass
+    C h;
+    int i = 4;
+    initial begin
+        h = new;
+        h.data_array[1] = 64'h1234_5678_9abc_def0;
+        h.data_array[2] = 64'h1;
+        h.q.push_back(16'habcd);
+        h.show();
+        $display("handle %h %h %h", h.data_array[1][15:0], h.q[0][i+:4], h.q[$][15:8]);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "this 9abcdef0 12345678 1\nhandle def0 c ab\n"))

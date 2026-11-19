@@ -9,6 +9,8 @@ pub(super) use discovery::local_constants;
 pub(super) use discovery::same_tables;
 mod query_binding;
 pub(super) use discovery::query_operand_dimensions_id;
+#[cfg(test)]
+pub(super) use query_binding::QUERY_CONTEXT_VARIABLES;
 mod queries;
 pub(super) use query_binding::{
     query_context_for_operand, query_value, shape as operand_shape, validate_data_operand,
@@ -150,11 +152,8 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                     randomizable: port.r#type().container.is_none()
                         && !port.r#type().holds_chandle()
                         && port.randomizable,
-                    enum_domain: port.r#type().enum_domain.clone(),
-                    packed_enum: port.r#type().packed_enum,
                     real: matches!(port.r#type().kind(), TypeKind::Real | TypeKind::Shortreal),
                     string: matches!(port.r#type().kind(), TypeKind::String),
-                    class: port.r#type().class().map(str::to_owned),
                     packed: signal_packed_dimension_widths(port.r#type().packed_ranges()),
                     unpacked: unpacked_dimension_widths(port.r#type().unpacked_ranges()),
                     signed: port.r#type().is_signed(),
@@ -171,7 +170,6 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                     ),
                     members: port.r#type().members.clone(),
                     signed_element_depth: port.r#type().signed_element_depth,
-                    unpacked_struct: port.r#type().unpacked_struct.clone(),
                 },
                 // The shape has the type the port was declared with.
                 port.r#type(),
@@ -203,11 +201,8 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                         && !signal.r#type().holds_chandle()
                         && !signal.is_net()
                         && !signal.is_const,
-                    enum_domain: signal.r#type().enum_domain.clone(),
-                    packed_enum: signal.r#type().packed_enum,
                     real: matches!(signal.r#type().kind(), TypeKind::Real | TypeKind::Shortreal),
                     string: matches!(signal.r#type().kind(), TypeKind::String),
-                    class: signal.r#type().class().map(str::to_owned),
                     packed: signal_packed_dimension_widths(signal.r#type().packed_ranges()),
                     unpacked: unpacked_dimension_widths(signal.r#type().unpacked_ranges()),
                     signed: signal.r#type().is_signed(),
@@ -224,7 +219,6 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                     ),
                     members: signal.r#type().members.clone(),
                     signed_element_depth: signal.r#type().signed_element_depth,
-                    unpacked_struct: signal.r#type().unpacked_struct.clone(),
                 },
                 // The shape has the type the signal was declared with.
                 signal.r#type(),
@@ -346,6 +340,37 @@ pub(super) fn parameter_signed_element_marker(name: &str) -> String {
     format!("__parameter::signed_element::{name}")
 }
 
+/// Present for a parameter of unpacked array type whose element constants
+/// are published; the payload is their count.
+pub(super) fn parameter_elements_marker(name: &str) -> String {
+    format!("__parameter::elements::{name}")
+}
+
+/// A fact about the published elements of the unpacked array parameter
+/// `name`: the `left` and `right` bounds of its dimension, the `type` of an
+/// element (its width shifted left by two, whether it is two-state in bit
+/// one, and its sign in bit zero), the value of the element at a storage
+/// position, the left one first, or the number of packed dimensions of an
+/// element (`packed`) and their bounds (`packed_{dimension}_{left,right}`,
+/// outermost first).
+pub(super) fn parameter_element_marker(name: &str, fact: impl std::fmt::Display) -> String {
+    format!("__parameter::element::{fact}::{name}")
+}
+
+/// Present for an unpacked array parameter of packed structures whose
+/// element constants are published with the layout of their members; the
+/// payload is the number of members.
+pub(super) fn parameter_element_members_marker(name: &str) -> String {
+    format!("__parameter::element_members::{name}")
+}
+
+/// The `offset` of member `path` (`a.b` for a member of a member) in an
+/// element of the unpacked array parameter `name`, or its `type`: its width
+/// shifted left by one, and its sign.
+pub(super) fn parameter_element_member_marker(name: &str, fact: &str, path: &str) -> String {
+    format!("__parameter::element_member::{fact}::{path}::{name}")
+}
+
 /// Present for a parameter of packed structure type whose member constants
 /// are published; the payload is their count.
 pub(super) fn parameter_members_marker(name: &str) -> String {
@@ -356,6 +381,12 @@ pub(super) fn parameter_members_marker(name: &str) -> String {
 /// structure parameter `name`.
 pub(super) fn parameter_member_value_marker(name: &str, path: &str) -> String {
     format!("__parameter::member::value::{path}::{name}")
+}
+
+/// Bits `128 * chunk` and up of the value of a member wider than 128 bits,
+/// whose first 128 bits are its value marker.
+pub(super) fn parameter_member_chunk_marker(name: &str, path: &str, chunk: usize) -> String {
+    format!("__parameter::member::value{chunk}::{path}::{name}")
 }
 
 /// The type of that member: its width, shifted left by one, and its sign.
@@ -395,10 +426,37 @@ fn extend_variable_dimensions_from_const_env(context: &mut PackedDimensions, con
         let Some(name) = key.strip_prefix("__variable::dimensions::") else {
             continue;
         };
+        extend_variable_dimensions_from_markers(context, const_env, name, *count);
+    }
+}
+
+/// [`extend_variable_dimensions_from_const_env`] for the variables `names`
+/// only.
+fn extend_variable_dimensions_of(
+    context: &mut PackedDimensions,
+    const_env: &ConstEnv,
+    names: &HashSet<String>,
+) {
+    for name in names {
+        if let Some(count) = const_env.get(&variable_dimensions_marker(name)) {
+            extend_variable_dimensions_from_markers(context, const_env, name, *count);
+        }
+    }
+}
+
+/// The shape of variable `name` that the markers of `const_env` describe,
+/// `count` dimensions of it, in `context`.
+fn extend_variable_dimensions_from_markers(
+    context: &mut PackedDimensions,
+    const_env: &ConstEnv,
+    name: &str,
+    count: i128,
+) {
+    {
         let Some(unpacked) = const_env.get(&variable_unpacked_dimensions_marker(name)) else {
-            continue;
+            return;
         };
-        let ranges = (0..*count)
+        let ranges = (0..count)
             .map(|index| {
                 let index = usize::try_from(index).ok()?;
                 let left = *const_env.get(&variable_dimension_marker(name, index, "left"))?;
@@ -409,19 +467,16 @@ fn extend_variable_dimensions_from_const_env(context: &mut PackedDimensions, con
                 ))
             })
             .collect::<Option<Vec<_>>>();
-        let Some(mut ranges) = ranges else { continue };
+        let Some(mut ranges) = ranges else { return };
         let Ok(unpacked) = usize::try_from(*unpacked) else {
-            continue;
+            return;
         };
         if unpacked > ranges.len() {
-            continue;
+            return;
         }
         let packed_ranges = ranges.split_off(unpacked);
         let ty = Type::from(TypeShape {
             container: None,
-            is_enum: false,
-            enum_domain: None,
-            packed_enum: false,
             kind: TypeKind::Logic,
             is_signed: variable_type_is_signed(const_env, name),
             packed_ranges,
@@ -431,8 +486,6 @@ fn extend_variable_dimensions_from_const_env(context: &mut PackedDimensions, con
                 .collect(),
             members: Vec::new(),
             signed_element_depth: None,
-            class: None,
-            unpacked_struct: None,
             spelling: type_names::Spelling::default(),
         });
         let mut shape = procedural::dimensions_from_type(&ty);
@@ -442,11 +495,10 @@ fn extend_variable_dimensions_from_const_env(context: &mut PackedDimensions, con
             shape.declared = existing.declared.clone();
             shape.container = existing.container.clone();
             shape.randomizable = existing.randomizable;
-            shape.enum_domain = existing.enum_domain.clone();
-            shape.packed_enum = existing.packed_enum;
             shape.members = existing.members.clone();
             shape.is_2state = existing.is_2state;
             shape.signed_element_depth = existing.signed_element_depth;
+            shape = shape.with_enumeration(existing.retained_enumeration());
         }
         context.insert(name.to_string(), shape);
     }
@@ -621,9 +673,20 @@ pub(super) fn unshared_discovery() -> bool {
 mod tests;
 
 pub(super) fn parameter_packed_dimensions(parameters: &[Parameter]) -> VariablePackedDimensions {
+    // The enumerated type a parameter is declared with (6.19), also one too
+    // wide for its members to be materialized.
+    let enumeration = |parameter: &Parameter| {
+        parameter
+            .semantic_type
+            .as_ref()
+            .map(semantic_types::ConstantType::enumeration)
+            .unwrap_or_default()
+    };
     parameters
         .iter()
-        .filter(|parameter| !parameter.packed_ranges.is_empty() || parameter.enum_domain.is_some())
+        .filter(|parameter| {
+            !parameter.packed_ranges.is_empty() || enumeration(parameter).declaration().is_some()
+        })
         .map(|parameter| {
             (
                 parameter.name.clone(),
@@ -632,19 +695,16 @@ pub(super) fn parameter_packed_dimensions(parameters: &[Parameter]) -> VariableP
                     container: None,
                     chandle: false,
                     randomizable: true,
-                    enum_domain: parameter.enum_domain.clone(),
-                    packed_enum: false,
                     real: false,
                     string: false,
-                    class: None,
                     packed: function_packed_dimension_widths(&parameter.packed_ranges),
                     unpacked: Vec::new(),
                     signed: parameter.declared_signed.unwrap_or(false),
                     is_2state: parameter.declared_is_2state,
                     members: parameter.members.clone(),
                     signed_element_depth: parameter.signed_element_depth,
-                    unpacked_struct: None,
-                }),
+                })
+                .with_enumeration(enumeration(parameter)),
             )
         })
         .collect()

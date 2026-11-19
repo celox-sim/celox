@@ -152,6 +152,9 @@ export interface WasmFrontendSimulatorHandle
 	combWasmBytes(): Uint8Array | number[];
 	/** Internal floating-point helper for generated simulation modules. */
 	evaluateFloat?(lhs: bigint, rhs: bigint, code: bigint): bigint;
+	/** Internal heap helper for generated simulation modules, which loads
+	 * the memory files of `$readmemh`. */
+	heapCall?(code: bigint, a: bigint, b: bigint, c: bigint): bigint;
 	eventWasmBytes(name: string): Uint8Array | number[];
 	/**
 	 * Per event name, the derived domains its ticks and edges run, as JSON.
@@ -374,6 +377,12 @@ export interface SimulatorOptions {
 	 * diagnostic level is set. Project diagnostics take precedence. Default: false.
 	 */
 	allowInferredLatches?: boolean;
+	/**
+	 * Promote recoverable diagnostics (inferred latches and other
+	 * compatibility fallbacks) from warnings to errors. Explicit per-code
+	 * project diagnostics take precedence. Default: false.
+	 */
+	strict?: boolean;
 	/** Path to write VCD waveform output. Mutually exclusive with `fst`. */
 	vcd?: string;
 	/**
@@ -404,7 +413,10 @@ export interface SimulatorOptions {
 	 * partitions of the combinational logic whose inputs changed; off unless
 	 * enabled with "+sir:partitioned_settle"), net_inlining (SystemVerilog
 	 * designs built with a dead store policy: combinational nets the policy
-	 * does not keep observable become part of the logic that reads them)
+	 * does not keep observable become part of the logic that reads them),
+	 * scheduler_callees (a native image's compiled scheduler calls its larger
+	 * bodies as functions of their own, which compile in parallel; on at
+	 * every level, "-sir:scheduler_callees" inlines them)
 	 *
 	 * @example ["-sir:reschedule", "+sir:gvn"]
 	 */

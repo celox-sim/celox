@@ -17,6 +17,8 @@ use celox_frontend_core::symbolic::artifact::{HierarchicalBinding, HierarchicalS
 use celox_sv_analyzer as sv;
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
+pub(super) mod calls;
+
 use super::{
     AnalyzedSvModule, LoweredSvInstance, LoweredSvModule, LoweredSvModuleKey, lower_instances,
     module_constants_with_overrides, module_parameter_types, propagate_force_signals,
@@ -35,6 +37,15 @@ pub(super) struct ElaboratedModule {
     instances: Vec<LoweredSvInstance>,
     constants: HashMap<String, i128>,
     parameter_types: HashMap<String, (usize, bool)>,
+    /// The module's own parameters and local parameters, which hierarchical
+    /// names can denote (IEEE 1800-2023 23.6), not the package parameters
+    /// among `constants`, with the sized literal of the value of each that
+    /// the specialization gives one.
+    parameters: HashMap<String, Option<String>>,
+    /// The parameters among `parameters` whose packed dimensions are other
+    /// than one `[N-1:0]`, whose selects a literal of the value would not
+    /// index as declared.
+    dimensioned: HashSet<String>,
 }
 
 impl ElaboratedModule {
@@ -47,6 +58,27 @@ impl ElaboratedModule {
         let constants = module_constants_with_overrides(source, &[]);
         let mut instances = lower_instances(source, &constants, &parameter_types)?;
         propagate_force_signals(&mut instances, force_signals);
+        // The parameters whose packed dimensions are other than one
+        // `[N-1:0]`, which a select indexes as declared.
+        let dimensioned: HashSet<String> = source
+            .parameters()
+            .iter()
+            .filter(|parameter| match parameter.packed_ranges() {
+                [] => false,
+                [range] => {
+                    let eval = |expr| {
+                        sv::typecheck::eval_const_expr_with_types(
+                            expr,
+                            &constants,
+                            &parameter_types,
+                        )
+                    };
+                    eval(range.right()) != Some(0) || eval(range.left()).is_none_or(|left| left < 0)
+                }
+                _ => true,
+            })
+            .map(|parameter| parameter.name().to_string())
+            .collect();
         Ok(Self {
             name: source.name().to_string(),
             interface_handles: source.interface_handles().to_vec(),
@@ -55,6 +87,18 @@ impl ElaboratedModule {
             instances,
             constants,
             parameter_types,
+            dimensioned,
+            parameters: source
+                .parameters()
+                .iter()
+                .map(|parameter| {
+                    let literal = match parameter.value() {
+                        Some(sv::ir::ConstExpr::Literal(text)) => Some(text.clone()),
+                        _ => None,
+                    };
+                    (parameter.name().to_string(), literal)
+                })
+                .collect(),
         })
     }
 
@@ -97,11 +141,71 @@ fn signals(module: &sv::ir::Module) -> Vec<(String, sv::ir::Type, bool)> {
 #[derive(Clone)]
 pub(super) struct HierarchicalReference {
     pub signal: sv::ast::HierarchicalSignal,
-    start: HierarchicalStart,
-    path: Vec<(String, usize)>,
+    pub start: HierarchicalStart,
+    pub path: Vec<(String, usize)>,
     /// The specializations that hold the signal, from the different
     /// instances of the module, and its local name in each.
     pub targets: Vec<(ModuleId, String)>,
+}
+
+/// A function or task of another instance that a hierarchical name of a
+/// module calls (IEEE 1800-2023 23.8).
+#[derive(Clone)]
+pub(super) struct HierarchicalCall {
+    /// The name, as [`sv::ParsedSource::hierarchical_names`] spells it,
+    /// which is also the name the module calls the subroutine by.
+    pub written: String,
+    pub start: HierarchicalStart,
+    /// The instance path from the start to the instance that declares it.
+    pub path: Vec<(String, usize)>,
+    /// The specializations that declare the subroutine, from the different
+    /// instances of the module, and its name in each.
+    pub targets: Vec<(ModuleId, String)>,
+}
+
+/// What a hierarchical name is followed to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Lookup {
+    Signal,
+    Subroutine,
+}
+
+/// The type a found subroutine carries in place of a signal's, which no
+/// comparison of followings tells apart.
+fn subroutine_placeholder_type() -> sv::ast::Type {
+    sv::ast::Type::resolved(sv::ast::TypeKind::Logic, false, None, &[], &[])
+}
+
+/// The start and instance path, from a module, of the object that the
+/// reference `start` and `path` names from the instance that `caller_start`
+/// and `caller_path` name from the module: the references of a subroutine
+/// that the module calls through a hierarchical name, seen from the module.
+pub(super) fn compose(
+    (caller_start, caller_path): (HierarchicalStart, &[(String, usize)]),
+    (start, path): (HierarchicalStart, &[(String, usize)]),
+) -> Option<(HierarchicalStart, Vec<(String, usize)>)> {
+    let HierarchicalStart::Ancestor(levels) = start else {
+        return Some((HierarchicalStart::Root, path.to_vec()));
+    };
+    let below = caller_path.len();
+    let joined = |kept: &[(String, usize)]| [kept, path].concat();
+    match caller_start {
+        HierarchicalStart::Root => {
+            let kept = below.checked_sub(levels)?;
+            Some((HierarchicalStart::Root, joined(&caller_path[..kept])))
+        }
+        HierarchicalStart::Ancestor(above) => Some(if levels <= below {
+            (
+                HierarchicalStart::Ancestor(above),
+                joined(&caller_path[..below - levels]),
+            )
+        } else {
+            (
+                HierarchicalStart::Ancestor(above + levels - below),
+                path.to_vec(),
+            )
+        }),
+    }
 }
 
 /// The specialized hierarchy, for following names through it.
@@ -129,6 +233,14 @@ struct Found {
     path: Vec<(String, usize)>,
     /// How many leading components name the signal.
     length: usize,
+    /// Whether the last of them also selects an element of the signal, as
+    /// `r[0]` of `top.u.r[0].f` does: the name scan spells a constant index
+    /// followed by a member as part of the component, as it does those of
+    /// instance arrays and generate blocks.
+    selects: bool,
+    /// The typed literal of the value of the parameter the name denotes,
+    /// which no signal holds.
+    constant: Option<String>,
     target: String,
     r#type: sv::ast::Type,
     is_net: bool,
@@ -153,6 +265,24 @@ impl HierarchicalReference {
 }
 
 impl Found {
+    /// The leading components of `components` that name the signal,
+    /// without the index of an element of it that the last one selects.
+    fn named(&self, components: &[String]) -> Vec<String> {
+        let mut named = components[..self.length.min(components.len())].to_vec();
+        if self.selects
+            && let Some(last) = named.last_mut()
+            && let Some(name) = without_index(last)
+        {
+            *last = name.to_string();
+        }
+        named
+    }
+
+    /// The name of the signal, as [`Self::named`] spells it.
+    fn written(&self, components: &[String]) -> String {
+        self.named(components).join(".")
+    }
+
     /// Whether two followings reach the same relative object, if from
     /// different specializations.
     fn same_object(&self, other: &Found) -> bool {
@@ -161,6 +291,8 @@ impl Found {
             self.levels,
             &self.path,
             self.length,
+            self.selects,
+            &self.constant,
             &self.target,
             &self.r#type,
             self.is_net,
@@ -169,6 +301,8 @@ impl Found {
             other.levels,
             &other.path,
             other.length,
+            other.selects,
+            &other.constant,
             &other.target,
             &other.r#type,
             other.is_net,
@@ -224,6 +358,7 @@ impl<'a> Hierarchy<'a> {
         mut module: ModuleId,
         components: &[String],
         mut at: usize,
+        lookup: Lookup,
     ) -> Result<Option<Found>, sv::AnalyzerError> {
         let mut path = Vec::new();
         'instances: while at < components.len() {
@@ -249,14 +384,58 @@ impl<'a> Hierarchy<'a> {
         }
         let elaborated = &self.elaborated[&module];
         let analyzed = &self.analyzed[&elaborated.name];
-        let Some((length, target, r#type, is_net)) =
+        if lookup == Lookup::Subroutine {
+            // A function or task of the module's own scope (23.8).
+            let [name] = &components[at..] else {
+                return Ok(None);
+            };
+            if !analyzed
+                .source
+                .subroutine_names(&analyzed.name, &analyzed.packages)
+                .contains(name)
+            {
+                return Ok(None);
+            }
+            return Ok(Some(Found {
+                rooted: false,
+                levels: 0,
+                path,
+                length: components.len(),
+                selects: false,
+                constant: None,
+                target: name.clone(),
+                r#type: subroutine_placeholder_type(),
+                is_net: false,
+                modules: vec![module],
+            }));
+        }
+        let Some((length, selects, target, r#type, is_net)) =
             (at + 1..=components.len()).rev().find_map(|end| {
                 let name = components[at..end].join(".");
-                let (target, r#type, is_net) = find_signal(elaborated, analyzed, &name)?;
-                Some((end, target, r#type, is_net))
+                if let Some((target, r#type, is_net)) = find_signal(elaborated, analyzed, &name) {
+                    return Some((end, false, target, r#type, is_net));
+                }
+                // An element of the signal, whose members the rest of the
+                // name selects (IEEE 1800-2023 7.4.5, 23.6).
+                let name = without_index(&name)?;
+                let (target, r#type, is_net) = find_signal(elaborated, analyzed, name)?;
+                Some((end, true, target, r#type, is_net))
             })
         else {
-            return Ok(None);
+            return Ok(
+                parameter(elaborated, &components[at..])?.map(|(constant, r#type)| Found {
+                    rooted: false,
+                    levels: 0,
+                    path,
+                    length: components.len(),
+                    selects: false,
+                    constant: Some(constant),
+                    target: components[at].clone(),
+                    r#type,
+                    is_net: false,
+                    modules: vec![module],
+                }),
+            );
         };
         let r#type = resolved_type(elaborated, r#type).ok_or_else(|| {
             sv::AnalyzerError::Unsupported(format!(
@@ -269,6 +448,8 @@ impl<'a> Hierarchy<'a> {
             levels: 0,
             path,
             length,
+            selects,
+            constant: None,
             target,
             r#type,
             is_net,
@@ -282,11 +463,12 @@ impl<'a> Hierarchy<'a> {
         &self,
         module: ModuleId,
         components: &[String],
+        lookup: Lookup,
     ) -> Result<Option<Found>, sv::AnalyzerError> {
         let elaborated = &self.elaborated[&module];
         if starts_at_instance(elaborated, components) {
             return Ok(self
-                .walk(module, components, 0)?
+                .walk(module, components, 0, lookup)?
                 .filter(|found| !found.path.is_empty()));
         }
         // Interface instances are flattened into the module's signals, rather
@@ -297,10 +479,10 @@ impl<'a> Hierarchy<'a> {
                 .interface_scopes
                 .contains(&components[..end].join("."))
         }) {
-            return self.walk(module, components, 0);
+            return self.walk(module, components, 0, lookup);
         }
         if components[0] == self.authored_name(module) {
-            return self.walk(module, components, 1);
+            return self.walk(module, components, 1, lookup);
         }
         Ok(None)
     }
@@ -315,6 +497,7 @@ impl<'a> Hierarchy<'a> {
         module: ModuleId,
         components: &[String],
         memo: &mut HashMap<ModuleId, Option<Found>>,
+        lookup: Lookup,
     ) -> Result<Option<Found>, sv::AnalyzerError> {
         let mut found: Option<Found> = None;
         let parents = self.parents.get(&module).map_or(&[][..], Vec::as_slice);
@@ -325,9 +508,9 @@ impl<'a> Hierarchy<'a> {
             let from_parent = match memo.get(&parent) {
                 Some(cached) => cached.clone(),
                 None => {
-                    let resolved = match self.downward(parent, components)? {
+                    let resolved = match self.downward(parent, components, lookup)? {
                         Some(found) => Some(found),
-                        None => self.upward(parent, components, memo)?,
+                        None => self.upward(parent, components, memo, lookup)?,
                     };
                     memo.insert(parent, resolved.clone());
                     resolved
@@ -351,7 +534,7 @@ impl<'a> Hierarchy<'a> {
                 // The instances are at different depths below the scope the
                 // name starts at, or below different scopes of that name.
                 Some(_) => {
-                    return match self.rooted(module, components, &mut HashMap::default())? {
+                    return match self.rooted(module, components, &mut HashMap::default(), lookup)? {
                         Some(rooted) => Ok(Some(rooted)),
                         None => Err(sv::AnalyzerError::Unsupported(format!(
                             "upward hierarchical reference `{}` that denotes different \
@@ -375,13 +558,14 @@ impl<'a> Hierarchy<'a> {
         module: ModuleId,
         components: &[String],
         memo: &mut HashMap<ModuleId, Option<Found>>,
+        lookup: Lookup,
     ) -> Result<Option<Found>, sv::AnalyzerError> {
         let mut found: Option<Found> = None;
         for &parent in self.parents.get(&module).map_or(&[][..], Vec::as_slice) {
             let from_parent = match memo.get(&parent) {
                 Some(cached) => cached.clone(),
                 None => {
-                    let resolved = match self.downward(parent, components)? {
+                    let resolved = match self.downward(parent, components, lookup)? {
                         Some(mut found) => self.instance_path(parent).map(|mut path| {
                             path.append(&mut found.path);
                             Found {
@@ -391,7 +575,7 @@ impl<'a> Hierarchy<'a> {
                                 ..found
                             }
                         }),
-                        None => self.rooted(parent, components, memo)?,
+                        None => self.rooted(parent, components, memo, lookup)?,
                     };
                     memo.insert(parent, resolved.clone());
                     resolved
@@ -438,22 +622,208 @@ impl<'a> Hierarchy<'a> {
         path.push(segment);
         Some(path)
     }
+
+    /// The path from the top instance of the instance that a name written
+    /// in `module` reaches from `start` along `path`; `None` if `module` has
+    /// several instances and the name starts at an ancestor.
+    fn absolute(
+        &self,
+        module: ModuleId,
+        start: HierarchicalStart,
+        path: &[(String, usize)],
+    ) -> Option<Vec<(String, usize)>> {
+        let mut absolute = match start {
+            HierarchicalStart::Root => Vec::new(),
+            HierarchicalStart::Ancestor(levels) => {
+                let mut absolute = self.instance_path(module)?;
+                absolute.truncate(absolute.len().checked_sub(levels)?);
+                absolute
+            }
+        };
+        absolute.extend(path.iter().cloned());
+        Some(absolute)
+    }
 }
 
 /// Resolve the hierarchical names of specialization `module` that its
-/// source spells with literal instance indices.
-pub(super) fn resolve(hierarchy: &Hierarchy<'_>, module: ModuleId) -> Vec<HierarchicalReference> {
+/// source spells with literal instance indices: the signals of other
+/// instances they denote, and the subroutines they call.
+pub(super) fn resolve(
+    hierarchy: &Hierarchy<'_>,
+    module: ModuleId,
+) -> (Vec<HierarchicalReference>, Vec<HierarchicalCall>) {
     let analyzed = &hierarchy.analyzed[&hierarchy.keys[&module].name];
     let mut references = Vec::new();
+    let mut calls = Vec::new();
     for components in analyzed
         .source
         .hierarchical_names(&analyzed.name, &analyzed.packages)
     {
         // The scan also finds names in inactive generate branches. A name
         // the analysis uses reaches `resolve_name` again with its error.
-        let _ = resolve_name(hierarchy, module, &components, &mut references);
+        if !matches!(
+            resolve_name(hierarchy, module, &components, &mut references),
+            Ok(true)
+        ) {
+            let _ = resolve_call(hierarchy, module, &components, &mut calls);
+        }
     }
-    references
+    // A name indexed by a genvar, which analysis evaluates per element,
+    // stands for its names with each element index the design has, so that
+    // the analysis does not stop at each in turn.
+    for pattern in analyzed
+        .source
+        .hierarchical_name_patterns(&analyzed.name, &analyzed.packages)
+    {
+        for components in expand_pattern(hierarchy, &pattern) {
+            if !matches!(
+                resolve_name(hierarchy, module, &components, &mut references),
+                Ok(true)
+            ) {
+                let _ = resolve_call(hierarchy, module, &components, &mut calls);
+            }
+        }
+    }
+    (references, calls)
+}
+
+/// The names that `pattern` (see `ParsedSource::hierarchical_name_patterns`)
+/// stands for: each `name[*]` replaced by `name[k]` for every element index
+/// `k` of an instance array or interface instance array of that name in the
+/// design. At most [`MAX_PATTERN_EXPANSIONS`] names; a pattern of more
+/// stands for none, and the analysis resolves its names one by one.
+fn expand_pattern(hierarchy: &Hierarchy<'_>, pattern: &[String]) -> Vec<Vec<String>> {
+    let mut expanded: Vec<Vec<String>> = vec![Vec::new()];
+    for component in pattern {
+        let Some(base) = component.strip_suffix("[*]") else {
+            for name in &mut expanded {
+                name.push(component.clone());
+            }
+            continue;
+        };
+        let indices = element_indices(hierarchy, base);
+        if indices.is_empty()
+            || expanded.len().saturating_mul(indices.len()) > MAX_PATTERN_EXPANSIONS
+        {
+            return Vec::new();
+        }
+        expanded = expanded
+            .into_iter()
+            .flat_map(|name| {
+                indices.iter().map(move |index| {
+                    let mut name = name.clone();
+                    name.push(format!("{base}[{index}]"));
+                    name
+                })
+            })
+            .collect();
+    }
+    expanded
+}
+
+/// The most names one pattern of hierarchical names stands for.
+const MAX_PATTERN_EXPANSIONS: usize = 4096;
+
+/// The element indices of the instance arrays and interface instance arrays
+/// named `base` in any specialization of the design.
+fn element_indices(hierarchy: &Hierarchy<'_>, base: &str) -> std::collections::BTreeSet<usize> {
+    let mut indices = std::collections::BTreeSet::new();
+    for module in hierarchy.elaborated.values() {
+        for instance in &module.instances {
+            if let Some((index, _)) = instance.array_element
+                && instance.instance_name == base
+            {
+                indices.insert(instance.array_index_base + index);
+            }
+        }
+        for scope in &module.interface_scopes {
+            if let Some(index) = scope
+                .strip_prefix(base)
+                .and_then(|rest| rest.strip_prefix('['))
+                .and_then(|rest| rest.strip_suffix(']'))
+                .and_then(|index| index.parse::<usize>().ok())
+            {
+                indices.insert(index);
+            }
+        }
+    }
+    indices
+}
+
+/// Follow the hierarchical name `components` of `module` to an object
+/// that `lookup` finds, and where the following started.
+fn follow(
+    hierarchy: &Hierarchy<'_>,
+    module: ModuleId,
+    components: &[String],
+    lookup: Lookup,
+) -> Result<Option<(HierarchicalStart, Found)>, sv::AnalyzerError> {
+    let elaborated = &hierarchy.elaborated[&module];
+    Ok(if components[0] == "$root" {
+        root_name(hierarchy, components, lookup)?
+    } else if starts_at_instance(elaborated, components)
+        || components[0] == hierarchy.authored_name(module)
+    {
+        hierarchy
+            .downward(module, components, lookup)?
+            .map(|found| (HierarchicalStart::Ancestor(0), found))
+    } else if declares(elaborated, &components[0]) {
+        // A variable, generate block or interface of the module.
+        None
+    } else {
+        hierarchy
+            .upward(module, components, &mut HashMap::default(), lookup)?
+            .map(|found| {
+                let start = if found.rooted {
+                    HierarchicalStart::Root
+                } else {
+                    HierarchicalStart::Ancestor(found.levels)
+                };
+                (start, found)
+            })
+    })
+}
+
+/// What name `components`, which starts at `$root`, denotes (IEEE 1800-2023
+/// 23.3.1), from whichever scope it is written in, an object that `lookup`
+/// finds. The root of several top-level modules stands for `$root`, and its
+/// instances are the tops.
+fn root_name(
+    hierarchy: &Hierarchy<'_>,
+    components: &[String],
+    lookup: Lookup,
+) -> Result<Option<(HierarchicalStart, Found)>, sv::AnalyzerError> {
+    let start = if hierarchy.hidden_root {
+        1
+    } else if components.get(1) == Some(&hierarchy.root.0.name) {
+        2
+    } else {
+        return Ok(None);
+    };
+    Ok(hierarchy
+        .walk(hierarchy.root.1, components, start, lookup)?
+        .map(|found| (HierarchicalStart::Root, found)))
+}
+
+/// `start` and `found` of a name written in `module`, which a name from the
+/// top that reaches the only instance of `module` starts at the module
+/// instead: it names the module's own signal, as `Top.sig` does in `Top`
+/// for `$root.Top.sig`, and is one signal with it, which each process
+/// writes once.
+fn relative(
+    hierarchy: &Hierarchy<'_>,
+    module: ModuleId,
+    start: HierarchicalStart,
+    mut found: Found,
+) -> (HierarchicalStart, Found) {
+    if start == HierarchicalStart::Root
+        && found.modules == [module]
+        && hierarchy.instance_path(module).as_ref() == Some(&found.path)
+    {
+        found.path.clear();
+        return (HierarchicalStart::Ancestor(0), found);
+    }
+    (start, found)
 }
 
 /// Add the reference of the hierarchical name `components` of `module` to
@@ -464,51 +834,36 @@ pub(super) fn resolve_name(
     components: &[String],
     references: &mut Vec<HierarchicalReference>,
 ) -> Result<bool, sv::AnalyzerError> {
-    let elaborated = &hierarchy.elaborated[&module];
-    let resolved = if components[0] == "$root" {
-        // `$root.top. ...` (IEEE 1800-2023 23.3.1). The root of several
-        // top-level modules stands for `$root`, and its instances are the
-        // tops.
-        let start = if hierarchy.hidden_root {
-            1
-        } else if components.get(1) == Some(&hierarchy.root.0.name) {
-            2
-        } else {
-            return Ok(false);
-        };
-        hierarchy
-            .walk(hierarchy.root.1, components, start)?
-            .map(|found| (HierarchicalStart::Root, found))
-    } else if starts_at_instance(elaborated, components)
-        || components[0] == hierarchy.authored_name(module)
-    {
-        hierarchy
-            .downward(module, components)?
-            .map(|found| (HierarchicalStart::Ancestor(0), found))
-    } else if declares(elaborated, &components[0]) {
-        // A variable, generate block or interface of the module.
-        None
-    } else {
-        hierarchy
-            .upward(module, components, &mut HashMap::default())?
-            .map(|found| {
-                let start = if found.rooted {
-                    HierarchicalStart::Root
-                } else {
-                    HierarchicalStart::Ancestor(found.levels)
-                };
-                (start, found)
-            })
-    };
-    let Some((start, found)) = resolved else {
+    let Some((start, found)) = follow(hierarchy, module, components, Lookup::Signal)?
+        .map(|(start, found)| relative(hierarchy, module, start, found))
+    else {
         return Ok(false);
     };
-    let written = components[..found.length].join(".");
+    let written = found.written(components);
     if references
         .iter()
         .any(|reference| reference.signal.paths.contains(&written))
     {
         return Ok(false);
+    }
+    // A parameter is read as its value, which no signal holds (23.6).
+    if let Some(constant) = found.constant {
+        references.push(HierarchicalReference {
+            signal: sv::ast::HierarchicalSignal {
+                paths: vec![written.clone()],
+                name: written,
+                r#type: found.r#type,
+                is_net: false,
+                local: false,
+                interface_instance: None,
+                aliased: None,
+                constant: Some(constant),
+            },
+            start,
+            path: found.path,
+            targets: Vec::new(),
+        });
+        return Ok(true);
     }
     // A name that starts at the module's own name and names no instance
     // denotes the module's own signal (IEEE 1800-2023 23.8).
@@ -520,6 +875,9 @@ pub(super) fn resolve_name(
                 r#type: found.r#type,
                 is_net: found.is_net,
                 local: true,
+                interface_instance: None,
+                aliased: None,
+                constant: None,
             },
             start,
             path: Vec::new(),
@@ -534,6 +892,9 @@ pub(super) fn resolve_name(
             r#type: found.r#type,
             is_net: found.is_net,
             local: false,
+            interface_instance: None,
+            aliased: None,
+            constant: None,
         },
         start,
         path: found.path,
@@ -546,15 +907,298 @@ pub(super) fn resolve_name(
     Ok(true)
 }
 
+/// Add the reference of hierarchical name `components` of the body of
+/// interface instance `scope` of `module` to `references` (IEEE 1800-2023
+/// 23.8): the body does not declare it, so it is searched for in the scope
+/// that instantiates the instance, the generate blocks that hold it
+/// innermost first and then the module, and upward from the module as a
+/// name of the module is; a name that starts at `$root` as from any scope
+/// (23.3.1). Whether the name denotes a signal not referenced yet.
+pub(super) fn resolve_interface_name(
+    hierarchy: &Hierarchy<'_>,
+    module: ModuleId,
+    scope: &sv::InterfaceBodyScope,
+    components: &[String],
+    references: &mut Vec<HierarchicalReference>,
+) -> Result<bool, sv::AnalyzerError> {
+    // The generate blocks that hold the instance, outermost first: `g[1].u`
+    // is instance `u` of block `g[1]`.
+    let blocks = &scope.blocks;
+    let resolved = if components[0] == "$root" {
+        // A name that starts at `$root` denotes the same object from every
+        // scope.
+        root_name(hierarchy, components, Lookup::Signal)?
+    } else {
+        let mut resolved = None;
+        for depth in (0..=blocks.len()).rev() {
+            let mut name = blocks[..depth].to_vec();
+            name.extend(components.iter().cloned());
+            if let Some(found) = hierarchy.downward(module, &name, Lookup::Signal)? {
+                // The components of the blocks precede those of the name.
+                resolved = Some((
+                    HierarchicalStart::Ancestor(0),
+                    Found {
+                        length: found.length.saturating_sub(depth),
+                        ..found
+                    },
+                ));
+                break;
+            }
+        }
+        match resolved {
+            Some(resolved) => Some(resolved),
+            None => hierarchy
+                .upward(module, components, &mut HashMap::default(), Lookup::Signal)?
+                .map(|found| {
+                    let start = if found.rooted {
+                        HierarchicalStart::Root
+                    } else {
+                        HierarchicalStart::Ancestor(found.levels)
+                    };
+                    (start, found)
+                }),
+        }
+    };
+    let Some((start, found)) =
+        resolved.map(|(start, found)| relative(hierarchy, module, start, found))
+    else {
+        return Ok(false);
+    };
+    // The components that name the signal; the rest select in it.
+    let named = found.named(components);
+    let written = named.join(".");
+    let body = |reference: &&mut HierarchicalReference| {
+        reference.signal.interface_instance.as_deref() == Some(scope.handle.as_str())
+    };
+    if references
+        .iter_mut()
+        .filter(body)
+        .any(|reference| reference.signal.paths.contains(&written))
+    {
+        return Ok(false);
+    }
+    let own = found.levels == 0 && found.path.is_empty() && start == HierarchicalStart::Ancestor(0);
+    // Another spelling of an object a name of the body already denotes,
+    // such as `Top.sig` and `$root.Top.sig`, is another name of the same
+    // signal: one object, written by each process once.
+    let object = hierarchy.absolute(module, start, &found.path);
+    if let Some(reference) = references.iter_mut().filter(body).find(|reference| {
+        if own {
+            reference.signal.aliased.as_ref() == Some(&found.target)
+        } else {
+            !reference.signal.local
+                && reference
+                    .targets
+                    .iter()
+                    .map(|(module, target)| (*module, target))
+                    .eq(found.modules.iter().map(|module| (*module, &found.target)))
+                && match (
+                    hierarchy.absolute(module, reference.start, &reference.path),
+                    &object,
+                ) {
+                    (Some(known), Some(object)) => known == *object,
+                    // Names from an ancestor of a module with several
+                    // instances are the same object only if spelled alike.
+                    _ => reference.start == start && reference.path == found.path,
+                }
+        }
+    }) {
+        reference.signal.paths.push(written);
+        return Ok(true);
+    }
+    // The body names every object of the scope by its placeholder, apart
+    // from its own members.
+    let name = sv::ast::virtual_interfaces::upward_signal(&scope.interface, &scope.handle, &named);
+    // The module's own signal, which the body reads as the module does.
+    if own {
+        references.push(HierarchicalReference {
+            signal: sv::ast::HierarchicalSignal {
+                paths: vec![written],
+                name,
+                r#type: found.r#type,
+                is_net: found.is_net,
+                local: true,
+                interface_instance: Some(scope.handle.clone()),
+                aliased: Some(found.target),
+                constant: None,
+            },
+            start,
+            path: Vec::new(),
+            targets: Vec::new(),
+        });
+        return Ok(true);
+    }
+    references.push(HierarchicalReference {
+        signal: sv::ast::HierarchicalSignal {
+            paths: vec![written],
+            name,
+            r#type: found.r#type,
+            is_net: found.is_net,
+            local: false,
+            interface_instance: Some(scope.handle.clone()),
+            aliased: None,
+            constant: None,
+        },
+        start,
+        path: found.path,
+        targets: found
+            .modules
+            .into_iter()
+            .map(|module| (module, found.target.clone()))
+            .collect(),
+    });
+    Ok(true)
+}
+
+/// Add the call of the hierarchical name `components` of `module` to
+/// `calls`. Whether the name calls a subroutine not called yet.
+pub(super) fn resolve_call(
+    hierarchy: &Hierarchy<'_>,
+    module: ModuleId,
+    components: &[String],
+    calls: &mut Vec<HierarchicalCall>,
+) -> Result<bool, sv::AnalyzerError> {
+    let Some((start, found)) = follow(hierarchy, module, components, Lookup::Subroutine)? else {
+        return Ok(false);
+    };
+    let written = components.join(".");
+    if calls.iter().any(|call| call.written == written) {
+        return Ok(false);
+    }
+    calls.push(HierarchicalCall {
+        written,
+        start,
+        path: found.path,
+        targets: found
+            .modules
+            .into_iter()
+            .map(|module| (module, found.target.clone()))
+            .collect(),
+    });
+    Ok(true)
+}
+
+/// The object that hierarchical name `components` of a task or function of
+/// interface instance `scope` of `module` denotes, called through a virtual
+/// interface: the one the body of the instance would name (IEEE 1800-2023
+/// 23.8), from the instance's parent.
+pub(super) struct OutwardObject {
+    pub(super) r#type: sv::ast::Type,
+    pub(super) is_net: bool,
+    start: HierarchicalStart,
+    path: Vec<(String, usize)>,
+    /// The specializations that hold it, and its name in each.
+    pub(super) targets: Vec<(ModuleId, String)>,
+}
+
+impl OutwardObject {
+    /// The path from the top instance of the instance that holds the object,
+    /// for the instance of `module` at `instance`.
+    pub(super) fn rooted(&self, instance: &[(String, usize)]) -> Option<Vec<(String, usize)>> {
+        let mut rooted = match self.start {
+            HierarchicalStart::Root => Vec::new(),
+            HierarchicalStart::Ancestor(levels) => {
+                instance[..instance.len().checked_sub(levels)?].to_vec()
+            }
+        };
+        rooted.extend(self.path.iter().cloned());
+        Some(rooted)
+    }
+}
+
+/// The [`OutwardObject`] of name `components` of interface instance `scope`
+/// of `module`, if the hierarchy has one.
+pub(super) fn outward_object(
+    hierarchy: &Hierarchy<'_>,
+    module: ModuleId,
+    scope: &sv::InterfaceBodyScope,
+    components: &[String],
+) -> Result<Option<OutwardObject>, sv::AnalyzerError> {
+    let mut found = Vec::new();
+    if !resolve_interface_name(hierarchy, module, scope, components, &mut found)? {
+        return Ok(None);
+    }
+    let Some(reference) = found.pop() else {
+        return Ok(None);
+    };
+    let signal = reference.signal;
+    Ok(Some(match signal.aliased {
+        // The parent's own signal.
+        Some(own) => OutwardObject {
+            r#type: signal.r#type,
+            is_net: signal.is_net,
+            start: HierarchicalStart::Ancestor(0),
+            path: Vec::new(),
+            targets: vec![(module, own)],
+        },
+        None => OutwardObject {
+            r#type: signal.r#type,
+            is_net: signal.is_net,
+            start: reference.start,
+            path: reference.path,
+            targets: reference.targets,
+        },
+    }))
+}
+
 /// The bindings of the local signals of `references` in `lowered`.
 pub(super) fn bindings(
     references: &[HierarchicalReference],
     lowered: &LoweredSvModule,
     lowered_modules: &HashMap<ModuleId, LoweredSvModule>,
 ) -> Result<HashMap<SourceVarId, HierarchicalBinding>, sv::AnalyzerError> {
+    let mut bindings = signal_bindings(references, lowered, lowered_modules)?;
+    // The controls of a force through a hierarchical name denote the
+    // controls of the target in its own module (IEEE 1800-2023 10.6.2). A
+    // target that no procedure of its module holds has no hold, and the
+    // forcing module's hold stays its own.
+    for signal in lowered.source.signals() {
+        let (Some(control), Some(_)) = (signal.force_control(), signal.hierarchical()) else {
+            continue;
+        };
+        let Some(reference) = references
+            .iter()
+            .find(|reference| reference.signal.name == control.target)
+        else {
+            continue;
+        };
+        let targets: Option<Vec<_>> = reference
+            .targets
+            .iter()
+            .map(|(module, target)| {
+                let name = sv::ir::force_control_name(&control.role, target);
+                Some((*module, *lowered_modules[module].signal_names.get(&name)?))
+            })
+            .collect();
+        let Some(targets) = targets else {
+            if control.role == sv::ir::ForceRole::Hold {
+                continue;
+            }
+            return Err(sv::AnalyzerError::Unsupported(format!(
+                "force of `{}` through a hierarchical name",
+                reference.signal.name
+            )));
+        };
+        bindings.insert(
+            lowered.signal_names[signal.name()],
+            HierarchicalBinding {
+                start: reference.start,
+                path: reference.path.clone(),
+                targets,
+            },
+        );
+    }
+    Ok(bindings)
+}
+
+fn signal_bindings(
+    references: &[HierarchicalReference],
+    lowered: &LoweredSvModule,
+    lowered_modules: &HashMap<ModuleId, LoweredSvModule>,
+) -> Result<HashMap<SourceVarId, HierarchicalBinding>, sv::AnalyzerError> {
     references
         .iter()
-        .filter(|reference| !reference.signal.local)
+        .filter(|reference| !reference.signal.local && reference.signal.constant.is_none())
         .map(|reference| {
             let var_id = lowered.signal_names[&reference.signal.name];
             let targets = reference
@@ -600,6 +1244,9 @@ pub(super) struct ForeignWrites {
     /// `runs_as_process`), whose writes store into the variable as they
     /// execute.
     pub exclusive: bool,
+    /// Whether a continuous assignment or a combinational process drives
+    /// it, which excludes every other writer.
+    pub combinational: bool,
 }
 
 /// Add the signals that the hierarchical names of `module` (`module_id`),
@@ -615,6 +1262,8 @@ pub(super) fn collect_foreign_writes(
     let mut always_ff = HashSet::default();
     let mut exclusive = HashSet::default();
     for process in module.initial_processes() {
+        // An `always_ff` that runs as a process is still one (IEEE
+        // 1800-2023 9.2.2.4): its variables are those of an `always_ff`.
         let ordinary = process
             .site()
             .is_none_or(|site| site.construct != "always_ff");
@@ -623,13 +1272,15 @@ pub(super) fn collect_foreign_writes(
         } else if ordinary {
             &mut repeatedly
         } else {
-            &mut exclusive
+            &mut always_ff
         };
         super::procedural::written_names_with_calls(module, process.body(), written);
     }
+    let mut combinational = HashSet::default();
     for process in module.comb_processes() {
-        super::procedural::written_names_with_calls(module, process.body(), &mut exclusive);
+        super::procedural::written_names_with_calls(module, process.body(), &mut combinational);
     }
+    exclusive.extend(combinational.iter().cloned());
     for process in module.ff_processes() {
         let written = if process.is_always_ff() {
             &mut always_ff
@@ -655,6 +1306,7 @@ pub(super) fn collect_foreign_writes(
             entry.repeating += usize::from(repeating);
             entry.always_ff |= by_always_ff;
             entry.exclusive |= by_exclusive;
+            entry.combinational |= combinational.contains(name);
         }
     }
 }
@@ -680,6 +1332,7 @@ pub(super) fn collect_virtual_writes(
             entry.repeating += foreign.repeating.min(1);
             entry.always_ff |= foreign.always_ff;
             entry.exclusive |= foreign.exclusive;
+            entry.combinational |= foreign.combinational;
         }
     }
 }
@@ -733,6 +1386,99 @@ fn find_instance<'a>(
         }
     }
     None
+}
+
+/// The typed literal of the value of parameter `name` of a module, a lone
+/// remaining component, and its type, when it is integral: the value the
+/// specialization evaluates, or the sized literal it gives a wider one.
+fn parameter(
+    module: &ElaboratedModule,
+    name: &[String],
+) -> Result<Option<(String, sv::ast::Type)>, sv::AnalyzerError> {
+    let [name] = name else {
+        return Ok(None);
+    };
+    let Some(literal) = module.parameters.get(name) else {
+        return Ok(None);
+    };
+    // A select of the parameter indexes its declared dimensions.
+    if module.dimensioned.contains(name) {
+        return Err(sv::AnalyzerError::Unsupported(format!(
+            "hierarchical reference to parameter `{name}`, whose packed dimensions are other \
+             than one `[N-1:0]`"
+        )));
+    }
+    let Some(&(width, signed)) = module.parameter_types.get(name) else {
+        return Ok(None);
+    };
+    // A value read from its literal, not evaluated, keeps unknown or
+    // high-impedance bits that the two-state conversion of a `bit`
+    // parameter would clear.
+    let evaluated = width <= 128 && module.constants.contains_key(name);
+    if !evaluated
+        && literal.as_deref().is_some_and(|literal| {
+            literal
+                .split_once('\'')
+                .is_some_and(|(_, digits)| digits.contains(['x', 'X', 'z', 'Z', '?']))
+        })
+    {
+        return Err(sv::AnalyzerError::Unsupported(format!(
+            "hierarchical reference to parameter `{name}`, whose value has unknown or \
+             high-impedance bits"
+        )));
+    }
+    Ok(typed_literal(
+        module,
+        name,
+        literal.as_deref(),
+        width,
+        signed,
+    ))
+}
+
+/// The literal of the value of parameter `name` of `width` bits, of its
+/// signedness, and its type.
+fn typed_literal(
+    module: &ElaboratedModule,
+    name: &str,
+    literal: Option<&str>,
+    width: usize,
+    signed: bool,
+) -> Option<(String, sv::ast::Type)> {
+    let signing = if signed { "s" } else { "" };
+    let literal = match module.constants.get(name) {
+        Some(&value) if width > 0 && width <= 128 => {
+            let mask = if width == 128 {
+                u128::MAX
+            } else {
+                (1u128 << width) - 1
+            };
+            format!("{width}'{signing}d{}", value as u128 & mask)
+        }
+        // A wider value keeps the digits of the literal the analysis gives
+        // it, of the parameter's width, with the parameter's signedness.
+        _ => {
+            let digits = literal?.strip_prefix(&format!("{width}'"))?;
+            let digits = digits.strip_prefix(['s', 'S']).unwrap_or(digits);
+            format!("{width}'{signing}{digits}")
+        }
+    };
+    let width = i128::try_from(width).ok()?;
+    let r#type = sv::ast::Type::resolved(
+        sv::ast::TypeKind::Logic,
+        signed,
+        None,
+        &[(width - 1, 0)],
+        &[],
+    );
+    Some((literal, r#type))
+}
+
+/// `name` without the constant index `[n]` that ends it, as the name scan
+/// spells an element of an array that a member select follows.
+fn without_index(name: &str) -> Option<&str> {
+    let (name, index) = name.strip_suffix(']')?.rsplit_once('[')?;
+    (!index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())).then_some(name)
 }
 
 /// The local name, type and net kind of signal `name` of a module.
@@ -806,8 +1552,14 @@ fn resolved_type(module: &ElaboratedModule, r#type: &sv::ir::Type) -> Option<sv:
     )
     .with_chandle(r#type.is_chandle());
     // The members of a packed structure, which the name selects.
-    Some(match r#type.packed_structure() {
+    let resolved = match r#type.packed_structure() {
         Some(structure) => resolved.with_members_of(structure),
+        None => resolved,
+    };
+    // The named values of an enumeration, which `%p` and the enumeration
+    // methods show.
+    Some(match r#type.enumeration() {
+        Some(enumeration) => resolved.with_enumeration_of(enumeration),
         None => resolved,
     })
 }

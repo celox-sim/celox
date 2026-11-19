@@ -521,6 +521,46 @@ fn links_functions_from_a_shared_library() {
     assert_eq!(sim.get(y), BigUint::from(12u32));
 }
 
+/// C code that uses a facility of context imports Celox does not provide
+/// (IEEE 1800-2023 35.5.3), here `svGetScope`, is rejected when its library
+/// loads, naming the symbol, not at the first call.
+#[cfg(target_os = "linux")]
+#[test]
+fn libraries_that_need_the_scope_api_fail_to_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let c_source = dir.path().join("scope.c");
+    let library = dir.path().join("libscope.so");
+    std::fs::write(
+        &c_source,
+        "void *svGetScope(void);\nint scoped(int x) { return svGetScope() ? x : -x; }\n",
+    )
+    .unwrap();
+    let compiled = std::process::Command::new("cc")
+        .args(["-shared", "-fPIC", "-o"])
+        .arg(&library)
+        .arg(&c_source)
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let source = r#"
+        module Top(input logic clk, input int a, output int y);
+            import "DPI-C" context function int scoped(input int x);
+            always_ff @(posedge clk) y <= scoped(a);
+        endmodule
+    "#;
+    // SAFETY: `scoped` is `int scoped(int)`.
+    let Err(error) = unsafe { builder(source).dpi_library(&library) }.build_cranelift() else {
+        panic!("a library that needs svGetScope must not load");
+    };
+    let error = error.to_string();
+    assert!(error.contains("cannot load DPI-C library"), "{error}");
+    assert!(error.contains("svGetScope"), "{error}");
+}
+
 extern "C" fn dpi_sub(x: i32, y: i32) -> i32 {
     x.wrapping_sub(y)
 }
@@ -591,6 +631,104 @@ fn unresolved_function_is_a_build_error() {
 
 extern "C" fn dpi_twice(x: i32) -> i32 {
     x.wrapping_mul(2)
+}
+
+dpi_backends! {
+    // A context import is called as any other (IEEE 1800-2023 35.5.3); its
+    // C code may not use the scope API or call exports, which Celox does not
+    // provide to C.
+    fn context_function_imports(sim) {
+        @build unsafe {
+            builder(r#"
+                module Top(input logic clk, input int a, input int b, output int y);
+                    import "DPI-C" context function int dpi_add(input int x, input int y);
+                    always_ff @(posedge clk) y <= dpi_add(a, b);
+                endmodule
+            "#)
+            .dpi_function("dpi_add", dpi_add as *const ())
+        };
+        let clk = sim.event("clk");
+        let (a, b, y) = (sim.signal("a"), sim.signal("b"), sim.signal("y"));
+        sim.modify(|io| {
+            io.set(a, 40u32);
+            io.set(b, 2u32);
+        })
+        .unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(y), BigUint::from(42u32));
+    }
+}
+
+const UNLINKED: &str = r#"
+    module Top(input logic clk, input int a, output int y);
+        import "DPI-C" context function int unlinked_sum(input int x, input int y);
+        always_ff @(posedge clk) y <= unlinked_sum(a, a);
+    endmodule
+"#;
+
+/// An import that no registered function or library provides fails the
+/// build, unless the design is only elaborated.
+#[test]
+fn unlinked_imports_fail_the_build_by_default() {
+    let Err(error) = builder(UNLINKED).build_interpreter() else {
+        panic!("an unlinked import must fail the build");
+    };
+    assert!(
+        error.to_string().contains(
+            "DPI-C import `unlinked_sum` is not provided by any registered function or library"
+        ),
+        "{error}"
+    );
+}
+
+/// An elaboration that does not run the design builds without the C
+/// function of an import.
+#[test]
+fn unlinked_imports_build_for_elaboration() {
+    builder(UNLINKED)
+        .allow_unlinked_dpi_for_elaboration()
+        .build_interpreter()
+        .unwrap();
+}
+
+dpi_backends! {
+    // Calling an import the design was built without is a run-time error
+    // naming it, on every backend; the call's arguments are not evaluated
+    // into a C call.
+    fn unlinked_import_calls_are_runtime_errors(sim) {
+        @build builder(UNLINKED).allow_unlinked_dpi_for_elaboration();
+        let clk = sim.event("clk");
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 3u32)).unwrap();
+        let error = sim.tick(clk).expect_err("the call of an unlinked import fails");
+        assert!(
+            error.to_string().contains(
+                "DPI-C import `unlinked_sum` was elaborated without its C body (allow_unlinked_dpi_for_elaboration) and cannot be called"
+            ),
+            "{error}"
+        );
+    }
+}
+
+/// Any number of imports may be unlinked, also in one design.
+#[test]
+fn many_unlinked_imports_build_for_elaboration() {
+    let mut source = String::from("module Top(input logic clk, input int a, output int y);\n");
+    for index in 0..80 {
+        source.push_str(&format!(
+            "    import \"DPI-C\" function int unlinked_{index}(input int x);\n"
+        ));
+    }
+    source.push_str("    always_ff @(posedge clk) begin\n");
+    for index in 0..80 {
+        source.push_str(&format!("        y <= unlinked_{index}(a);\n"));
+    }
+    source.push_str("    end\nendmodule\n");
+    let source: &'static str = Box::leak(source.into_boxed_str());
+    builder(source)
+        .allow_unlinked_dpi_for_elaboration()
+        .build_interpreter()
+        .unwrap();
 }
 
 dpi_backends! {
@@ -750,13 +888,6 @@ fn rejects_unsupported_imports_and_calls() {
                 always_ff @(posedge clk) y <= f(a, y);
             endmodule"#,
             "DPI-C pure import with an output or inout argument",
-        ),
-        (
-            r#"module Top(input logic clk, input int a, output int y);
-                import "DPI-C" context function int f(input int x);
-                always_ff @(posedge clk) y <= f(a);
-            endmodule"#,
-            "DPI-C context import",
         ),
         (
             r#"module Top(input logic clk, input int a);
@@ -1273,5 +1404,224 @@ dpi_backends! {
         sim.tick(clk).unwrap();
         assert_eq!(sim.get(sim.signal("y")), BigUint::from(21u32));
         assert_eq!(sim.get(sim.signal("z")), BigUint::from(40u32));
+    }
+}
+
+fn dpi_count_calls(x: i32) -> i32 {
+    x + 1
+}
+
+extern "C" fn dpi_increment(x: i32) -> i32 {
+    dpi_count_calls(x)
+}
+
+dpi_backends! {
+    // A recursive function that calls a C function goes out of line, as
+    // any recursive function does: inlining cannot expand the recursion.
+    fn recursive_functions_call_c_functions(sim) {
+        @build unsafe {
+            builder(r#"
+                module Top(input logic clk, input int a, output int y);
+                    import "DPI-C" function int dpi_increment(input int x);
+                    function automatic int climb(int n, int x);
+                        if (n == 0) return x;
+                        return climb(n - 1, dpi_increment(x));
+                    endfunction
+                    always_ff @(posedge clk) y <= climb(a, 0);
+                endmodule
+            "#)
+            .dpi_function("dpi_increment", dpi_increment as *const ())
+        };
+        let clk = sim.event("clk");
+        let (a, y) = (sim.signal("a"), sim.signal("y"));
+        sim.modify(|io| io.set(a, 5u32)).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(y), BigUint::from(5u32));
+    }
+}
+
+recorder!(record_unit_native, "unit_native");
+recorder!(record_unit_cranelift, "unit_cranelift");
+recorder!(record_unit_interpreter, "unit_interpreter");
+recorder!(record_unit_wasm, "unit_wasm");
+recorder!(record_unit_cranelift_parallel, "unit_cranelift_parallel");
+
+// The C calls of a function that goes out of line keep their order with the
+// function's writes, as an inlined body's do: each call sees the value the
+// write before it made.
+macro_rules! unit_call_order_test {
+    ($name:ident, $tag:literal, $record:ident, $build:ident $(, $method:ident($($arg:expr),*))*) => {
+        #[test]
+        fn $name() {
+            let source = r#"
+                module Top(input logic clk, input int a, output int y);
+                    import "DPI-C" function void record(input int value);
+                    function automatic int walk(int n, int c);
+                        record(c);
+                        c = c + 10;
+                        record(c);
+                        if (n == 0) return c;
+                        return walk(n - 1, c);
+                    endfunction
+                    always_ff @(posedge clk) y <= walk(2, a);
+                endmodule
+            "#;
+            let mut sim = unsafe { builder(source).dpi_function("record", $record as *const ()) }
+                $(.$method($($arg),*))*
+                .$build()
+                .unwrap();
+            let clk = sim.event("clk");
+            let a = sim.signal("a");
+            sim.modify(|io| io.set(a, 1u32)).unwrap();
+            sim.tick(clk).unwrap();
+            assert_eq!(recorded($tag), vec![1, 11, 11, 21, 21, 31]);
+            assert_eq!(sim.get(sim.signal("y")), BigUint::from(31u32));
+        }
+    };
+}
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+unit_call_order_test!(
+    unit_call_order_native,
+    "unit_native",
+    record_unit_native,
+    build_native
+);
+unit_call_order_test!(
+    unit_call_order_cranelift,
+    "unit_cranelift",
+    record_unit_cranelift,
+    build_cranelift
+);
+unit_call_order_test!(
+    unit_call_order_interpreter,
+    "unit_interpreter",
+    record_unit_interpreter,
+    build_interpreter
+);
+unit_call_order_test!(
+    unit_call_order_wasm,
+    "unit_wasm",
+    record_unit_wasm,
+    build_wasm
+);
+unit_call_order_test!(
+    unit_call_order_cranelift_parallel,
+    "unit_cranelift_parallel",
+    record_unit_cranelift_parallel,
+    build_cranelift,
+    threads(4),
+    parallel_partition(celox::ParallelPartition::Always)
+);
+
+static EXCLUSIVE_IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static EXCLUSIVE_MOST: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Counts the calls in flight at once, each held for a moment.
+extern "C" fn dpi_exclusive(x: i32) -> i32 {
+    use std::sync::atomic::Ordering;
+    let now = EXCLUSIVE_IN_FLIGHT.fetch_add(1, Ordering::SeqCst) + 1;
+    EXCLUSIVE_MOST.fetch_max(now, Ordering::SeqCst);
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    EXCLUSIVE_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+    x + 1
+}
+
+/// C code need not be thread-safe: C calls that out-of-line functions make
+/// from independent combinational processes never run at once, also when
+/// the settle runs on parallel lanes.
+#[test]
+fn c_calls_in_functions_never_run_concurrently() {
+    let mut source = String::from(
+        "module Top(input int a, output int y0, y1, y2, y3, y4, y5, y6, y7);\n\
+         import \"DPI-C\" function int dpi_exclusive(input int x);\n\
+         function automatic int climb(int n, int x);\n\
+             if (n == 0) return x;\n\
+             return climb(n - 1, dpi_exclusive(x));\n\
+         endfunction\n",
+    );
+    for index in 0..8 {
+        source.push_str(&format!("always @* y{index} = climb({index}, a);\n"));
+    }
+    source.push_str("endmodule\n");
+    let source: &'static str = Box::leak(source.into_boxed_str());
+    let mut sim =
+        unsafe { builder(source).dpi_function("dpi_exclusive", dpi_exclusive as *const ()) }
+            .threads(4)
+            .parallel_partition(celox::ParallelPartition::Always)
+            .build_cranelift()
+            .unwrap();
+    let a = sim.signal("a");
+    sim.modify(|io| io.set(a, 100u32)).unwrap();
+    for index in 0..8u32 {
+        assert_eq!(
+            sim.get(sim.signal(&format!("y{index}"))),
+            BigUint::from(100 + index)
+        );
+    }
+    assert_eq!(
+        EXCLUSIVE_MOST.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "C calls ran at once"
+    );
+}
+
+static ISOLATED_CALLS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+extern "C" fn dpi_counted_twice(value: i64) -> i64 {
+    ISOLATED_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    value * 2
+}
+
+/// A noncontext DPI-C import called in an `always @*` block reaches only its
+/// arguments and its result (IEEE 1800-2023 35.5.3), so the block runs when
+/// what it reads changes (9.4.2.2) and no more often: settles for an
+/// unrelated clock do not call it again, whether the settle runs whole or
+/// by partitions.
+#[test]
+fn combinational_dpi_calls_run_only_when_their_reads_change() {
+    let source = r#"
+        module Top(input logic clk, input longint a, output longint y, output int count);
+            import "DPI-C" function longint dpi_counted_twice(input longint value);
+            always @* y = dpi_counted_twice(a);
+            initial count = 0;
+            always_ff @(posedge clk) count <= count + 1;
+        endmodule
+    "#;
+    for partitioned in [false, true] {
+        let mut sim = unsafe {
+            builder(source).dpi_function("dpi_counted_twice", dpi_counted_twice as *const ())
+        };
+        if partitioned {
+            sim = sim.enable_pass(celox::SirPass::PartitionedSettle);
+        }
+        let mut sim = sim.build_native().unwrap();
+        let (clk, a, y, count) = (
+            sim.event("clk"),
+            sim.signal("a"),
+            sim.signal("y"),
+            sim.signal("count"),
+        );
+        sim.modify(|io| io.set(a, 5u64)).unwrap();
+        sim.tick(clk).unwrap();
+        let settled = ISOLATED_CALLS.load(std::sync::atomic::Ordering::SeqCst);
+        for _ in 0..10 {
+            sim.tick(clk).unwrap();
+        }
+        assert_eq!(sim.get(count), BigUint::from(11u32));
+        assert_eq!(sim.get(y), BigUint::from(10u32));
+        assert_eq!(
+            ISOLATED_CALLS.load(std::sync::atomic::Ordering::SeqCst),
+            settled,
+            "ticks of an unrelated clock call the import again (partitioned={partitioned})"
+        );
+        sim.modify(|io| io.set(a, 6u64)).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(y), BigUint::from(12u32));
+        assert_eq!(
+            ISOLATED_CALLS.load(std::sync::atomic::Ordering::SeqCst),
+            settled + 1,
+            "partitioned={partitioned}"
+        );
     }
 }

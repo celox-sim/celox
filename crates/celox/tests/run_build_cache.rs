@@ -47,6 +47,27 @@ module t {
 }
 "#;
 
+/// [`MEMORY_SOURCE`] with the load in an `always_ff`, whose generated code
+/// reads the file at each edge.
+const CLOCKED_MEMORY_SOURCE: &str = r#"
+module Rom (clk: input clock, q: output logic<8>) {
+    var mem: logic<8>[4];
+    always_ff (clk) { $readmemh("mem.hex", mem); }
+    assign q = mem[0];
+}
+#[test(t)]
+module t {
+    inst clk: $tb::clock_gen;
+    var q: logic<8>;
+    inst dut: Rom (clk, q);
+    initial {
+        clk.next(1);
+        $assert(q == 8'h12);
+        $finish();
+    }
+}
+"#;
+
 fn project(source: &str) -> tempfile::TempDir {
     let project = tempfile::tempdir().unwrap();
     fs::write(
@@ -259,21 +280,22 @@ fn reuses_compilation_across_processes_and_invalidates_changed_inputs() {
     cached(path, &[], "miss", true);
 }
 
+/// A memory file is read when the test runs (IEEE 1800-2023 21.4), so the
+/// cached build stays valid when it changes: a run reads its contents then,
+/// first next to the source and then in the working directory.
 #[test]
-fn tracks_readmem_contents_and_new_lookup_candidates() {
+fn reads_readmem_files_when_the_test_runs() {
     let project = project(MEMORY_SOURCE);
     let path = project.path();
     fs::write(path.join("mem.hex"), "12\n12\n12\n12\n").unwrap();
     cached(path, &[], "miss", true);
     cached(path, &[], "hit", true);
-    // A source-relative file now takes precedence over the project-root file.
-    fs::write(path.join("src/mem.hex"), "12\n12\n12\n12\n").unwrap();
-    cached(path, &[], "miss", true);
+    // A source-relative file takes precedence over the project-root file.
     fs::write(path.join("src/mem.hex"), "34\n34\n34\n34\n").unwrap();
-    let output = cached(path, &[], "miss", false);
+    let output = cached(path, &[], "hit", false);
     assert!(output.contains("status=fail"), "{output}");
     fs::remove_file(path.join("src/mem.hex")).unwrap();
-    cached(path, &[], "miss", true);
+    cached(path, &[], "hit", true);
 }
 
 #[test]
@@ -290,12 +312,13 @@ fn absolute_readmem_path_keeps_its_original_location_after_project_move() {
     cached(&old, &[], "hit", true);
     fs::rename(&old, &moved).unwrap();
     // The literal still names the original location, which no longer exists.
-    cached(&moved, &[], "miss", false);
-    // Restore that location with different contents: the cache must also miss
-    // while a fresh compilation follows the unchanged literal.
+    cached(&moved, &[], "hit", false);
+    // Restore that location: the run reads the file the literal names.
     fs::create_dir(&old).unwrap();
+    fs::write(old.join("mem.hex"), "12\n12\n12\n12\n").unwrap();
+    cached(&moved, &[], "hit", true);
     fs::write(old.join("mem.hex"), "34\n34\n34\n34\n").unwrap();
-    cached(&moved, &[], "miss", false);
+    cached(&moved, &[], "hit", false);
 }
 
 #[test]
@@ -304,7 +327,7 @@ fn reuses_relative_cache_after_project_move() {
         "$assert(q == 4);",
         "if q == 4 { for _i in 0..2 { $assert(q == 4); } } else { $assert(q == 4); }",
     );
-    for source in [&nested, MEMORY_SOURCE] {
+    for source in [&nested, MEMORY_SOURCE, CLOCKED_MEMORY_SOURCE] {
         check_project_move(source);
     }
 }
@@ -372,11 +395,11 @@ fn check_project_move(source: &str) {
         &["--native-image-input", image_path.to_str().unwrap()],
         true,
     );
-    if source == MEMORY_SOURCE {
-        // Reload candidates against the relocated root, including a newly
-        // created source-relative file that outranks the root-relative file.
+    if source == MEMORY_SOURCE || source == CLOCKED_MEMORY_SOURCE {
+        // The run looks the file up against the relocated root, where a
+        // source-relative file outranks the root-relative one.
         fs::write(moved.join("src/mem.hex"), "34\n34\n34\n34\n").unwrap();
-        cached(&moved, &[], "miss", false);
+        cached(&moved, &[], "hit", false);
     }
     fs::remove_dir_all(moved.join("src")).unwrap();
     fs::remove_file(moved.join("Veryl.toml")).unwrap();
@@ -389,7 +412,7 @@ fn check_project_move(source: &str) {
 
 #[cfg(unix)]
 #[test]
-fn tracks_retargeted_readmem_directory_symlink() {
+fn reads_readmem_files_through_a_retargeted_directory_symlink() {
     let fixture = project(&MEMORY_SOURCE.replace("mem.hex", "data/mem.hex"));
     let root = fixture.path();
     for (directory, contents) in [("good", "12\n12\n12\n12\n"), ("bad", "34\n34\n34\n34\n")] {
@@ -402,7 +425,8 @@ fn tracks_retargeted_readmem_directory_symlink() {
     cached(root, &[], "hit", true);
     fs::remove_file(&alias).unwrap();
     std::os::unix::fs::symlink("../bad", &alias).unwrap();
-    let output = cached(root, &[], "miss", false);
+    // The run reads the file through the symlink as it is then.
+    let output = cached(root, &[], "hit", false);
     assert!(output.contains("status=fail"));
 }
 

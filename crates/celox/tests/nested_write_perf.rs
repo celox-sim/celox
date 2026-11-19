@@ -223,8 +223,9 @@ fn assert_infers_latch_with_runtime_limit(source: &str, runtime_limit: bool) {
     use miette::Diagnostic;
 
     let error = Simulator::builder(source, "AdcGroupNestedWriteMre")
+        .strict(true)
         .build()
-        .expect_err("incomplete nested writes must fail under the strict default");
+        .expect_err("incomplete nested writes must fail in strict mode");
     assert!(error.to_string().contains("inferred_latch"), "{error}");
 
     let mut policy = DiagnosticPolicy::default();

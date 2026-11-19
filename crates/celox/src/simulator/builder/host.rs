@@ -44,7 +44,6 @@ pub struct SimulatorBuilder<'a, Target = Simulator> {
     live_signals: Vec<(Vec<(String, usize)>, Vec<String>)>,
     injected_components: crate::InjectedComponents,
     frontend_artifact: Option<celox_frontend_sdk::FrontendArtifact>,
-    file_dependencies: celox_frontend_veryl::FileDependencyCollector,
     native_file_calls: bool,
     /// Whether the build keeps the value change points of
     /// [`Self::value_change_signals`]: not one that starts interpreted,
@@ -55,15 +54,6 @@ pub struct SimulatorBuilder<'a, Target = Simulator> {
 
 /// Configuration methods shared by all builder variants.
 impl<'a, Target> SimulatorBuilder<'a, Target> {
-    /// Track external Veryl file lookups in this compilation-owned collector.
-    pub fn file_dependency_collector(
-        mut self,
-        collector: celox_frontend_veryl::FileDependencyCollector,
-    ) -> Self {
-        self.file_dependencies = collector;
-        self
-    }
-
     /// Returns the source files passed to this builder.
     pub fn sources(&self) -> &[(&'a str, &'a Path)] {
         &self.sources
@@ -228,10 +218,12 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
 
     /// Allow incomplete assignments and retained values in `always_comb`.
     ///
-    /// Disabled by default. When enabled, inferred latches retain their
-    /// value while closed and follow their inputs while open. Explicit
-    /// SystemVerilog `always_latch` and ordinary `always @*` processes do
-    /// not require this option.
+    /// Inferred latches compile with a warning by default; this option
+    /// silences that diagnostic when it has no explicit level. When
+    /// enabled, inferred latches retain their value while closed and
+    /// follow their inputs while open. Explicit SystemVerilog
+    /// `always_latch` and ordinary `always @*` processes do not require
+    /// this option.
     pub fn allow_inferred_latches(mut self, enable: bool) -> Self {
         self.options.allow_inferred_latches = enable;
         self
@@ -621,6 +613,21 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
         self
     }
 
+    /// Build a design whose DPI-C imports no registered function or library
+    /// provides, for an elaboration that never runs it.
+    ///
+    /// Each call of such an import is a run-time error naming the import,
+    /// which says it was elaborated without its C body; no C function is
+    /// called. Without this, which is the
+    /// default, an import nothing provides fails the build with a `Dpi`
+    /// error. Only a caller that elaborates a design to check it, as the
+    /// elaboration mode of a conformance runner does without linking C code,
+    /// should allow it.
+    pub fn allow_unlinked_dpi_for_elaboration(mut self) -> Self {
+        self.options.dpi.allow_unlinked();
+        self
+    }
+
     /// Set the dead store elimination policy.
     pub fn dead_store_policy(mut self, policy: DeadStorePolicy) -> Self {
         self.options.dead_store_policy = policy;
@@ -680,8 +687,41 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
     }
 
     /// Override recoverable compilation diagnostic severities.
+    ///
+    /// The strict and shared-temporary settings are kept, whichever
+    /// order the setters are called in: this replaces the per-code
+    /// overrides only. Use [`strict`](Self::strict) and
+    /// [`shared_always_temporary`](Self::shared_always_temporary) to
+    /// change those themselves.
     pub fn diagnostic_policy(mut self, policy: crate::DiagnosticPolicy) -> Self {
-        self.options.diagnostic_policy = policy;
+        let strict = self.options.diagnostic_policy.strict || policy.strict;
+        let shared = self.options.diagnostic_policy.shared_always_temporary
+            || policy.shared_always_temporary;
+        self.options.diagnostic_policy = policy.strict(strict).with_shared_always_temporary(shared);
+        self
+    }
+
+    /// Compatibility: treat a variable written by several `always @*`
+    /// blocks as a temporary of each block, so its writes do not wake
+    /// the other blocks. This changes simulation behavior (it deviates
+    /// from IEEE 1800-2023 9.4.2.2), so it is off by default and always
+    /// reported as a warning when it applies. It is not a diagnostic
+    /// level and cannot be set through
+    /// [`diagnostic_policy`](Self::diagnostic_policy).
+    pub fn shared_always_temporary(mut self, enable: bool) -> Self {
+        self.options.diagnostic_policy.shared_always_temporary = enable;
+        self
+    }
+
+    /// Promote recoverable compilation diagnostics to errors.
+    ///
+    /// By default diagnostics such as inferred latches are warnings and
+    /// the design compiles with the documented fallback semantics.
+    /// Strict mode restores the previous error behavior. An explicit
+    /// per-code [`diagnostic_policy`](Self::diagnostic_policy) override
+    /// wins over strict mode for its code.
+    pub fn strict(mut self, enable: bool) -> Self {
+        self.options.diagnostic_policy.strict = enable;
         self
     }
 
@@ -854,3 +894,7 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
 /// distinct widths, by which the injection finds them.
 #[cfg(test)]
 mod call_consumer_tests;
+/// The compiled scheduler's skipped settles in designs whose domains make
+/// opaque calls or whose combinational processes capture.
+#[cfg(test)]
+mod settle_skip_tests;

@@ -24,6 +24,7 @@ impl Ff<'_, '_> {
         // `initial` blocks, like `always_comb`, as Verilator settles them.
         let runs_at_time_zero = always_comb || !self.m.four_state;
         self.direct = true;
+        self.holds_targets = true;
         let mut reads = self.m.implicit_reads(body, always_comb);
         reads.extend(self.m.implicit_reads(sensitivity_body, always_comb));
         for stmt in body {
@@ -75,11 +76,14 @@ impl Ff<'_, '_> {
             }
         }
         let mut targets = merged;
+        // A `$readmemh` assigns the words it may load, although the file
+        // read when it executes gives only some of them.
+        let assigned = without_loaded_words(&targets, &self.writes.memory_loads);
         if kind == sv::ir::CombProcessKind::AlwaysComb
             && super::super::comb_retention::retains_state(
                 &body_unit,
-                &targets,
-                &targets
+                &assigned,
+                &assigned
                     .iter()
                     .map(|target| (target.id, self.m.var(target.id).width))
                     .collect(),
@@ -99,6 +103,29 @@ impl Ff<'_, '_> {
         }
         .into_iter()
         .collect();
+        // A force stores into the targets of such a unit, which needs no run
+        // of the procedure: one would repeat the procedure's other effects,
+        // and end the hold of a release. A target the force cannot store,
+        // one an `always_comb` assigns whole, would need such runs.
+        for target in &targets {
+            if !self.m.procedurally_forced.contains(&target.id) {
+                continue;
+            }
+            let Some((enabled, _)) = self.m.force_controls(target.id) else {
+                continue;
+            };
+            if !self
+                .m
+                .var(enabled)
+                .force_control
+                .is_some_and(|slot| slot.stored)
+            {
+                return Err(unsupported(format!(
+                    "force or release of `{}`, which an `always_comb` that runs as a process assigns whole",
+                    self.m.var(target.id).path.join(".")
+                )));
+            }
+        }
         sources.sort_by_key(|atom| (atom.id.0, atom.access.lsb, atom.access.msb));
         let (initialized, _) = self.m.temp("comb_initialized", 1, false, false);
         let init = self.b.alloc_bit(1, false);
@@ -274,6 +301,22 @@ impl Ff<'_, '_> {
             false_block: (done, vec![]),
         });
         self.b.switch_to_block(execute);
+        // Each run is an execution of the procedure, which ends the holds of
+        // its targets (IEEE 1800-2023 10.6.2), also the run at time zero
+        // (9.2.2.2.2, and that of an `always @*` in two-state mode).
+        for target in &targets {
+            if !self.m.procedurally_forced.contains(&target.id) {
+                continue;
+            }
+            let Some(&hold) = self.m.force_holds.get(&target.id) else {
+                continue;
+            };
+            let width = self.m.var(hold).width;
+            let cleared = self.b.alloc_bit(width, false);
+            self.b
+                .emit(SIRInstruction::Imm(cleared, SIRValue::new(0u8)));
+            self.store(hold, SIROffset::Static(0), width, cleared);
+        }
         // Each run is a resume of the process (IEEE 1800-2023 16.4.2).
         if let Some(site_id) = flush_site {
             self.b.emit(SIRInstruction::RuntimeEvent {
@@ -394,4 +437,31 @@ impl Ff<'_, '_> {
         }
         Ok(paths)
     }
+}
+
+/// `targets` without the bits of `loads`.
+fn without_loaded_words(
+    targets: &[VarAtomBase<SourceVarId>],
+    loads: &[(SourceVarId, BitAccess)],
+) -> Vec<VarAtomBase<SourceVarId>> {
+    let mut remaining = targets.to_vec();
+    for &(id, loaded) in loads {
+        remaining = remaining
+            .into_iter()
+            .flat_map(|target| {
+                if target.id != id || !target.access.overlaps(&loaded) {
+                    return vec![target];
+                }
+                let mut parts = Vec::new();
+                if target.access.lsb < loaded.lsb {
+                    parts.push(VarAtomBase::new(id, target.access.lsb, loaded.lsb - 1));
+                }
+                if target.access.msb > loaded.msb {
+                    parts.push(VarAtomBase::new(id, loaded.msb + 1, target.access.msb));
+                }
+                parts
+            })
+            .collect();
+    }
+    remaining
 }

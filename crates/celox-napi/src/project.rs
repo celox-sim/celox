@@ -2,6 +2,32 @@
 
 use super::*;
 
+/// Whether `path` names a SystemVerilog source (`.sv` / `.svh`).
+pub(super) fn is_sv_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("sv") || ext.eq_ignore_ascii_case("svh"))
+}
+
+/// Split sources into Veryl and SystemVerilog sources by file extension.
+///
+/// Sources without an `.sv`/`.svh` extension are treated as Veryl, matching
+/// the historical behavior for extensionless in-memory sources.
+pub(super) fn partition_hdl_sources<T: Clone>(
+    sources: &[(T, std::path::PathBuf)],
+) -> (Vec<(T, std::path::PathBuf)>, Vec<(T, std::path::PathBuf)>) {
+    let mut veryl = Vec::new();
+    let mut sv = Vec::new();
+    for source in sources {
+        if is_sv_path(&source.1) {
+            sv.push(source.clone());
+        } else {
+            veryl.push(source.clone());
+        }
+    }
+    (veryl, sv)
+}
+
 /// Append extra source as a separate file entry if provided.
 pub(super) fn append_extra_source(
     sources: &mut Vec<(String, std::path::PathBuf)>,
@@ -18,6 +44,13 @@ pub(super) fn append_extra_source(
 pub(super) struct CeloxConfig {
     #[serde(default)]
     pub(super) diagnostics: celox::DiagnosticPolicy,
+    /// Root `strict = true` in celox.toml: promote recoverable diagnostics
+    /// to errors. A per-call `strict` option also enables it.
+    #[serde(default)]
+    pub(super) strict: Option<bool>,
+    /// `[compatibility]` opt-ins of celox.toml.
+    #[serde(default)]
+    pub(super) compatibility: CeloxCompatibility,
     /// Glob patterns (relative to project root) for `.veryl` files to exclude
     /// from compilation and type generation.
     #[serde(default)]
@@ -26,6 +59,33 @@ pub(super) struct CeloxConfig {
     pub(super) test: CeloxTestConfig,
     #[serde(default)]
     pub(super) simulation: CeloxSimulationConfig,
+}
+
+/// Behavior-changing compatibility opt-ins of a celox.toml.
+#[derive(serde::Deserialize, Default, Clone, Copy)]
+#[serde(default)]
+pub(super) struct CeloxCompatibility {
+    pub(super) legacy_empty_reductions: Option<bool>,
+    pub(super) shared_always_temporary: Option<bool>,
+}
+
+impl CeloxConfig {
+    /// The project diagnostic policy, with strict mode from the project
+    /// setting or the per-call `strict` option, and the shared-temporary
+    /// compatibility opt-in as a warning unless diagnostics set it.
+    pub(super) fn diagnostic_policy(&self, strict_option: bool) -> celox::DiagnosticPolicy {
+        self.diagnostics
+            .clone()
+            .strict(self.strict.unwrap_or(false) || strict_option)
+            .with_shared_always_temporary(
+                self.compatibility.shared_always_temporary.unwrap_or(false),
+            )
+    }
+
+    /// Whether empty SV array reductions return zero (compatibility).
+    pub(super) fn legacy_empty_reductions(&self) -> bool {
+        self.compatibility.legacy_empty_reductions.unwrap_or(false)
+    }
 }
 
 #[derive(serde::Deserialize, Default)]

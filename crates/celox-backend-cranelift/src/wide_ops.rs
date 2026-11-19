@@ -15,6 +15,28 @@ fn isub_from_imm(builder: &mut FunctionBuilder, imm: i64, rhs: Value) -> Value {
     builder.ins().isub(lhs, rhs)
 }
 
+/// Clear the bits above `width` in the top chunk of a wide result.
+///
+/// Wide values keep those bits zero: reductions, comparisons and shifts read
+/// whole chunks. The operations whose top chunk can receive a carry, a
+/// borrow, high product bits, bits shifted left, a sign fill, inverted zeros
+/// or the excess of a truncated source clear them on their result.
+pub(crate) fn clear_top_chunk_padding(
+    builder: &mut FunctionBuilder,
+    chunks: &mut [Value],
+    width: usize,
+) {
+    let top_bits = width % 64;
+    if top_bits == 0 {
+        return;
+    }
+    if let Some(top) = chunks.get_mut(width / 64) {
+        *top = builder
+            .ins()
+            .band_imm_s(*top, ((1u64 << top_bits) - 1) as i64);
+    }
+}
+
 // ─────────────────────────────────────────────────────────
 //  Wide Binary Operations
 // ─────────────────────────────────────────────────────────

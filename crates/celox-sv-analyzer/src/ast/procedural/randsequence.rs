@@ -151,6 +151,7 @@ enum Frame<'p> {
         kind: CaseKind,
         selector: Expr,
         chandles: bool,
+        strings: bool,
         items: &'p [RsCaseItem],
         next: usize,
         arms: Vec<CaseItemBase<Expr, LValue>>,
@@ -547,9 +548,9 @@ impl BodyBuilder<'_, '_, '_> {
                                         .iter()
                                         .flat_map(|item| item.labels.iter().copied())
                                         .collect::<Vec<_>>();
-                                    let (prelude, kind, selector, chandles) = self
+                                    let (prelude, kind, selector, chandles, strings) = self
                                         .scoped(&locals, |this| {
-                                            this.case_header("case", None, *selector, &labels)
+                                            this.case_header("case", None, *selector, &labels, &[])
                                         })?;
                                     break Step::Push(Frame::Case {
                                         locals: locals.clone(),
@@ -557,6 +558,7 @@ impl BodyBuilder<'_, '_, '_> {
                                         kind,
                                         selector,
                                         chandles,
+                                        strings,
                                         items,
                                         next: 0,
                                         arms: Vec::new(),
@@ -712,6 +714,7 @@ impl BodyBuilder<'_, '_, '_> {
                     kind,
                     selector,
                     chandles,
+                    strings,
                     items,
                     next,
                     arms,
@@ -727,9 +730,9 @@ impl BodyBuilder<'_, '_, '_> {
                                 .iter()
                                 .map(|label| celox_sv_syntax::CaseMatch::Expression(*label))
                                 .collect::<Vec<_>>();
-                            let chandles = *chandles;
+                            let (chandles, strings) = (*chandles, *strings);
                             let labels = self.scoped(&locals.clone(), |this| {
-                                this.native_case_labels(&matches, false, chandles)
+                                this.native_case_labels(&matches, false, chandles, strings)
                             })?;
                             arms.push(CaseItemBase { labels, body });
                         }

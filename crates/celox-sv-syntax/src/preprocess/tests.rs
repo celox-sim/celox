@@ -500,3 +500,22 @@ fn includes_resolve_relative_and_search_paths_with_persistent_macros() {
             .contains("wire guarded;")
     );
 }
+
+/// The text view keeps the line of every token: the lines of a branch left
+/// out, of its block comments and of a definition's continuations stay
+/// empty lines, so a diagnostic in a second parse of the text names the
+/// source line.
+#[test]
+fn text_keeps_lines_of_skipped_branches_and_definitions() {
+    let code = "module M;\n`ifdef UNDEFINED\n  wire a;\n  /* one\n  two */\n`define X 1\n`else\n  wire b;\n`endif\n`define Y 1 + \\\n  2\n  wire c;\nendmodule\n";
+    let text = preprocess(code);
+    let line = |text: &str, word: &str| {
+        text.lines()
+            .position(|line| line.contains(word))
+            .map(|line| line + 1)
+    };
+    assert_eq!(line(&text, "wire b"), line(code, "wire b"), "{text}");
+    assert_eq!(line(&text, "wire c"), line(code, "wire c"), "{text}");
+    assert_eq!(line(&text, "endmodule"), line(code, "endmodule"), "{text}");
+    assert_eq!(line(&text, "wire a"), None, "{text}");
+}

@@ -89,17 +89,19 @@ pub(super) fn port_type(
 }
 
 /// Whether the range of the port declaration of a non-ANSI port, which its
-/// net or variable declaration repeats in other words, has the bounds of the
-/// port's type (IEEE 1800-2023 23.2.2.1).
+/// net or variable declaration of type `object_type` repeats in other
+/// words, has the bounds of the port's type `ty`, or the width of a type
+/// without a range (IEEE 1800-2023 23.2.2.1).
 pub(super) fn declared_port_range_matches(
-    port: &celox_sv_syntax::Port,
+    declared_type: Option<celox_sv_syntax::TypeId>,
+    object_type: Option<celox_sv_syntax::TypeId>,
     ty: &Type,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
     aliases: &TypeAliases,
 ) -> Converted<bool> {
-    let Some(id) = port.declared_type else {
+    let Some(id) = declared_type else {
         return Ok(true);
     };
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
@@ -110,6 +112,34 @@ pub(super) fn declared_port_range_matches(
             constants::eval_ast_const_expr(&tree.functions, range.right(), env),
         )
     };
+    // A type keyword or name without a range has the width of the port
+    // declaration's range; a real type has none.
+    let object_ranged = object_type.is_some_and(|id| {
+        !tree
+            .declarations()
+            .data_type(id)
+            .packed_dimensions
+            .is_empty()
+    });
+    if !object_ranged {
+        let Some(width) = declared.iter().try_fold(1u128, |width, range| {
+            let (left, right) = bounds(range)?;
+            width.checked_mul(left.abs_diff(right) + 1)
+        }) else {
+            return Ok(true);
+        };
+        let bits =
+            semantic_types::of_type(&mut session.types, &tree.functions, ty, env).map(|id| {
+                match session.types.data(id) {
+                    semantic_types::TyData::Packed(packed) => Some(packed.bits()),
+                    _ => None,
+                }
+            });
+        return Ok(match bits {
+            Some(bits) => bits == Some(width),
+            None => true,
+        });
+    }
     Ok(declared.len() == ty.packed_ranges.len()
         && declared
             .iter()
@@ -231,8 +261,27 @@ pub(super) fn net_signals(
     declarations: Option<&Arc<types::TypeDeclarations>>,
     selected_name: Option<&str>,
 ) -> Converted<Vec<Signal>> {
+    // A generic interconnect net (6.6.8) has no data type of its own: the
+    // authored implicit type only states signing and packed dimensions, and
+    // the connections determine the rest at elaboration (23.3.3.7.1). Its
+    // `NetResolution::Interconnect` marker carries that through the IR.
     if declaration.net_type == "interconnect" {
-        return Err(unsupported("interconnect net declaration"));
+        // An interconnect net has no data type: only the signing and
+        // packed dimensions of an implicit data type may be authored
+        // (6.6.8, Syntax 6-2).
+        if !matches!(
+            tree.declarations().data_type(declaration.data_type).kind,
+            DataTypeKind::Implicit
+        ) {
+            return Err(unsupported("interconnect net with a data type"));
+        }
+        if declaration
+            .variables
+            .iter()
+            .any(|variable| variable.value.is_some())
+        {
+            return Err(unsupported("interconnect net declaration assignment"));
+        }
     }
     if matches!(
         tree.declarations().data_type(declaration.data_type).kind,
@@ -245,6 +294,22 @@ pub(super) fn net_signals(
     let Some(base) = bind(declaration.data_type, tree, session, &context)? else {
         return Err(unsupported("unsupported net data type"));
     };
+    // A net has a four-state integral type or an unpacked aggregate of
+    // such (6.7.1): no string, handle or chandle.
+    let illegal = match base.kind {
+        TypeKind::String => Some("type `string`"),
+        TypeKind::Object | TypeKind::Process | TypeKind::Event => Some("a handle type"),
+        TypeKind::Chandle => Some("type `chandle`"),
+        _ => None,
+    };
+    if let Some(data_type) = illegal
+        && let Some(variable) = declaration.variables.first()
+    {
+        return Err(AnalyzerError::IllegalNetDataType {
+            name: normalize_identifier(&variable.name.spelling),
+            data_type,
+        });
+    }
     let mut signals = Vec::new();
     for variable in &declaration.variables {
         let name = normalize_identifier(&variable.name.spelling);
@@ -261,21 +326,30 @@ pub(super) fn net_signals(
         if ty.container.is_some() {
             return Err(unsupported("dynamic container net"));
         }
-        let drive = match declaration.net_type.as_str() {
-            "tri0" => NetDrive::Pull(false),
-            "tri1" => NetDrive::Pull(true),
-            "supply0" => NetDrive::Supply(false),
-            "supply1" => NetDrive::Supply(true),
-            _ => NetDrive::None,
-        };
-        signals.push(
-            Signal::new_net(name, ty)
-                .with_unresolved_net(declaration.net_type == "uwire")
-                .with_net_resolution(NetResolution::of(&declaration.net_type))
-                .with_net_drive(drive),
-        );
+        signals.push(net_signal(name, ty, &declaration.net_type));
     }
     Ok(signals)
+}
+
+/// The net `name` of type `ty` and of net type `net_type`.
+fn net_signal(name: String, ty: Type, net_type: &str) -> Signal {
+    let drive = match net_type {
+        "tri0" => NetDrive::Pull(false),
+        "tri1" => NetDrive::Pull(true),
+        "supply0" => NetDrive::Supply(false),
+        "supply1" => NetDrive::Supply(true),
+        _ => NetDrive::None,
+    };
+    Signal::new_net(name, ty)
+        .with_unresolved_net(net_type == "uwire")
+        .with_net_resolution(NetResolution::of(net_type))
+        .with_net_drive(drive)
+}
+
+/// The implicit scalar net `name` of net type `net_type` (IEEE 1800-2023
+/// 6.10), as a declaration `net_type name;` declares it.
+pub(super) fn implicit_net(name: String, net_type: &str) -> Signal {
+    net_signal(name, Type::implicit(), net_type)
 }
 
 /// Value/type ambiguity is retained in authored parameter syntax. A named
@@ -390,7 +464,21 @@ pub(super) fn alias_base_type(
     binding::bind_alias_in(id, native, tree, session, &context, defer_class_defaults)
 }
 
-/// Builtin integral identity/width without syntax or aggregate layout.
+/// [`builtin_type`], or the type of named events (IEEE 1800-2023 15.5), a
+/// handle whose semantic type names its built-in class in `table`.
+pub(super) fn builtin_type_in(
+    table: &mut semantic_types::TyTable,
+    name: &str,
+    signing: Option<bool>,
+) -> Option<Type> {
+    if name == "event" {
+        return Some(super::classes::handle(table, super::events::CLASS));
+    }
+    builtin_type(name, signing)
+}
+
+/// Builtin integral identity/width without syntax or aggregate layout. The
+/// type of named events is a class handle, which [`builtin_type_in`] binds.
 pub(super) fn builtin_type(name: &str, signing: Option<bool>) -> Option<Type> {
     let (kind, width, signed) = match name {
         "real" | "realtime" => (TypeKind::Real, Some(64), true),
@@ -407,8 +495,6 @@ pub(super) fn builtin_type(name: &str, signing: Option<bool>) -> Option<Type> {
         "integer" => (TypeKind::Logic, Some(32), true),
         "time" => (TypeKind::Logic, Some(64), false),
         "chandle" => (TypeKind::Chandle, Some(64), false),
-        // A named event is a handle (IEEE 1800-2023 15.5).
-        "event" => return Some(super::classes::handle_shape(super::events::CLASS)),
         _ => return None,
     };
     let mut ty = Type::new(kind);

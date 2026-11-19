@@ -223,6 +223,7 @@ pub(super) fn plan_coupled_store_region(
     let mut conditions = Vec::new();
     let mut leaf_values = Vec::new();
     let mut removable_muxes = HashSet::default();
+    let mut removed = HashSet::<RegisterId>::default();
     loop {
         let mut level_condition = None;
         let mut selected = Vec::with_capacity(roots.len());
@@ -254,6 +255,19 @@ pub(super) fn plan_coupled_store_region(
         if level_muxes.len() != roots.len() {
             break;
         }
+        // A level removes the Muxes of its roots, so none of them may be a
+        // value a leaf stores, of an earlier level or of this one, nor may
+        // this level select a value an earlier level removed: that leaf
+        // would store a value without a definition. A chain that selects the
+        // same Mux on its first and its last arm, `c0 ? m : c1 ? y : m`,
+        // ends the spine above the level that would peel `m`.
+        if roots.iter().any(|root| {
+            selected.contains(root) || leaf_values.iter().flatten().any(|value| value == root)
+        }) || selected.iter().any(|value| removed.contains(value))
+        {
+            break;
+        }
+        removed.extend(roots.iter().copied());
         let level_condition = level_condition?;
         if conditions.is_empty() && level_condition != condition {
             return None;

@@ -369,7 +369,6 @@ impl<B: SimBackend> Simulator<B> {
                     metadata,
                     state,
                     state_size,
-                    files: &mut self.file_io,
                     pending: &self.pending_host_events,
                     read_seq: &self.runtime_events.read_seq,
                     error: None,
@@ -382,6 +381,7 @@ impl<B: SimBackend> Simulator<B> {
                     comb_before: Vec::new(),
                     observer: None,
                     updates: self.observation.observes_updates,
+                    plusargs: &self.plusargs,
                 };
                 let ((result, error), elapsed) = match prepared {
                     Some(call) => {

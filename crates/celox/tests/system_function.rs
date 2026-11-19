@@ -32,26 +32,30 @@ module Top (clk: input clock, d: input logic) {
 
 #[test]
 fn test_ff_statement_system_tasks_are_lowered() {
-    // `$readmemh` reads its file at compile time, so a missing file is an
-    // input error rather than an unsupported construct.
+    // `$readmemh` reads its file when it executes (IEEE 1800-2023 21.4): a
+    // missing file is reported then, and the simulation goes on.
     let readmemh = r#"
-module Top (clk: input clock) {
+module Top (clk: input clock, q: output logic<8>) {
     var mem: logic<8>[4];
     always_ff (clk) {
         $readmemh("celox-missing-memory-file.hex", mem);
     }
+    assign q = mem[0];
 }
 "#;
-    let err = Simulator::builder(readmemh, "Top")
-        .build()
-        .expect_err("a missing memory file must be reported");
-    assert!(
-        matches!(
-            err.kind(),
-            celox::SimulatorErrorKind::SIRParser(celox::ParserError::MemoryFile { .. })
-        ),
-        "expected a memory file error, got: {err:?}"
-    );
+    let mut sim = Simulator::builder(readmemh, "Top").build().unwrap();
+    let clk = sim.event("clk");
+    for _ in 0..2 {
+        sim.tick(clk).unwrap();
+        let events = sim.drain_runtime_events();
+        assert!(
+            matches!(&events[..], [celox::RuntimeEvent::Report(report)]
+                if report.severity == celox::Severity::Error
+                    && String::from_utf8_lossy(&report.message)
+                        .contains("failed to read celox-missing-memory-file.hex")),
+            "{events:?}"
+        );
+    }
 
     let finish = r#"
 module Top (clk: input clock) {

@@ -151,7 +151,11 @@ pub(super) fn check_declared(
 /// compilation unit qualifies, `q::x`, the imports of the scope resolved
 /// already, which report an item the package does not declare or export
 /// (26.3, 26.6; see [`PackedDimensions::declared_values`]).
-fn declared_value(tree: &AnalysisContext<'_>, name: &str, dimensions: &PackedDimensions) -> bool {
+pub(super) fn declared_value(
+    tree: &AnalysisContext<'_>,
+    name: &str,
+    dimensions: &PackedDimensions,
+) -> bool {
     let imported = scope::imported(tree);
     let package_item = name.split_once("::").is_some_and(|(scope, _)| {
         scope == packages::UNIT || imported.package_scopes.contains(scope)

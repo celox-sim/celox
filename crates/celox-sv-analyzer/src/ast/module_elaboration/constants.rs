@@ -3,6 +3,17 @@
 use super::*;
 
 impl ScopeElaboration<'_> {
+    /// The types of the constants that an item of the scope may name: its
+    /// parameters, which hide a constant of the same name of a package it
+    /// uses (IEEE 1800-2023 26.3), its enumeration members and the
+    /// constants of those packages.
+    fn enum_constant_types(&self) -> HashMap<String, semantic_types::ConstantType> {
+        let mut constant_types = self.imported.constant_types.clone();
+        constant_types.extend(self.enum_constants.declarations.clone());
+        parameters::hide_constant_types(&mut constant_types, &self.parameters);
+        constant_types
+    }
+
     /// The parameters, constants, types, enumeration members and array parameters
     /// of the scope. Returns the context that calls its constant functions, which
     /// the later phases bind in.
@@ -55,16 +66,31 @@ impl ScopeElaboration<'_> {
         if self.name == self.override_module_name {
             apply_parameter_overrides(&mut self.parameters, self.parameter_overrides)?;
         }
+        // A parameter may take its value from a constant of a package the
+        // scope uses, such as `AllPagesW = rp::W` that sizes a type of the
+        // scope (IEEE 1800-2023 26.3): bind the scope's parameters with the
+        // imported constants, as the second pass below does.
         self.const_env = self.imported.const_env.clone().into();
-        self.const_env.extend(const_env_from_parameters(
+        parameters::extend_const_env_with_imported_parameters(
             syntax_tree,
             session,
+            &mut self.const_env,
             &self.parameters,
-        ));
+            &self.imported.parameter_values,
+        );
         self.declare_class_scopes(syntax_tree, session);
         self.type_aliases =
             type_aliases_from_scope_with_env(syntax_tree, session, &self.const_env)?.into();
         self.declare_class_scopes(syntax_tree, session);
+        // The elements of the array parameters are constants of the scope
+        // also for the declarations bound before the array parameters are
+        // collected again below: the parameters of the second pass, the
+        // enumeration members and the constant functions. The type of an
+        // array parameter may not be formed yet, such as a packed structure
+        // with a member sized by a constant the second pass binds from a
+        // package: its elements are published by the call after that pass,
+        // which reports what still fails.
+        let _ = self.publish_array_elements(syntax_tree, session);
         self.enum_constants = enum_member_constants_from_scope(
             syntax_tree,
             session,
@@ -93,30 +119,46 @@ impl ScopeElaboration<'_> {
         // discarded during the initial pass. Materialize only enum-member
         // references so exported parameter expressions retain dependencies
         // on other parameters for later specialization.
-        self.parameters = parameters_from_scope(
+        let outer = session
+            .enum_constant_types
+            .replace(self.enum_constant_types().into_iter().collect());
+        let parameters = parameters_from_scope(
             syntax_tree,
             session,
             &self.type_aliases,
             &self.const_env,
             self.applicable_parameter_overrides,
-        )?;
+        );
+        session.enum_constant_types = outer;
+        self.parameters = parameters?;
+        let own: HashSet<String> = self
+            .parameters
+            .iter()
+            .map(|parameter| parameter.name().to_string())
+            .collect();
+        let own: HashSet<&str> = own.iter().map(String::as_str).collect();
         for parameter in &mut self.parameters {
             parameter.value = parameter.value.take().map(|value| {
-                substitute_typed_parameter_literals(
-                    value,
-                    &self.enum_constants.numbers,
-                    &self.enum_constants.types,
+                parameters::substitute_wide_imported_literals(
+                    substitute_typed_parameter_literals(
+                        value,
+                        &self.enum_constants.numbers,
+                        &self.enum_constants.types,
+                    ),
+                    &own,
+                    &self.imported.parameter_values,
                 )
             });
         }
         if self.name == self.override_module_name {
             apply_parameter_overrides(&mut self.parameters, self.parameter_overrides)?;
         }
-        extend_const_env_with_parameters(
+        parameters::extend_const_env_with_imported_parameters(
             syntax_tree,
             session,
             &mut self.const_env,
             &self.parameters,
+            &self.imported.parameter_values,
         );
         self.declare_class_scopes(syntax_tree, session);
         self.type_aliases =
@@ -165,27 +207,16 @@ impl ScopeElaboration<'_> {
                 &parameter_values,
             )));
         let syntax_tree = &parameterized;
-        extend_const_env_with_parameters(
+        parameters::extend_const_env_with_imported_parameters(
             syntax_tree,
             session,
             &mut self.const_env,
             &self.parameters,
+            &self.imported.parameter_values,
         );
         self.declare_class_scopes(syntax_tree, session);
 
-        self.array_parameters = array_parameters::array_parameters_from_scope(
-            syntax_tree,
-            session,
-            &self.const_env,
-            &self.type_aliases,
-            &self.parameters,
-        )?;
-        for parameter in &self.array_parameters {
-            self.const_env.insert(
-                parameters::unbounded_parameter_marker(&parameter.signal.name),
-                0,
-            );
-        }
+        self.publish_array_elements(syntax_tree, session)?;
         self.declare_class_scopes(syntax_tree, session);
         if self.array_parameters.is_empty() {
             return Ok(parameterized);
@@ -212,6 +243,129 @@ impl ScopeElaboration<'_> {
             &variables,
         ));
         Ok(syntax_tree.with_functions(functions))
+    }
+
+    /// Publish the elements of the scope's array parameters whose value is
+    /// a constant as constants of the scope.
+    fn publish_array_elements(
+        &mut self,
+        syntax_tree: &AnalysisContext<'_>,
+        session: &mut Session,
+    ) -> Result<(), AnalyzerError> {
+        self.array_parameters = array_parameters::array_parameters_from_scope(
+            syntax_tree,
+            session,
+            &self.const_env,
+            &self.type_aliases,
+            &self.parameters,
+        )?;
+        for parameter in &self.array_parameters {
+            self.const_env.insert(
+                parameters::unbounded_parameter_marker(&parameter.signal.name),
+                0,
+            );
+        }
+        // The elements of an array parameter whose value is a constant
+        // are constants of the scope, each array after those before it:
+        // an array may take its value from an earlier one. A type of the
+        // scope may size a member by such an element, and so may the
+        // element type of a later array parameter, whose elements a later
+        // round publishes, until a round publishes no new constant.
+        loop {
+            if self.array_parameters.is_empty() {
+                break;
+            }
+            let before = self.const_env.len();
+            let values = parameter_value_env_with_imported(
+                syntax_tree,
+                session,
+                &self.parameters,
+                &self.const_env,
+                self.imported,
+            );
+            let constant_types: ConstantTypes = self.enum_constant_types().into_iter().collect();
+            let mut arrays: HashMap<String, Expr> = HashMap::default();
+            for process in &self.imported.initial_processes {
+                for statement in &process.body {
+                    if let Stmt::Assign {
+                        lhs: LValue::Ident(name),
+                        rhs,
+                        ..
+                    } = statement
+                    {
+                        arrays.insert(name.clone(), rhs.clone());
+                    }
+                }
+            }
+            // An array names the arrays before it and those of the
+            // packages the module uses by their shapes.
+            let mut shapes =
+                parameter_packed_dimensions_with_imported(&self.parameters, self.imported);
+            for signal in self.imported.signals.iter().chain(
+                self.array_parameters
+                    .iter()
+                    .map(|parameter| &parameter.signal),
+            ) {
+                shapes.insert(
+                    signal.name().to_string(),
+                    procedural::dimensions_from_type(signal.r#type()),
+                );
+            }
+            for parameter in &self.array_parameters {
+                let mut dims =
+                    PackedDimensions::new(shapes.clone(), &self.const_env, &self.type_aliases);
+                dims.parameter_values = values.clone().into();
+                dims.array_parameter_values = arrays.clone().into();
+                // A pattern item may be a member of an enumeration, of the
+                // scope or of a package it uses: it has the enumeration's
+                // type (IEEE 1800-2023 6.19.3).
+                dims.constant_types = constant_types.clone();
+                if let Some(elements) = parameter.constant_elements(syntax_tree, session, &dims) {
+                    let members = parameters::element_member_markers(
+                        &syntax_tree.functions,
+                        &self.const_env,
+                        parameter.signal.name(),
+                        &parameter.signal.r#type().members,
+                    );
+                    for (key, value) in
+                        parameters::element_markers(parameter.signal.name(), &elements)
+                            .into_iter()
+                            .chain(members)
+                    {
+                        self.const_env.insert(key, value);
+                    }
+                    arrays.insert(parameter.signal.name().to_string(), elements.value);
+                }
+            }
+            if self.const_env.len() == before {
+                break;
+            }
+            self.type_aliases =
+                type_aliases_from_scope_with_env(syntax_tree, session, &self.const_env)?.into();
+            self.array_parameters = array_parameters::array_parameters_from_scope(
+                syntax_tree,
+                session,
+                &self.const_env,
+                &self.type_aliases,
+                &self.parameters,
+            )?;
+        }
+        // The array parameters of the generate blocks, whose conditions may
+        // read the elements published above.
+        let local = array_parameters::generate_array_parameters(
+            syntax_tree,
+            session,
+            &self.const_env,
+            &self.type_aliases,
+        )?;
+        for parameter in &local {
+            self.const_env.insert(
+                parameters::unbounded_parameter_marker(&parameter.signal.name),
+                0,
+            );
+        }
+        self.array_parameters.extend(local);
+        Ok(())
     }
 
     /// Record the scope's tables as they stand as those of the classes it
@@ -320,6 +474,13 @@ impl ScopeElaboration<'_> {
                         &self.type_aliases,
                         &self.parameters,
                     )?;
+                    self.array_parameters
+                        .extend(array_parameters::generate_array_parameters(
+                            syntax_tree,
+                            session,
+                            &self.const_env,
+                            &self.type_aliases,
+                        )?);
                     let parameter_values = parameter_value_env_with_imported(
                         syntax_tree,
                         session,

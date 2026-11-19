@@ -123,3 +123,25 @@ sv_backends! {
         assert_eq!(sim.get(low), BigUint::from(231u32));
     }
 }
+
+#[test]
+fn locators_of_packed_arrays_of_enumerations_compare_their_bits() {
+    // An element of these arrays is a packed array of an enumerated type
+    // (IEEE 1800-2023 7.4.1), which keeps its enumerated type but has no
+    // members of its own; the locator's item is such a packed array
+    // (7.12.1).
+    let source = "module Top;
+        typedef enum logic [1:0] {A, B, C} e_t;
+        e_t [1:0] named [3] = '{'{A, B}, '{C, A}, '{B, B}};
+        enum logic [1:0] {X, Y} [1:0] anonymous [2] = '{'{X, Y}, '{Y, Y}};
+        initial begin
+            $display(\"%p %p\", named.find_index with (item == {B, B}),
+                named.find_first_index with (item[1] == C));
+            $display(\"%p\", anonymous.find_index with (item == {Y, Y}));
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["'{2} '{1}", "'{1}"]
+    );
+}

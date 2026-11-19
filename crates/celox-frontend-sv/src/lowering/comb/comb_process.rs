@@ -4,6 +4,104 @@
 use super::*;
 
 impl Comb<'_, '_> {
+    /// The bits `target` of variable `id` that `value` defines (from bit
+    /// `origin` of the value), when the value reads bits of `id` itself:
+    /// one piece per bit, with the sources of that bit. A continuous
+    /// assignment whose bits each read only other bits of its net, such as a
+    /// Gray-code decoder `assign b = {1'b0, b[N-1:1]} ^ g;`, settles as those
+    /// bits do (IEEE 1800-2023 10.3.2). Any other process, or a bit that
+    /// reads itself, would hold its previous value: a latch.
+    fn own_bit_pieces(
+        &mut self,
+        id: SourceVarId,
+        value: NodeId,
+        sources: &Sources,
+        target: BitAccess,
+        origin: usize,
+    ) -> Result<Vec<(BitAccess, NodeId, Sources)>, sv::AnalyzerError> {
+        let message = format!(
+            "latch inference inside always_comb for `{}` (self dependency at bits {}:{})",
+            self.m.var(id).path.join("."),
+            target.msb,
+            target.lsb
+        );
+        let latch = || unsupported(message.clone());
+        if !self.continuous {
+            return Err(latch());
+        }
+        let others: Sources = sources
+            .iter()
+            .copied()
+            .filter(|source| source.id != id)
+            .collect();
+        let mut pieces = Vec::new();
+        for bit in target.lsb..=target.msb {
+            let relative = BitAccess::new(bit - origin, bit - origin);
+            let own = bit_sources(self.arena, value, relative).ok_or_else(latch)?;
+            let own: Sources = own.into_iter().filter(|source| source.id == id).collect();
+            if own
+                .iter()
+                .any(|source| source.access.lsb <= bit && bit <= source.access.msb)
+            {
+                return Err(latch());
+            }
+            let mut sources = others.clone();
+            sources.extend(own);
+            pieces.push((
+                BitAccess::new(bit, bit),
+                self.slice(value, relative)?,
+                sources,
+            ));
+        }
+        Ok(pieces)
+    }
+
+    /// Whether `node`, the value of bits `window` of variable `id`, reads
+    /// those bits only where it keeps them: an arm of a multiplexer that
+    /// is the read of the very bits it defines.
+    fn holds_only(&self, node: NodeId, id: SourceVarId, window: BitAccess) -> bool {
+        match self.arena.get(node) {
+            SLTNode::Input {
+                variable,
+                index,
+                access,
+                ..
+            } if *variable == id && index.is_empty() && *access == window => true,
+            SLTNode::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                !self.reads(*cond, id, window)
+                    && self.holds_only(*then_expr, id, window)
+                    && self.holds_only(*else_expr, id, window)
+            }
+            // A part of a wider value of the variable's bits.
+            SLTNode::Slice { expr, access } if access.lsb <= window.lsb => {
+                let lsb = window.lsb - access.lsb;
+                let inner = BitAccess::new(lsb, lsb + self.width(*expr) - 1);
+                self.holds_only(*expr, id, inner)
+            }
+            SLTNode::Concat(parts) => {
+                let mut lsb = window.lsb;
+                parts.iter().rev().all(|&(part, width)| {
+                    let part_window = BitAccess::new(lsb, lsb + width - 1);
+                    lsb += width;
+                    self.holds_only(part, id, part_window)
+                })
+            }
+            _ => !self.reads(node, id, window),
+        }
+    }
+
+    /// Whether `node` may read bits `window` of variable `id`.
+    fn reads(&self, node: NodeId, id: SourceVarId, window: BitAccess) -> bool {
+        self.node_sources(node).is_none_or(|sources| {
+            sources
+                .iter()
+                .any(|source| source.id == id && source.access.overlaps(&window))
+        })
+    }
     /// Execute one combinational process and return the logic it defines.
     pub fn lower_process(
         &mut self,
@@ -14,14 +112,58 @@ impl Comb<'_, '_> {
         // otherwise it would hold its previous value (a latch).
         let mut visited = HashSet::default();
         let mut writes = Vec::new();
-        static_writes(self.m, body, &mut visited, &mut writes, false);
-        for (id, access) in writes {
+        let mut unrolled = HashSet::default();
+        static_writes(
+            self.m,
+            body,
+            &mut visited,
+            &mut writes,
+            &mut unrolled,
+            false,
+        );
+        // The drivers of a variable count the bits a select in loops writes
+        // in their iterations (see `ProcModule::unrolled_select_writes`).
+        // A loop folded rather than unrolled writes the whole variable or
+        // element at each run-time position instead; the process then runs
+        // as a guarded unit, which writes only the positions the select
+        // takes.
+        for &id in &unrolled {
+            let mut counted: Vec<_> = writes
+                .iter()
+                .filter(|(written, _)| *written == id)
+                .map(|(_, access)| (access.lsb, access.msb))
+                .collect();
+            counted.sort_unstable();
+            let beyond = store.get(&id).is_some_and(|range| {
+                range.ranges.iter().any(|(&lsb, (value, width, _))| {
+                    // Whether the counted bits cover `lsb` up to its top.
+                    let msb = lsb + width - 1;
+                    let mut next = lsb;
+                    for &(low, high) in &counted {
+                        if low <= next && next <= high {
+                            next = high + 1;
+                        }
+                    }
+                    value.is_some() && next <= msb
+                })
+            });
+            if beyond {
+                return Err(unsupported(RUNTIME_LOOP_CONDITION));
+            }
+        }
+        for &(id, access) in &writes {
             let defined = store.get(&id).is_some_and(|range| {
                 range
                     .get_parts_ref(access)
                     .is_ok_and(|parts| parts.iter().all(|(value, _)| value.is_some()))
             });
             if !defined {
+                // Bits that no path the process takes writes, such as
+                // those of a branch a parameter excludes, keep their value.
+                if self.hold_latches {
+                    self.held = true;
+                    continue;
+                }
                 return Err(unsupported(format!(
                     "latch inference inside always_comb for `{}` (bits {}:{})",
                     self.m.var(id).path.join("."),
@@ -57,48 +199,66 @@ impl Comb<'_, '_> {
                 .map(|(&lsb, (value, width, origin))| (lsb, value.clone(), *width, *origin))
                 .collect();
             for (lsb, value, width, origin) in ranges {
-                let Some((expr, sources)) = value else {
+                let Some((value, sources)) = value else {
                     continue;
                 };
                 let msb = lsb + width - 1;
-                let relative = BitAccess::new(lsb - origin, msb - origin);
-                let expr = self.slice(expr, relative)?;
                 let target = BitAccess::new(lsb, msb);
-                if sources
+                // A value that reads other bits of its own net defines each
+                // bit apart, from the current values of those bits.
+                let self_read = sources
                     .iter()
-                    .any(|source| source.id == id && source.access.overlaps(&target))
-                {
-                    return Err(unsupported(format!(
-                        "latch inference inside always_comb for `{}` (self dependency at bits {msb}:{lsb})",
-                        self.m.var(id).path.join(".")
-                    )));
-                }
-                let previous_sources = sources
-                    .iter()
-                    .copied()
-                    .filter(|source| source.id != id || !source.access.overlaps(&target))
-                    .filter(|source| {
-                        written_atoms.iter().any(|written| {
-                            written.id == source.id && written.access.overlaps(&source.access)
+                    .any(|source| source.id == id && source.access.overlaps(&target));
+                // A value that keeps the bits on some paths, and reads them
+                // nowhere else, is a latch (IEEE 1800-2023 9.2.2.2,
+                // 9.2.2.3): it reads the bits' previous value, and is the
+                // same however often it is evaluated.
+                let held = self_read && !self.continuous && self.hold_latches && {
+                    let relative = BitAccess::new(lsb - origin, msb - origin);
+                    let sliced = self.slice(value, relative)?;
+                    self.holds_only(sliced, id, target)
+                };
+                self.held |= held;
+                let split = self_read && !held;
+                let pieces = if split {
+                    self.own_bit_pieces(id, value, &sources, target, origin)?
+                } else {
+                    let relative = BitAccess::new(lsb - origin, msb - origin);
+                    vec![(target, self.slice(value, relative)?, sources)]
+                };
+                for (target, expr, sources) in pieces {
+                    let previous_sources = sources
+                        .iter()
+                        .copied()
+                        // A source the process writes is read before the write,
+                        // the bits a latch keeps included.
+                        .filter(|source| {
+                            held || source.id != id || !source.access.overlaps(&target)
                         })
-                    })
-                    .collect();
-                paths.push(LogicPath {
-                    transparent_copy: self.continuous,
-                    target: LogicPathTarget::Var(VarAtomBase::new(id, lsb, msb)),
-                    sources: sources
-                        .into_iter()
-                        .filter(|source| !self.m.is_hidden(source.id))
-                        .collect(),
-                    previous_sources,
-                    address_sources: HashSet::default(),
-                    local_inputs: Vec::new(),
-                    order_before: HashSet::default(),
-                    comb_capture_enable_sites: Vec::new(),
-                    comb_capture_enable_always: false,
-                    pre_lower_nodes: Vec::new(),
-                    expr,
-                });
+                        .filter(|source| !split || source.id != id)
+                        .filter(|source| {
+                            written_atoms.iter().any(|written| {
+                                written.id == source.id && written.access.overlaps(&source.access)
+                            })
+                        })
+                        .collect();
+                    paths.push(LogicPath {
+                        transparent_copy: self.continuous,
+                        target: LogicPathTarget::Var(VarAtomBase::new(id, target.lsb, target.msb)),
+                        sources: sources
+                            .into_iter()
+                            .filter(|source| !self.m.is_hidden(source.id))
+                            .collect(),
+                        previous_sources,
+                        address_sources: HashSet::default(),
+                        local_inputs: Vec::new(),
+                        order_before: HashSet::default(),
+                        comb_capture_enable_sites: Vec::new(),
+                        comb_capture_enable_always: false,
+                        pre_lower_nodes: Vec::new(),
+                        expr,
+                    });
+                }
             }
         }
         if !self.events.observers.is_empty() {
@@ -174,18 +334,23 @@ pub(in crate::lowering) fn subtract_written_sensitivity(
 }
 
 /// The module variables (and constant bit ranges) a statement list may
-/// write, following subroutine calls.
+/// write, following subroutine calls. The variables of `unrolled` are
+/// those of selects in loops whose bits are counted in each iteration (see
+/// `ProcModule::unrolled_select_writes`).
 pub(in crate::lowering) fn static_writes(
     m: &ProcModule<'_>,
     stmts: &[sv::ir::Stmt],
     visited: &mut HashSet<String>,
     writes: &mut Vec<(SourceVarId, BitAccess)>,
+    unrolled: &mut HashSet<SourceVarId>,
     functions_only: bool,
 ) {
     let mut calls = Vec::new();
     let record = |this: &ProcModule<'_>,
                   lvalue: &sv::ir::LValue,
-                  writes: &mut Vec<(SourceVarId, BitAccess)>| {
+                  loops: &LoopValues,
+                  writes: &mut Vec<(SourceVarId, BitAccess)>,
+                  unrolled: &mut HashSet<SourceVarId>| {
         let Some(id) = this.id(lvalue.name()) else {
             return;
         };
@@ -193,81 +358,70 @@ pub(in crate::lowering) fn static_writes(
             return;
         }
         let variable = this.var(id);
-        let access = match lvalue {
-            sv::ir::LValue::Ident(_) => full(variable.width),
-            sv::ir::LValue::Select { msb, lsb, .. } => {
-                let bounds = sv::typecheck::eval_const_expr_with_types(
-                    msb,
-                    this.constants,
-                    this.parameter_types,
-                )
+        let sv::ir::LValue::Select { msb, lsb, .. } = lvalue else {
+            writes.push((id, full(variable.width)));
+            return;
+        };
+        // A select at positions only the variables of the loops around it
+        // make run-time values writes the bits it selects in their
+        // iterations, as the unrolled loops write them.
+        if let Some(accesses) = this.unrolled_select_writes(lvalue, loops) {
+            writes.extend(accesses.into_iter().map(|access| (id, access)));
+            unrolled.insert(id);
+            return;
+        }
+        let bounds =
+            sv::typecheck::eval_const_expr_with_types(msb, this.constants, this.parameter_types)
                 .zip(sv::typecheck::eval_const_expr_with_types(
                     lsb,
                     this.constants,
                     this.parameter_types,
                 ))
                 .and_then(|(msb, lsb)| constant_select_write(variable, msb, lsb));
-                match bounds {
-                    Some((Some(access), _)) => access,
-                    // A constant select entirely outside the vector
-                    // writes nothing.
-                    Some((None, _)) => return,
-                    // A run-time select may write any bit; the written
-                    // value keeps the others, so it defines the whole
-                    // vector, or the one element its constant part names.
-                    None => {
-                        let element = dynamic_array_element_lvalue(
-                            lvalue,
-                            this.variables,
-                            this.name_to_id,
-                            this.constants,
-                            this.parameter_types,
-                        );
-                        element
-                            .is_none()
-                            .then(|| {
-                                dynamic_packed_write(
-                                    lvalue,
-                                    this.variables,
-                                    this.name_to_id,
-                                    this.constants,
-                                    this.parameter_types,
-                                )
-                            })
-                            .flatten()
-                            .and_then(|write| write.window)
-                            .unwrap_or(full(variable.width))
-                    }
-                }
-            }
+        let access = match bounds {
+            Some((Some(access), _)) => access,
+            // A constant select entirely outside the vector writes
+            // nothing.
+            Some((None, _)) => return,
+            // A run-time select may write any bit; the written value keeps
+            // the others, so it defines the whole vector, or the one
+            // element its constant part names.
+            None => this
+                .dynamic_select_access(lvalue)
+                .unwrap_or(full(variable.width)),
         };
         writes.push((id, access));
     };
-    for stmt in stmts {
-        stmt.walk(&mut |stmt| {
-            match stmt {
-                sv::ir::Stmt::Assign { lhs, .. } => record(m, lhs, writes),
-                sv::ir::Stmt::AssignConcat { parts, .. } => {
-                    for part in parts {
-                        record(m, part, writes);
-                    }
+    let variable_type = |name: &str| m.integral_variable_type(name);
+    let bounds = LoopBounds {
+        constants: m.constants,
+        parameter_types: m.parameter_types,
+        variable_type: &variable_type,
+        calls: m,
+    };
+    bounds.walk(stmts, &mut LoopValues::new(), &mut |stmt, loops| {
+        match stmt {
+            sv::ir::Stmt::Assign { lhs, .. } => record(m, lhs, loops, writes, unrolled),
+            sv::ir::Stmt::AssignConcat { parts, .. } => {
+                for part in parts {
+                    record(m, part, loops, writes, unrolled);
                 }
-                sv::ir::Stmt::Call { name, args, .. } => calls.push((name.clone(), args.clone())),
-                _ => {}
             }
-            if functions_only {
-                let mut expressions = Vec::new();
-                stmt_calls(stmt, &mut expressions);
-                calls.extend(expressions.into_iter().filter_map(|(callee, args)| {
-                    if let sv::ir::Callee::Subroutine(name) = callee {
-                        Some((name, args))
-                    } else {
-                        None
-                    }
-                }));
-            }
-        });
-    }
+            sv::ir::Stmt::Call { name, args, .. } => calls.push((name.clone(), args.clone())),
+            _ => {}
+        }
+        if functions_only {
+            let mut expressions = Vec::new();
+            stmt_calls(stmt, &mut expressions);
+            calls.extend(expressions.into_iter().filter_map(|(callee, args)| {
+                if let sv::ir::Callee::Subroutine(name) = callee {
+                    Some((name, args))
+                } else {
+                    None
+                }
+            }));
+        }
+    });
     let mut index = 0;
     let mut seen_defaults = super::super::procedural::SeenDefaults::default();
     while index < calls.len() {
@@ -294,17 +448,108 @@ pub(in crate::lowering) fn static_writes(
                 && let Some(lvalues) = arg.as_ref().and_then(lvalue_from_expr)
             {
                 for lvalue in &lvalues {
-                    record(m, lvalue, writes);
+                    record(m, lvalue, &LoopValues::new(), writes, unrolled);
                 }
             }
         }
         if visited.insert(name) && (!functions_only || !subroutine.is_task) {
-            static_writes(m, &subroutine.body, visited, writes, functions_only);
+            static_writes(
+                m,
+                &subroutine.body,
+                visited,
+                writes,
+                unrolled,
+                functions_only,
+            );
             if functions_only {
                 // Sensitivity is syntactic: folded branches still exclude
                 // their written expressions, including writes in callees.
-                static_writes(m, &subroutine.sensitivity_body, visited, writes, true);
+                static_writes(
+                    m,
+                    &subroutine.sensitivity_body,
+                    visited,
+                    writes,
+                    unrolled,
+                    true,
+                );
             }
         }
     }
+}
+
+/// The bits of the variables that bits `bits` of `node` are computed from,
+/// through operators that take each result bit from the same bits of their
+/// operands (bitwise operators, concatenations and selects); `None` where
+/// the expression mixes bits otherwise.
+fn bit_sources(
+    arena: &SLTNodeArena<SourceVarId>,
+    node: NodeId,
+    bits: BitAccess,
+) -> Option<Sources> {
+    let width = |node| celox_slt::get_width(node, arena);
+    let whole = |node| BitAccess::new(0, width(node) - 1);
+    Some(match arena.get(node) {
+        SLTNode::Input {
+            variable,
+            index,
+            access,
+            ..
+        } if index.is_empty() => std::iter::once(VarAtomBase::new(
+            *variable,
+            access.lsb + bits.lsb,
+            access.lsb + bits.msb,
+        ))
+        .collect(),
+        SLTNode::Constant(..) => Sources::default(),
+        SLTNode::Binary(
+            left,
+            celox_design::BinaryOp::And | celox_design::BinaryOp::Or | celox_design::BinaryOp::Xor,
+            right,
+        ) if width(*left) == width(node) && width(*right) == width(node) => {
+            let mut sources = bit_sources(arena, *left, bits)?;
+            sources.extend(bit_sources(arena, *right, bits)?);
+            sources
+        }
+        SLTNode::Unary(
+            celox_design::UnaryOp::Ident
+            | celox_design::UnaryOp::BitNot
+            | celox_design::UnaryOp::ToTwoState,
+            operand,
+        ) if width(*operand) == width(node) => bit_sources(arena, *operand, bits)?,
+        SLTNode::Mux {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            let mut sources = bit_sources(arena, *cond, whole(*cond))?;
+            sources.extend(bit_sources(arena, *then_expr, bits)?);
+            sources.extend(bit_sources(arena, *else_expr, bits)?);
+            sources
+        }
+        SLTNode::Slice { expr, access } => bit_sources(
+            arena,
+            *expr,
+            BitAccess::new(access.lsb + bits.lsb, access.lsb + bits.msb),
+        )?,
+        SLTNode::Capture { expr, .. } => bit_sources(arena, *expr, bits)?,
+        SLTNode::Concat(parts) => {
+            // Most significant part first.
+            let mut sources = Sources::default();
+            let mut top = width(node);
+            for &(part, part_width) in parts {
+                let low = top - part_width;
+                let (from, to) = (bits.lsb.max(low), bits.msb.min(top - 1));
+                if from <= to {
+                    sources.extend(bit_sources(
+                        arena,
+                        part,
+                        BitAccess::new(from - low, to - low),
+                    )?);
+                }
+                top = low;
+            }
+            sources
+        }
+        _ => return None,
+    })
 }

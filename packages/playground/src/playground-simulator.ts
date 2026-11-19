@@ -47,6 +47,14 @@ function runExport(instance: WebAssembly.Instance): KernelRun {
 	return () => (instance.exports.run as CallableFunction)();
 }
 
+/** The heap helper of generated code, which the Playground has no heap for:
+ * a `$readmemh` that executes needs a memory file it cannot read. */
+function unsupportedHeapCall(): bigint {
+	throw new Error(
+		"memory files ($readmemh, $readmemb) are not supported in the Playground",
+	);
+}
+
 /** One instantiated design: its memory, kernels and edge runner. */
 class PlaygroundInstance {
 	readonly layout: Record<string, any>;
@@ -73,7 +81,13 @@ class PlaygroundInstance {
 		const instantiate = (module: WebAssembly.Module) =>
 			runExport(
 				new WebAssembly.Instance(module, {
-					env: { memory, celox_extern_4294967295: evaluateWasmFloat },
+					env: {
+						memory,
+						celox_extern_4294967295: evaluateWasmFloat,
+						// The heap helper, whose memory files the Playground cannot
+						// provide.
+						celox_extern_4294967294: unsupportedHeapCall,
+					},
 				}),
 			);
 		this.comb = instantiate(compiled.combModule);

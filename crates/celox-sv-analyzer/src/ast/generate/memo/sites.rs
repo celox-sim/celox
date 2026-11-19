@@ -149,18 +149,13 @@ impl CallSites for InsideItem {
 impl CallSites for Type {
     fn call_sites(&self, visit: &mut dyn FnMut(usize)) {
         let TypeShape {
-            is_enum: _,
-            enum_domain: _,
-            packed_enum: _,
             kind: _,
             is_signed: _,
             packed_ranges,
             unpacked_ranges,
             members,
             signed_element_depth: _,
-            class: _,
             container: _,
-            unpacked_struct: _,
             spelling: _,
         } = &**self;
         packed_ranges.call_sites(visit);
@@ -192,18 +187,14 @@ impl CallSites for VariableDimensions {
             declared: _,
             container: _,
             randomizable: _,
-            enum_domain: _,
-            packed_enum: _,
             real: _,
             string: _,
-            class: _,
             packed,
             unpacked,
             signed: _,
             is_2state: _,
             members,
             signed_element_depth: _,
-            unpacked_struct: _,
             chandle: _,
         } = &**self;
         packed.call_sites(visit);
@@ -249,6 +240,7 @@ impl CallSites for Item {
             imports: _,
             shadowed: _,
             scope: _,
+            blocks: _,
         } = self;
         for value in literals.values() {
             value.call_sites(visit);

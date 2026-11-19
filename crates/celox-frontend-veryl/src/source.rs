@@ -56,7 +56,6 @@ impl VerylIdMap {
 #[derive(Clone, Default)]
 pub struct VerylTestbenchSource {
     pub reset_type: veryl_metadata::ResetType,
-    pub file_dependencies: crate::FileDependencyCollector,
     pub id_map: VerylIdMap,
     /// Constant scalar string lets are continuous assignments, outside initial blocks.
     pub constant_strings: HashMap<celox_design::StateAddr, Expression>,

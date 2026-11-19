@@ -1135,7 +1135,11 @@ fn finish_specialization(
                 // also in a typedef no use binds (IEEE 1800-2023 6.18).
                 let mut context = PackedDimensions::new(HashMap::default(), &env, &aliases);
                 context.parameter_values = parameters.literals.clone().into();
-                context.constant_types = Arc::new(parameters.constant_types.clone());
+                context.constant_types = parameters
+                    .constant_types
+                    .iter()
+                    .map(|(name, r#type)| (name.clone(), r#type.clone()))
+                    .collect();
                 context.type_declarations = Some(declarations.clone());
                 let bound =
                     match type_binding::binding::bind_in(target, native, tree, session, &context) {
@@ -1186,7 +1190,9 @@ fn finish_specialization(
                     if matches!(
                         native.data_type(target).kind,
                         celox_sv_syntax::DataTypeKind::Enum { .. }
-                    ) && let Some(domain) = ty.enum_domain.clone()
+                    ) && let Some(domain) = ty
+                        .enumeration()
+                        .and_then(|enumeration| enumeration.domain.clone())
                     {
                         for member in &domain.members {
                             for key in crate::ast::parameters::binding_keys(&member.name, &env, 0) {
@@ -1712,7 +1718,7 @@ fn finish(
     // tells it apart from another of the same structure. An anonymous one is
     // not told apart.
     let named = ty.declaration_name().is_some();
-    if ty.is_enum && !named {
+    if ty.enumeration().is_some() && !named {
         return Err(unsupported(
             "enumeration type as a class type parameter value",
         ));
@@ -1822,11 +1828,6 @@ fn spelled(ty: &Type, id: Option<semantic_types::TyId>, table: &semantic_types::
     let class = id
         .and_then(|id| table.handle_class(id))
         .map(|class| &**class);
-    debug_assert_eq!(
-        class,
-        ty.class(),
-        "a handle type is spelled from its semantic type"
-    );
     let mut spelled = if let Some(container) = &ty.container {
         // The element and key types of a container are those of its
         // semantic type, where they are not bound themselves.
@@ -1905,7 +1906,7 @@ fn spelled(ty: &Type, id: Option<semantic_types::TyId>, table: &semantic_types::
     }
     // The spelling hashes the whole shape of the type, which stays its
     // spelling until specializations are named by their semantic types.
-    if ty.is_enum || !ty.members.is_empty() {
+    if ty.enumeration().is_some() || !ty.members.is_empty() {
         // An aggregate is told apart by its whole structure.
         use std::hash::{Hash, Hasher};
         let mut hasher = fxhash::FxHasher::default();
@@ -2355,7 +2356,7 @@ fn extend_body_constant_types<'a>(
         dimensions.remove(name);
     }
     extend_constant_types(
-        Arc::make_mut(&mut dimensions.constant_types),
+        &mut dimensions.constant_types,
         env,
         aliases.iter().copied(),
         bindings,
@@ -2366,19 +2367,19 @@ fn extend_body_constant_types<'a>(
 /// Apply only the declarations of a class to a visible constant-type map.
 /// Hiding a parameter without a supported type must also hide an enclosing one.
 fn extend_constant_types<'a>(
-    target: &mut HashMap<String, semantic_types::ConstantType>,
+    target: &mut impl ConstantTypeTable,
     env: &HashMap<String, Option<i128>>,
     aliases: impl Iterator<Item = &'a str>,
     bindings: &HashMap<String, semantic_types::ConstantType>,
     nonconstant_members: &'a HashSet<String>,
 ) {
     for name in aliases.chain(nonconstant_members.iter().map(String::as_str)) {
-        target.remove(name);
+        target.hide_type(name);
     }
     let prefix = crate::ast::parameters::unbounded_parameter_marker("");
     for key in env.keys() {
         if let Some(name) = key.strip_prefix(&prefix) {
-            target.remove(name);
+            target.hide_type(name);
         }
     }
     target.extend(bindings.iter().map(|(name, ty)| (name.clone(), ty.clone())));
@@ -2469,18 +2470,18 @@ mod tests {
     #[test]
     fn virtual_interface_type_arguments_are_spelled_by_their_semantic_types() {
         let mut table = semantic_types::TyTable::default();
-        let mut spelled = |modport: Option<&str>| {
+        let mut spelled = |modport: Option<&str>, arguments: &[i128]| {
             let ty = value_type(
                 &mut table,
-                VirtualInterface {
-                    interface: "bus_if".into(),
-                    modport: modport.map(Into::into),
-                },
+                VirtualInterface::new("bus_if".into(), modport.map(Into::into), arguments.into()),
             );
             spelling(&ty, &table)
         };
-        assert_eq!(spelled(None), "virtual bus_if");
-        assert_eq!(spelled(Some("m")), "virtual bus_if.m");
+        assert_eq!(spelled(None, &[]), "virtual bus_if");
+        assert_eq!(spelled(Some("m"), &[]), "virtual bus_if.m");
+        // The parameter values of a specialization are part of the type.
+        assert_eq!(spelled(None, &[8, 4]), "virtual bus_if#(8, 4)");
+        assert_ne!(spelled(None, &[8]), spelled(None, &[16]));
     }
 
     #[test]

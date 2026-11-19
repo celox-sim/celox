@@ -238,3 +238,68 @@ sv_backends! {
         }
     }
 }
+
+/// An `always @*` may assign nonblocking (IEEE 1800-2023 9.2.2.2.2, 10.4.2),
+/// as OpenTitan's behavioral `vcc_pgd` does: it runs after each change of
+/// its implicit event list, like one with an explicit list, and a blocking
+/// read sees the value from before the update. Icarus 13 and Verilator 5.054
+/// print the same lines.
+#[test]
+fn implicit_event_lists_run_nonblocking_assignments() {
+    let source = r#"`timescale 1ns/1ns
+module pgd(output logic pok_o);
+  logic gen_supp_a;
+  assign gen_supp_a = 1'b1;
+  logic init_start;
+  initial begin
+    init_start = 1'b1;
+    init_start = 1'b0;
+  end
+  always (* xprop_off *) @( * ) begin
+    if (init_start) pok_o <= 1'b0;
+    if (!init_start && gen_supp_a) pok_o <= gen_supp_a;
+  end
+endmodule
+module Top;
+  logic pok, a, b, y, z;
+  logic [3:0] c, q;
+  pgd u(.pok_o(pok));
+  always @* y <= a & b;
+  always @(*) begin
+    {q[3:2], q[1:0]} <= {c[1:0], c[3:2]};
+    z = y;
+  end
+  initial begin
+    a = 1; b = 0; c = 4'b0110;
+    #1 $display("%b %b %b %b", pok, y, z, q);
+    b = 1; c = 4'b1100;
+    #1 $display("%b %b %b %b", pok, y, z, q);
+    $finish;
+  end
+endmodule"#;
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, Path::new("always_star_nba.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<String> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            ["1 0 0 1001", "1 1 1 0011"],
+            "four_state={four_state}"
+        );
+    }
+}

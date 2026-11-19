@@ -62,6 +62,19 @@ impl ScopeElaboration<'_> {
                 )
             })
             .collect::<Vec<_>>();
+            comb_processes.extend(
+                port_connections(&self.ports, syntax_tree, session, &self.packed_dimensions)?
+                    .into_iter()
+                    .map(|process| {
+                        substitute_process_constants_with_parameter_literals(
+                            syntax_tree,
+                            session,
+                            process,
+                            &self.const_env,
+                            &self.parameter_values,
+                        )
+                    }),
+            );
             let mut ff_processes = ff_processes_from_scope(
                 syntax_tree,
                 session,
@@ -119,6 +132,7 @@ impl ScopeElaboration<'_> {
             self.signals.push(assertion_control::signal());
         }
         let forced = procedural_forces::lower(
+            syntax_tree,
             &self.packed_dimensions,
             &mut session.types,
             &syntax_tree.functions,
@@ -127,7 +141,8 @@ impl ScopeElaboration<'_> {
             &self.comb_processes,
             &self.ff_processes,
             &mut self.initial_processes,
-            &self.subroutines,
+            &mut self.subroutines,
+            &self.imported.external_forces.clone(),
         )?;
         procedural_assigns::lower(
             &self.packed_dimensions,

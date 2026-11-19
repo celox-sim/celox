@@ -461,6 +461,7 @@ impl Names {
                 msb,
                 lsb,
                 array_slice_width,
+                window,
                 ..
             } => {
                 self.rename_name(name);
@@ -468,6 +469,10 @@ impl Names {
                 self.rename_const(lsb);
                 if let Some(width) = array_slice_width {
                     self.rename_const(width);
+                }
+                // The position of a run-time element names the index.
+                if let Some(at) = window.as_mut().and_then(|window| window.at.as_mut()) {
+                    self.rename_const(at);
                 }
             }
         }
@@ -482,11 +487,8 @@ pub(super) fn dimensions_from_type(r#type: &Type) -> VariableDimensions {
             chandle: r#type.is_chandle(),
             container: r#type.container.clone(),
             randomizable: r#type.container.is_none() && !r#type.holds_chandle(),
-            enum_domain: r#type.enum_domain.clone(),
-            packed_enum: r#type.packed_enum,
             real: matches!(r#type.kind(), TypeKind::Real | TypeKind::Shortreal),
             string: matches!(r#type.kind(), TypeKind::String),
-            class: r#type.class().map(str::to_owned),
             packed: dimensions::signal_packed_dimension_widths(r#type.packed_ranges()),
             unpacked: unpacked_dimension_widths(r#type.unpacked_ranges()),
             signed: r#type.is_signed(),
@@ -503,7 +505,6 @@ pub(super) fn dimensions_from_type(r#type: &Type) -> VariableDimensions {
             ),
             members: r#type.members.clone(),
             signed_element_depth: r#type.signed_element_depth,
-            unpacked_struct: r#type.unpacked_struct.clone(),
             declared: type_names::Declared::new(r#type),
         },
         r#type,
@@ -651,9 +652,6 @@ pub(super) fn rename_expr_idents(
 pub(super) fn int_type() -> Type {
     Type::from(TypeShape {
         container: None,
-        is_enum: false,
-        enum_domain: None,
-        packed_enum: false,
         kind: TypeKind::Bit,
         is_signed: true,
         packed_ranges: vec![PackedRange::new(
@@ -663,8 +661,6 @@ pub(super) fn int_type() -> Type {
         unpacked_ranges: Vec::new(),
         members: Vec::new(),
         signed_element_depth: None,
-        class: None,
-        unpacked_struct: None,
         spelling: type_names::Spelling::keyword("int"),
     })
 }
@@ -840,7 +836,8 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                         .insert(name.clone(), value.clone());
                 }
                 if let Some(binding) = layered.constant_types.get(name) {
-                    Arc::make_mut(&mut self.dims.constant_types)
+                    self.dims
+                        .constant_types
                         .insert(name.clone(), binding.clone());
                 }
                 self.names
@@ -896,11 +893,12 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         for entry in scope.entries.into_iter().rev() {
             match entry.shadowed_constant_type {
                 Some(binding) => {
-                    Arc::make_mut(&mut self.dims.constant_types)
+                    self.dims
+                        .constant_types
                         .insert(entry.source.clone(), binding);
                 }
                 None if self.dims.constant_types.contains_key(&entry.source) => {
-                    Arc::make_mut(&mut self.dims.constant_types).remove(&entry.source);
+                    self.dims.constant_types.remove(&entry.source);
                 }
                 None => {}
             }
@@ -1160,7 +1158,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             },
             shadowed_dimensions: self.dims.remove(source),
             shadowed_constant_type: if self.dims.constant_types.contains_key(source) {
-                Arc::make_mut(&mut self.dims.constant_types).remove(source)
+                self.dims.constant_types.remove(source)
             } else {
                 None
             },
@@ -1183,7 +1181,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         self.dims.class_scope = Some(class.name.clone());
         let constants =
             classes::specializations::constant_types(&self.tree, self.session, &class.name);
-        Arc::make_mut(&mut self.dims.constant_types).extend(constants);
+        self.dims.constant_types.extend(constants);
         // The name of a property of unpacked structure type, whose members
         // are properties named by their member paths, is hidden too.
         let aggregates = class

@@ -306,12 +306,20 @@ pub fn run_test(
         .collect();
     append_extra_source(&mut src_pairs, &opts.extra_source);
 
-    let source_refs: Vec<(&str, &std::path::Path)> = src_pairs
+    let (veryl_pairs, sv_pairs) = partition_hdl_sources(&src_pairs);
+    let source_refs: Vec<(&str, &std::path::Path)> = veryl_pairs
         .iter()
         .map(|(s, p)| (s.as_str(), p.as_path()))
         .collect();
-    let builder = apply_options(celox::Simulator::from_sources(source_refs, &top), &opts)
-        .with_injected_components(injected_components(env, components)?);
+    let sv_refs: Vec<(&str, &std::path::Path)> = sv_pairs
+        .iter()
+        .map(|(s, p)| (s.as_str(), p.as_path()))
+        .collect();
+    let builder = apply_options(
+        NativeSimulatorHandle::builder_for_sources(source_refs, sv_refs, &top),
+        &opts,
+    )
+    .with_injected_components(injected_components(env, components)?);
     let result = builder
         .run_test_detailed()
         .map_err(|e| Error::from_reason(format!("{e}")))?;
@@ -367,7 +375,9 @@ pub fn run_test_from_project(
 ) -> Result<NapiTestResult> {
     let mut opts = parse_options(&options)?;
     let (mut sources, metadata, celox_cfg) = load_project_sources(&project_path)?;
-    opts.common.diagnostic_policy = celox_cfg.diagnostics.clone();
+    opts.common.diagnostic_policy =
+        celox_cfg.diagnostic_policy(opts.common.diagnostic_policy.strict);
+    opts.common.legacy_empty_reductions = celox_cfg.legacy_empty_reductions();
     append_extra_source(&mut sources, &opts.extra_source);
 
     let source_refs: Vec<(&str, &std::path::Path)> = sources

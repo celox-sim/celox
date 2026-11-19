@@ -888,3 +888,32 @@ fn array_parameter_overrides_take_equivalent_element_types() {
     let error = error.to_string();
     assert!(error.contains("module parameter override"), "{error}");
 }
+
+#[test]
+fn packed_arrays_of_process_states_keep_their_states() {
+    // `state` of class `process` is a built-in enumerated type (IEEE
+    // 1800-2023 9.7), which a packed array may have as its elements (7.4.1)
+    // and an element selected from it has again. `$typename` spells it as
+    // the typedef of class `std::process` it is, after its members (20.6.1
+    // e, f).
+    let source = "module Top;
+        std::process::state [1:0] states;
+        process::state other [2];
+        std::process::state one;
+        initial begin
+            states[1] = std::process::RUNNING;
+            states[0] = process::KILLED;
+            other[0] = states[1];
+            $display(\"%0d %0d %s\", states, states[0], other[0].name());
+            $display(\"%s|%s\", $typename(one), $typename(other));
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        [
+            "4294967300 4 RUNNING",
+            "enum{FINISHED=32'sd0,RUNNING=32'sd1,WAITING=32'sd2,SUSPENDED=32'sd3,KILLED=32'sd4}std::process::state|\
+             enum{FINISHED=32'sd0,RUNNING=32'sd1,WAITING=32'sd2,SUSPENDED=32'sd3,KILLED=32'sd4}std::process::state$[0:1]"
+        ]
+    );
+}

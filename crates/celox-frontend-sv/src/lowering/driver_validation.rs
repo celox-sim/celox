@@ -49,6 +49,118 @@ pub(super) fn resolve_inout_drivers(
     }
 }
 
+/// Reject a member of an interface instance that a hierarchical name forces
+/// (IEEE 1800-2023 10.6.2) and that a procedure of another instance, or of
+/// one below it that the interface port is passed on to, writes through an
+/// interface port. The write reaches the member as an output
+/// port connection does, so after a release the member would take the last
+/// value written there instead of keeping the forced value until the next
+/// write.
+pub(super) fn validate_forced_interface_members(
+    module_ids: &HashMap<LoweredSvModuleKey, ModuleId>,
+    modules: &HashMap<ModuleId, LoweredSvModule>,
+    forced: &HashMap<ModuleId, Vec<String>>,
+) -> Result<(), sv::AnalyzerError> {
+    let mut written: HashMap<ModuleId, HashSet<String>> = HashMap::default();
+    for (module_id, names) in forced {
+        let Some(module) = modules.get(module_id) else {
+            continue;
+        };
+        for instance in &module.instances {
+            let Some(&child_id) = module_ids.get(&LoweredSvModuleKey::instance_key(instance))
+            else {
+                continue;
+            };
+            for connection in &instance.port_connections {
+                if !connection.formal.contains('$') || !names.contains(&connection.actual) {
+                    continue;
+                }
+                let writes = interface_port_writes(
+                    child_id,
+                    module_ids,
+                    modules,
+                    &mut written,
+                    &mut Vec::new(),
+                );
+                if writes.contains(&connection.formal) {
+                    return Err(sv::AnalyzerError::Unsupported(format!(
+                        "force or release of interface member `{}` of `{}`, which a procedure \
+                         of instance `{}` or of one below it writes through an interface port",
+                        connection.actual.replace('$', "."),
+                        module.source.name(),
+                        instance.instance_name,
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The names that procedures of module `module_id` write, with the members
+/// of its interface ports that procedures of the instances below it write
+/// through interface ports they are passed on to.
+fn interface_port_writes<'a>(
+    module_id: ModuleId,
+    module_ids: &HashMap<LoweredSvModuleKey, ModuleId>,
+    modules: &HashMap<ModuleId, LoweredSvModule>,
+    written: &'a mut HashMap<ModuleId, HashSet<String>>,
+    visiting: &mut Vec<ModuleId>,
+) -> &'a HashSet<String> {
+    if !written.contains_key(&module_id) {
+        let mut writes = HashSet::default();
+        // A cycle of instances, which the module graph validation reports,
+        // forwards nothing.
+        if let Some(module) = modules.get(&module_id)
+            && !visiting.contains(&module_id)
+        {
+            visiting.push(module_id);
+            for body in module
+                .source
+                .comb_processes()
+                .iter()
+                .filter(|process| process.kind() != sv::ir::CombProcessKind::ContinuousAssign)
+                .map(sv::ir::CombProcess::body)
+                .chain(
+                    module
+                        .source
+                        .ff_processes()
+                        .iter()
+                        .map(sv::ir::FfProcess::body),
+                )
+                .chain(
+                    module
+                        .source
+                        .initial_processes()
+                        .iter()
+                        .map(|process| process.body()),
+                )
+            {
+                procedural::written_names_with_calls(&module.source, body, &mut writes);
+            }
+            for instance in &module.instances {
+                let Some(&child_id) = module_ids.get(&LoweredSvModuleKey::instance_key(instance))
+                else {
+                    continue;
+                };
+                let child = interface_port_writes(child_id, module_ids, modules, written, visiting);
+                writes.extend(
+                    instance
+                        .port_connections
+                        .iter()
+                        .filter(|connection| {
+                            connection.formal.contains('$') && child.contains(&connection.formal)
+                        })
+                        .map(|connection| connection.actual.clone()),
+                );
+            }
+            visiting.pop();
+        }
+        written.insert(module_id, writes);
+    }
+    &written[&module_id]
+}
+
 pub(super) fn validate_specialized_instance_net_drivers(
     module_ids: &HashMap<LoweredSvModuleKey, ModuleId>,
     modules: &HashMap<ModuleId, LoweredSvModule>,
@@ -122,8 +234,9 @@ pub(super) fn validate_specialized_instance_net_drivers(
         }
 
         // A hierarchical name denotes another instance's object, which its
-        // own instance checks; only procedural writes of variables may
-        // reach it through the name.
+        // own instance checks with the writes that reach it through the
+        // name (`validate_foreign_drivers`). A net is not driven through
+        // one, nor is a variable by the output of a child instance.
         let mut written = None;
         for signal in module.source.signals() {
             let Some(name) = signal.hierarchical() else {
@@ -152,7 +265,7 @@ pub(super) fn validate_specialized_instance_net_drivers(
                     })
                     .contains(signal.name())
             } else {
-                !drivers.continuous(signal.name()).is_empty()
+                false
             };
             if driven || !child_output_driver_ranges(module, &children, signal.name()).is_empty() {
                 return Err(sv::AnalyzerError::Unsupported(format!(
@@ -160,7 +273,7 @@ pub(super) fn validate_specialized_instance_net_drivers(
                     if signal.is_net() {
                         "driver of a net"
                     } else {
-                        "continuous assignment to a variable"
+                        "connection of an output port to a variable"
                     }
                 )));
             }
@@ -187,11 +300,51 @@ pub(super) fn validate_specialized_instance_net_drivers(
         };
         for signal_name in net_names {
             let child_driver_ranges = child_output_driver_ranges(module, &children, signal_name);
+            // A generic interconnect that merged into a resolved net
+            // (23.3.3.7.1) takes its drivers from every connected port;
+            // the glue joins them with the merged resolution, which
+            // each array element may merge separately (6.6.8).
+            let resolved_kind = |resolution: &sv::ast::NetResolution| {
+                !matches!(
+                    resolution,
+                    sv::ast::NetResolution::Single | sv::ast::NetResolution::Interconnect
+                )
+            };
+            let interconnect_resolved = module
+                .interconnect_resolutions
+                .get(signal_name)
+                .is_some_and(resolved_kind);
+            let element_width = module
+                .signal_names
+                .get(signal_name)
+                .and_then(|id| module.variables.get(id))
+                .filter(|variable| !variable.array_dims.is_empty())
+                .map(|variable| {
+                    variable.width / variable.array_dims.iter().product::<usize>().max(1)
+                })
+                .unwrap_or(0);
+            // Whether the drivers on one range may join: the merged
+            // resolution of the element that range belongs to.
+            let range_resolved = |range: Option<(i128, i128)>| {
+                if interconnect_resolved {
+                    return true;
+                }
+                let Some((lsb, _)) = range else {
+                    return false;
+                };
+                element_width > 0
+                    && module
+                        .interconnect_element_resolutions
+                        .get(signal_name)
+                        .and_then(|per_element| per_element.get(&((lsb as usize) / element_width)))
+                        .is_some_and(resolved_kind)
+            };
             validate_net_driver_ranges(
                 &drivers,
                 signal_name,
                 &child_driver_ranges,
-                resolved_nets.net(signal_name).is_some(),
+                resolved_nets.net(signal_name).is_some() || interconnect_resolved,
+                &range_resolved,
             )?;
         }
 
@@ -375,6 +528,7 @@ fn validate_net_driver_ranges(
     signal_name: &str,
     child_driver_ranges: &[(usize, Option<(i128, i128)>)],
     resolved: bool,
+    child_resolved: &dyn Fn(Option<(i128, i128)>) -> bool,
 ) -> Result<(), sv::AnalyzerError> {
     let local_drivers = drivers.local(signal_name);
     let overlapping_local_drivers = local_drivers.iter().enumerate().any(|(index, left)| {
@@ -392,7 +546,15 @@ fn validate_net_driver_ranges(
     let overlapping_continuous = driver_ranges_overlap(&drivers.continuous(signal_name));
     // The continuous assignments of a resolved net are joined into one
     // definition; a driver below an instance still needs bits of its own.
-    if driver_ranges_overlap(child_driver_ranges)
+    // Child drivers may overlap only on a range whose merged resolution
+    // joins them, which each array element merges separately (6.6.8).
+    let unresolved_child_overlap = child_driver_ranges.iter().enumerate().any(|(index, left)| {
+        child_driver_ranges[index + 1..].iter().any(|right| {
+            net_driver_ranges_overlap(left.1, right.1)
+                && !(child_resolved(left.1) && child_resolved(right.1))
+        })
+    });
+    if unresolved_child_overlap
         || child_local_overlap
         || (!resolved && (overlapping_local_drivers || overlapping_continuous))
     {
@@ -580,6 +742,16 @@ pub(super) fn validate_foreign_drivers(
                 for process in module.ff_processes().iter().filter(|p| p.is_always_ff()) {
                     procedural::written_names_with_calls(module, process.body(), &mut written);
                 }
+                // An `always_ff` that runs as a process is still one (IEEE
+                // 1800-2023 9.2.2.4).
+                for process in module.initial_processes().iter().filter(|process| {
+                    process.repeats()
+                        && process
+                            .site()
+                            .is_some_and(|site| site.construct == "always_ff")
+                }) {
+                    procedural::written_names_with_calls(module, process.body(), &mut written);
+                }
                 written
             })
             .contains(name);
@@ -594,6 +766,10 @@ pub(super) fn validate_foreign_drivers(
             .contains(name);
         let reason = if continuous {
             Some("its module drives it continuously or from always_comb")
+        } else if writes.combinational
+            && (!drivers.is_empty() || local_once || writes.repeating > 1)
+        {
+            Some("another module drives it continuously or from always_comb")
         } else if writes.always_ff && (!drivers.is_empty() || local_once || writes.repeating > 1) {
             Some("an always_ff process writes it")
         } else if local_always_ff {

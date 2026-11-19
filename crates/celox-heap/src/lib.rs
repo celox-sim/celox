@@ -19,6 +19,7 @@ use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 pub mod containers;
 mod dpi;
 mod edges;
+pub mod memory_files;
 mod objects;
 pub mod ops;
 pub mod randomization;
@@ -96,7 +97,19 @@ pub struct Heap {
     #[serde(default)]
     events: bool,
     containers: HashMap<Handle, Arc<containers::Container>>,
-    container_lookup: HashMap<Arc<containers::Container>, Handle>,
+    /// The containers by their contents, so that equal contents have one
+    /// handle, see [`containers::Interned`].
+    container_lookup: HashMap<containers::Interned, Handle>,
+    /// The [`containers::contents_digest`] of containers by handle, which
+    /// stores keep up to date without visiting the other elements. A
+    /// container without one has it computed when it is needed.
+    #[serde(default)]
+    container_digests: HashMap<Handle, u64>,
+    /// The last SET result, the container it was made from and the index
+    /// it stored, until the SET_MASK of that index that completes it: a
+    /// store that leaves its element as it was gives back that container.
+    #[serde(skip)]
+    last_set: Option<(Handle, Handle, u64)>,
     /// Structure records by their contents, see [`ops::OBJECT_FINISH_RECORD`].
     #[serde(default)]
     record_lookup: HashMap<objects::RecordContents, Handle>,
@@ -164,6 +177,10 @@ pub struct Heap {
     /// The call area of the DPI-C call being made, which no state outlives.
     #[serde(skip)]
     dpi: dpi::CallArea,
+    /// The reader of memory files and the load being stored, which no state
+    /// outlives.
+    #[serde(skip)]
+    memory_files: memory_files::MemoryFiles,
 }
 
 impl Default for Heap {
@@ -192,6 +209,8 @@ impl Heap {
             events: false,
             containers: HashMap::default(),
             container_lookup: HashMap::default(),
+            container_digests: HashMap::default(),
+            last_set: None,
             record_lookup: HashMap::default(),
             fault: None,
             pinned: 1,
@@ -209,6 +228,7 @@ impl Heap {
             solved: Vec::new(),
             edges: HashMap::default(),
             dpi: dpi::CallArea::default(),
+            memory_files: memory_files::MemoryFiles::default(),
         }
     }
 
@@ -343,6 +363,9 @@ impl Heap {
         self.objects.retain(|handle, _| objects.contains(handle));
         self.edges.retain(|handle, _| objects.contains(handle));
         self.containers.retain(|handle, _| objects.contains(handle));
+        self.container_digests
+            .retain(|handle, _| objects.contains(handle));
+        self.last_set = None;
         self.container_lookup
             .retain(|_, handle| objects.contains(handle));
         self.record_lookup

@@ -832,13 +832,14 @@ impl BodyBuilder<'_, '_, '_> {
             },
         };
         let (found, _) = virtual_interfaces::member(self.session, &ty, &member)?;
+        let found = found.clone();
         virtual_interfaces::check_write(self.session, &ty, &member)?;
         if found.is_net {
             return Err(unsupported(format!(
                 "procedural assignment to net `{member}` through a virtual interface"
             )));
         }
-        let target = dimensions_from_type(&found.r#type);
+        let target = dimensions_from_type(&found.type_in(&mut self.session.types));
         let mut value = match (&selected, op) {
             (Some((written, _)), "=") => expression_binding::expression(
                 right,
@@ -862,7 +863,7 @@ impl BodyBuilder<'_, '_, '_> {
             expression_binding::value(handle, native, &self.tree, self.session, &self.dims)?;
         self.rename_expr(&mut handle);
         self.rename_expr(&mut value);
-        let template = virtual_interfaces::template(&ty.interface, &member);
+        let template = virtual_interfaces::template(&ty.key(), &member);
         let stmt =
             virtual_interfaces::dispatch(self.session, handle, &ty, &member, |session, signal| {
                 let lhs = match &selected {

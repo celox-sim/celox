@@ -62,13 +62,15 @@ pub(crate) fn count_test_settles(
 }
 
 /// What [`Plan::new`] decides for `program` that tests of call effects
-/// check: the storage the settle reads, why each kernel falls back, and the
-/// events RTL logic drives (`Plan::derived`).
+/// and of host clocks check: the storage the settle reads, why each kernel
+/// falls back, the events RTL logic drives (`Plan::derived`) and the events
+/// with a host clock slot (`Plan::clocks`).
 #[cfg(test)]
 pub(crate) struct PlanSummary {
     pub(crate) settle_reads: Option<HashSet<AbsoluteAddr>>,
     pub(crate) fallback: Vec<Option<String>>,
     pub(crate) derived: Vec<AbsoluteAddr>,
+    pub(crate) clocks: Vec<AbsoluteAddr>,
     /// With deferred settles, per kernel whether its runs observe the
     /// settled state (`Lazy::kernels`).
     pub(crate) lazy: Option<Vec<bool>>,
@@ -82,6 +84,11 @@ pub(crate) fn plan_for_test(program: &LaidOutProgram) -> Result<PlanSummary, Str
     Ok(PlanSummary {
         derived: plan
             .derived
+            .iter()
+            .map(|&event| plan.events[event].signal)
+            .collect(),
+        clocks: plan
+            .clocks
             .iter()
             .map(|&event| plan.events[event].signal)
             .collect(),

@@ -164,6 +164,10 @@ pub(super) const GROUPS: &[Group] = &[
         text: include_str!("hierarchy.vtest"),
     },
     Group {
+        file: "src/sv/cases/interconnect.vtest",
+        text: include_str!("interconnect.vtest"),
+    },
+    Group {
         file: "src/sv/cases/indexed_select.vtest",
         text: include_str!("indexed_select.vtest"),
     },
@@ -218,5 +222,9 @@ pub(super) const GROUPS: &[Group] = &[
     Group {
         file: "src/sv/cases/types.vtest",
         text: include_str!("types.vtest"),
+    },
+    Group {
+        file: "src/sv/cases/keyword_versions.vtest",
+        text: include_str!("keyword_versions.vtest"),
     },
 ];

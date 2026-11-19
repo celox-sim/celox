@@ -11,7 +11,6 @@ impl<'a> PlanBuilder<'a> {
         let sir = self.sir;
         let shared = self.shared;
         let addresses = &self.found.addresses;
-        let opaque_dependencies = self.found.opaque_dependencies;
         let storage = home(shared);
         let finish_sites = schema
             .runtime_event_sites
@@ -31,20 +30,59 @@ impl<'a> PlanBuilder<'a> {
                 .get(trigger.id)
                 .is_some_and(|signal| model.kinds.get(signal) == Some(&trigger.kind))
         };
-        let effects = sir.eval_comb.iter().any(|unit| {
-            instructions(unit).any(|inst| match inst {
-                SIRInstruction::Store(_, _, _, _, triggers, sites) => {
-                    triggers.iter().any(|trigger| !internal_trigger(trigger)) || !sites.is_empty()
-                }
-                SIRInstruction::Commit(_, _, _, _, triggers) => {
-                    triggers.iter().any(|trigger| !internal_trigger(trigger))
-                }
-                // Records, captures and external calls, a callee's too. A
-                // call's effects do not say which triggers it raises, so any
-                // is taken for one the scheduler does not compare itself.
-                _ => inst.host_effects() != celox_sir::HostEffects::default(),
-            })
-        });
+        let effect = |inst: &SIRInstruction<RegionedAbsoluteAddr>| match inst {
+            SIRInstruction::Store(_, _, _, _, triggers, sites) => {
+                triggers.iter().any(|trigger| !internal_trigger(trigger)) || !sites.is_empty()
+            }
+            SIRInstruction::Commit(_, _, _, _, triggers) => {
+                triggers.iter().any(|trigger| !internal_trigger(trigger))
+            }
+            // Records, captures and external calls, a callee's too. A
+            // call's effects do not say which triggers it raises, so any
+            // is taken for one the scheduler does not compare itself.
+            _ => inst.host_effects() != celox_sir::HostEffects::default(),
+        };
+        let effects = sir
+            .eval_comb
+            .iter()
+            .any(|unit| instructions(unit).any(effect));
+        // Some effects are no work of a settle whose inputs did not change.
+        // The captures of combinational processes (`$display` in
+        // `always_comb`, deferred assertions) record only for sites enabled
+        // in the settle: by the generated observers when what a process
+        // reads changed since the last settle, or by a store that changed
+        // its target (`Generator::emit_settle`). A guarded process, an
+        // `always @*`, runs only when what it reads changed (IEEE 1800-2023
+        // 9.2.2.2, 9.4.2.2), and with it its records and its calls of
+        // isolated functions: noncontext DPI-C imports, which reach nothing
+        // of the design but their arguments and results (35.5.3). Symbolic
+        // logic, which runs in every settle, records through captures and
+        // calls no DPI-C import. These effects still keep the plan from
+        // running part of a settle or moving it (`effects`): the part would
+        // leave out the records and calls its stores do not need.
+        let observed = self.native_observers && !schema.comb_observers.is_empty();
+        let unchanged_inputs_do_nothing = |inst: &SIRInstruction<RegionedAbsoluteAddr>| match inst {
+            SIRInstruction::CombCaptureEvent { .. }
+            | SIRInstruction::CombCaptureEnableIfChanged { .. } => observed,
+            SIRInstruction::ExternCall { func, .. } => schema
+                .extern_functions
+                .get(*func as usize)
+                .is_some_and(|function| function.isolated),
+            SIRInstruction::RuntimeEvent { site_id, .. } => schema
+                .runtime_event_sites
+                .get(*site_id as usize)
+                .is_some_and(|site| match site.kind {
+                    RuntimeEventKind::Display | RuntimeEventKind::Write => true,
+                    RuntimeEventKind::Report(severity) => severity != celox_design::Severity::Fatal,
+                    RuntimeEventKind::Finish | RuntimeEventKind::Stop => false,
+                }),
+            _ => false,
+        };
+        let skippable = sir
+            .eval_comb
+            .iter()
+            .flat_map(instructions)
+            .all(|inst| unchanged_inputs_do_nothing(inst) || !effect(inst));
         // Dirty tracking compares stable homes by their representative
         // (`shared_storage`), which groups addresses only by an equal start
         // offset: no two homes may overlap from different offsets.
@@ -52,18 +90,20 @@ impl<'a> PlanBuilder<'a> {
             homes_overlap_only_whole(program.layout()),
             "stable homes overlap at different offsets"
         );
-        // A pending settle cannot pass an opaque reader, nor can an opaque
-        // writer use a sliced settle selected only from explicit stores.
-        // Keep the complete generated settle in that general path.
-        let settle_reads: Option<HashSet<AbsoluteAddr>> =
-            (!effects && !opaque_dependencies).then(|| {
-                sir.eval_comb
-                    .iter()
-                    .flat_map(instructions)
-                    .flat_map(read_storage)
-                    .map(|source| storage(source.absolute_addr()))
-                    .collect()
-            });
+        // A settle whose inputs did not change would store what its outputs
+        // already hold, whatever else reads or writes the state: a unit that
+        // makes opaque calls marks a change after it runs (`inline_writer`),
+        // and a cone settle runs only after precise writes of its sources.
+        // Opaque readers only keep settles from waiting for their readers
+        // (`deferred_settles`).
+        let settle_reads: Option<HashSet<AbsoluteAddr>> = skippable.then(|| {
+            sir.eval_comb
+                .iter()
+                .flat_map(instructions)
+                .flat_map(read_storage)
+                .map(|source| storage(source.absolute_addr()))
+                .collect()
+        });
         self.found.finish_sites = finish_sites;
         self.found.effects = effects;
         self.found.settle_reads = settle_reads;
@@ -84,6 +124,7 @@ impl<'a> PlanBuilder<'a> {
         let kernels = &self.found.kernels;
         let finish_sites = &self.found.finish_sites;
         let settle_reads = &self.found.settle_reads;
+        let opaque_dependencies = self.found.opaque_dependencies;
         let storage = home(shared);
         let stores = unit_stores(storage);
         // A settle may wait for its readers only when it is a function of
@@ -134,9 +175,17 @@ impl<'a> PlanBuilder<'a> {
             .scheduler
             .as_ref()
             .is_some_and(|scheduler| scheduler.update_points);
+        // A pending settle cannot pass a reader whose loads are unknown, nor
+        // move the records of the captures it makes.
+        let effects = self.found.effects;
         let eager = settle_reads
             .as_ref()
-            .filter(|_| !update_points && !sir.eval_comb.iter().any(fails))
+            .filter(|_| {
+                !update_points
+                    && !opaque_dependencies
+                    && !effects
+                    && !sir.eval_comb.iter().any(fails)
+            })
             .and_then(|_| {
                 let stateful = sir.eval_comb_stateful.as_ref();
                 let eager = stateful.and_then(|stateful| {
@@ -276,8 +325,10 @@ impl<'a> PlanBuilder<'a> {
         let retained = &self.found.retained;
         let lazy = &self.found.lazy;
         let storage = home(shared);
+        // A cone leaves out the captures of the processes outside it.
         let incremental = if lazy.is_none()
             && settle_reads.is_some()
+            && !self.found.effects
             && !sir.eval_comb.iter().any(fails)
             && sir
                 .eval_comb

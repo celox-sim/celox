@@ -265,6 +265,9 @@ fn prepare_external_hierarchy_collecting(
             event_assignments: Vec::new(),
             repeated_ff_writes: Vec::new(),
             inout_driven_inside: HashSet::default(),
+            interconnect_names: HashSet::default(),
+            interconnect_resolutions: HashMap::default(),
+            interconnect_element_resolutions: HashMap::default(),
             calls: None,
         }
     };
@@ -453,7 +456,14 @@ fn prepare_external_hierarchy_collecting(
             .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
         analyses.insert(
             module_id,
-            analyze_specialization(base, &mut design, key, &[], warnings)?,
+            analyze_specialization(
+                base,
+                &mut design,
+                key,
+                sv::ast::HierarchicalObjects::default(),
+                &[],
+                warnings,
+            )?,
         );
     }
     let overrides = schedule::exported_overrides(analyses.values())?;
@@ -495,6 +505,7 @@ fn prepare_external_hierarchy_collecting(
                     warnings,
                     LevelLists::Processes,
                     HierarchicalNames {
+                        forced: &[],
                         properties: &properties,
                         time_format,
                         ..HierarchicalNames::lowering(&expansion)
@@ -505,8 +516,10 @@ fn prepare_external_hierarchy_collecting(
         })
         .collect::<Result<HashMap<_, _>, FrontendError>>()?;
     resolve_inout_drivers(&module_ids, &mut lowered_modules);
+    resolve_interconnects(&mut module_ids, &mut lowered_modules)?;
     validate_specialized_instance_net_drivers(&module_ids, &lowered_modules, four_state)?;
     let mut modules = HashMap::default();
+    let design_waits = DesignWaits::of(&lowered_modules);
     for (key, &module_id) in &module_ids {
         let lowered = &lowered_modules[&module_id];
         let mut sim_module = lowered.sim_module.clone();
@@ -528,6 +541,7 @@ fn prepare_external_hierarchy_collecting(
             key,
             &module_ids,
             &lowered_modules,
+            &design_waits,
             four_state,
             allow_inferred_latches,
             true,
@@ -568,17 +582,19 @@ fn prepare_external_hierarchy_collecting(
         });
     };
     let package_states = lower_package_states(
-        &any_module.packages,
-        &design,
+        package_states(
+            &any_module.packages,
+            &design,
+            &properties,
+            time_format,
+            &expansion,
+        ),
         module_ids.len(),
         four_state,
         false,
-        &properties,
-        time_format,
         warnings,
         force_out_of_line,
         None,
-        &expansion,
     )?;
     // How often the design instantiates these modules is not known here;
     // assembly checks the drivers of package variables across instances.

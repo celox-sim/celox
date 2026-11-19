@@ -535,6 +535,14 @@ impl SIRTranslator {
             while res_chunks.len() < final_num_chunks {
                 res_chunks.push(state.builder.ins().iconst(types::I64, 0));
             }
+            // Inverted zeros, a borrow and the excess of a truncated source can
+            // reach the bits above the result width.
+            let truncates = r_width > d_width;
+            if matches!(op, UnaryOp::BitNot | UnaryOp::Minus)
+                || (truncates && matches!(op, UnaryOp::Ident | UnaryOp::ToTwoState))
+            {
+                wide_ops::clear_top_chunk_padding(state.builder, &mut res_chunks, d_width);
+            }
 
             if self.options.four_state {
                 let r_masks: Vec<Value> = state.regs[rhs]

@@ -237,6 +237,16 @@ impl SIRTranslator {
         while res_chunks.len() < final_num_chunks {
             res_chunks.push(state.builder.ins().iconst(types::I64, 0));
         }
+        // A carry, a borrow, high product bits, bits shifted left or
+        // sign-filled and the excess of an operand wider than the result can
+        // land above the result width. Four-state shifts clear both planes
+        // below, after an unknown count is applied.
+        if l_width.max(r_width) > d_width
+            || matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul)
+            || (!self.options.four_state && matches!(op, BinaryOp::Shl | BinaryOp::Sar))
+        {
+            wide_ops::clear_top_chunk_padding(state.builder, &mut res_chunks, d_width);
+        }
 
         if self.options.four_state {
             // Get or generate zero masks for each operand

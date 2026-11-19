@@ -754,6 +754,7 @@
         "interfaces::binds_interface_array_ports_in_declaration_order",
         "interfaces::binds_positional_connections_and_parameter_values",
         "interfaces::calls_functions_and_reads_parameters_through_instances_and_ports",
+        "interfaces::calls_writing_imported_functions_from_generate_functions_and_tasks",
         "interfaces::clocks_interface_processes_from_member_clocks",
         "interfaces::drives_members_through_child_outputs_and_array_generate_regions",
         "interfaces::elaborates_net_members_typedefs_and_localparams",
@@ -764,6 +765,23 @@
         "interfaces::reads_undriven_interface_members_as_unknown",
         "interfaces::rewrites_nested_references_and_keeps_declaration_functions",
         "interfaces::runs_interface_processes_once_per_array_element"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_interface_array_member_function",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 does not re-evaluate a continuous assignment in an element of an interface instance array that calls a function reading a member when the member changes after time zero; the scalar interface form is re-evaluated. Verilator passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "interfaces::calls_member_functions_from_interface_array_logic"
       ]
     }
   },
@@ -4949,6 +4967,88 @@
     "cases": {
       "xezim": [
         "file_io::monitor_time_queries_do_not_trigger_output"
+      ]
+    }
+  },
+  {
+    "id": "sv_interconnect_external_simulator_support",
+    "category": "simulator_unsupported",
+    "phase": "compile",
+    "observed_version": "Verilator 5.054 / Icarus 13.0",
+    "reason": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+    "upstream": [],
+    "evidence": [
+      "src/sv/cases/interconnect.vtest",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "interconnect::generic_interconnect_connects_implicit_ports",
+        "interconnect::interconnect_array_elements_may_carry_real_and_logic",
+        "interconnect::interconnect_array_elements_merge_resolutions_separately",
+        "interconnect::interconnect_array_elements_of_equal_width",
+        "interconnect::interconnect_array_elements_resolve_independently",
+        "interconnect::interconnect_array_passes_whole_through_a_module",
+        "interconnect::interconnect_array_port_chains_through_a_module",
+        "interconnect::interconnect_array_uwire_element_does_not_block_resolved_drivers",
+        "interconnect::interconnect_array_with_one_connected_element",
+        "interconnect::interconnect_authored_signing_is_preserved",
+        "interconnect::interconnect_concatenation_operands_keep_their_widths",
+        "interconnect::interconnect_instances_merge_their_ports_separately",
+        "interconnect::interconnect_merges_to_wand_from_connected_ports",
+        "interconnect::interconnect_merges_to_wand_from_connected_ports_four_state",
+        "interconnect::interconnect_port_chains_through_a_module",
+        "interconnect::interconnect_takes_signedness_from_connected_ports",
+        "interconnect::interconnect_takes_width_and_value_from_connected_ports",
+        "interconnect::interconnect_wire_drivers_conflict_to_x_four_state"
+      ],
+      "icarus": [
+        "interconnect::generic_interconnect_connects_implicit_ports",
+        "interconnect::interconnect_array_elements_may_carry_real_and_logic",
+        "interconnect::interconnect_array_elements_merge_resolutions_separately",
+        "interconnect::interconnect_array_elements_of_equal_width",
+        "interconnect::interconnect_array_elements_resolve_independently",
+        "interconnect::interconnect_array_passes_whole_through_a_module",
+        "interconnect::interconnect_array_port_chains_through_a_module",
+        "interconnect::interconnect_array_uwire_element_does_not_block_resolved_drivers",
+        "interconnect::interconnect_array_with_one_connected_element",
+        "interconnect::interconnect_authored_signing_is_preserved",
+        "interconnect::interconnect_concatenation_operands_keep_their_widths",
+        "interconnect::interconnect_instances_merge_their_ports_separately",
+        "interconnect::interconnect_merges_to_wand_from_connected_ports",
+        "interconnect::interconnect_merges_to_wand_from_connected_ports_four_state",
+        "interconnect::interconnect_port_chains_through_a_module",
+        "interconnect::interconnect_takes_signedness_from_connected_ports",
+        "interconnect::interconnect_takes_width_and_value_from_connected_ports",
+        "interconnect::interconnect_wire_drivers_conflict_to_x_four_state"
+      ]
+    }
+  },
+  {
+    "id": "sv_xezim_interconnect_arrays_and_resolution",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "xezim version 0.11.4",
+    "reason": "xezim 0.11.4 accepts generic interconnect nets but does not resolve each element of an interconnect array to its own net type as IEEE 1800-2023 6.6.8 requires (its iBus example carries logic on one element and real on another), and it does not merge the dominating net type of connected ports as 23.3.3.7.1 requires (a wand port merged with a wire port yields wand). Celox follows the standard in both cases; scalar interconnect chains agree.",
+    "upstream": [],
+    "evidence": [
+      "src/sv/cases/interconnect.vtest",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "xezim": [
+        "interconnect::interconnect_array_elements_may_carry_real_and_logic",
+        "interconnect::interconnect_array_elements_merge_resolutions_separately",
+        "interconnect::interconnect_array_elements_of_equal_width",
+        "interconnect::interconnect_array_elements_resolve_independently",
+        "interconnect::interconnect_array_passes_whole_through_a_module",
+        "interconnect::interconnect_array_port_chains_through_a_module",
+        "interconnect::interconnect_array_uwire_element_does_not_block_resolved_drivers",
+        "interconnect::interconnect_array_with_one_connected_element",
+        "interconnect::interconnect_authored_signing_is_preserved",
+        "interconnect::interconnect_instances_merge_their_ports_separately",
+        "interconnect::interconnect_merges_to_wand_from_connected_ports",
+        "interconnect::interconnect_merges_to_wand_from_connected_ports_four_state"
       ]
     }
   }

@@ -85,9 +85,6 @@ impl TyTable {
         }
     }
 
-    /// Record the members of the enumeration declaration `decl` declares
-    /// (6.19). A declaration is one per elaborated scope, which its
-    /// parameters belong to, so it has one set of members.
     /// Record how `$typename` names declaration `decl`: the `typename` of
     /// its typedef and the `aggregate` keyword of a structure or union.
     pub(in crate::ast) fn record_spelling(
@@ -133,6 +130,9 @@ impl TyTable {
         );
     }
 
+    /// Record the members of the enumeration declaration `decl` declares
+    /// (6.19). A declaration is one per elaborated scope, which its
+    /// parameters belong to, so it has one set of members.
     pub(in crate::ast) fn record_enum_domain(
         &mut self,
         decl: super::DeclId,

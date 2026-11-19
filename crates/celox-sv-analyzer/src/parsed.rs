@@ -28,8 +28,9 @@ pub struct ParsedSource {
 /// What a module analysis lowers.
 #[derive(Clone, Copy)]
 enum ModuleAnalysis<'a> {
-    /// The whole module, with the signals its hierarchical names denote.
-    Full(&'a [ast::HierarchicalSignal]),
+    /// The whole module, with the objects its hierarchical names denote,
+    /// and its variables and nets that other modules force through theirs.
+    Full(ast::HierarchicalObjects<'a>, &'a [String]),
     DeclarationsOnly,
 }
 
@@ -342,13 +343,13 @@ impl ParsedSource {
             pattern_overrides,
             interfaces,
             packages,
-            ModuleAnalysis::Full(&[]),
+            ModuleAnalysis::Full(ast::HierarchicalObjects::default(), &[]),
             design,
         )
     }
 
     /// [`Self::analyze_module`] for a module whose hierarchical names
-    /// denote `hierarchical`, signals of other instances.
+    /// denote `hierarchical`, signals and subroutines of other instances.
     #[allow(clippy::too_many_arguments)]
     pub fn analyze_module_with_hierarchy(
         &self,
@@ -359,7 +360,36 @@ impl ParsedSource {
         interfaces: &ModuleInterfaces,
         packages: &Packages,
         design: &mut Design,
-        hierarchical: &[ast::HierarchicalSignal],
+        hierarchical: ast::HierarchicalObjects<'_>,
+    ) -> Result<Ir, AnalyzerError> {
+        self.analyze_module_with_hierarchy_and_forces(
+            module_name,
+            overrides,
+            type_overrides,
+            pattern_overrides,
+            interfaces,
+            packages,
+            design,
+            hierarchical,
+            &[],
+        )
+    }
+
+    /// [`Self::analyze_module_with_hierarchy`] for a module whose variables
+    /// and nets `forced` other modules force through hierarchical names
+    /// (IEEE 1800-2023 10.6.2): the module declares their force controls.
+    #[allow(clippy::too_many_arguments)]
+    pub fn analyze_module_with_hierarchy_and_forces(
+        &self,
+        module_name: &str,
+        overrides: &HashMap<String, ir::ConstExpr>,
+        type_overrides: &[(String, ast::Type)],
+        pattern_overrides: &[(String, ast::BoundPattern)],
+        interfaces: &ModuleInterfaces,
+        packages: &Packages,
+        design: &mut Design,
+        hierarchical: ast::HierarchicalObjects<'_>,
+        forced: &[String],
     ) -> Result<Ir, AnalyzerError> {
         self.analyze_module_with_packages(
             module_name,
@@ -368,7 +398,7 @@ impl ParsedSource {
             pattern_overrides,
             interfaces,
             packages,
-            ModuleAnalysis::Full(hierarchical),
+            ModuleAnalysis::Full(hierarchical, forced),
             design,
         )
     }
@@ -405,6 +435,35 @@ impl ParsedSource {
     /// names denote another instance's signal. A specialization of a module
     /// with generic interface ports is scanned in its authored module.
     pub fn hierarchical_names(&self, module_name: &str, packages: &Packages) -> Vec<Vec<String>> {
+        self.scan_hierarchical_names(module_name, packages, false)
+    }
+
+    /// The dotted names of [`Self::hierarchical_names`] in which an index
+    /// that is no constant decimal, such as a genvar `u[i].x` of a loop
+    /// generate construct, is followed by another component: that index is
+    /// spelled `[*]`, as in `u[*]`, for the caller to expand over the
+    /// elements it may select (IEEE 1800-2023 23.6, 27.4).
+    pub fn hierarchical_name_patterns(
+        &self,
+        module_name: &str,
+        packages: &Packages,
+    ) -> Vec<Vec<String>> {
+        self.scan_hierarchical_names(module_name, packages, true)
+            .into_iter()
+            .filter(|components| {
+                components
+                    .iter()
+                    .any(|component| component.ends_with("[*]"))
+            })
+            .collect()
+    }
+
+    fn scan_hierarchical_names(
+        &self,
+        module_name: &str,
+        packages: &Packages,
+        patterns: bool,
+    ) -> Vec<Vec<String>> {
         use celox_sv_syntax::TokenKind;
         let original = packages.authored_module_name(module_name);
         let mut names = Vec::new();
@@ -451,6 +510,30 @@ impl ParsedSource {
                             .unwrap()
                             .push_str(&format!("[{index}]"));
                         at += 3;
+                    } else if patterns && text(at) == Some("[") {
+                        // Any other index, up to its closing bracket.
+                        let mut depth = 0usize;
+                        let mut close = None;
+                        for index in at..significant.len() {
+                            match text(index) {
+                                Some("[") => depth += 1,
+                                Some("]") => {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        close = Some(index);
+                                        break;
+                                    }
+                                }
+                                Some(";") => break,
+                                _ => {}
+                            }
+                        }
+                        if let Some(close) = close
+                            && text(close + 1) == Some(".")
+                        {
+                            components.last_mut().unwrap().push_str("[*]");
+                            at = close + 1;
+                        }
                     }
                     if text(at) == Some(".") && is_name(at + 1) {
                         components.push(ast::normalize_identifier(&significant[at + 1].text));
@@ -461,6 +544,22 @@ impl ParsedSource {
                 }
                 if components.len() > 1 && !names.contains(&components) {
                     names.push(components);
+                }
+            }
+        }
+        names
+    }
+
+    /// The names of the functions and tasks that module `module_name`
+    /// declares in its own scope, which hierarchical names of other modules
+    /// may call (IEEE 1800-2023 23.8).
+    pub fn subroutine_names(&self, module_name: &str, packages: &Packages) -> Vec<String> {
+        let original = packages.authored_module_name(module_name);
+        let mut names = Vec::new();
+        for scope in self.index.scopes(original) {
+            for name in ast::subroutine_owners::module_subroutine_names(scope) {
+                if !names.contains(&name) {
+                    names.push(name);
                 }
             }
         }
@@ -510,7 +609,8 @@ impl ParsedSource {
                 values: &overrides,
                 types: &[],
                 patterns: &[],
-                hierarchical: &[],
+                hierarchical: ast::HierarchicalObjects::default(),
+                forced: &[],
             },
             interfaces,
             packages,
@@ -535,7 +635,7 @@ impl ParsedSource {
             &[],
             interfaces,
             &packages,
-            ModuleAnalysis::Full(&[]),
+            ModuleAnalysis::Full(ast::HierarchicalObjects::default(), &[]),
             &mut packages.design(),
         )
     }
@@ -592,7 +692,11 @@ impl ParsedSource {
                     types: type_overrides,
                     patterns: pattern_overrides,
                     hierarchical: match analysis {
-                        ModuleAnalysis::Full(hierarchical) => hierarchical,
+                        ModuleAnalysis::Full(hierarchical, _) => hierarchical,
+                        ModuleAnalysis::DeclarationsOnly => ast::HierarchicalObjects::default(),
+                    },
+                    forced: match analysis {
+                        ModuleAnalysis::Full(_, forced) => forced,
                         ModuleAnalysis::DeclarationsOnly => &[],
                     },
                 },
@@ -609,6 +713,42 @@ impl ParsedSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A name whose index is no constant decimal and that another component
+    /// follows is a pattern, its index spelled `[*]`; a constant index stays.
+    #[test]
+    fn genvar_indexed_names_are_patterns() {
+        let code = r#"
+            module Top;
+                for (genvar i = 0; i < 2; i++) begin : g
+                    initial $display("%0d %0d %0d", d.bus[i].addr, d.u[i + 1].v.w, d.m[i]);
+                end
+                initial $display("%0d", d.bus[1].addr);
+            endmodule
+        "#;
+        let parsed = ParsedSource::parse(code, Path::new("patterns.sv")).unwrap();
+        let packages = Packages::default();
+        let patterns = parsed.hierarchical_name_patterns("Top", &packages);
+        let spell = |names: &[&[&str]]| -> Vec<Vec<String>> {
+            names
+                .iter()
+                .map(|name| name.iter().map(|part| part.to_string()).collect())
+                .collect()
+        };
+        assert_eq!(
+            patterns,
+            spell(&[&["d", "bus[*]", "addr"], &["d", "u[*]", "v", "w"]])
+        );
+        let names = parsed.hierarchical_names("Top", &packages);
+        assert!(
+            names.contains(&spell(&[&["d", "bus[1]", "addr"]])[0]),
+            "{names:?}"
+        );
+        assert!(
+            !names.iter().flatten().any(|part| part.contains("[*]")),
+            "{names:?}"
+        );
+    }
 
     fn type_binding(text: &str) -> ast::Type {
         let code = format!("module Caller; Child #(.T({text})) c(); endmodule");
@@ -966,7 +1106,7 @@ mod tests {
             module \escaped.name (output logic y); assign y = 1'b0; endmodule
             module Duplicate; endmodule
             module Duplicate; endmodule
-            module Legacy({y}); output y; endmodule
+            module Legacy(y, y); inout y; endmodule
         "#,
             Path::new("index.sv"),
         )

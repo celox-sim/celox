@@ -170,10 +170,18 @@ impl Ff<'_, '_> {
             return Ok(lvalue.clone());
         }
         let mut lvalue = lvalue.clone();
-        if let sv::ir::LValue::Select { msb, lsb, .. } = &mut lvalue {
+        if let sv::ir::LValue::Select {
+            msb, lsb, window, ..
+        } = &mut lvalue
+        {
             let mut calls = Vec::new();
             *lsb = self.hoist_const(lsb, &mut calls)?;
             *msb = self.hoist_const(msb, &mut calls)?;
+            // The window's position names the same element, from the same
+            // call results.
+            if let Some(at) = window.as_mut().and_then(|window| window.at.as_mut()) {
+                **at = self.hoist_const(at, &mut calls)?;
+            }
         }
         Ok(lvalue)
     }
@@ -202,12 +210,18 @@ impl Ff<'_, '_> {
         &mut self,
         mut lvalue: sv::ir::LValue,
     ) -> Result<sv::ir::LValue, sv::AnalyzerError> {
-        let sv::ir::LValue::Select { msb, lsb, .. } = &mut lvalue else {
+        let sv::ir::LValue::Select {
+            msb, lsb, window, ..
+        } = &mut lvalue
+        else {
             return Ok(lvalue);
         };
         let mut copies = HashMap::default();
         *lsb = self.freeze_const(lsb, &mut copies)?;
         *msb = self.freeze_const(msb, &mut copies)?;
+        if let Some(at) = window.as_mut().and_then(|window| window.at.as_mut()) {
+            **at = self.freeze_const(at, &mut copies)?;
+        }
         Ok(lvalue)
     }
 
@@ -342,6 +356,36 @@ impl Ff<'_, '_> {
         Ok(frozen)
     }
 
+    /// Hoist the calls of a select and of the selects it applies to, the
+    /// inner ones first, with one call cache: a read within an element at a
+    /// run-time index (`mem[f()][j +: 4]`) repeats the element's position in
+    /// the bounds of both selects, and its calls run once.
+    fn hoist_select(
+        &mut self,
+        select: &sv::ir::Expr,
+        calls: &mut Vec<(sv::ir::ConstExpr, sv::ir::ConstExpr)>,
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        use sv::ir::Expr;
+        let Expr::Select {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } = select
+        else {
+            return self.hoist(select);
+        };
+        let expr = self.hoist_select(expr, calls)?;
+        let lsb = self.hoist_const(lsb, calls)?;
+        let msb = self.hoist_const(msb, calls)?;
+        Ok(Expr::Select {
+            expr: Box::new(expr),
+            msb,
+            lsb,
+            signed: *signed,
+        })
+    }
+
     /// Execute the user subroutine calls of an expression and replace each by
     /// a hidden variable holding its result.
     pub(super) fn hoist(&mut self, expr: &sv::ir::Expr) -> Result<sv::ir::Expr, sv::AnalyzerError> {
@@ -465,17 +509,19 @@ impl Ff<'_, '_> {
                 callee: sv::ir::Callee::String(op),
                 args,
                 ..
-            } => self.string_call(*op, args)?,
+            } => self.string_call(op.clone(), args)?,
             Expr::Call {
                 callee: sv::ir::Callee::Object(op),
                 args,
                 ..
             } => match &**op {
                 sv::ir::ObjectOp::Container { op, layout } => {
-                    self.container_call(*op, *layout, args)?
+                    self.container_call(*op, layout.clone(), args)?
                 }
-                sv::ir::ObjectOp::Locator(locator) => self.locator(*locator, args)?,
-                sv::ir::ObjectOp::Pattern(pattern) => self.aggregate_pattern(*pattern, args)?,
+                sv::ir::ObjectOp::Locator(locator) => self.locator(locator.clone(), args)?,
+                sv::ir::ObjectOp::Pattern(pattern) => {
+                    self.aggregate_pattern(pattern.clone(), args)?
+                }
                 sv::ir::ObjectOp::Concat(concat) => self.container_concat(concat, args)?,
                 sv::ir::ObjectOp::Stream(op) => self.stream_call(op, args)?,
                 sv::ir::ObjectOp::ScopeRandomize(program) => self.scope_randomize(program, args)?,
@@ -686,23 +732,7 @@ impl Ff<'_, '_> {
                     .map(|arg| arg.as_ref().map(|arg| self.hoist(arg)).transpose())
                     .collect::<Result<_, _>>()?,
             },
-            Expr::Select {
-                expr,
-                msb,
-                lsb,
-                signed,
-            } => {
-                let expr = self.hoist(expr)?;
-                let mut calls = Vec::new();
-                let lsb = self.hoist_const(lsb, &mut calls)?;
-                let msb = self.hoist_const(msb, &mut calls)?;
-                Expr::Select {
-                    expr: Box::new(expr),
-                    msb,
-                    lsb,
-                    signed: *signed,
-                }
-            }
+            Expr::Select { .. } => self.hoist_select(expr, &mut Vec::new())?,
             Expr::Concat(parts) => Expr::Concat(
                 parts
                     .iter()

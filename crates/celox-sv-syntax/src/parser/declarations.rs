@@ -40,12 +40,7 @@ impl UnitFrame {
             !self.scopes[checker.depth..].iter().any(|scope| {
                 matches!(
                     *scope,
-                    "endclass"
-                        | "endgroup"
-                        | "endclocking"
-                        | "endproperty"
-                        | "endsequence"
-                        | "endspecify"
+                    "endclass" | "endclocking" | "endproperty" | "endsequence" | "endspecify"
                 )
             })
         })
@@ -91,7 +86,6 @@ impl UnitFrame {
                 "endclass"
                     | "endchecker"
                     | "endclocking"
-                    | "endgroup"
                     | "endproperty"
                     | "endsequence"
                     | "endspecify"
@@ -233,17 +227,14 @@ impl Parser<'_> {
                 self.attributes()?;
                 continue;
             }
-            if scopes.last() == Some(&"endgroup")
-                && delimiters.is_empty()
-                && self.peek() != "endgroup"
-            {
-                if self.coverage_item_prefix()? {
-                    delimiters.push("}");
-                }
-                continue;
-            }
             let root = scopes.is_empty() && delimiters.is_empty();
             let start = pending.as_ref().map_or(self.at, |value| value.0);
+            if root && self.peek() == "primitive" {
+                let primitive = self.primitive()?;
+                self.primitives.push(primitive);
+                pending = None;
+                continue;
+            }
             if self.unit_start() {
                 let id = SourceUnitId(units.len());
                 units.push(self.unit()?);
@@ -269,11 +260,16 @@ impl Parser<'_> {
                 Some(BodyItemKind::Parameter(self.parameter_declaration()?))
             } else if root
                 && pending.as_ref().is_some_and(|value| value.1 == self.at)
-                && self.logic_gate_start()
+                && (self.logic_gate_start() || self.primitive_instance_start())
             {
                 Some(BodyItemKind::LogicGate(Box::new(self.logic_gate()?)))
             } else if delimiters.is_empty() && self.peek() == "assign" {
                 Some(BodyItemKind::Assign(self.assign_statement()?))
+            } else if delimiters.is_empty() && self.peek() == "covergroup" {
+                let in_class = scopes.last() == Some(&"endclass");
+                Some(BodyItemKind::Covergroup(
+                    self.covergroup_declaration(in_class, false)?,
+                ))
             } else if delimiters.is_empty()
                 && blocked_subroutines == 0
                 && matches!(self.peek(), "function" | "task")
@@ -355,10 +351,7 @@ impl Parser<'_> {
             let mut closed = false;
             let mut completed_children = Vec::new();
             let opening = delimiters.is_empty()
-                && matches!(
-                    word,
-                    "class" | "checker" | "clocking" | "covergroup" | "sequence"
-                )
+                && matches!(word, "class" | "checker" | "clocking" | "sequence")
                 || delimiters.is_empty()
                     && word == "property"
                     && (self.at == 0
@@ -380,12 +373,6 @@ impl Parser<'_> {
                     scopes.push("endchecker");
                     continue;
                 }
-                if word == "covergroup" {
-                    self.coverage_header()?;
-                    scopes.push("endgroup");
-                    blocked_subroutines += 1;
-                    continue;
-                }
             }
             let closing = delimiters.is_empty() && scopes.last().copied() == Some(word);
             match word {
@@ -397,10 +384,6 @@ impl Parser<'_> {
                 "class" if delimiters.is_empty() => scopes.push("endclass"),
                 "checker" if delimiters.is_empty() => scopes.push("endchecker"),
                 "clocking" if delimiters.is_empty() => scopes.push("endclocking"),
-                "covergroup" if delimiters.is_empty() => {
-                    scopes.push("endgroup");
-                    blocked_subroutines += 1;
-                }
                 "property"
                     if delimiters.is_empty()
                         && (self.at == 0
@@ -418,7 +401,7 @@ impl Parser<'_> {
                 }
                 word if delimiters.is_empty() && scopes.last().copied() == Some(word) => {
                     let ended = scopes.pop().unwrap();
-                    if matches!(ended, "endgroup" | "endproperty" | "endsequence") {
+                    if matches!(ended, "endproperty" | "endsequence") {
                         blocked_subroutines -= 1;
                     }
                     closed = scopes.is_empty();
@@ -443,7 +426,7 @@ impl Parser<'_> {
             self.at += 1;
             if closing && let Some((start, category, items)) = captured.pop() {
                 if category == "class" {
-                    self.finish_class(None);
+                    self.finish_class(None)?;
                 }
                 if let Some((_, _, parent)) = captured.last_mut() {
                     parent.push(super::generate::Builder::node(
@@ -560,6 +543,7 @@ impl Parser<'_> {
                 package_bindings,
                 type_aliases: Vec::new(),
                 time_declarations: Vec::new(),
+                default_nettype: self.default_nettype.clone(),
                 end_label: None,
                 tokens: header,
             },
@@ -593,12 +577,13 @@ impl Parser<'_> {
                 frame.unit.items = std::mem::take(&mut frame.builder.roots);
                 self.adopt_non_ansi_ports(&mut frame.unit)?;
                 self.declare_implicit_nets(&mut frame.unit)?;
+                self.reject_variable_loop_indices(&frame.unit)?;
+                self.reject_duplicate_block_names(&frame.unit)?;
+                self.reject_circular_typedefs(&frame.unit)?;
                 frame.unit.body = self.range(frame.body_start);
                 if !frame.unit.external {
                     self.expect(frame.end)?;
-                    if self.eat(":") {
-                        frame.unit.end_label = Some(self.name()?);
-                    }
+                    frame.unit.end_label = self.end_label(Some(&frame.unit.name))?;
                 }
                 frame.unit.tokens = self.range(frame.start);
                 if let Some(parent) = frames.last_mut() {
@@ -619,17 +604,6 @@ impl Parser<'_> {
                 return Err(self.error("resetall directive inside a design element"));
             }
             if self.directive()? {
-                frames.push(frame);
-                continue;
-            }
-            if frame.scopes.last() == Some(&"endgroup")
-                && frame.delimiters.is_empty()
-                && self.peek() != "endgroup"
-            {
-                if self.coverage_item_prefix()? {
-                    frame.delimiters.push("}");
-                }
-                frame.item_start = true;
                 frames.push(frame);
                 continue;
             }
@@ -761,6 +735,19 @@ impl Parser<'_> {
                 frames.push(frame);
                 continue;
             }
+            // A covergroup is one item, whose parser reads it through its
+            // `endgroup` (IEEE 1800-2023 19.3).
+            if frame.delimiters.is_empty() && self.peek() == "covergroup" {
+                let start = self.at;
+                let in_class = frame.scopes.last() == Some(&"endclass");
+                let id = self.covergroup_declaration(in_class, true)?;
+                frame.record(self, start, BodyItemKind::Covergroup(id))?;
+                frame.conditional = frame.builder.active();
+                frame.prototype = false;
+                frame.item_start = true;
+                frames.push(frame);
+                continue;
+            }
             if frame.delimiters.is_empty() && self.package_binding_start() {
                 let start = self.at;
                 let id = self.package_binding()?;
@@ -804,7 +791,10 @@ impl Parser<'_> {
                 frames.push(frame);
                 continue;
             }
-            if frame.delimiters.is_empty() && frame.item_start && self.logic_gate_start() {
+            if frame.delimiters.is_empty()
+                && frame.item_start
+                && (self.logic_gate_start() || self.primitive_instance_start())
+            {
                 let start = self.at;
                 let gate = self.logic_gate()?;
                 frame.record(self, start, BodyItemKind::LogicGate(Box::new(gate)))?;
@@ -839,7 +829,7 @@ impl Parser<'_> {
                 && !frame
                     .scopes
                     .iter()
-                    .any(|scope| matches!(*scope, "endgroup" | "endproperty" | "endsequence"))
+                    .any(|scope| matches!(*scope, "endproperty" | "endsequence"))
                 && matches!(self.peek(), "function" | "task")
             {
                 let parameters = self.parameter_declarations.len();
@@ -1032,7 +1022,6 @@ impl Parser<'_> {
                         "endclass"
                             | "endchecker"
                             | "endclocking"
-                            | "endgroup"
                             | "endproperty"
                             | "endsequence"
                             | "endspecify"
@@ -1103,9 +1092,9 @@ impl Parser<'_> {
                 "function" | "task"
                     if delimiters.is_empty()
                         && !frame.prototype
-                        && !scopes.iter().any(|scope| {
-                            matches!(*scope, "endgroup" | "endproperty" | "endsequence")
-                        }) =>
+                        && !scopes
+                            .iter()
+                            .any(|scope| matches!(*scope, "endproperty" | "endsequence")) =>
                 {
                     scopes.push(if word == "function" {
                         "endfunction"
@@ -1142,13 +1131,6 @@ impl Parser<'_> {
                     scopes.push("endproperty")
                 }
                 "sequence" => scopes.push("endsequence"),
-                "covergroup" if delimiters.is_empty() => {
-                    scopes.push("endgroup");
-                    self.coverage_header()?;
-                    frame.item_start = true;
-                    frames.push(frame);
-                    continue;
-                }
                 "specify" => scopes.push("endspecify"),
                 "if" | "for" | "else" if scopes.is_empty() && delimiters.is_empty() => {
                     frame.conditional = true
@@ -1170,7 +1152,6 @@ impl Parser<'_> {
                         "end"
                             | "endclass"
                             | "endchecker"
-                            | "endgroup"
                             | "endclocking"
                             | "endproperty"
                             | "endsequence"
@@ -1191,7 +1172,7 @@ impl Parser<'_> {
                     .chain(frames.iter().rev())
                     .find(|frame| frame.unit.kind == UnitKind::Package)
                     .map(|frame| frame.unit.name.spelling.clone());
-                self.finish_class(package);
+                self.finish_class(package)?;
                 let class = frame
                     .classes
                     .pop()
@@ -1269,6 +1250,22 @@ impl Parser<'_> {
     pub(super) fn parameter_declaration(&mut self) -> Result<ParameterDeclarationId> {
         let start = self.at;
         let parameters = self.parameters(";")?;
+        // Only a parameter port list may omit a default value (IEEE
+        // 1800-2023 6.20.1, Syntax 6-6).
+        if let Some(parameter) = parameters.iter().find(|parameter| {
+            matches!(
+                parameter.kind,
+                ParameterKind::Value { default: None, .. } | ParameterKind::Type { default: None }
+            )
+        }) {
+            return Err(self.error_at(
+                parameter.tokens,
+                format!(
+                    "parameter `{}` declared without a value outside a parameter port list",
+                    parameter.name.value()
+                ),
+            ));
+        }
         let id = ParameterDeclarationId(self.parameter_declarations.len());
         self.parameter_declarations.push(ParameterDeclaration {
             parameters,
@@ -1418,7 +1415,9 @@ impl Parser<'_> {
                 PortKind::Explicit { name, expression }
             } else if matches!(self.peek(), "," | ")") {
                 PortKind::NonAnsi(None)
-            } else if !fresh && matches!(self.peek(), "{" | "(") {
+            } else if !fresh && (matches!(self.peek(), "{" | "(") || !ansi && self.nth(1) == "[") {
+                // A port expression of a non-ANSI header: a concatenation,
+                // or a bit- or part-select (23.2.2.1).
                 PortKind::NonAnsi(Some(self.expression(0)?))
             } else {
                 PortKind::Named(self.name()?)

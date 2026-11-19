@@ -85,23 +85,30 @@ fn editing_a_cloned_shape_invalidates_only_its_own_binding() {
     assert!(!shape.same_declaration(&edited));
 }
 
+/// Handles of two classes have one shape: their element types tell them
+/// apart (IEEE 1800-2023 8.4), in another table too, and a handle whose
+/// shape changes forgets its class with its binding.
 #[test]
-fn class_identity_changes_cannot_reuse_a_previous_binding() {
-    let mut shape = procedural::dimensions_from_type(&Type::new(TypeKind::Bit));
-    shape.class = Some("C".into());
+fn handles_of_classes_are_told_apart_by_their_element_types() {
     let mut table = TyTable::default();
     let functions = const_functions::ConstantFunctions::default();
-    let first = shape
-        .bind_type(&mut table, &functions, &ConstEnv::default())
-        .unwrap();
-    shape.class = Some("D".into());
-    let second = shape
-        .type_id(&mut table, &functions, &ConstEnv::default())
-        .unwrap();
-    assert_ne!(first, second);
-    assert!(
-        matches!(table.data(second), TyData::Class(semantic_types::Decl::Class(decl)) if table.decl(*decl).name.as_ref() == "D")
-    );
+    let c = procedural::dimensions_from_type(&classes::handle(&mut table, "C"));
+    let d = procedural::dimensions_from_type(&classes::handle(&mut table, "D"));
+    assert_eq!(c.clone_shape(), d.clone_shape());
+    assert_ne!(c, d);
+    let id = |shape: &VariableDimensions, table: &mut TyTable| {
+        shape.type_id(table, &functions, &ConstEnv::default())
+    };
+    assert_ne!(id(&c, &mut table), id(&d, &mut table));
+    assert_eq!(c.class_in(&table).as_deref(), Some("C"));
+    // A table that declared the class on its own tells the same class.
+    let mut other = TyTable::default();
+    let again = procedural::dimensions_from_type(&classes::handle(&mut other, "C"));
+    assert_eq!(c, again);
+    assert_eq!(again.class_in(&other).as_deref(), Some("C"));
+    let mut changed = c.clone();
+    changed.signed = true;
+    assert_eq!(changed.class_in(&table), None);
 }
 
 #[test]
@@ -311,4 +318,46 @@ fn a_shape_bound_to_its_base_type_is_caught() {
         ));
     // A change that keeps the binding but adds a dimension.
     procedural::dimensions_from_type(&array).bound(&table);
+}
+
+#[test]
+fn shapes_of_an_enumerated_type_are_not_those_of_its_bits() {
+    // A shape that keeps an enumerated type (IEEE 1800-2023 6.19) is not of
+    // a bit array of the same shape (6.22.2), also where neither its members
+    // nor its declared type tell it, such as for an enumeration too wide
+    // for its members: the closed-shape cache, which keys on the shape, does
+    // not give it the type of a bit array typed before it.
+    let mut ty = Type::new(TypeKind::Bit);
+    ty.packed_ranges.push(PackedRange::new(
+        ConstExpr::Literal("129".into()),
+        ConstExpr::Literal("0".into()),
+    ));
+    ty.unpacked_ranges.push(UnpackedRange::new(
+        ConstExpr::Literal("0".into()),
+        ConstExpr::Literal("1".into()),
+    ));
+    let bits = VariableDimensions::new(VariableShape {
+        declared: type_names::Declared::default(),
+        ..procedural::dimensions_from_type(&ty).clone_shape()
+    });
+    let enumerated = VariableDimensions::new(bits.clone_shape()).with_enumeration(
+        semantic_types::EnumBinding::new(semantic_types::EnumDeclaration {
+            name: Some("w_t".into()),
+            named: true,
+            scope: None,
+            typename: None,
+            domain: None,
+            dims: 1,
+        }),
+    );
+    let mut table = TyTable::default();
+    let functions = const_functions::ConstantFunctions::default();
+    let env = ConstEnv::default();
+    let bits = bits.type_id(&mut table, &functions, &env).unwrap();
+    let enumerated = enumerated.type_id(&mut table, &functions, &env).unwrap();
+    assert_ne!(bits, enumerated);
+    assert_eq!(
+        table.enumeration(table.fixed_element(enumerated)),
+        Some(false)
+    );
 }

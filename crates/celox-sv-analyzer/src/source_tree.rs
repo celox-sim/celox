@@ -6,7 +6,7 @@ use crate::AnalyzerError;
 mod scopes;
 pub(crate) use scopes::ScopeHandle;
 mod spans;
-pub(crate) use spans::{Ranges, SourceText, Spans, Starts};
+pub(crate) use spans::{CovergroupInteriors, Ranges, SourceText, Spans, Starts};
 
 /// A file's native arenas, shared by the trees that view them, with the
 /// index of their spans and the facts analyses derive from them, which are

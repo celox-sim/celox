@@ -8,7 +8,7 @@ use crate::{
 };
 use celox_design::ForkJoin;
 use frame_image::{FrameImage, ImageLayout};
-use std::sync::Arc;
+use std::{cmp::Reverse, sync::Arc};
 
 pub mod frame_image;
 
@@ -123,6 +123,7 @@ impl<B: SimBackend> SimulationState<B> {
                 return process;
             }
             self.process_state.activations = (0..self.kernel_count).map(Activation::root).collect();
+            self.rebuild_activation_reuse();
         }
         let activation = &mut self.process_state.activations[process];
         if let Some(frame) = &self.model.processes[process].frame {
@@ -254,7 +255,8 @@ impl<B: SimBackend> SimulationState<B> {
                 .set(random, &((u64::from(seed) | (1 << 32)).into(), 0u8.into()));
             child.control = ProcessControl::default();
             child.live = true;
-            child.parent = Some(process);
+            // Linked below, by `set_parent`.
+            child.parent = None;
             child.pending.clear();
             child.join = None;
             if frames.is_none() {
@@ -263,25 +265,23 @@ impl<B: SimBackend> SimulationState<B> {
                     .set(resume, &((entry as u64).into(), 0u8.into()));
             }
             child.private.set(status, &(0u8.into(), 0u8.into()));
-            let reusable = (self.kernel_count..self.process_state.activations.len()).find(|&id| {
-                !self.process_state.activations[id].live
-                    && !self.process_state.activations[id].control.exposed
-                    && !self
-                        .process_state
-                        .activations
-                        .iter()
-                        .any(|a| a.parent == Some(id))
-            });
-            let id = reusable.unwrap_or(self.process_state.activations.len());
-            if id == self.process_state.activations.len() {
-                self.process_state.activations.push(child);
-                self.model
-                    .processes
-                    .push(self.model.processes[process].clone());
-            } else {
-                self.process_state.activations[id] = child;
-                self.model.processes[id] = self.model.processes[process].clone();
-            }
+            let id = match self.take_reusable_activation() {
+                Some(id) => {
+                    self.set_parent(id, None);
+                    self.process_state.activations[id] = child;
+                    self.model.processes[id] = self.model.processes[process].clone();
+                    id
+                }
+                None => {
+                    self.process_state.activations.push(child);
+                    self.activation_children.push(0);
+                    self.model
+                        .processes
+                        .push(self.model.processes[process].clone());
+                    self.process_state.activations.len() - 1
+                }
+            };
+            self.set_parent(id, Some(process));
             if let Some((stack, resume)) = &frames {
                 let mut stack = stack.clone();
                 stack[unit_resume..unit_resume + UNIT_RESUME_BYTES]
@@ -397,11 +397,15 @@ impl<B: SimBackend> SimulationState<B> {
         self.process_wakeups
             .retain(|std::cmp::Reverse((_, id))| !cancelled[*id]);
         // Already captured NBA values are independent scheduler work.
-        for (id, &cancelled) in cancelled.iter().enumerate() {
-            if cancelled {
-                self.retire_activation(id);
-            }
+        let ids: Vec<usize> = cancelled
+            .iter()
+            .enumerate()
+            .filter_map(|(id, &cancelled)| cancelled.then_some(id))
+            .collect();
+        for &id in &ids {
+            self.retire_activation(id);
         }
+        self.release_for_reuse(&ids, true);
         for &id in &live_cancelled {
             self.process_changed(id);
         }
@@ -415,6 +419,7 @@ impl<B: SimBackend> SimulationState<B> {
             return;
         }
         self.process_state.activations[process].live = false;
+        self.release_for_reuse(&[process], false);
         if let Some(parent) = self.process_state.activations[process].parent {
             let parent = &mut self.process_state.activations[parent];
             if let Some((join, children)) = &mut parent.join {
@@ -453,10 +458,9 @@ impl<B: SimBackend> SimulationState<B> {
         let mut next = Some(process);
         while let Some(id) = next {
             let has_children = self
-                .process_state
-                .activations
-                .iter()
-                .any(|child| child.parent == Some(id));
+                .activation_children
+                .get(id)
+                .is_some_and(|&count| count > 0);
             let Some(activation) = self.process_state.activations.get_mut(id) else {
                 break;
             };
@@ -475,7 +479,8 @@ impl<B: SimBackend> SimulationState<B> {
             if has_children {
                 break;
             }
-            next = activation.parent.take();
+            next = activation.parent;
+            self.set_parent(id, None);
         }
     }
 
@@ -537,6 +542,140 @@ impl<B: SimBackend> SimulationState<B> {
         }
     }
 
+    /// Whether spawned activation `id` may be reused for a new child: it
+    /// ended, no process handle refers to it (IEEE 1800-2023 9.7), and no
+    /// activation names it as its parent.
+    fn activation_reusable(&self, id: usize) -> bool {
+        self.process_state
+            .activations
+            .get(id)
+            .is_some_and(|activation| !activation.live && !activation.control.exposed)
+            && self.activation_children.get(id) == Some(&0)
+    }
+
+    /// Clear every registration that names the ended activations `ids`, and
+    /// offer each that may be reused for a new child: the only way an
+    /// activation reaches [`Self::take_reusable_activation`], so that a
+    /// reused one inherits nothing of the one before. `killed` when they
+    /// ended before running to their end (`disable`, `$exit`), which may
+    /// leave them queued or waiting anywhere.
+    pub(super) fn release_for_reuse(&mut self, ids: &[usize], killed: bool) {
+        if killed {
+            let released: fxhash::FxHashSet<usize> = ids.iter().copied().collect();
+            self.process_wakeups
+                .retain(|Reverse((_, id))| !released.contains(id));
+            self.spawned.retain(|id| !released.contains(id));
+        }
+        for &id in ids {
+            if self
+                .process_state
+                .activations
+                .get(id)
+                .is_none_or(|activation| activation.live)
+            {
+                continue;
+            }
+            let state = &mut self.process_state;
+            state.waiters.remove(id);
+            state.ready.remove(&id);
+            state.deferred_ready.remove(&id);
+            state.inactive.remove(&id);
+            state.reactive.remove(&id);
+            state.observed.remove(&id);
+            state.re_inactive.remove(&id);
+            state.call_stacks.remove(&id);
+            // The named events it waits for, or observes.
+            let control = &mut state.activations[id].control;
+            let events: Vec<u32> = std::mem::take(&mut control.events)
+                .into_iter()
+                .chain(std::mem::take(&mut control.observed_events))
+                .collect();
+            for handle in events {
+                if let Some(event) = state.events.get_mut(&handle) {
+                    event.waiters.retain(|&waiter| waiter != id);
+                }
+            }
+            if self.continued == Some(id) {
+                self.continued = None;
+            }
+            self.slot_resumed.retain(|&resumed| resumed != id);
+            self.cancel_semaphore_wait(id);
+            self.cancel_mailbox_wait(id);
+            if id >= self.kernel_count && self.activation_reusable(id) {
+                self.reusable_activations.push(Reverse(id));
+            }
+        }
+    }
+
+    /// The smallest reusable activation, if any. Every activation that is
+    /// reusable was offered when it became so; an offered one that no longer
+    /// is, or was taken already, is dropped.
+    fn take_reusable_activation(&mut self) -> Option<usize> {
+        while let Some(Reverse(id)) = self.reusable_activations.pop() {
+            if self.activation_reusable(id) {
+                // A recount of every link costs a scan of the activations:
+                // check the counts at every power of two reuses.
+                self.reuses += 1;
+                debug_assert!(
+                    !self.reuses.is_power_of_two()
+                        || self.activation_children == self.count_children(),
+                    "the counts of children follow the parent links"
+                );
+                return Some(id);
+            }
+        }
+        None
+    }
+
+    /// Link activation `id` to `parent`, or unlink it. The only place that
+    /// changes a link once activations are counted, so each activation's
+    /// count of children stays the number of links to it: unlinking the
+    /// last child of an ended activation offers it for reuse.
+    fn set_parent(&mut self, id: usize, parent: Option<usize>) {
+        let previous = std::mem::replace(&mut self.process_state.activations[id].parent, parent);
+        if previous == parent {
+            return;
+        }
+        if let Some(previous) = previous {
+            let count = &mut self.activation_children[previous];
+            *count -= 1;
+            if *count == 0 {
+                self.release_for_reuse(&[previous], false);
+            }
+        }
+        if let Some(parent) = parent {
+            self.activation_children[parent] += 1;
+        }
+    }
+
+    /// The number of activations linked to each activation as their parent.
+    fn count_children(&self) -> Vec<u32> {
+        let activations = &self.process_state.activations;
+        let mut children = vec![0; activations.len()];
+        for activation in activations {
+            if let Some(count) = activation
+                .parent
+                .and_then(|parent| children.get_mut(parent))
+            {
+                *count += 1;
+            }
+        }
+        children
+    }
+
+    /// Recount the children of the activations and offer every reusable one,
+    /// after the activations were replaced by those of a saved state, where
+    /// each ended one was released (see [`Self::release_for_reuse`]) before.
+    pub(super) fn rebuild_activation_reuse(&mut self) {
+        self.activation_children = self.count_children();
+        self.reusable_activations.clear();
+        for id in self.kernel_count..self.process_state.activations.len() {
+            if self.activation_reusable(id) {
+                self.reusable_activations.push(Reverse(id));
+            }
+        }
+    }
+
     pub(super) fn rebuild_activation_models(&mut self) {
         self.model.processes.truncate(self.kernel_count);
         for index in 0..self.process_state.activations.len() {
@@ -547,6 +686,7 @@ impl<B: SimBackend> SimulationState<B> {
                     .push(self.model.processes[kernel].clone());
             }
         }
+        self.rebuild_activation_reuse();
     }
 }
 

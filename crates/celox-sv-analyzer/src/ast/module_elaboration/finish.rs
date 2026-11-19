@@ -11,8 +11,20 @@ impl ScopeElaboration<'_> {
         session: &mut Session,
         inline_randomizations: Vec<classes::constraints::InlineRequest>,
     ) -> Option<scope::ScopeSymbols> {
+        // A package parameter whose value calls a constant function with an
+        // array parameter of the package is published with the literal of
+        // that array as the argument (IEEE 1800-2023 13.4.3): a scope that
+        // uses the parameter has the package's constants, not its arrays'
+        // elements. A package has no overrides, so the value is fixed.
+        if self.is_package {
+            for parameter in &mut self.parameters {
+                parameter.value = parameter.value.take().map(|value| {
+                    parameters::substitute_array_parameter_arguments(value, &self.const_env)
+                });
+            }
+        }
         if self.is_package || self.export_symbols {
-            Arc::make_mut(&mut self.packed_dimensions.constant_types).extend(
+            self.packed_dimensions.constant_types.extend(
                 classes::specializations::export_constant_types(syntax_tree, session),
             );
         }
@@ -25,8 +37,24 @@ impl ScopeElaboration<'_> {
                 .into_iter()
                 .map(Arc::new)
                 .collect(),
+            // A scope that binds an instance of the interface lowers its
+            // code, which handles objects of the classes the interface sees
+            // (IEEE 1800-2023 25.3): a package's importers see those
+            // themselves.
+            object_classes: if self.is_package {
+                Vec::new()
+            } else {
+                self.imported
+                    .classes
+                    .iter()
+                    .chain(&self.imported.object_classes)
+                    .cloned()
+                    .collect()
+            },
             class_member_types: classes::specializations::export_member_types(syntax_tree, session),
             inline_randomizations,
+            // A scope exports no other instance's subroutines.
+            hierarchical_subroutines: Vec::new(),
             declarations_only: self.imported.declarations_only,
             type_parameter_bindings: HashMap::default(),
             pattern_parameter_bindings: HashMap::default(),
@@ -46,7 +74,12 @@ impl ScopeElaboration<'_> {
             // or export makes visible by name.
             type_declarations: types::declared_type_names(syntax_tree).unwrap_or_default(),
             enum_constants: self.enum_constants.clone(),
-            constant_types: (*self.packed_dimensions.constant_types).clone(),
+            constant_types: self
+                .packed_dimensions
+                .constant_types
+                .iter()
+                .map(|(name, r#type)| (name.clone(), r#type.clone()))
+                .collect(),
             functions: self.functions.clone(),
             function_return_types: (*self.packed_dimensions.function_return_types).clone(),
             constant_functions: syntax_tree.functions.clone(),
@@ -69,9 +102,15 @@ impl ScopeElaboration<'_> {
             ff_processes: self.ff_processes.clone(),
             aliases: self.imported.aliases.clone(),
             interface_members: self.imported.interface_members.clone(),
+            // A scope exports no other instance's parameters either.
+            hierarchical_constants: HashMap::default(),
+            outward_names: self.imported.outward_names.clone(),
             local_aliases: self.imported.local_aliases.clone(),
+            external_forces: Vec::new(),
             interface_types: self.imported.interface_types.clone(),
             interface_modports: self.imported.interface_modports.clone(),
+            interface_arguments: self.imported.interface_arguments.clone(),
+            interface_blocks: self.imported.interface_blocks.clone(),
             interface_arrays: self.imported.interface_arrays.clone(),
             interface_scopes: self.imported.interface_scopes.clone(),
             interface_declarations: self.imported.interface_declarations.clone(),

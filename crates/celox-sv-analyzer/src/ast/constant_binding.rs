@@ -63,6 +63,75 @@ pub(super) fn bind_in(
 ) -> Converted<Option<ConstExpr>> {
     bind_in_context(root, native, tree, session, dimensions, dimensions)
 }
+/// `value` with each name of a constant that only its literal holds, one
+/// too wide for the numeric environment such as a wide enumeration member,
+/// replaced by that literal: a cast folds its operand's value (IEEE
+/// 1800-2023 6.24.1), which the name alone does not give.
+fn with_wide_literals(value: ConstExpr, dimensions: &PackedDimensions) -> ConstExpr {
+    let wide = |value: Box<ConstExpr>| Box::new(with_wide_literals(*value, dimensions));
+    match value {
+        ConstExpr::Ident(name) if !dimensions.const_env.contains_key(&name) => {
+            match dimensions.parameter_values.get(&name) {
+                Some(Expr::Literal(text)) if typecheck::parse_integral_literal(text).is_some() => {
+                    ConstExpr::Literal(text.clone())
+                }
+                _ => ConstExpr::Ident(name),
+            }
+        }
+        ConstExpr::Literal(_) | ConstExpr::Ident(_) => value,
+        ConstExpr::Select { expr, bit } => ConstExpr::Select {
+            expr: wide(expr),
+            bit: wide(bit),
+        },
+        ConstExpr::SelectRange {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => ConstExpr::SelectRange {
+            expr: wide(expr),
+            msb: wide(msb),
+            lsb: wide(lsb),
+            signed,
+        },
+        ConstExpr::Resize {
+            expr,
+            width,
+            signed,
+        } => ConstExpr::Resize {
+            expr: wide(expr),
+            width,
+            signed,
+        },
+        ConstExpr::Function { callee, args, site } => ConstExpr::Function {
+            callee,
+            args: args
+                .into_iter()
+                .map(|arg| with_wide_literals(arg, dimensions))
+                .collect(),
+            site,
+        },
+        ConstExpr::Unary { op, expr } => ConstExpr::Unary {
+            op,
+            expr: wide(expr),
+        },
+        ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
+            left: wide(left),
+            op,
+            right: wide(right),
+        },
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => ConstExpr::Mux {
+            condition: wide(condition),
+            then_expr: wide(then_expr),
+            else_expr: wide(else_expr),
+        },
+    }
+}
+
 fn bind_in_context(
     root: ExprId,
     native: &Declarations,
@@ -483,11 +552,29 @@ fn bind_in_context(
                     // dimension or a generate condition has no layout to
                     // select from, and an override is evaluated before the
                     // instance that receives it exists.
-                    if let Some(literal) =
-                        parameter_member(id, native, tree, &query_dimensions.const_env)
-                    {
-                        values.push(ConstExpr::Literal(literal));
-                        continue;
+                    if let Some((root, index, path)) = parameter_member(id, native, tree) {
+                        let literal = match index {
+                            None => parameters::member_literal(
+                                &root,
+                                &path,
+                                &query_dimensions.const_env,
+                            ),
+                            // A member of an element of an array parameter,
+                            // whose index is a constant (11.2.1).
+                            Some(index) => element_member_literal(
+                                &root,
+                                index,
+                                &path,
+                                native,
+                                tree,
+                                session,
+                                query_dimensions,
+                            ),
+                        };
+                        if let Some(literal) = literal {
+                            values.push(ConstExpr::Literal(literal));
+                            continue;
+                        }
                     }
                     let is_query = matches!(&native.expression(id).kind,ExprKind::Call{expression,..} if matches!(&native.expression(*expression).kind,ExprKind::Name(name) if SystemFunction::from_name(&name.spelling).is_some_and(|f|f.is_data_query()||matches!(f,SystemFunction::Isunbounded|SystemFunction::Typename))));
                     let mut context = if is_query {
@@ -563,6 +650,7 @@ fn bind_in_context(
             },
             Job::Cast(target) => {
                 let value = values.pop().ok_or_else(disagreement)?;
+                let value = with_wide_literals(value, dimensions);
                 let Some(value) = casts::cast_constant_target(
                     tree,
                     session,
@@ -697,15 +785,66 @@ fn bind_in_context(
             Job::Select(name, count) => {
                 let start = values.len().checked_sub(count).ok_or_else(disagreement)?;
                 let mut indices = values.split_off(start);
-                if let Some(indices) = indices
+                let constant_indices = indices
                     .iter()
                     .map(|index| eval_ast_const_expr(&tree.functions, index, &dimensions.const_env))
-                    .collect::<Option<Vec<_>>>()
+                    .collect::<Option<Vec<_>>>();
+                if let Some([index]) = constant_indices.as_deref()
                     && let Some(literal) =
-                        parameter_element_literal(&name, &indices, &dimensions.const_env)
+                        parameters::array_element_literal(&name, *index, &dimensions.const_env)
                 {
                     values.push(ConstExpr::Literal(literal));
-                } else if indices.len() == 1 {
+                } else if let Some([index, selects @ ..]) = constant_indices.as_deref()
+                    && let Some(literal) = parameters::array_element_select_literal(
+                        &name,
+                        *index,
+                        selects,
+                        &dimensions.const_env,
+                    )
+                {
+                    // A select of the element's packed dimensions, such as
+                    // `table_p[0][1]`.
+                    values.push(ConstExpr::Literal(literal));
+                } else if dimensions
+                    .get(&name)
+                    .is_some_and(|shape| !shape.unpacked.is_empty())
+                {
+                    // An element of an unpacked array whose elements are not
+                    // constants here; a bit-select of the name would select
+                    // from another value.
+                    return Ok(None);
+                } else if let Some(constant) = &constant_indices
+                    && let Some(literal) =
+                        parameter_element_literal(&name, constant, &dimensions.const_env)
+                {
+                    values.push(ConstExpr::Literal(literal));
+                } else if let Some(constant) = &constant_indices
+                    && let Some((window, signed)) =
+                        parameters::parameter_element_window(&name, constant, &dimensions.const_env)
+                {
+                    // An element of a parameter wider than the numeric
+                    // environment holds: a select of its value, which folds
+                    // where the value is known (IEEE 1800-2023 7.4.1).
+                    values.push(match window {
+                        Ok((offset, width)) => ConstExpr::SelectRange {
+                            expr: Box::new(ConstExpr::Ident(name)),
+                            msb: Box::new(ConstExpr::Literal((offset + width - 1).to_string())),
+                            lsb: Box::new(ConstExpr::Literal(offset.to_string())),
+                            signed,
+                        },
+                        // An index out of range reads X bits (11.5.1).
+                        Err(width) => ConstExpr::Literal(format!(
+                            "{width}'{}b{}",
+                            if signed { "s" } else { "" },
+                            "x".repeat(width)
+                        )),
+                    });
+                } else if indices.len() == 1
+                    && parameters::parameter_rank(&name, &dimensions.const_env)
+                        .is_none_or(|rank| rank <= 1)
+                {
+                    // A bit of a vector; an element of a parameter of more
+                    // packed dimensions is no bit of it.
                     values.push(ConstExpr::Select {
                         expr: Box::new(ConstExpr::Ident(name)),
                         bit: Box::new(indices.pop().unwrap()),
@@ -790,24 +929,77 @@ pub(super) fn bind_unpacked_dimension(
     range.ok_or_else(|| unsupported("unresolved unpacked array dimension"))
 }
 
-/// The typed literal of native expression `id` if it selects a member, or a
-/// member of a member, of a packed structure parameter whose member
-/// constants `env` holds: `p.m`, `p.m.n` or `pkg::p.m`.
+/// The typed literal of member `path` of the element that native index
+/// expression `index` selects in the array parameter `root`, when the index
+/// is a constant in `dimensions` (IEEE 1800-2023 11.2.1).
+fn element_member_literal(
+    root: &str,
+    index: ExprId,
+    path: &str,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+) -> Option<String> {
+    let env = &dimensions.const_env;
+    let index = bind_in(index, native, tree, session, dimensions)
+        .ok()
+        .flatten()
+        .and_then(|index| eval_ast_const_expr(&tree.functions, &index, env))?;
+    parameters::array_element_member_literal(root, index, path, env)
+}
+
+/// The typed literal of native expression `id` if it selects, with a
+/// constant index, a member of an element of an array parameter that is no
+/// variable in `dimensions`, as in the initializer of another parameter.
+pub(super) fn array_parameter_member(
+    id: ExprId,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+) -> Option<String> {
+    if !matches!(native.expression(id).kind, ExprKind::Member { .. }) {
+        return None;
+    }
+    let (root, Some(index), path) = parameter_member(id, native, tree)? else {
+        return None;
+    };
+    if dimensions.get(&root).is_some() {
+        return None;
+    }
+    element_member_literal(&root, index, &path, native, tree, session, dimensions)
+}
+
+/// The parameter, the index of its element and the member path that native
+/// expression `id` selects, if it selects a member, or a member of a member,
+/// of a packed structure parameter or of an element of an unpacked array
+/// parameter: `p.m`, `p.m.n`, `pkg::p.m` or `p[k].m`.
 fn parameter_member(
     mut id: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
-    env: &ConstEnv,
-) -> Option<String> {
+) -> Option<(String, Option<ExprId>, String)> {
     let mut path = Vec::new();
+    let mut index = None;
     let root = loop {
         match &native.expression(id).kind {
             ExprKind::Member {
                 expression,
                 separator,
                 name,
-            } if separator == "." => {
+            } if separator == "." && index.is_none() => {
                 path.push(instances::normalize_identifier(&name.spelling));
+                id = *expression;
+            }
+            ExprKind::Select {
+                expression,
+                dimension,
+            } if index.is_none() && !path.is_empty() => {
+                let DimensionKind::Index(selected) = dimension.kind else {
+                    return None;
+                };
+                index = Some(selected);
                 id = *expression;
             }
             ExprKind::Member {
@@ -832,7 +1024,7 @@ fn parameter_member(
         return None;
     }
     path.reverse();
-    parameters::member_literal(&root, &path.join("."), env)
+    Some((root, index, path.join(".")))
 }
 
 /// The operand of native expression `id` if it is a `$typename` call.

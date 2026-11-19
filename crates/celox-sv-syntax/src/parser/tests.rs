@@ -1,8 +1,12 @@
 use super::*;
 
+mod end_labels;
+
 fn parse(code: &str) -> Declarations {
     Declarations::parse(code, Path::new("headers.sv")).unwrap()
 }
+
+mod illegal_items;
 
 #[test]
 fn checker_scopes_capture_native_control_and_procedure_ownership_without_leaking_items() {
@@ -432,7 +436,7 @@ fn macro_headers_retain_original_spelling_and_expansion_chain() {
 #[test]
 fn nonansi_external_and_wildcard_units_are_explicit() {
     let syntax = parse(
-        "extern module E(input int x); module N(a,.b({x,y})); output a; endmodule : N module W(.*); endmodule interface Bus; endinterface",
+        "extern module E(input int x); module N(a,.b({x,y})); output a; inout x, y; endmodule : N module W(.*); endmodule interface Bus; endinterface",
     );
     assert!(syntax.units[0].external);
     assert_eq!(syntax.units[1].port_style, PortStyle::NonAnsi);
@@ -1577,7 +1581,7 @@ fn continuous_assignment_targets_declare_implicit_nets_in_their_scope() {
 
 #[test]
 fn ordinary_net_declarations_retain_qualifiers_types_dimensions_and_values() {
-    let code = "module M;wire signed[7:0] a[2:1],b=3+2;trireg(small)scalared[3:0]c;tri(strong0,weak1)vectored logic[4:0]#(1:2:3,4,5)d;wire T[3:0]#1 e;input wire p;C child();if(1)begin:g uwire bit q;end endmodule interface I;tri t;endinterface";
+    let code = "module M;wire signed[7:0] a[2:1],b=3+2;trireg(small)scalared[3:0]c;tri(strong0,weak1)vectored logic[4:0]#(1:2:3,4,5)d;wire T[3:0]#1 e;C child();if(1)begin:g uwire bit q;end endmodule interface I;tri t;endinterface";
     let native = Declarations::parse(code, Path::new("nets.sv")).unwrap();
     assert_eq!(native.net_declarations.len(), 6);
     let a = &native.net_declarations[0];
@@ -2290,6 +2294,46 @@ fn reserved_keywords_cannot_supply_declaration_or_expression_identifiers() {
     }
 }
 
+/// A word the `begin_keywords` version does not reserve is an identifier
+/// wherever an identifier may appear, not only where a declaration names
+/// it (22.14): as a statement's target, an operand, a port, a net, a
+/// parameter and a generate block's name.
+#[test]
+fn unreserved_keywords_are_identifiers_everywhere() {
+    let tree = parse(
+        "`begin_keywords \"1364-2005\"
+module M(input bit, output reg [1:0] var);
+  wire byte = bit;
+  localparam string = 2;
+  integer int, expect, do;
+  task t; input bit; begin int = bit; end endtask
+  generate for (genvar i = 0; i < 2; i = i + 1) begin : logic wire w = byte; end endgenerate
+  initial begin
+    var <= #2 2'b01;
+    expect = int + string;
+    do[1:0] = logic[1].w;
+    for (int = 0; int < 2; int = int + 1) expect = expect;
+  end
+endmodule
+`end_keywords",
+    );
+    assert!(
+        tree.tokens
+            .iter()
+            .filter(|token| token.text == "\\bit")
+            .all(|token| token.kind == crate::TokenKind::EscapedIdentifier)
+    );
+    for source in [
+        "`begin_keywords \"1364-2005\" `end_keywords module M; logic bit; endmodule",
+        "`begin_keywords \"1800-2005\" module M; logic bit; endmodule `end_keywords",
+    ] {
+        assert!(
+            Declarations::parse(source, Path::new("reserved.sv")).is_err(),
+            "{source}"
+        );
+    }
+}
+
 #[test]
 fn keyword_directive_scopes_and_escaped_identifiers_preserve_names() {
     parse("module \\module ; logic \\always ; assign \\always =1; endmodule");
@@ -2823,21 +2867,92 @@ fn checker_formal_prefixes_validate_names_types_dimensions_and_directions() {
     }
 }
 
+/// The items of a covergroup are typed nodes of its declaration (IEEE
+/// 1800-2023 19.3); a function of a cross body is no subroutine of the
+/// scope around the covergroup.
 #[test]
-fn covergroup_headers_and_item_prefixes_validate_without_leaking_sampling_functions() {
-    for coverage in [
-        "covergroup cg; coverpoint x; endgroup",
-        "covergroup cg; option: coverpoint x; type_option: cross a,b; endgroup",
-        "covergroup cg(input int x) @(posedge clk or negedge rst); option.per_instance=1; type_option.weight=2; cp: coverpoint x iff(enable) { bins b[]={0,[1:3]}; bins transition=(1=>2[*3]); } cx: cross cp,other iff(enable) { bins all=binsof(cp) intersect {0}; function int helper(); typedef int T; return 1; endfunction } endgroup:cg",
-        "covergroup cg with function sample(input int x); logic[3:0] cp: coverpoint x; endgroup",
-        "covergroup cg @P::cb; cross a,b; endgroup",
-        "covergroup cg @@(begin M.task_name or end P::C::f); coverpoint x; endgroup",
+fn covergroup_headers_and_items_parse_without_leaking_cross_body_functions() {
+    for (coverage, items) in [
+        ("covergroup cg; coverpoint x; endgroup", vec!["coverpoint"]),
+        (
+            "covergroup cg; option: coverpoint x; type_option: cross a,b; endgroup",
+            vec!["coverpoint option", "cross type_option"],
+        ),
+        (
+            "covergroup cg(input int x) @(posedge clk or negedge rst); option.per_instance=1; type_option.weight=2; cp: coverpoint x iff(enable) { bins b[]={0,[1:3]}; bins transition=(1=>2[*3]); } cx: cross cp,other iff(enable) { bins all=binsof(cp) intersect {0}; function int helper(); typedef int T; return 1; endfunction } endgroup:cg",
+            vec![
+                "option per_instance",
+                "type_option weight",
+                "coverpoint cp",
+                "cross cx",
+            ],
+        ),
+        (
+            "covergroup cg with function sample(input int x); logic[3:0] cp: coverpoint x; endgroup",
+            vec!["coverpoint cp"],
+        ),
+        ("covergroup cg @P::cb; cross a,b; endgroup", vec!["cross"]),
+        (
+            "covergroup cg @@(begin M.task_name or end P::C::f); coverpoint x; endgroup",
+            vec!["coverpoint"],
+        ),
     ] {
+        let label = |label: &Option<Name>| {
+            label
+                .as_ref()
+                .map_or(String::new(), |label| format!(" {}", label.value()))
+        };
+        for source in [
+            format!(
+                "class C; {coverage} endclass function int global_f(); return 1; endfunction module M; endmodule"
+            ),
+            format!("module M; class C; {coverage} endclass endmodule"),
+        ] {
+            let source = parse(&source);
+            let [covergroup] = source.covergroups.as_slice() else {
+                panic!("{coverage}")
+            };
+            assert_eq!(covergroup.name.value(), "cg", "{coverage}");
+            assert_eq!(
+                source.classes[0].covergroups,
+                [CovergroupId(0)],
+                "{coverage}"
+            );
+            let parsed = covergroup
+                .items
+                .iter()
+                .map(|item| match item {
+                    CoverageItem::Option(option) => format!(
+                        "{} {}",
+                        if option.type_option {
+                            "type_option"
+                        } else {
+                            "option"
+                        },
+                        option.member.value()
+                    ),
+                    CoverageItem::Coverpoint(point) => {
+                        format!("coverpoint{}", label(&point.label))
+                    }
+                    CoverageItem::Cross(cross) => format!("cross{}", label(&cross.label)),
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(parsed, items, "{coverage}");
+            // The function of the cross body is none of the scope's.
+            let subroutines = source
+                .subroutines
+                .iter()
+                .map(|subroutine| subroutine.name.value())
+                .collect::<Vec<_>>();
+            assert!(
+                subroutines.is_empty() || subroutines == ["global_f"],
+                "{coverage}"
+            );
+        }
         let source = parse(&format!(
             "class C; {coverage} endclass function int global_f(); return 1; endfunction module M; endmodule"
         ));
         assert_eq!(source.subroutines.len(), 1, "{coverage}");
-        parse(&format!("module M; class C; {coverage} endclass endmodule"));
     }
     for coverage in [
         "covergroup ; endgroup",
@@ -3162,6 +3277,134 @@ fn non_ansi_port_declarations_fold_into_the_header() {
     // from the body.
     assert!(unit.net_declarations.is_empty());
     assert_eq!(unit.items.len(), 1);
+}
+
+#[test]
+fn non_ansi_subroutine_ports_take_variable_declarations() {
+    let syntax = parse(
+        "module M;\n task t;\n output x;\n input signed [3:0] y;\n int x;\n \
+         reg [3:0] z, y;\n x = y;\n endtask\nendmodule\n",
+    );
+    let task = &syntax.subroutines[0];
+    let ports: Vec<_> = task
+        .port_declarations
+        .iter()
+        .flat_map(|declaration| &declaration.ports)
+        .map(|port| {
+            let r#type = syntax.data_type(port.data_type);
+            (
+                r#type.kind.clone(),
+                r#type.signed,
+                r#type.packed_dimensions.len(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        ports,
+        [
+            (DataTypeKind::Builtin("int".into()), None, 0),
+            (DataTypeKind::Builtin("reg".into()), Some(true), 1),
+        ]
+    );
+    // `int x;` is gone from the body; `reg z` stays as the only declarator.
+    assert_eq!(task.items.len(), 2);
+    let StatementKind::Declaration(LocalDeclaration::Variables(declaration)) =
+        &syntax.statement(task.items[0]).kind
+    else {
+        panic!()
+    };
+    assert_eq!(declaration.variables.len(), 1);
+    assert_eq!(declaration.variables[0].name.value(), "z");
+}
+
+#[test]
+fn non_ansi_subroutine_port_redeclarations_keep_their_rules() {
+    for body in [
+        // A range on the variable declaration only (23.2.2.1).
+        "input l; reg [4:0] l;",
+        // A range on the port declaration only.
+        "input [7:0] l; integer l;",
+        "input [7:0] l; reg l;",
+        // An initializer or unpacked dimensions on the variable declaration.
+        "input l; int l = 1;",
+        "input l; int l [2];",
+    ] {
+        let code = format!("module M; task t; {body} endtask endmodule");
+        assert!(
+            Declarations::parse(&code, Path::new("bad.sv")).is_err(),
+            "{body}"
+        );
+    }
+    // A port declaration with a data type is complete; the variable
+    // declaration stays a second declaration of the name.
+    let syntax = parse("module M; task t; input int l; int l; endtask endmodule");
+    assert_eq!(syntax.subroutines[0].items.len(), 1);
+}
+
+#[test]
+fn port_declarations_need_a_list_of_ports() {
+    for code in [
+        "module M; input x; endmodule",
+        "module M(input a); output b; endmodule",
+        "interface I(); inout c; endinterface",
+    ] {
+        assert!(
+            Declarations::parse(code, Path::new("bad.sv")).is_err(),
+            "{code}"
+        );
+    }
+    // A subroutine of such a design element keeps its non-ANSI formals.
+    parse("module M; task t; input x; endtask endmodule");
+}
+
+#[test]
+fn non_ansi_port_expressions_become_explicit_ports() {
+    let syntax = parse(
+        "module M(a[7:4], a[3:0], , .e({c, d}), f, f);\n input [7:0] a;\n \
+         output c;\n output reg [1:0] d;\n input f;\nendmodule\n",
+    );
+    let unit = &syntax.units[0];
+    assert_eq!(unit.port_style, PortStyle::Ansi);
+    let ports: Vec<_> = unit
+        .ports
+        .iter()
+        .map(|port| match &port.kind {
+            PortKind::Explicit { name, expression } => (
+                name.value().to_string(),
+                expression.is_some(),
+                port.direction,
+            ),
+            PortKind::Named(name) => (name.value().to_string(), false, port.direction),
+            kind => panic!("{kind:?}"),
+        })
+        .collect();
+    assert_eq!(
+        ports,
+        [
+            ("%port1".into(), true, Some(Direction::Input)),
+            ("%port2".into(), true, Some(Direction::Input)),
+            ("%port3".into(), false, Some(Direction::Input)),
+            ("e".into(), true, Some(Direction::Output)),
+            ("%port5".into(), true, Some(Direction::Input)),
+            ("%port6".into(), true, Some(Direction::Input)),
+        ]
+    );
+    // The port declarations declare the objects: nets, and the variable
+    // of the output of a data type (23.2.2.3).
+    assert_eq!(unit.net_declarations.len(), 3);
+    assert_eq!(unit.data_declarations.len(), 1);
+    // The first port of an output that a port expression reads too keeps
+    // its name; the ports of an input that several drive do not.
+    let syntax = parse("module M(y, y[0], a, a); output [1:0] y; input a; endmodule");
+    let kinds: Vec<_> = syntax.units[0]
+        .ports
+        .iter()
+        .map(|port| matches!(port.kind, PortKind::Named(_)))
+        .collect();
+    assert_eq!(kinds, [true, false, false, false]);
+    // An inout port expression keeps the non-ANSI form.
+    let syntax = parse("module M(a, a); inout a; endmodule");
+    assert_eq!(syntax.units[0].port_style, PortStyle::NonAnsi);
 }
 
 #[test]
@@ -4076,6 +4319,8 @@ fn named_assertion_instances_follow_clock_and_disable_rules() {
     }
 }
 
+mod parameter_values;
+
 /// Only an abstract or interface class declares pure virtual methods (IEEE
 /// 1800-2023 8.21, 8.26), also when nothing uses the class.
 #[test]
@@ -4175,10 +4420,10 @@ fn external_constraints_resolve_unqualified_names_in_their_lexical_scope() {
 }
 
 /// The parser records the names that covergroups (IEEE 1800-2023 19.3) and
-/// user-defined nettypes (6.6.7) declare, whose declarations stay
-/// unconverted.
+/// user-defined nettypes (6.6.7) declare: a covergroup is a body item of
+/// its own kind, a nettype declaration stays unconverted.
 #[test]
-fn unconverted_type_declarations_record_their_names() {
+fn covergroup_and_nettype_declarations_record_their_names() {
     let syntax = parse(
         "module M; bit x; covergroup cg @(posedge x); Label: coverpoint x; endgroup \
          nettype logic [3:0] wide with resolve; nettype wide alias_t; endmodule",
@@ -4189,6 +4434,16 @@ fn unconverted_type_declarations_record_their_names() {
         .map(|declaration| declaration.name.value())
         .collect::<Vec<_>>();
     assert_eq!(covergroups, ["cg"]);
+    let items = syntax.units[0]
+        .items
+        .iter()
+        .map(|item| match &syntax.body_item(*item).kind {
+            BodyItemKind::Covergroup(id) => syntax.covergroup(*id).name.value(),
+            BodyItemKind::Unconverted { category, .. } => category.as_str(),
+            _ => "",
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(items, ["", "cg", "nettype", "nettype"]);
     let nettypes = syntax
         .nettypes
         .iter()
@@ -4331,3 +4586,5 @@ fn let_declarations_are_recorded_and_calls_stay_calls() {
             if matches!(&tree.expression(*expression).kind, ExprKind::Name(name) if name.value() == "f")
     )));
 }
+
+mod declaration_names;

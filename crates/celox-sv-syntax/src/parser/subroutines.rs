@@ -163,6 +163,7 @@ impl Parser<'_> {
                 data_type,
                 dimensions,
                 default,
+                declared_type: None,
                 tokens: self.range(start),
             });
             if self.eat(")") {
@@ -205,6 +206,7 @@ impl Parser<'_> {
                 data_type,
                 dimensions,
                 default,
+                declared_type: None,
                 tokens: self.range(start),
             });
             if !self.eat(",") {
@@ -218,7 +220,99 @@ impl Parser<'_> {
         })
     }
 
+    /// Complete the ports of non-ANSI port declarations that give no data
+    /// type with the variable declarations of the same names in the body
+    /// (IEEE 1800-2023 13.3 `mytask2`), under the rules of non-ANSI module
+    /// ports (23.2.2.1): the port declaration's signing carries over, and
+    /// so does its packed range to a type without a keyword or range; a
+    /// range of both must be the same. The declarator leaves the body, so
+    /// the port is declared once.
+    fn adopt_port_objects(
+        &mut self,
+        port_declarations: &mut [SubroutinePortDeclaration],
+        items: &mut Vec<StatementId>,
+    ) -> Result<()> {
+        let resume = self.at;
+        for port in port_declarations
+            .iter_mut()
+            .flat_map(|declaration| &mut declaration.ports)
+        {
+            if port.variable || !matches!(self.types[port.data_type.0].kind, DataTypeKind::Implicit)
+            {
+                continue;
+            }
+            let Some(name) = port.name.as_ref().map(|name| name.value().to_string()) else {
+                continue;
+            };
+            let found = items.iter().enumerate().find_map(|(position, &item)| {
+                let StatementKind::Declaration(LocalDeclaration::Variables(declaration)) =
+                    &self.statements[item.0].kind
+                else {
+                    return None;
+                };
+                if declaration.constant || declaration.lifetime.is_some() {
+                    return None;
+                }
+                let index = declaration
+                    .variables
+                    .iter()
+                    .position(|declarator| declarator.name.value() == name)?;
+                Some((
+                    position,
+                    item,
+                    index,
+                    declaration.data_type,
+                    declaration.variables[index].clone(),
+                    declaration.variables.len() == 1,
+                ))
+            });
+            let Some((position, item, index, object_type, declarator, last)) = found else {
+                continue;
+            };
+            self.at = self
+                .indices
+                .partition_point(|&index| index < declarator.tokens.start);
+            if !declarator.dimensions.is_empty() || declarator.value.is_some() {
+                return Err(self.error(format!(
+                    "variable declaration of non-ANSI subroutine port `{name}` with an \
+                     initializer or unpacked dimensions"
+                )));
+            }
+            // A variable declaration that gives no range declares no vector of
+            // the port declaration's range (23.2.2.1).
+            if !self.types[port.data_type.0].packed_dimensions.is_empty()
+                && self.types[object_type.0].packed_dimensions.is_empty()
+                && !matches!(self.types[object_type.0].kind, DataTypeKind::Implicit)
+            {
+                return Err(self.error(format!(
+                    "non-ANSI subroutine port `{name}` with a range declared again without one"
+                )));
+            }
+            let (data_type, declared) = self.merge_port_type(port.data_type, object_type)?;
+            port.declared_type = declared;
+            port.data_type = data_type;
+            if last {
+                items.remove(position);
+            } else if let StatementKind::Declaration(LocalDeclaration::Variables(declaration)) =
+                &mut self.statements[item.0].kind
+            {
+                declaration.variables.remove(index);
+            }
+        }
+        self.at = resume;
+        Ok(())
+    }
+
     pub(super) fn subroutine(&mut self, prototype: bool) -> Result<SubroutineId> {
+        let subroutine = self.subroutine_node(prototype)?;
+        let id = SubroutineId(self.subroutines.len());
+        self.subroutines.push(subroutine);
+        Ok(id)
+    }
+
+    /// A function or task declaration, which the caller stores: in the
+    /// subroutine arena, or with the cross body that declares it.
+    pub(super) fn subroutine_node(&mut self, prototype: bool) -> Result<Subroutine> {
         let start = self.at;
         let task = self.eat("task");
         if !task {
@@ -311,20 +405,56 @@ impl Parser<'_> {
                 }
             }
             body_tokens = self.range(body_start);
+            self.adopt_port_objects(&mut port_declarations, &mut items)?;
             self.at += 1;
             if self.eat(":") {
-                end_label = Some(if kind == SubroutineKind::Constructor {
+                let label = if kind == SubroutineKind::Constructor {
                     self.contextual_name(&["new"])?
                 } else {
                     self.name()?
-                });
+                };
+                // The name after `endfunction` or `endtask` shall be that
+                // of the subroutine (IEEE 1800-2023 9.3.4).
+                if label.value() != name.value() {
+                    self.at -= 1;
+                    return Err(self.error(format!(
+                        "end label `{}` differs from the name `{}` of its subroutine",
+                        label.value(),
+                        name.value()
+                    )));
+                }
+                end_label = Some(label);
             }
         } else {
             body_tokens = self.range(body_start);
         }
-        let id = SubroutineId(self.subroutines.len());
+        // A task or a void function returns no value (IEEE 1800-2023 13.3,
+        // 13.4.1); a randsequence production has returns of its own.
+        let void = task || return_type.is_some_and(
+            |id| matches!(&self.types[id.0].kind, DataTypeKind::Builtin(name) if name == "void"),
+        );
+        if void {
+            let mut pending = items.clone();
+            while let Some(id) = pending.pop() {
+                let statement = &self.statements[id.0];
+                match &statement.kind {
+                    StatementKind::Return(Some(_)) => {
+                        return Err(self.error_at(
+                            statement.tokens,
+                            format!(
+                                "return of a value from {} `{}`",
+                                if task { "task" } else { "void function" },
+                                name.value()
+                            ),
+                        ));
+                    }
+                    StatementKind::Unconverted { category, .. } if category == "randsequence" => {}
+                    kind => pending.extend(kind.children()),
+                }
+            }
+        }
         let authored_statements = self.body_membership(&items);
-        self.subroutines.push(Subroutine {
+        Ok(Subroutine {
             kind,
             name,
             scope,
@@ -338,7 +468,6 @@ impl Parser<'_> {
             end_label,
             body_tokens,
             tokens: self.range(start),
-        });
-        Ok(id)
+        })
     }
 }

@@ -563,8 +563,13 @@ pub(crate) fn eval_const_assignment_in_env(
     }
 }
 
-/// Evaluate and resize a constant expression in a case selector's comparison
-/// context without discarding X/Z masks.
+/// Evaluate a constant expression assigned to a value of `width` and
+/// `signed` without discarding X/Z masks.
+///
+/// The width is the context of the context-determined operands, which are
+/// extended before they are evaluated (IEEE 1800-2023 11.6.1, 11.8.2); the
+/// value keeps its own signedness until it is converted (11.8.1). A size
+/// cast evaluates its operand the same way (6.24.1).
 pub fn context_size_const_integral_literal(
     expr: &ConstExpr,
     constants: &impl Constants,
@@ -572,14 +577,15 @@ pub fn context_size_const_integral_literal(
     width: usize,
     signed: bool,
 ) -> Option<IntegralLiteral> {
-    if let Some(fill) = unbased_fill_from_const_expr(expr) {
-        let mut literal = integral_fill_literal(fill, width)?;
-        literal.signed = signed;
-        return Some(literal);
-    }
-    let literal = eval_const_integral_literal_with_types(expr, constants, types)?;
-    let extension = signed_extension(&literal, literal.signed);
-    Some(resize_integral_literal(literal, width, signed, extension))
+    eval_const_integral_literal_with_types(
+        &ConstExpr::Resize {
+            expr: Box::new(expr.clone()),
+            width,
+            signed,
+        },
+        constants,
+        types,
+    )
 }
 
 /// Evaluate an integral expression in the common context of a case-generate.
@@ -1511,7 +1517,7 @@ fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral>
             let lsb = integral_literal_as_i128(&lsb, lsb.signed)?;
             let low = msb.min(lsb);
             let width = usize::try_from(msb.abs_diff(lsb)).ok()?.checked_add(1)?;
-            if width > 65_536 {
+            if width > crate::ast::MAX_CONSTANT_VALUE_BITS {
                 return None;
             }
             let mut value = BigUint::default();
@@ -1688,6 +1694,22 @@ pub(crate) fn integral_literal_as_i128(literal: &IntegralLiteral, signed: bool) 
     }
     // Extend the sign as a bit pattern: 2^127 is not a positive i128.
     Some((value | (u128::MAX << literal.width)) as i128)
+}
+
+/// The value of a literal wider than 128 bits in the i128 slot of the
+/// constant environment, which holds it sign-extended from bit 127 (as
+/// typed substitution restores it); `None` for any other value.
+pub(crate) fn wide_integral_literal_as_i128(literal: &IntegralLiteral) -> Option<i128> {
+    if literal.mask != BigUint::default() {
+        return None;
+    }
+    let high = &literal.value >> 127usize;
+    let all_ones = (BigUint::from(1u8) << literal.width.checked_sub(127)?) - BigUint::from(1u8);
+    if high != BigUint::default() && high != all_ones {
+        return None;
+    }
+    let low = &literal.value & BigUint::from(u128::MAX);
+    Some(u128::try_from(low).ok()? as i128)
 }
 
 fn eval_integral_unary(op: UnaryOp, mut literal: IntegralLiteral) -> IntegralLiteral {
@@ -2028,8 +2050,12 @@ fn parse_small_literal(value: &str) -> Option<IntegralLiteral> {
             return None;
         }
         let value = value.parse::<u128>().ok()?;
+        if value.leading_zeros() == 0 {
+            // A sign bit would make it 129 bits wide.
+            return None;
+        }
         return Some(IntegralLiteral {
-            width: (128 - value.leading_zeros() as usize).max(32),
+            width: unsized_signed_width(128 - value.leading_zeros() as usize),
             signed: true,
             value: BigUint::from(value),
             mask: BigUint::default(),
@@ -2060,7 +2086,15 @@ fn parse_small_literal(value: &str) -> Option<IntegralLiteral> {
     }
     let value = u128::from_str_radix(digits, radix).ok()?;
     let natural_width = if bits_per_digit == 0 {
-        (128 - value.leading_zeros() as usize).max(32)
+        let bits = 128 - value.leading_zeros() as usize;
+        if signed && width.is_none() {
+            if bits == 128 {
+                return None;
+            }
+            unsized_signed_width(bits)
+        } else {
+            bits
+        }
     } else {
         digits.len().checked_mul(bits_per_digit)?
     };
@@ -2278,9 +2312,18 @@ fn parse_unbased_unsized_literal(value: &str) -> Option<IntegralLiteral> {
     })
 }
 
+/// The width of an unsized signed number whose magnitude has `bits` bits:
+/// 32, or a sign bit above a magnitude that needs more than 32 bits
+/// (IEEE 1800-2023, 5.7.1: 4294967296 is represented by at least 34 bits).
+/// A magnitude of exactly 32 bits keeps the 32-bit integer width, as other
+/// tools read 2147483648.
+fn unsized_signed_width(bits: usize) -> usize {
+    if bits <= 32 { 32 } else { bits + 1 }
+}
+
 fn parse_decimal_literal(value: &str) -> Option<IntegralLiteral> {
     let value = value.parse::<BigUint>().ok()?;
-    let width = value.bits().max(32) as usize;
+    let width = unsized_signed_width(value.bits() as usize);
     Some(IntegralLiteral {
         width,
         signed: true,
@@ -2321,7 +2364,12 @@ fn parse_based_literal(size: &str, based: &str) -> Option<IntegralLiteral> {
         parse_power_of_two_based_digits(digit_text, bits_per_digit)?
     };
     let natural_width = if bits_per_digit == 0 {
-        parsed.value.bits().max(32) as usize
+        let bits = parsed.value.bits() as usize;
+        if signed && width.is_none() {
+            unsized_signed_width(bits)
+        } else {
+            bits
+        }
     } else {
         digit_text.chars().count().checked_mul(bits_per_digit)?
     };
@@ -3124,6 +3172,22 @@ mod literal_tests {
                     truth.map(i128::from)
                 );
             }
+        }
+    }
+
+    #[test]
+    fn gives_unsized_signed_literals_over_32_bits_a_sign_bit() {
+        for (text, width) in [
+            ("2147483647", 32),
+            ("4294967295", 32),
+            ("4294967296", 34),
+            ("10000000000", 35),
+            ("'sd4294967296", 34),
+            ("'d4294967296", 33),
+            ("340282366920938463463374607431768211455", 129),
+        ] {
+            let lit = parse_integral_literal(text).unwrap();
+            assert_eq!(lit.width, width, "{text}");
         }
     }
 

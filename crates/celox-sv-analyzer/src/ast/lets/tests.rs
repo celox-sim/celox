@@ -121,6 +121,64 @@ fn let_bodies_resolve_their_names_where_they_are_declared() {
     assert_eq!(calls_of_f(&tree), 1);
 }
 
+/// What follows the name of a covergroup is not the module's to bind: a
+/// formal, a coverpoint or a cross item of the name of a `let` is no call
+/// of it, whether the `let` is declared before or after the covergroup
+/// (IEEE 1800-2023 19.3, 19.6.1), and stays the name it is.
+#[test]
+fn names_inside_covergroups_are_no_let_calls() {
+    for (source, names) in [
+        (
+            "module M; logic clk; logic [3:0] a, b, t; let f(x, y) = x + y; \
+             assign t = f(a, b); \
+             covergroup cg(int f) @(posedge clk); coverpoint a { bins lo = {[0:f]}; } endgroup \
+             endmodule",
+            1,
+        ),
+        (
+            "module M; logic clk; logic [3:0] a, b, t; \
+             covergroup cg @(posedge clk); f: coverpoint a; hi: coverpoint b; \
+             x: cross f, hi { bins s = x with (f + hi < 4); } endgroup \
+             let f = a + b; assign t = f; endmodule",
+            1,
+        ),
+        (
+            "module M; logic [3:0] a, b, t; let f = a + b; assign t = f; \
+             covergroup cg(int f); coverpoint a iff (a < f) { bins lo = {[0:f]}; } endgroup \
+             endmodule",
+            2,
+        ),
+        (
+            "module M; logic [3:0] a, t; let f(x) = x + 1; assign t = f(a); \
+             covergroup cg; coverpoint f(a) { bins lo = {f(0)}; } endgroup endmodule",
+            2,
+        ),
+    ] {
+        let tree = expanded(source);
+        let covergroup = &tree.covergroups[0];
+        let kept = tree
+            .expression_nodes()
+            .filter(|(_, node)| {
+                covergroup.header.end <= node.tokens.start
+                    && node.tokens.end <= covergroup.tokens.end
+                    && matches!(&node.kind, ExprKind::Name(name) if name.value() == "f")
+            })
+            .count();
+        assert_eq!(kept, names, "{source}");
+        // The call or the name outside the covergroup is expanded: it is
+        // the parenthesized body.
+        let assign = tree.assign_statements[0].tokens;
+        assert!(
+            tree.expression_nodes().any(|(_, node)| {
+                assign.start <= node.tokens.start
+                    && node.tokens.end <= assign.end
+                    && matches!(&node.kind, ExprKind::Group(_))
+            }),
+            "{source}"
+        );
+    }
+}
+
 /// A formal used in a type operator is replaced there too: the expansion's
 /// `type(...)` operand is the actual (11.12).
 #[test]

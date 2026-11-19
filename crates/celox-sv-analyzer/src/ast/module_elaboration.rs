@@ -6,6 +6,7 @@ mod bodies;
 mod constants;
 mod declarations;
 mod finish;
+mod implicit_nets;
 mod reachable_imports;
 
 /// The state [`Module::from_selected_scope_once`] elaborates a scope in: what
@@ -167,6 +168,11 @@ impl Module {
             {
                 classes::foreign::finish(syntax_tree, session, symbols)?;
             }
+            if let Ok(module) = &result
+                && !declarations_only
+            {
+                virtual_interface_calls::check_outward(session, module)?;
+            }
             if session.foreign.revision() == revision {
                 return result;
             }
@@ -207,6 +213,18 @@ impl Module {
         } else {
             &empty_parameter_overrides
         };
+        // The specializations of parameterized interfaces that earlier
+        // analyses named reach their instances from this scope too (25.9).
+        let mut imported = imported;
+        let specialized =
+            virtual_interfaces::specialization_signals(session, imported.state_signals.iter());
+        if !specialized.is_empty() {
+            Arc::make_mut(&mut imported)
+                .state_signals
+                .extend(specialized);
+        }
+        // So do the subroutines that call their tasks and functions.
+        virtual_interface_calls::import_specializations(session, &mut imported);
         let specialization =
             syntax_tree.child(syntax_tree.syntax_tree, applicable_parameter_overrides);
         let specialization = specialization.importing(imported.clone());
@@ -254,6 +272,9 @@ impl Module {
             scope.reject_ignored_constructs(syntax_tree, session)?;
             scope.ports_and_signals(syntax_tree, session)?;
             scope.declared_shapes(syntax_tree, session);
+            if scope.implicit_port_nets(syntax_tree)? {
+                scope.declared_shapes(syntax_tree, session);
+            }
             scope.subroutine_arguments(syntax_tree, session)?;
             let (array_initial_processes, packed_pattern_values) =
                 scope.array_parameter_values(syntax_tree, session)?;

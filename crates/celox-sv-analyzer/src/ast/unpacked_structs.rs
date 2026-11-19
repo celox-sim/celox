@@ -163,7 +163,7 @@ pub(in crate::ast) fn member_default(
 ) -> Converted<Option<Expr>> {
     // A member's type is read while its structure is bound, before the
     // member has a semantic type of its own.
-    if ty.is_enum
+    if ty.enumeration().is_some()
         || ty.is_unpacked_struct_in(&session.types)
         || ty.class_in(&session.types).is_some()
         || ty.is_chandle()
@@ -269,8 +269,7 @@ pub(in crate::ast) fn native_type(
                 if ty.unpacked_struct().is_some()
                     || !ty.members.is_empty()
                     || ty.is_chandle()
-                    || ty.is_enum
-                    || ty.packed_enum
+                    || ty.enumeration().is_some()
                     || !matches!(
                         ty.kind,
                         TypeKind::Bit
@@ -330,7 +329,7 @@ pub(in crate::ast) fn native_type(
         ConstExpr::Literal(width.checked_sub(1)?.to_string()),
         ConstExpr::Literal("0".into()),
     ));
-    r#type.unpacked_struct = Some(Arc::new(aggregate));
+    r#type.keep_structure(Some(Arc::new(aggregate)));
     Some(r#type)
 }
 
@@ -386,7 +385,7 @@ pub(in crate::ast) fn array_storage(ty: Type) -> Converted<Type> {
                 let count = aggregate.members().len();
                 let children = values.split_off(values.len() - count);
                 let mut offset = aggregate.width();
-                ty.members = aggregate
+                let members = aggregate
                     .members()
                     .iter()
                     .zip(children)
@@ -400,6 +399,8 @@ pub(in crate::ast) fn array_storage(ty: Type) -> Converted<Type> {
                         )
                     })
                     .collect();
+                // The storage is of the structure type still.
+                ty.reshape_keeping_declarations(|shape| shape.members = members);
                 values.push(ty);
             }
         }
@@ -414,7 +415,7 @@ pub(in crate::ast) fn whole(name: &str, dims: &PackedDimensions) -> Option<Expr>
     if !shape.unpacked.is_empty() {
         return None;
     }
-    let aggregate = shape.unpacked_struct.clone()?;
+    let aggregate = shape.structure_declaration()?.clone();
     Some(Expr::Concat(
         aggregate
             .leaves()
@@ -431,7 +432,7 @@ pub(in crate::ast) fn targets(name: &str, dims: &PackedDimensions) -> Option<Vec
     if !shape.unpacked.is_empty() {
         return None;
     }
-    let aggregate = shape.unpacked_struct.clone()?;
+    let aggregate = shape.structure_declaration()?.clone();
     Some(
         aggregate
             .leaves()
@@ -696,7 +697,7 @@ fn struct_of(
 ) -> Converted<Option<semantic_types::TyId>> {
     // Every shape keeps its structure metadata until declarations bind
     // their types.
-    let metadata = shape.unpacked_struct.is_some() && shape.container.is_none();
+    let metadata = shape.structure_declaration().is_some() && shape.container.is_none();
     let Some(mut ty) = shape.type_id(table, functions, env) else {
         return match metadata {
             true => Err(unsupported(
@@ -995,6 +996,70 @@ mod shape_struct_tests {
     }
 
     #[test]
+    fn declarations_of_other_structures_or_enumerations_are_other_declarations() {
+        // Two structure or enumeration declarations of the same members are
+        // types of their own (IEEE 1800-2023 6.22.1), so a shape that keeps
+        // the other one is another declaration, which signature publication
+        // must publish, though the shapes are alike.
+        let mut ty = Type::new(TypeKind::Bit);
+        ty.packed_ranges.push(PackedRange::new(
+            ConstExpr::Literal("0".into()),
+            ConstExpr::Literal("0".into()),
+        ));
+        let bits = procedural::dimensions_from_type(&ty).clone_shape();
+        let structure = |owner: &str| {
+            let mut shape = VariableDimensions::new(bits.clone());
+            shape.keep_structure(Some(Arc::new(UnpackedStruct {
+                owner: owner.into(),
+                ..(*one_bit(None)).clone()
+            })));
+            shape
+        };
+        assert!(structure("S").same_declaration(&structure("S")));
+        assert!(!structure("S").same_declaration(&structure("T")));
+        let enumeration = |name: &str| {
+            VariableDimensions::new(bits.clone()).with_enumeration(
+                semantic_types::EnumBinding::new(semantic_types::EnumDeclaration {
+                    name: Some(name.into()),
+                    named: true,
+                    scope: None,
+                    typename: None,
+                    domain: None,
+                    dims: 1,
+                }),
+            )
+        };
+        assert!(enumeration("e_t").same_declaration(&enumeration("e_t")));
+        assert!(!enumeration("e_t").same_declaration(&enumeration("f_t")));
+    }
+
+    #[test]
+    fn shapes_of_a_structure_are_not_those_of_its_bits() {
+        // A shape that keeps an unpacked structure type (IEEE 1800-2023 7.2)
+        // is not of a bit vector of its width (6.22.2): the closed-shape
+        // cache, which keys on the shape, does not give it the type of a bit
+        // vector typed before it.
+        let mut ty = Type::new(TypeKind::Bit);
+        ty.packed_ranges.push(PackedRange::new(
+            ConstExpr::Literal("0".into()),
+            ConstExpr::Literal("0".into()),
+        ));
+        let bits = VariableDimensions::new(VariableShape {
+            declared: type_names::Declared::default(),
+            ..procedural::dimensions_from_type(&ty).clone_shape()
+        });
+        let mut structure = VariableDimensions::new(bits.clone_shape());
+        structure.keep_structure(Some(one_bit(None)));
+        let mut table = semantic_types::TyTable::default();
+        let functions = const_functions::ConstantFunctions::default();
+        let env = ConstEnv::default();
+        let bits = bits.type_id(&mut table, &functions, &env).unwrap();
+        let structure = structure.type_id(&mut table, &functions, &env).unwrap();
+        assert_ne!(bits, structure);
+        assert!(table.is_unpacked_struct(structure));
+    }
+
+    #[test]
     #[cfg(debug_assertions)]
     #[should_panic(expected = "one declaration of unpacked structure type")]
     fn one_structure_type_with_two_layouts_is_caught() {
@@ -1035,7 +1100,8 @@ mod shape_struct_tests {
         // `S items[N]` where the scope has no `N`: a structure, but no
         // type to check a value against.
         let mut ty = Type::new(TypeKind::Bit);
-        ty.unpacked_struct = Some(Arc::new(UnpackedStruct {
+        ty.unpacked_ranges_mut().push(symbolic_range());
+        ty.keep_structure(Some(Arc::new(UnpackedStruct {
             owner: "S".into(),
             members: vec![Member {
                 name: "a".into(),
@@ -1043,8 +1109,7 @@ mod shape_struct_tests {
                 default: None,
                 width: 1,
             }],
-        }));
-        ty.unpacked_ranges.push(symbolic_range());
+        })));
         let shape = procedural::dimensions_from_type(&ty);
         let functions = const_functions::ConstantFunctions::default();
         let mut table = semantic_types::TyTable::default();

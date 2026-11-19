@@ -75,6 +75,24 @@ fn scoped_name(tree: &AnalysisContext<'_>, id: ExprId, native: &Declarations) ->
     }
 }
 
+/// The name of the function that the callee `id` of a call names: one of
+/// the scope, or one of another instance that a hierarchical name calls
+/// (IEEE 1800-2023 23.8), which the module has by the name it is called by.
+pub(in crate::ast) fn function_name(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Option<String> {
+    call_name(tree, id, native).or_else(|| {
+        let path = hierarchical_callee(tree, session, id, native, dimensions)?.join(".");
+        scope::imported(tree)
+            .hierarchical_subroutine(&path)
+            .map(|subroutine| subroutine.name.clone())
+    })
+}
+
 pub(in crate::ast) fn callable_name(
     tree: &AnalysisContext<'_>,
     id: ExprId,
@@ -94,14 +112,93 @@ pub(in crate::ast) fn callable_name(
     if separator != "." {
         return None;
     }
+    // A subroutine of another instance (IEEE 1800-2023 23.8), which the
+    // module calls by the name its hierarchical names resolve to.
+    let imported = scope::imported(tree);
+    if let Some(path) = dotted_name(id, native)
+        && let Some(subroutine) = imported.hierarchical_subroutine(&path)
+    {
+        return Some(subroutine.name.clone());
+    }
     let handle = call_name(tree, *expression, native)?;
-    scope::imported(tree)
+    imported
         .interface_members
         .get(&format!(
             "{handle}.{}",
             instances::normalize_identifier(&name.spelling)
         ))
         .cloned()
+}
+
+/// The components of the hierarchical name that the callee `id` of a call
+/// spells, as [`crate::ParsedSource::hierarchical_names`] spells them, its
+/// instance indices, constant expressions, evaluated (IEEE 1800-2023 23.6):
+/// `None` for a callee that is no dotted name.
+pub(in crate::ast) fn hierarchical_callee(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Option<Vec<String>> {
+    let ExprKind::Member {
+        expression,
+        separator,
+        name,
+    } = &native.expression(ungroup(id, native)).kind
+    else {
+        return None;
+    };
+    // A method of an object handle is no hierarchical name (IEEE 1800-2023
+    // 8.5).
+    if separator != "."
+        || objects::native_class(tree, session, *expression, native, dimensions).is_some()
+    {
+        return None;
+    }
+    let (parts, qualified) =
+        selected_values::path(*expression, native, tree, session, dimensions).ok()?;
+    qualified.is_none().then(|| {
+        let mut components = parts;
+        components.push(instances::normalize_identifier(&name.spelling));
+        components
+    })
+}
+
+/// The dotted name `a.b.c` that expression `id` spells, as
+/// [`crate::ParsedSource::hierarchical_names`] spells its components: a
+/// constant decimal index of a component other than the last stays part of
+/// it, as in `u[1]`.
+pub(in crate::ast) fn dotted_name(id: ExprId, native: &Declarations) -> Option<String> {
+    match &native.expression(ungroup(id, native)).kind {
+        ExprKind::Name(name) => Some(instances::normalize_identifier(&name.spelling)),
+        ExprKind::Member {
+            expression,
+            separator,
+            name,
+        } if separator == "." => Some(format!(
+            "{}.{}",
+            dotted_prefix(*expression, native)?,
+            instances::normalize_identifier(&name.spelling)
+        )),
+        _ => None,
+    }
+}
+
+/// [`dotted_name`] of the components before the last one, which may carry a
+/// constant decimal index.
+fn dotted_prefix(id: ExprId, native: &Declarations) -> Option<String> {
+    if let ExprKind::Select {
+        expression,
+        dimension,
+    } = &native.expression(ungroup(id, native)).kind
+        && let celox_sv_syntax::DimensionKind::Index(index) = dimension.kind
+        && let ExprKind::Literal(literal) = &native.expression(index).kind
+        && let Ok(index) = literal.replace('_', "").parse::<u64>()
+    {
+        return Some(format!("{}[{index}]", dotted_name(*expression, native)?));
+    }
+    dotted_name(id, native)
 }
 
 /// Resolve interface selections with the constant environment of the call site.
@@ -119,6 +216,12 @@ pub(super) fn bound_callable_name(
         objects::method(tree, session, id, native, dimensions)?
     {
         return Ok(Some(name));
+    }
+    if let Some(components) = hierarchical_callee(tree, session, id, native, dimensions)
+        && let Some(subroutine) =
+            scope::imported(tree).hierarchical_subroutine(&components.join("."))
+    {
+        return Ok(Some(subroutine.name.clone()));
     }
     interface_member_name(tree, session, id, native, dimensions)
 }
@@ -562,7 +665,11 @@ enum Finish {
     Repeat {
         literals: bool,
     },
-    Inside(Vec<bool>),
+    /// A set membership test; each item is a range when its flag is set.
+    /// When an operand is a string, each compares as a string (see
+    /// `enter_inside`): the flags tell, for the left operand and
+    /// then each item operand, which are not strings and become ones.
+    Inside(Vec<bool>, Option<Vec<bool>>),
     /// A string operation on the bound children, see [`strings`].
     StringCall(StringOp),
     /// An enumerated type method; the children are the receiver, then the
@@ -1368,10 +1475,26 @@ fn selected_container_element(
     {
         return Ok(zero_based_vector(&r#type, tree, dimensions).then_some((selected, r#type)));
     }
-    // The selects and members of the variable, innermost first.
+    // The selects and members of the variable or class property, innermost
+    // first, and the container the property holds: a queue, dynamic or
+    // associative array, or the storage of a fixed-size array.
     let mut chain = Vec::new();
     let mut base = ungroup(root, native);
+    let mut property = None;
     loop {
+        let declared = matches!(&native.expression(base).kind, ExprKind::Name(name)
+            if dimensions.get(&instances::normalize_identifier(&name.spelling)).is_some());
+        if !chain.is_empty()
+            && !declared
+            && matches!(
+                native.expression(base).kind,
+                ExprKind::Name(_) | ExprKind::Member { .. }
+            )
+            && let Some((found, _)) = objects::property(tree, session, base, native, dimensions)?
+        {
+            property = Some(found.storage.or_else(|| found.r#type.container.clone()));
+            break;
+        }
         match &native.expression(base).kind {
             ExprKind::Select { expression, .. } => {
                 chain.push((base, false));
@@ -1389,16 +1512,23 @@ fn selected_container_element(
         }
     }
     chain.reverse();
-    let ExprKind::Name(name) = &native.expression(base).kind else {
-        return Ok(None);
+    let (mut container, mut levels) = match &property {
+        Some(Some(container)) => (container.as_ref(), 1),
+        Some(None) => return Ok(None),
+        None => {
+            let ExprKind::Name(name) = &native.expression(base).kind else {
+                return Ok(None);
+            };
+            let Some(shape) = dimensions.get(&instances::normalize_identifier(&name.spelling))
+            else {
+                return Ok(None);
+            };
+            let Some(container) = shape.container.as_deref() else {
+                return Ok(None);
+            };
+            (container, shape.unpacked.len() + 1)
+        }
     };
-    let Some(shape) = dimensions.get(&instances::normalize_identifier(&name.spelling)) else {
-        return Ok(None);
-    };
-    let Some(mut container) = shape.container.as_deref() else {
-        return Ok(None);
-    };
-    let mut levels = shape.unpacked.len() + 1;
     while let Some(inner) = container.element.container.as_deref() {
         container = inner;
         levels += 1;

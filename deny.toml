@@ -17,6 +17,10 @@ ignore = [
     { id = "RUSTSEC-2025-0057", reason = "fxhash: used directly and by veryl-analyzer" },
     # Unmaintained, no vulnerability. Transitive via veryl-analyzer.
     { id = "RUSTSEC-2024-0436", reason = "paste: transitive via veryl-analyzer" },
+    # Unmaintained, no vulnerability; no patched version exists. Direct
+    # dependency of celox-runtime, used only to format the local time into the
+    # $date header of VCD and FST waveforms.
+    { id = "RUSTSEC-2026-0543", reason = "chrono: only formats the waveform header date in celox-runtime, no upgrade" },
 ]
 
 [licenses]

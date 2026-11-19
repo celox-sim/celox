@@ -16,8 +16,14 @@ const isWasm =
   process.env.NAPI_RS_FORCE_WASI === "error";
 
 describe.skipIf(!isWasm)("Inferred latches (WASM bridge)", () => {
-  test("rejects by default and preserves latch state with opt-in", () => {
-    expect(() => Simulator.fromSource(source, "Latch")).toThrow();
+  test("warns by default, rejects in strict mode and preserves latch state with opt-in", () => {
+    const warned = Simulator.fromSource(source, "Latch");
+    try {
+      expect(warned.warnings).toHaveLength(1);
+    } finally {
+      warned.dispose();
+    }
+    expect(() => Simulator.fromSource(source, "Latch", { strict: true })).toThrow(/inferred_latch/);
     const sim = Simulator.fromSource<{
       en: bigint;
       d: bigint;

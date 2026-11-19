@@ -77,7 +77,10 @@ pub(super) fn finish_value(
                 dimensions,
             )?
         }
-        Finish::StringCall(op) => strings::call(op, strings::operands(op, operands, dimensions)),
+        Finish::StringCall(op) => {
+            let args = strings::operands(op.clone(), operands, dimensions);
+            strings::call(op, args)
+        }
         Finish::Format {
             ticks_per_unit,
             ids,
@@ -143,7 +146,7 @@ pub(super) fn finish_value(
                 dimensions,
             );
             if dimensions.constant_indexed_base {
-                let operand = selects::indexed_expression_value(tree, session, operand, dimensions)
+                let operand = selects::indexed_context_operand(tree, session, operand, dimensions)
                     .ok_or_else(|| unsupported("constant cast operand"))?;
                 const_expr_to_expr(
                     casts::cast_constant_target(
@@ -207,7 +210,21 @@ pub(super) fn finish_value(
                 None => Err(unsupported("replication count"))?,
             }
         }
-        Finish::Inside(ranges) => {
+        Finish::Inside(ranges, integral) => {
+            // An integral operand of a test on strings becomes a string.
+            if let Some(integral) = integral {
+                operands = operands
+                    .into_iter()
+                    .zip(integral)
+                    .map(|(operand, integral)| {
+                        if integral {
+                            strings::call(StringOp::FromBits, vec![operand])
+                        } else {
+                            operand
+                        }
+                    })
+                    .collect();
+            }
             let mut operands = operands.into_iter();
             let operand = operands.next().ok_or_else(disagreement)?;
             let mut items = Vec::new();

@@ -271,12 +271,14 @@ fn lex_with_context(
                 TokenKind::Number
             }
             b if b.is_ascii_graphic() => {
+                // `+/-` and `+%-` are the absolute and the relative tolerance
+                // token (IEEE 1800-2023 11.4.13).
                 const OPERATORS: &[&str] = &[
                     "<<<=", ">>>=", "<<<", ">>>", "===", "!==", "==?", "!=?", "<<=", ">>=", "->>",
-                    "|->", "|=>", "<->", "&&&", "#-#", "#=#", "**", "++", "--", "&&", "||", "<=",
-                    ">=", "==", "!=", "<<", ">>", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=",
-                    "::", "+:", "-:", "~&", "~|", "~^", "^~", "->", "=>", "*>", "##", "@@", ":=",
-                    ":/", ".*", "(*", "*)",
+                    "|->", "|=>", "<->", "&&&", "#-#", "#=#", "+/-", "+%-", "**", "++", "--", "&&",
+                    "||", "<=", ">=", "==", "!=", "<<", ">>", "+=", "-=", "*=", "/=", "%=", "&=",
+                    "|=", "^=", "::", "+:", "-:", "~&", "~|", "~^", "^~", "->", "=>", "*>", "##",
+                    "@@", ":=", ":/", ".*", "(*", "*)",
                 ];
                 // `:` followed by a comment (`3'b0://`, `x:/*`) is not `:/`.
                 let comment_after_colon = source[at..].starts_with(":/")
@@ -419,6 +421,28 @@ mod tests {
             .map(|token| token.text.as_str())
             .collect::<Vec<_>>();
         assert_eq!(significant, ["3'b0", ":", "3'b1", ":", "x", ":/", "2"]);
+    }
+
+    /// The tolerance tokens of IEEE 1800-2023 11.4.13; a `+` before a
+    /// comment is not one.
+    #[test]
+    fn tolerance_operators_are_single_tokens() {
+        let text = "[a +/- b] [a+%-b] a+/*c*/-b a +// c\n- b a + / - b";
+        let mut sources = SourceMap::default();
+        let file = sources.add("tolerance.sv", text);
+        let tokens = lex(&sources, file).unwrap();
+        let significant = tokens
+            .iter()
+            .filter(|token| !token.is_trivia())
+            .map(|token| token.text.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            significant,
+            [
+                "[", "a", "+/-", "b", "]", "[", "a", "+%-", "b", "]", "a", "+", "-", "b", "a", "+",
+                "-", "b", "a", "+", "/", "-", "b"
+            ]
+        );
     }
 
     #[test]

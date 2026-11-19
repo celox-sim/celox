@@ -36,9 +36,6 @@ struct SpellingParts {
     aggregate: Option<&'static str>,
     /// The name of the typedef of an enumeration, struct or union.
     name: Option<TypedefName>,
-    /// The source position that declares an enumeration, which tells an
-    /// anonymous one apart (IEEE 1800-2023 6.22.1 c).
-    anonymous: Option<Arc<str>>,
     /// The elaborated scope that declares the enumeration, struct or union
     /// type: an analysis of a module, interface or program, which each
     /// instance with other parameter values has (6.22). `None` for a
@@ -71,9 +68,20 @@ impl Spelling {
         name: TypedefName,
         scope: Option<Arc<str>>,
     ) {
+        self.name_spelled(declaration, Some(name), scope);
+    }
+
+    /// [`Self::name`] for a typedef whose `$typename` name may not be
+    /// known.
+    pub(super) fn name_spelled(
+        &mut self,
+        declaration: Arc<str>,
+        name: Option<TypedefName>,
+        scope: Option<Arc<str>>,
+    ) {
         let mut parts = self.0.as_deref().cloned().unwrap_or_default();
         parts.declaration = Some(declaration);
-        parts.name = Some(name);
+        parts.name = name;
         parts.scope = scope;
         self.0 = Some(Arc::new(parts));
     }
@@ -83,24 +91,6 @@ impl Spelling {
         let mut parts = self.0.as_deref().cloned().unwrap_or_default();
         parts.scope = Some(scope);
         self.0 = Some(Arc::new(parts));
-    }
-
-    /// Record that the enumeration is declared at source position
-    /// `declaration`, in elaborated scope `scope` if a module, interface or
-    /// program.
-    pub(super) fn anonymous_enum(&mut self, declaration: Arc<str>, scope: Option<Arc<str>>) {
-        let mut parts = self.0.as_deref().cloned().unwrap_or_default();
-        parts.anonymous = Some(declaration);
-        if scope.is_some() {
-            parts.scope = scope;
-        }
-        self.0 = Some(Arc::new(parts));
-    }
-
-    /// The source position that declares an enumeration (see
-    /// [`Self::anonymous_enum`]).
-    pub(super) fn anonymous(&self) -> Option<&str> {
-        self.parts()?.anonymous.as_deref()
     }
 
     /// The identity of the typedef that names the type.
@@ -225,7 +215,7 @@ impl Declared {
             && r#type.unpacked_ranges.len() == shape.unpacked.len()
             && r#type.is_signed == shape.signed
             && r#type.container.is_some() == shape.container.is_some()
-            && r#type.class() == shape.class.as_deref())
+            && r#type.element.identity() == shape.element_identity())
         .then_some(r#type)
     }
 }
@@ -523,10 +513,18 @@ fn element_name(
         TyData::VirtualInterface {
             interface: Decl::Interface(interface),
             modport,
-        } => Ok(match (&session.types.decl(interface).name, modport) {
-            (interface, Some(modport)) => format!("virtual {interface}.{modport}"),
-            (interface, None) => format!("virtual {interface}"),
-        }),
+        } => Ok(
+            match (
+                virtual_interfaces::of_type(&session.types, id).map(|ty| ty.spelling()),
+                modport,
+            ) {
+                (Some(spelling), _) => spelling,
+                (None, Some(modport)) => {
+                    format!("virtual {}.{modport}", session.types.decl(interface).name)
+                }
+                (None, None) => format!("virtual {}", session.types.decl(interface).name),
+            },
+        ),
         TyData::Null
         | TyData::Class(_)
         | TyData::VirtualInterface { .. }

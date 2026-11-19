@@ -1,6 +1,8 @@
 use super::*;
 use crate::ast::ConstEnv;
 
+mod enum_declarations;
+
 fn eval_test_const_expr(expr: &ir::ConstExpr) -> Option<i128> {
     match expr {
         ir::ConstExpr::Literal(value) => value.parse().ok(),
@@ -35,13 +37,16 @@ fn eval_test_const_expr(expr: &ir::ConstExpr) -> Option<i128> {
 
 #[test]
 fn caps_aggregate_nested_generate_expansion() {
-    for (outer, inner, accepted) in [(2, 3, true), (100, 100, false), (10_000, 10_000, false)] {
+    for (outer, inner, accepted) in [(2, 3, true), (100, 100, true), (1001, 1000, false)] {
+        // A loop past the cap expands the cap's iterations before it is
+        // rejected; empty bodies keep that cheap.
+        let body = if accepted { "assign y = 1'b1;" } else { "" };
         let source = format!(
             r#"
             module Top(output wire y);
                 for (genvar i = 0; i < {outer}; i++) begin : outer_loop
                     for (genvar j = 0; j < {inner}; j++) begin : inner_loop
-                        assign y = 1'b1;
+                        {body}
                     end
                 end
             endmodule
@@ -312,6 +317,8 @@ fn preserves_enum_base_types_during_constant_substitution() {
     };
     assert_eq!(&**expr, &ir::Expr::Literal("2'd0".to_string()));
 }
+
+mod illegal_operands;
 
 #[test]
 fn accepts_casez_nested_under_comb_conditionals() {
@@ -650,6 +657,8 @@ fn substitutes_loop_indices_when_tracking_comb_writes() {
     )
     .expect("a concrete nonoverlapping loop write should preserve the guard proof");
 }
+
+mod unpacked_array_values;
 
 #[test]
 fn analyzes_comb_processes_with_generate_local_constants() {
@@ -1523,10 +1532,10 @@ fn preserves_overhanging_constant_parameter_part_selects() {
 #[test]
 fn bounds_constant_parameter_part_select_folding() {
     for selection in [
-        "W[65536:0]",
+        "W[1048576:0]",
         "W[1000000000:0]",
         "W[0 +: 1000000000]",
-        "W[1'bx +: 65537]",
+        "W[1'bx +: 1048577]",
         "W[1'bz -: 1000000000]",
         "W[1'bx +: 0]",
         "W[1'bx +: -1]",
@@ -1539,22 +1548,22 @@ fn bounds_constant_parameter_part_select_folding() {
             .expect_err("oversized selections must be rejected before allocating their bits");
         assert!(matches!(error, AnalyzerError::Unsupported(_)), "{error}");
     }
-    for selection in ["W[65535:0]", "W[1'bx +: 65536]"] {
+    for selection in ["W[1048575:0]", "W[1'bx +: 1048576]"] {
         let source = format!(
             "module Top; parameter logic [7:0] W = 0; \
             localparam N = {selection}; localparam BITS = $bits(N); endmodule"
         );
         let ir = analyze_source(&source, Path::new("maximum_parameter_select.sv")).unwrap();
         let parameters = ir.modules()[0].parameters();
-        assert_eq!(parameters[1].resolved_width(), Some(65_536));
-        assert_eq!(parameters[2].resolved_value(), Some(65_536));
+        assert_eq!(parameters[1].resolved_width(), Some(1_048_576));
+        assert_eq!(parameters[2].resolved_value(), Some(1_048_576));
     }
 }
 
 #[test]
 fn rejects_oversized_constant_parameter_operands_before_materialization() {
     for source in [
-        "module Top; parameter logic [65536:0] W = 0; localparam N = W[0:0]; endmodule",
+        "module Top; parameter logic [1048576:0] W = 0; localparam N = W[0:0]; endmodule",
         "module Top; parameter logic [1000000000:0] W = 0; localparam N = W[0:0]; endmodule",
         "module Top; parameter logic [1000000000:0] W = '1; localparam N = W[0:0]; endmodule",
         "module Top #(parameter logic [1000000000:0] W = 0, N = W[0:0]); endmodule",
@@ -1562,7 +1571,7 @@ fn rejects_oversized_constant_parameter_operands_before_materialization() {
          module Top; localparam N = p::W[0:0]; endmodule",
         "module Top; typedef logic [1000000000:0] wide_t; parameter wide_t W = 0; \
          localparam N = W[0:0]; endmodule",
-        "module Top; localparam W = 65537'd0; localparam N = W[0:0]; endmodule",
+        "module Top; localparam W = 1048577'd0; localparam N = W[0:0]; endmodule",
         "module Top; localparam W = 1000000000'd0; localparam N = W[0:0]; endmodule",
         "module Top; localparam W = 1000000000'bx; localparam N = W[0:0]; endmodule",
     ] {
@@ -1604,7 +1613,7 @@ fn permits_wide_unevaluated_constant_parameter_query_operands() {
         );
     }
     let error = analyze_source(
-        "module Top(input logic [3:0] data); localparam N = $size(data, 65537'd1); endmodule",
+        "module Top(input logic [3:0] data); localparam N = $size(data, 1048577'd1); endmodule",
         Path::new("wide_query_dimension.sv"),
     )
     .expect_err("the evaluated dimension argument must still have a bounded value");
@@ -1655,7 +1664,7 @@ fn preserves_unknown_constant_parameter_indexed_part_select_bases() {
 
 #[test]
 fn bounds_evaluated_constant_parameter_query_subexpressions() {
-    for literal_width in [65_537, 1_000_000_000] {
+    for literal_width in [1_048_577, 1_000_000_000] {
         for query in [
             format!("$bits(W[0 +: {literal_width}'d1])"),
             format!("$bits(W[{literal_width}'d0:0])"),
@@ -2659,6 +2668,68 @@ fn permits_redundant_default_nettype_directives_inside_modules() {
     );
 }
 
+/// An identifier of a port connection that nothing visible declares is an
+/// implicit scalar net of the module (IEEE 1800-2023 6.10); a parameter, an
+/// enumeration constant, a variable, an instance, an item a wildcard
+/// import supplies (26.3) and a system function such as `$time` (5.6.3)
+/// are no such identifier.
+#[test]
+fn declares_implicit_nets_of_port_connections() {
+    let ir = analyze_source(
+        r#"
+            package p; localparam logic [3:0] K = 4'd6; endpackage
+            interface bus; logic v; endinterface
+            module Child(input logic [3:0] a, input logic [3:0] b, input logic c,
+                         output logic [3:0] y, bus port);
+                assign y = a ^ b;
+            endmodule
+            module Top #(parameter logic P = 1'b1);
+                import p::*;
+                typedef enum logic [3:0] { E0, E1 } e_t;
+                logic [3:0] declared;
+                bus bus_i();
+                Child first(.a(implicit_in), .b(K), .c(P), .y(implicit_out), .port(bus_i));
+                Child second(.a({E1, implicit_in}), .b(declared), .c(~implicit_out),
+                             .y(), .port(bus_i));
+                Child third(.a($time), .b(4'd0), .c($stime), .y(), .port(bus_i));
+            endmodule
+        "#,
+        Path::new("implicit_port_nets.sv"),
+    )
+    .expect("undeclared port connection identifiers should be implicit nets");
+    let top = ir
+        .modules()
+        .iter()
+        .find(|module| module.name() == "Top")
+        .unwrap();
+    let mut implicit: Vec<_> = top
+        .signals()
+        .iter()
+        .filter(|signal| signal.name().starts_with("implicit_"))
+        .map(|signal| {
+            (
+                signal.name(),
+                signal.is_net(),
+                signal.r#type().resolved_width(),
+            )
+        })
+        .collect();
+    implicit.sort();
+    assert_eq!(
+        implicit,
+        [
+            ("implicit_in", true, Some(1)),
+            ("implicit_out", true, Some(1))
+        ]
+    );
+    for name in ["K", "P", "E1", "bus_i", "$time", "$stime"] {
+        assert!(
+            top.signals().iter().all(|signal| signal.name() != name),
+            "{name}"
+        );
+    }
+}
+
 #[test]
 fn rejects_unsupported_default_net_types() {
     for net_type in ["tri0", "wand", "wor"] {
@@ -3026,6 +3097,101 @@ fn rejects_unpacked_arrays_of_nonequivalent_named_elements_in_every_assignment()
                 || matches!(&error, AnalyzerError::IncompatibleClassHandle { .. }),
             "{items}: {error:?}"
         );
+    }
+}
+
+#[test]
+fn subarrays_of_wide_enumerations_keep_their_element_type() {
+    // A subarray selected from an array of an enumerated type has that
+    // element type (IEEE 1800-2023 7.4.6), also for an enumeration too wide
+    // for its members to be materialized: a `ref` argument of a bit array of
+    // the same shape does not take it (6.22.2, 13.5.2), also after a
+    // subarray of a bit array of that shape was typed first.
+    let function = "typedef enum bit [129:0] {A, B} w_t; \
+        function automatic void f(ref bit [129:0] p[2]); endfunction \
+        function automatic void g(ref w_t p[2]); endfunction";
+    for items in [
+        "w_t m[2][2]; initial f(m[0]);",
+        "w_t m[2][2]; bit [129:0] n[2][2]; initial begin f(n[0]); f(m[1]); end",
+    ] {
+        let source = format!("module Top; {function} {items} endmodule");
+        analyze_source(&source, Path::new("wide_enum_subarray.sv")).expect_err(items);
+    }
+    let source = format!(
+        "module Top; {function} w_t m[2][2]; bit [129:0] n[2][2]; \
+         initial begin f(n[0]); g(m[1]); end endmodule"
+    );
+    analyze_source(&source, Path::new("wide_enum_subarray.sv")).expect("the same element types");
+}
+
+#[test]
+fn typename_of_packed_arrays_of_process_states_stays_unsupported() {
+    // `$typename` of a packed array of an enumerated type is not supported,
+    // also of the built-in `std::process::state` (IEEE 1800-2023 9.7,
+    // 20.6.1): the analysis rejects it instead of failing.
+    let source = "module Top; std::process::state [1:0] states; \
+        initial $display(\"%s\", $typename(states)); endmodule";
+    let error = analyze_source(source, Path::new("process_state_typename.sv"))
+        .expect_err("a packed array of an enumerated type");
+    assert!(
+        error
+            .to_string()
+            .contains("`$typename` of a packed array of an enumerated type"),
+        "{error}"
+    );
+}
+
+#[test]
+fn parameters_of_wide_enumerations_keep_their_type() {
+    // A parameter of an enumerated type is of that type (IEEE 1800-2023
+    // 6.19, 6.20.2), also of one too wide for its members to be
+    // materialized: a formal of that type takes it, which a bit vector of
+    // the same width needs a cast for (6.19.3), and the shape of the
+    // parameter keeps it.
+    let declarations = "typedef enum bit [129:0] {A, B} w_t; parameter w_t P = B; \
+        function automatic void f(w_t x); endfunction";
+    let source = format!("module Top; {declarations} initial f(P); endmodule");
+    analyze_source(&source, Path::new("wide_enum_parameter.sv")).expect("an argument of its type");
+    let source = format!("module Top; {declarations} bit [129:0] v; initial f(v); endmodule");
+    analyze_source(&source, Path::new("wide_enum_parameter.sv")).expect_err("bits need a cast");
+    // Its shape keeps the enumerated type too: `$typename` of it stays
+    // unsupported as that of an enumerated type without known values.
+    let source =
+        format!("module Top; {declarations} initial $display(\"%s\", $typename(P)); endmodule");
+    let error = analyze_source(&source, Path::new("wide_enum_parameter.sv"))
+        .expect_err("an enumerated type without known values");
+    assert!(
+        error
+            .to_string()
+            .contains("`$typename` of an enumerated type with values that are not known"),
+        "{error}"
+    );
+}
+
+#[test]
+fn subarrays_of_unpacked_structures_keep_their_structure_type() {
+    // Each unpacked structure declaration is a type of its own (IEEE
+    // 1800-2023 6.22.1), which an element, a subarray or a slice selected
+    // from an array of it has (7.4.6): an array of another structure of
+    // the same members is not equivalent to it (6.22.2, 7.6).
+    let declarations = "typedef struct { int a; } s_t; typedef struct { int a; } t_t; \
+        s_t m[2][2]; t_t n[2][2]; s_t r[2]; t_t q[2];";
+    for items in [
+        "initial r = n[0];",
+        "initial m[1] = q;",
+        "initial r = n[1][0:1];",
+        "initial r = '{n[0][0], n[0][1]};",
+    ] {
+        let source = format!("module Top; {declarations} {items} endmodule");
+        analyze_source(&source, Path::new("struct_subarrays.sv")).expect_err(items);
+    }
+    for items in [
+        "initial r = m[0];",
+        "initial m[1] = r;",
+        "initial r = m[1][0:1];",
+    ] {
+        let source = format!("module Top; {declarations} {items} endmodule");
+        analyze_source(&source, Path::new("struct_subarrays.sv")).expect(items);
     }
 }
 
@@ -4238,6 +4404,8 @@ fn rejects_invalid_and_colliding_interface_declarations() {
             name: "m".to_string()
         })
     );
+    // A formal shadows an interface function in its subroutine (IEEE
+    // 1800-2023 23.9).
     assert_eq!(
         elaborate(
             "interface I; logic a;
@@ -4245,10 +4413,7 @@ fn rejects_invalid_and_colliding_interface_declarations() {
                  function automatic logic f(input logic helper); return helper; endfunction
              endinterface"
         ),
-        Err(AnalyzerError::Unsupported(
-            "declaration of `helper` in a nested scope of interface `I`, which shadows an interface item"
-                .to_string()
-        ))
+        Ok(None)
     );
     // Interface typedefs retain their declaration scopes even when their
     // unqualified names collide with another interface or the caller.
@@ -4888,6 +5053,15 @@ fn keeps_qualified_names_comments_and_preceding_imports() {
 
 #[test]
 fn rejects_unsupported_interface_uses() {
+    // A formal or a block declaration shadows an interface variable in its
+    // scope (IEEE 1800-2023 23.9).
+    assert_eq!(
+        elaborate(
+            "interface I; logic k; function automatic logic f(input logic k); return k; endfunction
+             always_comb begin logic k; k = 1'b0; end endinterface"
+        ),
+        Ok(None)
+    );
     const BUS: &str = r#"
         interface Bus;
             logic [7:0] x;
@@ -4917,10 +5091,6 @@ fn rejects_unsupported_interface_uses() {
             "port `p` of `W` drives member `x`, an input of port `p` of `M`",
         ),
         (
-            "module Top(output logic [7:0] o); Bus b [2] (); assign o = b.get(1); endmodule",
-            "call of a function of the unselected interface array `b`",
-        ),
-        (
             "module M(Bus p, output logic [7:0] o); assign o = p.x; endmodule
              module Top(output logic [7:0] o); Bus b(); M u(.p(b.r), .o(o)); endmodule",
             "modport mismatch at `M.p`",
@@ -4937,6 +5107,12 @@ fn rejects_unsupported_interface_uses() {
         (
             "module M(Bus.r p, output logic [7:0] o); assign o = p.peek(); endmodule",
             "call of `p.peek`, which the modport of port `p` does not import",
+        ),
+        (
+            "interface Ported(input logic c); logic v; endinterface
+             module R(interface p); endmodule
+             module Top; logic c; Ported p(c); R r(.*); endmodule",
+            "wildcard connection of generic interface port `p`",
         ),
         (
             "module F(Bus p); function automatic void h(); p.x = 1; endfunction endmodule",
@@ -4966,6 +5142,28 @@ fn rejects_unsupported_interface_uses() {
             "{body}"
         );
     }
+    // An unselected interface array names no element, which 23.6 makes
+    // an error rather than an unsupported construct.
+    let source = format!(
+        "{BUS}module Top(output logic [7:0] o); Bus b [2] (); assign o = b.get(1); endmodule"
+    );
+    assert_eq!(
+        elaborate(&source),
+        Err(AnalyzerError::InvalidInterfaceSelection {
+            detail: "call of a function of the unselected interface array `b`".to_string(),
+        })
+    );
+    // A run-time element selection is no constant instance select (23.6);
+    // it fails when the module body is analyzed, not in the port plan.
+    let source = format!(
+        "{BUS}module Top(input int i, output logic [7:0] o); Bus b [2] (); assign o = b[i].get(1); endmodule"
+    );
+    assert_eq!(
+        native_interface_sources(&[(&source, Path::new("interfaces.sv"))]).map(|_| ()),
+        Err(AnalyzerError::InvalidInterfaceSelection {
+            detail: "nonconstant interface index".to_string(),
+        })
+    );
     for (interface, message) in [
         (
             "interface I; enum {Idle, Busy} state; endinterface",
@@ -4978,10 +5176,6 @@ fn rejects_unsupported_interface_uses() {
         (
             "interface I; typedef enum {Idle, Busy} state_t; state_t state; endinterface",
             "enum type in interface `I`",
-        ),
-        (
-            "interface I; logic k; function automatic logic f(input logic k); return k; endfunction endinterface",
-            "declaration of `k` in a nested scope of interface `I`, which shadows an interface item",
         ),
         (
             "interface I; logic a; modport m(inout a); endinterface",
@@ -6984,6 +7178,39 @@ fn class_randomize_rejects_unsupported_semantics() {
     }
 }
 
+/// A random variable of the object, read through a receiver of any form,
+/// is no value the caller computes (IEEE 1800-2023 18.7): `items[i].addr` of
+/// `items[i].randomize() with` is the object's rand `addr`, which the
+/// constraints do not read through a select, so the call is rejected rather
+/// than sampling it before solving.
+#[test]
+fn inline_constraints_keep_random_members_of_selected_receivers() {
+    for constraint in [
+        "rdata == memory[items[i].addr];",
+        "rdata == items[i].addr + 1;",
+    ] {
+        let source = format!(
+            "module Top;
+                class item; rand bit [7:0] addr; rand bit [7:0] rdata; endclass
+                item items[2];
+                int i;
+                bit [7:0] memory [bit [7:0]];
+                initial begin
+                    items[0] = new;
+                    void'(items[i].randomize() with {{ {constraint} }});
+                end
+            endmodule"
+        );
+        let error = analyze_source(&source, Path::new("receiver.sv"))
+            .expect_err("a rand member through the receiver is not sampled")
+            .to_string();
+        assert!(
+            error.contains("inline constraints"),
+            "{constraint}: {error}"
+        );
+    }
+}
+
 #[test]
 fn rand_mode_setter_cannot_be_used_as_a_value() {
     let source = "module Top; class C; rand int x; endclass C c; int result; initial begin c = new; result = c.x.rand_mode(1); end endmodule";
@@ -7263,6 +7490,211 @@ fn covergroups_of_classes_are_declared_members() {
                 "{access}: {error}"
             );
         }
+    }
+}
+
+#[test]
+fn covergroups_that_extend_a_base_covergroup_are_rejected_where_used() {
+    // `covergroup extends` (IEEE 1800-2023 19.4.1) is a covergroup of its
+    // class like any other: its declaration alone makes no instance and is
+    // accepted, and what uses it is rejected as a covergroup of the class.
+    let classes = |method: &str| {
+        format!(
+            "class B; int v; covergroup cg; coverpoint v; endgroup endclass \
+             class D extends B; int w; \
+             covergroup extends cg; option.weight = 2; coverpoint w; endgroup {method} endclass"
+        )
+    };
+    let top = "D d; initial begin d = new; d.w = 1; end";
+    for source in [
+        format!("module Top; {} {top} endmodule", classes("")),
+        format!("{} module Top; {top} endmodule", classes("")),
+    ] {
+        analyze_source(&source, Path::new("extends.sv"))
+            .unwrap_or_else(|error| panic!("{source}: {error}"));
+    }
+    for method in [
+        "function new(); cg = new(); endfunction",
+        "function void s(); cg.sample(); endfunction",
+        "function real c(); return this.cg.get_coverage(); endfunction",
+    ] {
+        for source in [
+            format!("module Top; {} {top} endmodule", classes(method)),
+            format!("{} module Top; {top} endmodule", classes(method)),
+        ] {
+            let error = analyze_source(&source, Path::new("extends.sv"))
+                .expect_err(method)
+                .to_string();
+            assert!(
+                error.contains("covergroup `cg` of class `D` (IEEE 1800-2023 19.4)"),
+                "{source}: {error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn unconstructed_covergroups_keep_their_bodies_to_themselves() {
+    // What follows the name of a covergroup names its formals, `item`, the
+    // cross items and `CrossQueueType` (IEEE 1800-2023 19.3, 19.5.1.1,
+    // 19.6.1): the scope that declares the covergroup binds none of it, so
+    // a covergroup that nothing constructs analyzes whatever its formals
+    // shadow. `v` names nothing of the scopes below, and `s` a signal of
+    // another width.
+    let covergroup = "covergroup cg(int v, bit [3:0] s, int w = $bits(v)) @(posedge clk); \
+        option.per_instance = 1; \
+        type_option.weight = 2; \
+        cv: coverpoint v[$bits(v)-1:4] iff (v != 0) { \
+            option.weight = w; \
+            bins few = {[0:7]} with (item < 4); \
+            bins cast[] = {[0:15]} with (int'(item) % 2 == 0); \
+            bins width[2] = {[0:$bits(item)]}; \
+            bins near = {[8 +/- 2], [8 +%- 25]}; \
+            wildcard bins wild = {4'b1??0}; \
+            bins others[] = cv with (item > s); \
+            bins steps = (0 => 1 [* 2:3] => 2), ([3:4] [-> 2]); \
+            illegal_bins rest = default; \
+        } \
+        logic [$bits(s)-1:0] cs: coverpoint s[$bits(s)-1:0] iff (s != 0); \
+        cc: coverpoint ($bits(v))'(s); \
+        cx: cross cv, cs iff (v != s) { \
+            function CrossQueueType pairs(int limit); \
+                for (int i = 0; i < limit; i++) pairs.push_back('{i, i}); \
+            endfunction \
+            bins made = pairs(4); \
+            bins some = binsof(cv) intersect {[0:3]} && binsof(cs.low) || cx with (cv + cs < 8); \
+            ignore_bins more = binsof(cv) with (cv > cs) matches $; \
+        } \
+        endgroup : cg";
+    let mut rejected = Vec::new();
+    for (scope, source) in [
+        (
+            "module",
+            format!("module Top; logic clk; logic [15:0] s; {covergroup} endmodule"),
+        ),
+        (
+            "generate block",
+            format!(
+                "module Top; logic clk; logic [15:0] s; \
+                 if (1) begin : g {covergroup} end endmodule"
+            ),
+        ),
+        (
+            "class of a module",
+            format!(
+                "module Top; class C; logic clk; logic [15:0] s; {covergroup} endclass \
+                 C c; initial c = new; endmodule"
+            ),
+        ),
+        (
+            "class of the compilation unit",
+            format!(
+                "class C; logic clk; logic [15:0] s; {covergroup} endclass \
+                 module Top; C c; initial c = new; endmodule"
+            ),
+        ),
+        (
+            "compilation unit",
+            format!("logic clk; logic [15:0] s; {covergroup} module Top; endmodule"),
+        ),
+        (
+            "package of the source",
+            format!(
+                "package p; logic clk; logic [15:0] s; {covergroup} endpackage \
+                 module Top; import p::*; logic [15:0] t; assign t = s; endmodule"
+            ),
+        ),
+    ] {
+        if let Err(error) = analyze_source(&source, Path::new("covergroup-body.sv")) {
+            rejected.push(format!("{scope}: {error}"));
+        }
+    }
+    let package = format!(
+        "package p; logic clk; logic [15:0] s; {covergroup} \
+         class C; logic [15:0] s; {covergroup} endclass endpackage"
+    );
+    match analyze_packages(&[(&package, Path::new("covergroup-body-p.sv"))]) {
+        Ok(packages) => {
+            if let Err(error) = analyze_source_module_with_packages(
+                "module Top; import p::*; logic [15:0] t; C c; \
+                 initial begin c = new; t = s; end endmodule",
+                Path::new("covergroup-body-top.sv"),
+                "Top",
+                &HashMap::default(),
+                &packages,
+                &mut packages.design(),
+            ) {
+                rejected.push(format!("module that imports the package: {error}"));
+            }
+        }
+        Err(error) => rejected.push(format!("package: {error}")),
+    }
+    assert!(rejected.is_empty(), "{rejected:#?}");
+    // Nor is a bound inside a covergroup a constant value of the module,
+    // which a specparam may not be an operand of (6.20.5).
+    let source = "module Top; specparam SP = 3; logic [7:0] x; \
+                  covergroup cg; coverpoint x[SP:0] { bins low = {x[SP:0], {SP{1'b1}}}; } \
+                  endgroup endmodule";
+    analyze_source(source, Path::new("covergroup-specparam.sv"))
+        .unwrap_or_else(|error| panic!("{source}: {error}"));
+    // Nor is a formal or a coverpoint a call of the `let` of its name that
+    // the module declares, before or after the covergroup (11.12).
+    for source in [
+        "module Top; logic clk = 0; logic [3:0] a = 1, b = 2, t; \
+         let max(x, y) = x + y; assign t = max(a, b); \
+         covergroup cg(int max) @(posedge clk); coverpoint a { bins lo = {[0:max]}; } endgroup \
+         endmodule",
+        "module Top; logic clk = 0; logic [3:0] a = 1, b = 2, t; \
+         covergroup cg @(posedge clk); low: coverpoint a; hi: coverpoint b; \
+         x: cross low, hi { bins s = x with (low + hi < 4); } endgroup \
+         let low = a + b; assign t = low; endmodule",
+        "module Top; logic [3:0] a = 1, b = 2, t; let lim = a + b; assign t = lim; \
+         covergroup cg(int lim); coverpoint a iff (a < lim) { bins lo = {[0:lim]}; } endgroup \
+         endmodule",
+    ] {
+        analyze_source(source, Path::new("covergroup-let.sv"))
+            .unwrap_or_else(|error| panic!("{source}: {error}"));
+    }
+    // The plan of an interface that declares a covergroup, also in a
+    // class, stays rejected as before.
+    for items in [
+        covergroup.to_string(),
+        format!("class C; {covergroup} endclass"),
+    ] {
+        let source = format!(
+            "interface I; logic clk; logic [15:0] s; {items} endinterface \
+             module Top; I i(); endmodule"
+        );
+        let error = match plan_interfaces(&[(&source, Path::new("covergroup-body-if.sv"))], &[]) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("{source}: a covergroup in an interface"),
+        };
+        assert!(
+            error.contains("task, class, or verification declaration in interface `I`"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn covergroups_stay_declarations_of_the_scopes_that_bind_around_them() {
+    // A covergroup is a declaration of its scope like the unconverted item
+    // it was. A module with an interface instance declares the type as
+    // before; that the declarations it binds before the instance still
+    // hold the covergroup shows in nothing yet, as nothing binds one. The
+    // uses of an interconnect net that the module checks (IEEE 1800-2023
+    // 6.6.8) are none of the formals a covergroup declares itself.
+    for source in [
+        "interface I; logic x; endinterface \
+         module Top; I h(); bit x; \
+         covergroup cg @(posedge x); coverpoint x; endgroup cg c; endmodule",
+        "module Src(output logic o); assign o = 1'b1; endmodule \
+         module Dst(input logic a); endmodule \
+         module Top; interconnect link; Src s(.o(link)); Dst d(.a(link)); logic x; \
+         covergroup cg(int link); coverpoint x iff (link != 0); endgroup endmodule",
+    ] {
+        analyze_source(source, Path::new("covergroup-declaration.sv"))
+            .unwrap_or_else(|error| panic!("{source}: {error}"));
     }
 }
 
@@ -7700,7 +8132,9 @@ fn preserves_legal_enum_declaration_initializers() {
         "enum bit [1:0] { a=(2'bxx & 2'b00), b } value;",
         "enum logic [1:0] { a=2'bxx, b=2'b01, c } value;",
         "enum logic [1:0] { a=2'bxx, b=a & 2'b00, c } value;",
-        "localparam P=4'h2; enum logic [2:0] { A=P, B=4'h1+1 } value;",
+        // An operation on sized literals is no sized literal constant; the
+        // values stay unique (6.19).
+        "localparam P=4'h2; enum logic [2:0] { A=P, B=4'h1+2 } value;",
         "enum logic [2:0] { A=3'(4'h2) } value;",
         "enum logic [2:0] { A=3'h2 } value [2];",
         "typedef enum int { W=3 } E; typedef logic [W'(2):0] B; enum B { A=3'b101 } value;",
@@ -8723,7 +9157,6 @@ fn scalar_logic_gates_keep_unsupported_modifiers_explicit() {
     for gate in [
         "and #1 (y,a,b);",
         "and (strong1,weak0) (y,a,b);",
-        "and g[1:0](y,a,b);",
         "tran (y,a);",
     ] {
         let source = format!("module Top(input logic a,b,output wire y); {gate} endmodule");
@@ -8733,6 +9166,18 @@ fn scalar_logic_gates_keep_unsupported_modifiers_explicit() {
             "{error}"
         );
     }
+    // An array of instances has one range (IEEE 1800-2023 28.3.5).
+    let error = analyze_source(
+        "module Top(input logic a,b,output wire y); and g[1:0][1:0](y,a,b); endmodule",
+        Path::new("gates.sv"),
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("gate primitive instantiation with a multidimensional instance array"),
+        "{error}"
+    );
     for source in [
         "module Top(input logic [1:0] a,b,output wire y); and (y,a,b); endmodule",
         "module Top(input a,b,output wire [1:0] y); and ({y},a,b); endmodule",
@@ -8918,3 +9363,5 @@ fn block_imports_bind_the_calls_of_folded_branches() {
     assert!(sensitivity.contains("\"q::g\""), "{sensitivity}");
     assert!(!sensitivity.contains("\"g\""), "{sensitivity}");
 }
+
+mod constant_expressions;

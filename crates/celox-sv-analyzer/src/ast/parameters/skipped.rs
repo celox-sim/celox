@@ -14,6 +14,27 @@ fn integer(
         .ok_or_else(|| unsupported("parameter shape expression that is not a known constant"))
 }
 
+/// Whether native expression `root` has a concatenation or replication with
+/// a real operand.
+fn real_concatenation(root: ExprId, tree: &AnalysisContext<'_>) -> bool {
+    let native = tree.declarations();
+    let tokens = native.expression(root).tokens;
+    tree.spans()
+        .expressions
+        .within(&[tokens])
+        .into_iter()
+        .any(|id| match &native.expression(id).kind {
+            ExprKind::Concatenation(operands)
+            | ExprKind::Replication {
+                expressions: operands,
+                ..
+            } => operands
+                .iter()
+                .any(|operand| super::super::validation::real_operand(*operand, native, tree)),
+            _ => false,
+        })
+}
+
 fn bound(
     root: ExprId,
     unknown: bool,
@@ -537,13 +558,12 @@ fn pattern_items(
                 count,
                 left.min(right),
                 left.max(right),
-                VariableDimensions::new(VariableShape {
+                shape.derived(VariableShape {
                     declared: type_names::Declared::default(),
                     container: None,
                     chandle: false,
                     real: false,
                     string: false,
-                    class: None,
                     unpacked: rest.to_vec(),
                     ..shape.clone_shape()
                 }),
@@ -564,12 +584,11 @@ fn pattern_items(
                 count,
                 left.min(right),
                 left.max(right),
-                VariableDimensions::new(VariableShape {
+                shape.derived(VariableShape {
                     declared: type_names::Declared::default(),
                     container: None,
                     real: false,
                     string: false,
-                    class: None,
                     packed: rest.to_vec(),
                     ..shape.clone_shape()
                 }),
@@ -586,18 +605,14 @@ fn pattern_items(
                     container: None,
                     chandle: false,
                     randomizable: true,
-                    enum_domain: None,
-                    packed_enum: false,
                     real: false,
                     string: false,
-                    class: None,
                     packed: Vec::new(),
                     unpacked: Vec::new(),
                     members: Vec::new(),
                     signed: false,
                     is_2state: shape.is_2state,
                     signed_element_depth: None,
-                    unpacked_struct: None,
                 }),
                 true,
             )
@@ -703,7 +718,7 @@ pub(in crate::ast) fn literal_widths(
                         .replace('_', "")
                         .parse::<usize>()
                         .map_err(|_| unsupported("parameter literal width"))?;
-                    if width > constant_folding::MAX_CONSTANT_CONCAT_BITS {
+                    if width > constant_folding::MAX_CONSTANT_VALUE_BITS {
                         if shape {
                             validate_parameter_materialization_width(Some(width))?;
                         }
@@ -845,7 +860,7 @@ pub(in crate::ast) fn literal_widths(
             &|name| dimensions::parameter_type_from_const_env(&dims.const_env, name),
             true,
         )
-        && ty.width <= constant_folding::MAX_CONSTANT_CONCAT_BITS
+        && ty.width <= constant_folding::MAX_CONSTANT_VALUE_BITS
         && let Some(value) = eval_ast_const_expr(&tree.functions, &proof, &dims.const_env)
     {
         for id in visited {
@@ -918,7 +933,7 @@ fn proof(
             Job::Enter(id) => match &native.expression(id).kind {
                 ExprKind::Literal(text) => values.push(
                     if typecheck::integral_literal_type_metadata(text).is_some_and(|(width, _)| {
-                        width <= constant_folding::MAX_CONSTANT_CONCAT_BITS
+                        width <= constant_folding::MAX_CONSTANT_VALUE_BITS
                     }) {
                         Expr::Literal(text.clone())
                     } else {
@@ -935,7 +950,7 @@ fn proof(
                             .get(&name)
                             .filter(|value| {
                                 expr_static_width(tree, value, dims).is_some_and(|width| {
-                                    width <= constant_folding::MAX_CONSTANT_CONCAT_BITS
+                                    width <= constant_folding::MAX_CONSTANT_VALUE_BITS
                                 })
                             })
                             .cloned()
@@ -970,7 +985,7 @@ fn proof(
                                 .get(&name)
                                 .and_then(|value| expr_static_width(tree, value, dims))
                                 .is_some_and(|width| {
-                                    width <= constant_folding::MAX_CONSTANT_CONCAT_BITS
+                                    width <= constant_folding::MAX_CONSTANT_VALUE_BITS
                                 })
                         });
                     values.push(if safe {
@@ -1136,7 +1151,48 @@ pub(in crate::ast) fn validate_scope(
         .filter(|(_, _, prefix)| *prefix)
         .map(|(parameter, _, _)| parameter)
         .collect::<Vec<_>>();
+    reject_circular_parameters(&prefix, tree)?;
+    let variables = super::super::validation::element_variables(tree);
     for (parameter, scope, is_prefix) in &values {
+        // A parameter of the design element takes a constant value, which
+        // reads no variable or net (IEEE 1800-2023 6.20.2, 11.2.1).
+        if *is_prefix
+            && let ParameterKind::Value {
+                default: Some(root),
+                ..
+            } = parameter.kind
+            && let Some(name) = super::super::validation::variable_read(
+                root,
+                native,
+                tree.spans(),
+                dimensions,
+                &variables,
+            )
+        {
+            return Err(AnalyzerError::NonConstantExpression {
+                construct: format!(
+                    "the value of parameter `{}`",
+                    instances::normalize_identifier(&parameter.name.spelling)
+                ),
+                name,
+            });
+        }
+        if *is_prefix
+            && let ParameterKind::Value {
+                default: Some(root),
+                ..
+            } = parameter.kind
+            && let Some((construct, name)) =
+                default_argument_read(root, tree, dimensions, &variables)
+        {
+            return Err(AnalyzerError::NonConstantExpression {
+                construct: format!(
+                    "{construct}, which the value of parameter `{}` calls,",
+                    instances::normalize_identifier(&parameter.name.spelling)
+                ),
+                name,
+            });
+        }
         let scoped_context = tree.child(scope, &tree.parameter_overrides);
         let scope = &scoped_context;
         let ParameterKind::Value {
@@ -1159,9 +1215,238 @@ pub(in crate::ast) fn validate_scope(
         validate_operators(tree, root, native)?;
         if literal_widths(root, scope, session, dimensions)?.is_some() {
             validate(root, scope, session, dimensions, &unavailable, true)?;
-        } else if needs_selected(tree, root, native) {
+        } else if !matches!(
+            native
+                .expression(expression_binding::ungroup(root, native))
+                .kind,
+            ExprKind::Pattern { .. }
+        ) && needs_selected(tree, root, native)
+        {
+            // An assignment pattern takes its shape from the declared type
+            // (IEEE 1800-2023 10.9): it is checked where it is bound to it,
+            // casts of its items included.
             let context = dimensions::query_context_for_operand(root, scope, session, dimensions)?;
             selects::selected_parameter_initializer(root, scope, session, &context, None)?;
+        }
+        // The value of a parameter without unpacked dimensions is no
+        // unpacked array concatenation; a concatenation takes integral
+        // operands (11.3, Table 11-1).
+        if *is_prefix
+            && let ParameterKind::Value {
+                default: Some(root),
+                dimensions: unpacked,
+                ..
+            } = &parameter.kind
+            && unpacked.is_empty()
+            && real_concatenation(*root, tree)
+        {
+            return Err(AnalyzerError::IllegalOperand {
+                operator: "{}".into(),
+                operand: "real",
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The token ranges of the operands of `expressions` that are not
+/// evaluated: the first argument of a data query or `$typename` (20.6.1).
+fn unevaluated_operands(
+    expressions: &[ExprId],
+    tree: &AnalysisContext<'_>,
+) -> Vec<celox_sv_syntax::TokenRange> {
+    let native = tree.declarations();
+    expressions
+        .iter()
+        .filter_map(|id| {
+            let ExprKind::Call {
+                expression,
+                arguments,
+            } = &native.expression(*id).kind
+            else {
+                return None;
+            };
+            let name = expression_binding::callable_name(tree, *expression, native)?;
+            SystemFunction::from_name(&name)
+                .filter(|function| function.has_unevaluated_operand())?;
+            Some(native.expression(arguments.first()?.value?).tokens)
+        })
+        .collect()
+}
+
+fn within(ranges: &[celox_sv_syntax::TokenRange], tokens: celox_sv_syntax::TokenRange) -> bool {
+    ranges
+        .iter()
+        .any(|range| range.start <= tokens.start && tokens.end <= range.end)
+}
+
+/// A variable or net that the default of an argument reads, of a call in
+/// native expression `root` of a function of the design element that omits
+/// that argument: the call is no constant function call, whose defaults are
+/// constant expressions (IEEE 1800-2023 13.4.3).
+fn default_argument_read(
+    root: ExprId,
+    tree: &AnalysisContext<'_>,
+    dimensions: &PackedDimensions,
+    variables: &HashMap<String, bool>,
+) -> Option<(String, String)> {
+    let native = tree.declarations();
+    let unit = tree.root_unit().ok()?;
+    let tokens = native.expression(root).tokens;
+    let expressions = tree.spans().expressions.within(&[tokens]);
+    // A call in an operand that is not evaluated is not made.
+    let unevaluated = unevaluated_operands(&expressions, tree);
+    for id in expressions {
+        let ExprKind::Call {
+            expression,
+            arguments,
+        } = &native.expression(id).kind
+        else {
+            continue;
+        };
+        if within(&unevaluated, native.expression(id).tokens) {
+            continue;
+        }
+        let Some(name) = expression_binding::callable_name(tree, *expression, native) else {
+            continue;
+        };
+        let Some(function) = unit
+            .subroutines
+            .iter()
+            .map(|id| native.subroutine(*id))
+            .find(|subroutine| {
+                subroutine.kind == celox_sv_syntax::SubroutineKind::Function
+                    && subroutine.scope.is_empty()
+                    && instances::normalize_identifier(&subroutine.name.spelling) == name
+            })
+        else {
+            continue;
+        };
+        for (position, port) in function.ports.iter().flatten().enumerate() {
+            let (Some(default), Some(formal)) = (port.default, port.name.as_ref()) else {
+                continue;
+            };
+            let formal = instances::normalize_identifier(&formal.spelling);
+            let given = arguments.iter().enumerate().any(|(index, argument)| {
+                argument.value.is_some()
+                    && match &argument.name {
+                        Some(named) => instances::normalize_identifier(&named.spelling) == formal,
+                        None => index == position,
+                    }
+            });
+            if given {
+                continue;
+            }
+            if let Some(read) = super::super::validation::variable_read(
+                default,
+                native,
+                tree.spans(),
+                dimensions,
+                variables,
+            ) {
+                return Some((
+                    format!("the default of argument `{formal}` of function `{name}`"),
+                    read,
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// Reject a parameter of the design element whose value depends on itself,
+/// directly or through other parameters of the element: no constant value
+/// satisfies it (IEEE 1800-2023 6.20.2).
+fn reject_circular_parameters(
+    parameters: &[&celox_sv_syntax::Parameter],
+    tree: &AnalysisContext<'_>,
+) -> Converted<()> {
+    let native = tree.declarations();
+    let spans = tree.spans();
+    use celox_sv_syntax::ParameterKind;
+    let names = parameters
+        .iter()
+        .map(|parameter| instances::normalize_identifier(&parameter.name.spelling))
+        .collect::<Vec<_>>();
+    // The parameters each value reads.
+    let reads = parameters
+        .iter()
+        .map(|parameter| {
+            let ParameterKind::Value {
+                default: Some(root),
+                ..
+            } = parameter.kind
+            else {
+                return Vec::new();
+            };
+            let tokens = native.expression(root).tokens;
+            let expressions = spans.expressions.within(&[tokens]);
+            // The key of an assignment pattern item names a member or a
+            // type, not a parameter, and the operand of a data query is not
+            // evaluated.
+            let mut keys = unevaluated_operands(&expressions, tree);
+            keys.extend(
+                expressions
+                    .iter()
+                    .filter_map(|id| match &native.expression(*id).kind {
+                        ExprKind::Pattern { items, .. } => Some(items),
+                        _ => None,
+                    })
+                    .flatten()
+                    .filter_map(|item| item.key)
+                    .map(|key| native.expression(key).tokens),
+            );
+            let mut read = expressions
+                .into_iter()
+                .filter_map(|id| {
+                    let expression = native.expression(id);
+                    match &expression.kind {
+                        ExprKind::Name(name)
+                            if !keys.iter().any(|key| {
+                                key.start <= expression.tokens.start
+                                    && expression.tokens.end <= key.end
+                            }) =>
+                        {
+                            let name = instances::normalize_identifier(&name.spelling);
+                            names.iter().position(|other| *other == name)
+                        }
+                        _ => None,
+                    }
+                })
+                .collect::<Vec<_>>();
+            read.sort_unstable();
+            read.dedup();
+            read
+        })
+        .collect::<Vec<_>>();
+    // Depth-first search for a cycle: 1 while on the path, 2 when done.
+    let mut state = vec![0u8; parameters.len()];
+    for start in 0..parameters.len() {
+        if state[start] != 0 {
+            continue;
+        }
+        let mut path = vec![(start, 0usize)];
+        state[start] = 1;
+        while let Some((node, next)) = path.last_mut() {
+            let node = *node;
+            let Some(&target) = reads[node].get(*next) else {
+                state[node] = 2;
+                path.pop();
+                continue;
+            };
+            *next += 1;
+            match state[target] {
+                0 => {
+                    state[target] = 1;
+                    path.push((target, 0));
+                }
+                1 => {
+                    return Err(AnalyzerError::CircularParameter {
+                        name: names[target].clone(),
+                    });
+                }
+                _ => {}
+            }
         }
     }
     Ok(())

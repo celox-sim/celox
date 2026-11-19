@@ -280,12 +280,11 @@ impl BoundPattern {
             let right = eval(&dim.right)?;
             let count = usize::try_from(left.abs_diff(right) + 1)
                 .map_err(|_| unsupported("assignment pattern target size"))?;
-            let mut element = VariableDimensions::new(VariableShape {
+            let mut element = shape.derived(VariableShape {
                 declared: type_names::Declared::default(),
                 container: None,
                 real: false,
                 string: false,
-                class: None,
                 unpacked: rest.to_vec(),
                 ..shape.clone_shape()
             });
@@ -312,12 +311,11 @@ impl BoundPattern {
             let count = usize::try_from(left.abs_diff(right) + 1)
                 .map_err(|_| unsupported("assignment pattern target size"))?;
             shapes = vec![
-                VariableDimensions::new(VariableShape {
+                shape.derived(VariableShape {
                     declared: type_names::Declared::default(),
                     container: None,
                     real: false,
                     string: false,
-                    class: None,
                     packed: rest.to_vec(),
                     signed: shape.signed_element_depth == Some(1),
                     signed_element_depth: shape
@@ -378,11 +376,9 @@ impl BoundPattern {
                     container: None,
                     real: false,
                     string: false,
-                    class: None,
                     packed: Vec::new(),
                     signed: false,
                     signed_element_depth: None,
-                    unpacked_struct: None,
                     ..shape.clone_shape()
                 });
                 width

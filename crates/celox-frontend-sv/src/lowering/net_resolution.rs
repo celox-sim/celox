@@ -57,6 +57,7 @@ impl ResolvedNets {
             );
         for (name, resolution) in nets {
             if resolution == NetResolution::Single
+                || resolution == NetResolution::Interconnect
                 || resolved.nets.contains_key(name)
                 || strong_repeats.contains(name)
             {
@@ -311,7 +312,7 @@ fn resolve_planes(
                 let one_b = binary(arena, not_mb, And, vb)?;
                 Some((binary(arena, one_a, Or, one_b)?, true))
             }
-            NetResolution::Wire | NetResolution::Single => None,
+            NetResolution::Wire | NetResolution::Single | NetResolution::Interconnect => None,
         };
         if let Some((decided, one)) = decided {
             let open = complement(arena, decided)?;

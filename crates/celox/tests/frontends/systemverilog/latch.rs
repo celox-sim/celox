@@ -61,7 +61,7 @@ const MIXED_TOP: &str = "module Top(en: input logic, d: input logic<8>, q: outpu
 const MIXED_DUT: &str = "module Latch(input logic en, input logic [7:0] d, output logic [7:0] q); always_comb if(en) q=d; endmodule";
 
 #[test]
-fn mixed_hierarchy_inference_remains_opt_in() {
+fn mixed_hierarchy_inference_warns_by_default_and_errors_in_strict_mode() {
     let builder = || {
         Simulator::from_mixed_sources(
             vec![(MIXED_TOP, Path::new("top.veryl"))],
@@ -69,7 +69,13 @@ fn mixed_hierarchy_inference_remains_opt_in() {
             "Top",
         )
     };
-    let error = builder().build_interpreter().unwrap_err().to_string();
+    let sim = builder().build_interpreter().unwrap();
+    assert_eq!(sim.warnings().len(), 1, "{:?}", sim.warnings());
+    let error = builder()
+        .strict(true)
+        .build_interpreter()
+        .unwrap_err()
+        .to_string();
     assert!(
         error.contains("latch inference inside always_comb"),
         "{error}"
@@ -442,6 +448,180 @@ fn task_call_sensitivity_in_both_state_modes_at_o0_and_o2() {
             sim.run_until(10_000)
                 .unwrap_or_else(|error| panic!("four_state={four_state}, {level:?}: {error}"));
             assert!(sim.is_finished());
+        }
+    }
+}
+
+// A continuous assignment whose bits each read other bits of its own net,
+// as a Gray-code decoder does (OpenPiton's async_fifo:
+// `assign b_wptr = {1'b0, b_wptr[ASIZE-1:1]} ^ g_wptr;`), settles bit by
+// bit (IEEE 1800-2023 10.3.2). A bit that reads itself is a loop, and an
+// always_comb that reads what it writes holds a previous value (a latch).
+#[test]
+fn continuous_assignments_read_other_bits_of_their_net() {
+    let source = r#"
+        `timescale 1ns/1ns
+        module Top;
+            parameter ASIZE = 5;
+            reg [ASIZE-1:0] g_wptr = 5'b11010;
+            wire [ASIZE-1:0] b_wptr;
+            assign b_wptr[ASIZE-1:0] = ({1'b0, b_wptr[ASIZE-1:1]} ^ g_wptr[ASIZE-1:0]);
+            initial begin
+                #1 $display("%b", b_wptr);
+                g_wptr = 5'b00111;
+                #1 $display("%b", b_wptr);
+            end
+        endmodule
+    "#;
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("gray.sv"))], "Top")
+                .four_state(four_state)
+                .build_cranelift()
+                .unwrap();
+        sim.run_until(5).unwrap();
+        let displayed: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8(message).unwrap())
+                }
+                _ => None,
+            })
+            .collect();
+        // Gray 11010 is binary 10011, Gray 00111 is binary 00101.
+        assert_eq!(displayed, ["10011", "00101"], "four_state={four_state}");
+    }
+    // A continuous self-assignment is a combinational loop in both modes.
+    let rejected = "module Top; logic [3:0] g; wire [3:0] b; assign b = b ^ g; endmodule";
+    let error = celox::Simulation::from_sv_sources(vec![(rejected, Path::new("loop.sv"))], "Top")
+        .build_cranelift()
+        .err()
+        .unwrap_or_else(|| panic!("`{rejected}` is accepted"))
+        .to_string();
+    assert!(error.contains("latch inference"), "{error}");
+    // The always_comb self-read holds its previous value: a latch, which
+    // warns by default and is rejected in strict mode.
+    let latch = "module Top; logic [3:0] g, b; always_comb b = {1'b0, b[3:1]} ^ g; endmodule";
+    let sim = celox::Simulation::from_sv_sources(vec![(latch, Path::new("loop.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    assert_eq!(sim.warnings().len(), 1, "{:?}", sim.warnings());
+    let error = celox::Simulation::from_sv_sources(vec![(latch, Path::new("loop.sv"))], "Top")
+        .strict(true)
+        .build_cranelift()
+        .err()
+        .unwrap_or_else(|| panic!("`{latch}` is accepted in strict mode"))
+        .to_string();
+    assert!(error.contains("latch inference"), "{error}");
+}
+
+// Each output of an `always_comb` that keeps some bits on some paths, as
+// Vortex's FPU control does, depends on what that output reads (IEEE
+// 1800-2023 9.2.2.2.1): `c` reads the latched `di` through `s`, and `di`
+// does not read `c`, so they form no loop. A kept value reads the bits'
+// previous value.
+#[test]
+fn latched_outputs_depend_only_on_their_own_reads() {
+    let source = r#"
+        module Top(input logic [1:0] sel, input logic [1:0] m,
+                   output logic [1:0] q, output logic [1:0] d);
+            logic [1:0] di;
+            logic s;
+            logic [1:0] c;
+            always_comb begin
+                case (sel)
+                    2'b00: begin di = m; c = s ? 2'b01 : 2'b10; end
+                    2'b01: begin di = ~m; c = 2'b00; end
+                    default: c = 2'b11;
+                endcase
+            end
+            assign s = di[0];
+            assign q = c;
+            assign d = di;
+        endmodule
+    "#;
+    for four_state in [false, true] {
+        let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("held.sv"))], "Top")
+            .allow_inferred_latches(true)
+            .four_state(four_state)
+            .build_interpreter()
+            .unwrap_or_else(|error| panic!("four_state={four_state}: {error}"));
+        let (sel, m, q, d) = (
+            sim.signal("sel"),
+            sim.signal("m"),
+            sim.signal("q"),
+            sim.signal("d"),
+        );
+        for (selected, value, expected_q, expected_d) in [
+            (0u8, 0b01u8, 0b01u8, 0b01u8),
+            (2, 0b10, 0b11, 0b01),
+            (1, 0b01, 0b00, 0b10),
+            (3, 0b11, 0b11, 0b10),
+            (0, 0b10, 0b10, 0b10),
+        ] {
+            sim.modify(|io| {
+                io.set(sel, selected);
+                io.set(m, value);
+            })
+            .unwrap();
+            assert_eq!(
+                (sim.get(q), sim.get(d)),
+                (expected_q.into(), expected_d.into()),
+                "four_state={four_state}, sel={selected}, m={value}"
+            );
+        }
+    }
+}
+
+// A variable an `always_comb` writes only in a branch that a constant
+// excludes, as fpnew's square-root operands for the iteration units its
+// configuration leaves out, keeps its value, and the outputs of the taken
+// branch depend only on what they read: `w` reads `fed`, which `y` drives,
+// and `y` does not read `fed`.
+#[test]
+fn variables_written_only_in_excluded_branches_keep_their_value() {
+    let source = r#"
+        package p; localparam logic [1:0] UNITS = 2'b10; endpackage
+        module Top import p::*; (input logic [1:0] a, output logic [1:0] y, w, z);
+            logic [1:0] narrow, fed;
+            always_comb begin
+                case (UNITS)
+                    2'b00: begin narrow = a; y = a; w = fed; end
+                    default: begin y = a; w = fed; end
+                endcase
+            end
+            assign fed = ~y;
+            assign z = narrow;
+        endmodule
+    "#;
+    for four_state in [false, true] {
+        let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("excluded.sv"))], "Top")
+            .allow_inferred_latches(true)
+            .four_state(four_state)
+            .build_interpreter()
+            .unwrap_or_else(|error| panic!("four_state={four_state}: {error}"));
+        let (a, y, w, z) = (
+            sim.signal("a"),
+            sim.signal("y"),
+            sim.signal("w"),
+            sim.signal("z"),
+        );
+        for value in [1u8, 3] {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            assert_eq!(
+                (sim.get(y), sim.get(w)),
+                (value.into(), (!value & 3).into()),
+                "four_state={four_state}"
+            );
+            // `narrow` keeps its initial value: X, or 0 in two-state.
+            let unknown = if four_state { 3u8 } else { 0 };
+            assert_eq!(
+                sim.get_four_state(z).1,
+                unknown.into(),
+                "four_state={four_state}"
+            );
         }
     }
 }

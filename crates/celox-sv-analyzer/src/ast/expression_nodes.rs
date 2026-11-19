@@ -84,7 +84,7 @@ impl ObjectPlace {
             } => {
                 let get = containers::call(
                     crate::system_functions::ContainerOp::Get,
-                    *layout,
+                    layout.clone(),
                     vec![container.clone(), index.clone()],
                 );
                 match record {
@@ -156,7 +156,7 @@ impl ObjectPlace {
                 ..
             } => containers::call(
                 crate::system_functions::ContainerOp::Set,
-                *layout,
+                layout.clone(),
                 vec![
                     container.clone(),
                     index.clone(),

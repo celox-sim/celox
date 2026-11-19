@@ -77,7 +77,7 @@ pub(super) fn bind(
         return Ok(Some((
             containers::call(
                 op,
-                container.layout,
+                container.layout.clone(),
                 vec![expression_binding::value(
                     *base, native, tree, session, dims,
                 )?],

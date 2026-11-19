@@ -444,6 +444,7 @@ pub(super) fn run(
         .optimize_options(optimize_options)
         .x86_slp(opts.x86_slp)
         .diagnostic_policy(opts.design.diagnostics.clone())
+        .legacy_empty_reductions(opts.design.legacy_empty_reductions)
         .signal_access(opts.design.signal_access.clone())
         .four_state(opts.four_state)
         .hotspot_jit(opts.hotspot_jit)
@@ -794,16 +795,10 @@ fn compile_native_image(
     let image = if let Some(image) = native_image.take() {
         image
     } else if let Some(cache) = build_cache {
-        let (compiled, dependencies) =
-            celox_frontend_veryl::capture_file_dependencies(|collector| {
-                builder
-                    .file_dependency_collector(collector.clone())
-                    .compile_native()
-            });
-        let compiled = compiled?;
+        let compiled = builder.compile_native()?;
         super::report_warnings(compiled.warnings())
             .map_err(|message| RunError::TestFailed { message })?;
-        cache.store(compiled.program_image(), &dependencies);
+        cache.store(compiled.program_image());
         compiled.into_program_image()
     } else {
         let compiled = builder.compile_native()?;

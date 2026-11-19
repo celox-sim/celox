@@ -170,6 +170,7 @@ export interface NapiOptions {
 	plusargs?: string[];
 	fourState?: boolean;
 	allowInferredLatches?: boolean;
+	strict?: boolean;
 	vcd?: string;
 	fst?: string;
 	optLevel?: string;
@@ -429,6 +430,10 @@ export function buildNapiOpts(
 	}
 	if (options.allowInferredLatches !== undefined) {
 		napiOpts.allowInferredLatches = options.allowInferredLatches;
+		hasOpt = true;
+	}
+	if (options.strict !== undefined) {
+		napiOpts.strict = options.strict;
 		hasOpt = true;
 	}
 	if (options.fourState) {

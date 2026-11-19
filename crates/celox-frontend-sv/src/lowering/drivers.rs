@@ -89,7 +89,7 @@ pub(super) fn stmt_may_suspend(subroutines: &[sv::ir::Subroutine], stmt: &sv::ir
 /// recorded there with the formal: it is written when the formal is (see
 /// `ProcModule::written_names`).
 pub(super) fn kernel_written_names(
-    scan: &impl CallDefinitions,
+    scan: &(impl CallDefinitions + ?Sized),
     body: &[sv::ir::Stmt],
     names: &mut HashSet<String>,
     visited: &mut HashSet<String>,
@@ -99,6 +99,72 @@ pub(super) fn kernel_written_names(
     if depth > procedural::MAX_CALL_DEPTH {
         return;
     }
+    body_written_names(
+        scan,
+        body,
+        names,
+        refs,
+        &mut |name, subroutine, names, refs| {
+            if visited.insert(name.to_string()) {
+                kernel_written_names(scan, &subroutine.body, names, visited, depth + 1, refs);
+            }
+        },
+    );
+}
+
+/// Whether [`kernel_written_names`] without `refs` finds that `body` writes
+/// `name`: a callee whose written names were gathered (see [`WrittenNames`])
+/// is asked, not walked again.
+pub(super) fn kernel_writes_name(
+    scan: &(impl CallDefinitions + ?Sized),
+    body: &[sv::ir::Stmt],
+    name: &str,
+    visited: &mut HashSet<String>,
+    depth: usize,
+) -> bool {
+    if depth > procedural::MAX_CALL_DEPTH {
+        return false;
+    }
+    let mut names = HashSet::default();
+    let mut found = false;
+    body_written_names(
+        scan,
+        body,
+        &mut names,
+        &mut None,
+        &mut |callee, subroutine, _, _| {
+            if found {
+                return;
+            }
+            if let Some(writes) = scan.subroutine_writes(callee, name) {
+                found = writes;
+            } else if visited.insert(callee.to_string()) {
+                found = kernel_writes_name(scan, &subroutine.body, name, visited, depth + 1);
+            }
+        },
+    );
+    found || names.contains(name)
+}
+
+/// What a scan of `body` does with a subroutine a call of it enters, after
+/// adding the call's written actuals: the callee's name and definition.
+type EnterCallee<'s, 'f> = dyn FnMut(
+        &str,
+        &'s sv::ir::Subroutine,
+        &mut HashSet<String>,
+        &mut Option<Vec<(String, Vec<String>)>>,
+    ) + 'f;
+
+/// Adds the names `body` itself writes to `names`: by its assignments, and
+/// as the written arguments of its calls. Each subroutine a call enters is
+/// passed to `enter`, in the order the calls are taken.
+fn body_written_names<'s>(
+    scan: &'s (impl CallDefinitions + ?Sized),
+    body: &[sv::ir::Stmt],
+    names: &mut HashSet<String>,
+    refs: &mut Option<Vec<(String, Vec<String>)>>,
+    enter: &mut EnterCallee<'s, '_>,
+) {
     let mut calls = Vec::new();
     for stmt in body {
         stmt.walk(&mut |stmt| {
@@ -169,27 +235,209 @@ pub(super) fn kernel_written_names(
                 }
             }
         }
-        if visited.insert(name) {
-            kernel_written_names(scan, &subroutine.body, names, visited, depth + 1, refs);
+        enter(&name, subroutine, names, refs);
+    }
+}
+
+/// The names the subroutines of a module write, gathered once for the module
+/// so that the scans of its loops do not walk the callees again: for each
+/// strongly connected component of its call graph, the names its
+/// subroutines' own bodies write, and the components their calls enter.
+/// Whether a subroutine writes a name, directly or in the subroutines it
+/// calls, as [`kernel_written_names`] without `refs` finds it, is a search
+/// of the components it reaches: what is kept grows with the module, not
+/// with the length of its call chains.
+#[derive(Default)]
+pub(super) struct WrittenNames {
+    /// The component of each subroutine.
+    component: HashMap<String, usize>,
+    /// The names each component's subroutines write themselves.
+    own: Vec<HashSet<String>>,
+    /// The other components each component's subroutines call into.
+    calls: Vec<Vec<usize>>,
+}
+
+impl WrittenNames {
+    /// The names the subroutines `scan` defines, `subroutines`, write.
+    pub(super) fn of<'s>(
+        scan: &'s (impl CallDefinitions + ?Sized),
+        subroutines: impl IntoIterator<Item = &'s sv::ir::Subroutine>,
+    ) -> Self {
+        // What each subroutine's own body writes, and the subroutines its
+        // calls enter.
+        let mut names: Vec<(&str, HashSet<String>)> = Vec::new();
+        let mut index: HashMap<&str, usize> = HashMap::default();
+        let mut callees: Vec<Vec<&'s str>> = Vec::new();
+        for subroutine in subroutines {
+            if index.contains_key(subroutine.name.as_str()) {
+                continue;
+            }
+            let mut own = HashSet::default();
+            let mut entered = Vec::new();
+            body_written_names(
+                scan,
+                &subroutine.body,
+                &mut own,
+                &mut None,
+                &mut |_, callee, _, _| entered.push(callee.name.as_str()),
+            );
+            index.insert(subroutine.name.as_str(), names.len());
+            names.push((subroutine.name.as_str(), own));
+            callees.push(entered);
+        }
+        let edges: Vec<Vec<usize>> = callees
+            .into_iter()
+            .map(|entered| {
+                entered
+                    .into_iter()
+                    .filter_map(|name| index.get(name).copied())
+                    .collect()
+            })
+            .collect();
+        let edge_slices: Vec<&[usize]> = edges.iter().map(Vec::as_slice).collect();
+        let components = strongly_connected_components(&edge_slices);
+        let mut of_node = vec![0; names.len()];
+        for (component, nodes) in components.iter().enumerate() {
+            for &node in nodes {
+                of_node[node] = component;
+            }
+        }
+        let mut own = Vec::with_capacity(components.len());
+        let mut calls = Vec::with_capacity(components.len());
+        for (component, nodes) in components.iter().enumerate() {
+            let mut written = HashSet::default();
+            let mut entered: Vec<usize> = Vec::new();
+            for &node in nodes {
+                written.extend(std::mem::take(&mut names[node].1));
+                entered.extend(
+                    edges[node]
+                        .iter()
+                        .map(|&callee| of_node[callee])
+                        .filter(|&callee| callee != component),
+                );
+            }
+            entered.sort_unstable();
+            entered.dedup();
+            own.push(written);
+            calls.push(entered);
+        }
+        Self {
+            component: names
+                .iter()
+                .enumerate()
+                .map(|(node, (name, _))| (name.to_string(), of_node[node]))
+                .collect(),
+            own,
+            calls,
         }
     }
+
+    /// Whether subroutine `subroutine` writes `name`, directly or in the
+    /// subroutines it calls; `None` for a subroutine not gathered.
+    pub(super) fn writes(&self, subroutine: &str, name: &str) -> Option<bool> {
+        let start = *self.component.get(subroutine)?;
+        let mut visited = HashSet::default();
+        let mut pending = vec![start];
+        while let Some(component) = pending.pop() {
+            if !visited.insert(component) {
+                continue;
+            }
+            if self.own[component].contains(name) {
+                return Some(true);
+            }
+            pending.extend(&self.calls[component]);
+        }
+        Some(false)
+    }
+
+    /// The names and calls kept, a measure of what the gathering holds.
+    #[cfg(test)]
+    pub(super) fn entries(&self) -> usize {
+        self.own.iter().map(HashSet::len).sum::<usize>()
+            + self.calls.iter().map(Vec::len).sum::<usize>()
+    }
+}
+
+/// The strongly connected components of the graph `edges`, each a list of
+/// its nodes, in reverse topological order: a component comes after every
+/// component it has an edge to (Tarjan's algorithm, without recursion).
+fn strongly_connected_components(edges: &[&[usize]]) -> Vec<Vec<usize>> {
+    const UNVISITED: usize = usize::MAX;
+    let count = edges.len();
+    let mut order = vec![UNVISITED; count];
+    let mut low = vec![0; count];
+    let mut on_stack = vec![false; count];
+    let mut stack = Vec::new();
+    let mut components = Vec::new();
+    let mut next = 0;
+    for root in 0..count {
+        if order[root] != UNVISITED {
+            continue;
+        }
+        // Nodes being visited, with the index of their next edge.
+        let mut frames = vec![(root, 0usize)];
+        order[root] = next;
+        low[root] = next;
+        next += 1;
+        stack.push(root);
+        on_stack[root] = true;
+        while let Some(&mut (node, ref mut edge)) = frames.last_mut() {
+            if let Some(&target) = edges[node].get(*edge) {
+                *edge += 1;
+                if order[target] == UNVISITED {
+                    order[target] = next;
+                    low[target] = next;
+                    next += 1;
+                    stack.push(target);
+                    on_stack[target] = true;
+                    frames.push((target, 0));
+                } else if on_stack[target] {
+                    low[node] = low[node].min(order[target]);
+                }
+                continue;
+            }
+            frames.pop();
+            if let Some(&(parent, _)) = frames.last() {
+                low[parent] = low[parent].min(low[node]);
+            }
+            if low[node] == order[node] {
+                let mut component = Vec::new();
+                while let Some(member) = stack.pop() {
+                    on_stack[member] = false;
+                    component.push(member);
+                    if member == node {
+                        break;
+                    }
+                }
+                components.push(component);
+            }
+        }
+    }
+    components
 }
 
 /// Where a scan of a body finds the subroutines and DPI-C imports it calls.
 pub(super) trait CallDefinitions {
     fn subroutine(&self, name: &str) -> Option<&sv::ir::Subroutine>;
     fn dpi_import(&self, name: &str) -> Option<&sv::ir::DpiImport>;
+    /// Whether subroutine `subroutine` writes `name`, directly or in the
+    /// subroutines it calls, when that was gathered (see [`WrittenNames`]).
+    fn subroutine_writes(&self, _subroutine: &str, _name: &str) -> Option<bool> {
+        None
+    }
 }
 
 impl CallDefinitions for DriverScan<'_> {
     fn subroutine(&self, name: &str) -> Option<&sv::ir::Subroutine> {
-        self.subroutines
-            .iter()
-            .find(|subroutine| subroutine.name == name)
+        self.subroutines.get(name).copied()
     }
 
     fn dpi_import(&self, name: &str) -> Option<&sv::ir::DpiImport> {
-        self.dpi_imports.iter().find(|import| import.name() == name)
+        self.dpi_imports.get(name).copied()
+    }
+
+    fn subroutine_writes(&self, subroutine: &str, name: &str) -> Option<bool> {
+        self.written.writes(subroutine, name)
     }
 }
 
@@ -201,33 +449,81 @@ impl CallDefinitions for procedural::ProcModule<'_> {
     fn dpi_import(&self, name: &str) -> Option<&sv::ir::DpiImport> {
         self.dpi_imports.get(name)
     }
+
+    fn subroutine_writes(&self, subroutine: &str, name: &str) -> Option<bool> {
+        self.written_names.writes(subroutine, name)
+    }
 }
 
 /// Walks a body for the variables it writes: by assignments, and through the
 /// output arguments and bodies of the subroutines it calls, which write for
 /// the calling process (IEEE 1800-2023 9.2.2.2).
 pub(super) struct DriverScan<'a> {
-    subroutines: &'a [sv::ir::Subroutine],
-    dpi_imports: &'a [sv::ir::DpiImport],
+    /// The subroutines and DPI-C imports of the module by name, which the
+    /// scans of calls look up for each call they reach.
+    subroutines: HashMap<&'a str, &'a sv::ir::Subroutine>,
+    dpi_imports: HashMap<&'a str, &'a sv::ir::DpiImport>,
+    /// The names the subroutines write, when a scan of many bodies gathered
+    /// them first (see [`Self::with_written_names`]).
+    written: WrittenNames,
 }
 
 impl<'a> DriverScan<'a> {
     pub(super) fn of(module: &'a sv::ir::Module) -> Self {
-        Self {
-            subroutines: module.subroutines(),
-            dpi_imports: module.dpi_imports(),
+        // The first of each name, as a search in declaration order finds.
+        let mut subroutines = HashMap::default();
+        for subroutine in module.subroutines() {
+            subroutines
+                .entry(subroutine.name.as_str())
+                .or_insert(subroutine);
         }
+        let mut dpi_imports = HashMap::default();
+        for import in module.dpi_imports() {
+            dpi_imports.entry(import.name()).or_insert(import);
+        }
+        Self {
+            subroutines,
+            dpi_imports,
+            written: WrittenNames::default(),
+        }
+    }
+
+    /// [`Self::of`], with the names the subroutines of `module` write
+    /// gathered once, for scans of many bodies.
+    pub(super) fn with_written_names(module: &'a sv::ir::Module) -> Self {
+        let mut scan = Self::of(module);
+        scan.written = WrittenNames::of(&scan, module.subroutines());
+        scan
     }
 
     /// Calls `record` with each assignment target of `body`.
     pub(super) fn body(&self, record: &mut dyn FnMut(&sv::ir::LValue), body: &[sv::ir::Stmt]) {
-        self.body_at(record, body, &mut HashSet::default(), 0);
+        self.body_at(
+            &mut |lvalue, _| record(lvalue),
+            body,
+            None,
+            &mut HashSet::default(),
+            0,
+        );
+    }
+
+    /// Calls `record` with each assignment target of `body` and the values
+    /// that the variables of the `for` loops around it take, which `bounds`
+    /// finds (see [`procedural::LoopBounds::walk`]).
+    pub(super) fn body_in_loops(
+        &self,
+        record: &mut dyn FnMut(&sv::ir::LValue, &procedural::LoopValues),
+        body: &[sv::ir::Stmt],
+        bounds: &procedural::LoopBounds<'_>,
+    ) {
+        self.body_at(record, body, Some(bounds), &mut HashSet::default(), 0);
     }
 
     fn body_at(
         &self,
-        record: &mut dyn FnMut(&sv::ir::LValue),
+        record: &mut dyn FnMut(&sv::ir::LValue, &procedural::LoopValues),
         body: &[sv::ir::Stmt],
+        bounds: Option<&procedural::LoopBounds<'_>>,
         visited: &mut HashSet<String>,
         depth: usize,
     ) {
@@ -236,27 +532,38 @@ impl<'a> DriverScan<'a> {
             return;
         }
         let mut calls = Vec::new();
-        for stmt in body {
-            stmt.walk(&mut |stmt| {
-                match stmt {
-                    sv::ir::Stmt::Assign { lhs, .. } => record(lhs),
-                    sv::ir::Stmt::AssignConcat { parts, .. } => parts.iter().for_each(&mut *record),
-                    _ => {}
+        let outside = procedural::LoopValues::new();
+        let mut visit = |stmt: &sv::ir::Stmt, loops: &procedural::LoopValues| {
+            match stmt {
+                sv::ir::Stmt::Assign { lhs, .. } => record(lhs, loops),
+                sv::ir::Stmt::AssignConcat { parts, .. } => {
+                    for part in parts {
+                        record(part, loops);
+                    }
                 }
-                procedural::stmt_calls(stmt, &mut calls);
-            });
+                _ => {}
+            }
+            procedural::stmt_calls(stmt, &mut calls);
+        };
+        match bounds {
+            Some(bounds) => bounds.walk(body, &mut procedural::LoopValues::new(), &mut visit),
+            None => {
+                for stmt in body {
+                    stmt.walk(&mut |stmt| visit(stmt, &outside));
+                }
+            }
         }
         let mut seen_defaults = procedural::SeenDefaults::default();
         while let Some((callee, args)) = calls.pop() {
             if let sv::ir::Callee::Object(op) = &callee {
                 for lhs in procedural::written_object_arguments(op, &args) {
-                    record(&lhs);
+                    record(&lhs, &outside);
                 }
             }
             let name = match callee {
                 sv::ir::Callee::System(function) => {
                     for lvalue in procedural::written_system_arguments(function, &args) {
-                        record(&lvalue);
+                        record(&lvalue, &outside);
                     }
                     continue;
                 }
@@ -269,7 +576,7 @@ impl<'a> DriverScan<'a> {
             };
             if let Some(import) = self.dpi_import(&name) {
                 for lvalue in procedural::written_dpi_arguments(import, &args) {
-                    record(&lvalue);
+                    record(&lvalue, &outside);
                 }
                 continue;
             }
@@ -281,13 +588,15 @@ impl<'a> DriverScan<'a> {
                 if param.direction.is_written()
                     && let Some(lvalues) = arg.as_ref().and_then(procedural::lvalue_from_expr)
                 {
-                    lvalues.iter().for_each(&mut *record);
+                    for lvalue in &lvalues {
+                        record(lvalue, &outside);
+                    }
                 }
             }
             // A subroutine body writes a module variable for each caller;
             // its own formals and locals have module-unique names.
             if visited.insert(name) {
-                self.body_at(record, &subroutine.body, visited, depth + 1);
+                self.body_at(record, &subroutine.body, bounds, visited, depth + 1);
             }
         }
     }
@@ -430,7 +739,24 @@ impl ModuleDrivers {
         // run-time element.
         let mut shapes: HashMap<String, Option<(usize, usize)>> = HashMap::default();
         let mut writes: HashMap<String, Vec<DriverWrite>> = HashMap::default();
-        let scan = DriverScan::of(module);
+        let scan = DriverScan::with_written_names(module);
+        // The variables `for` loops declare are locals of the module.
+        let locals: HashMap<&str, &sv::ir::Type> = module
+            .locals()
+            .iter()
+            .map(|local| (local.name.as_str(), &local.r#type))
+            .collect();
+        let local_type = |name: &str| {
+            let info = signal_type_from_sv(locals.get(name)?, constants, parameter_types).ok()?;
+            (info.float.is_none() && info.array_dims.is_empty())
+                .then_some((info.width, info.signed))
+        };
+        let bounds = procedural::LoopBounds {
+            constants,
+            parameter_types,
+            variable_type: &local_type,
+            calls: &scan,
+        };
         let mut walk = |body: &[sv::ir::Stmt],
                         local: Option<usize>,
                         continuous: Option<usize>,
@@ -439,8 +765,8 @@ impl ModuleDrivers {
             if local.is_none() && continuous.is_none() && initial.is_none() {
                 return;
             }
-            scan.body(
-                &mut |lvalue| {
+            scan.body_in_loops(
+                &mut |lvalue, loops| {
                     let name = lvalue.name();
                     // The assertion control state of `$assertoff` and
                     // `$asserton` is simulator state, not a variable of the
@@ -453,6 +779,15 @@ impl ModuleDrivers {
                     }
                     let range = net_lvalue_range(lvalue, constants, parameter_types);
                     let element = match lvalue {
+                        // A run-time select of a structure member drives
+                        // bits of the member only, its window (IEEE
+                        // 1800-2023 6.5, 11.5.1).
+                        sv::ir::LValue::Select {
+                            window: Some(window),
+                            ..
+                        } if range.is_none() && window.at.is_none() => {
+                            Some((i128::from(window.lsb), i128::from(window.msb)))
+                        }
                         sv::ir::LValue::Select { lsb, .. } if range.is_none() => {
                             let shape = *shapes.entry(name.to_string()).or_insert_with(|| {
                                 types
@@ -479,18 +814,30 @@ impl ModuleDrivers {
                         }
                         _ => None,
                     };
-                    writes
-                        .entry(name.to_string())
-                        .or_default()
-                        .push(DriverWrite {
-                            local,
-                            continuous,
-                            initial,
-                            range,
-                            element,
-                        });
+                    let entry = writes.entry(name.to_string()).or_default();
+                    let write = |range, element| DriverWrite {
+                        local,
+                        continuous,
+                        initial,
+                        range,
+                        element,
+                    };
+                    match unrolled_select_bits(
+                        lvalue,
+                        range,
+                        element,
+                        loops,
+                        constants,
+                        parameter_types,
+                    ) {
+                        Some(bits) => {
+                            entry.extend(bits.into_iter().map(|bits| write(Some(bits), None)));
+                        }
+                        None => entry.push(write(range, element)),
+                    }
                 },
                 body,
+                &bounds,
             );
         };
         let comb = module.comb_processes();
@@ -665,6 +1012,61 @@ pub(super) fn net_lvalue_range(
     let msb = sv::typecheck::eval_const_expr_with_types(msb, constants, parameter_types)?;
     let lsb = sv::typecheck::eval_const_expr_with_types(lsb, constants, parameter_types)?;
     Some((msb.min(lsb), msb.max(lsb)))
+}
+
+/// The bits a select at run-time positions writes in the iterations of
+/// the `for` loops `loops` around it whose variables are all its positions
+/// read (IEEE 1800-2023 6.5, 12.7.1): those it selects in each iteration,
+/// as a constant select does, or the bits of its member or array element,
+/// `window`, in one that selects bits outside them, as the run-time form
+/// writes within those only (see `keep_element_window`). Overlapping bits
+/// are merged. `None` if the select is constant, or its positions read
+/// other run-time values.
+fn unrolled_select_bits(
+    lvalue: &sv::ir::LValue,
+    range: Option<(i128, i128)>,
+    window: Option<(i128, i128)>,
+    loops: &procedural::LoopValues,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> Option<Vec<(i128, i128)>> {
+    let sv::ir::LValue::Select {
+        msb,
+        lsb,
+        window: member,
+        ..
+    } = lvalue
+    else {
+        return None;
+    };
+    // The window of an element at a run-time index has no fixed bits: its
+    // bits count from the element's run-time position.
+    if range.is_some()
+        || loops.is_empty()
+        || member.as_ref().is_some_and(|member| member.at.is_some())
+    {
+        return None;
+    }
+    let mut bits: Vec<_> =
+        procedural::unrolled_select_bounds(msb, lsb, loops, constants, parameter_types)?
+            .into_iter()
+            .map(|(msb, lsb)| {
+                let (low, high) = (msb.min(lsb), msb.max(lsb));
+                match window {
+                    Some((bottom, top)) if low < bottom || high > top => (bottom, top),
+                    _ => (low, high),
+                }
+            })
+            .collect();
+    bits.sort_unstable();
+    let mut merged: Vec<(i128, i128)> = Vec::with_capacity(bits.len());
+    for (low, high) in bits {
+        match merged.last_mut() {
+            Some((_, top)) if low <= top.saturating_add(1) => *top = (*top).max(high),
+            _ => merged.push((low, high)),
+        }
+    }
+    Some(merged)
 }
 
 pub(super) fn net_driver_ranges_overlap(

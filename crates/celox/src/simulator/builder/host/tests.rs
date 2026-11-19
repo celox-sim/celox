@@ -1061,8 +1061,13 @@ endmodule"#;
                     panic!("four_state={four_state}, level={level:?}, fused={fused}: {error}")
                 });
                 assert!(simulation.is_finished());
-                let q = simulation.signal("q");
-                assert_eq!(simulation.get(q), num_bigint::BigUint::from(1u8));
+                // The design checks `q` itself. Combinational logic writes
+                // it, so O2's dead-store policy does not let the host read
+                // it.
+                if level == crate::OptLevel::O0 {
+                    let q = simulation.signal("q");
+                    assert_eq!(simulation.get(q), num_bigint::BigUint::from(1u8));
+                }
                 let stats = simulation.scheduler_stats();
                 assert!(stats.compiled_slots > 0, "{stats:?}");
                 assert!(stats.checked_steps > 0, "{stats:?}");
@@ -1849,6 +1854,93 @@ fn native_file_calls_reset_the_bound_after_a_wait() {
         }
         assert_eq!(results[0], results[1]);
         assert_eq!(results[1].1.len(), 12);
+    }
+}
+
+/// A testbench process that waits every cycle and opens, writes, flushes
+/// and closes a file and reads its plusargs, as RTLMeter's OpenPiton and
+/// VeeR-EL2 testbenches do, runs as a kernel of the compiled scheduler: the
+/// native service serves `$fopen`, `$fclose`, `$fflush`, `$test$plusargs`
+/// and `$value$plusargs` as the reference loop does, so no slot of the
+/// design falls back to it.
+#[cfg(any(
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+))]
+#[test]
+fn native_services_keep_file_and_plusargs_testbenches_compiled() {
+    let directory = tempfile::tempdir().unwrap();
+    for four_state in [false, true] {
+        let mut contents = Vec::new();
+        for mode in [
+            crate::SchedulerMode::Reference,
+            crate::SchedulerMode::Compiled,
+        ] {
+            let path = directory
+                .path()
+                .join(format!("trace-{four_state}-{mode:?}.txt"));
+            let source = format!(
+                r#"`timescale 1ns/1ns
+                module Top;
+                    bit clk = 0;
+                    int fd, count = 0, n = 0;
+                    bit seen, got, missing;
+                    logic [7:0] h = 0;
+                    always #1 clk = ~clk;
+                    initial begin
+                        fd = $fopen("{}", "w");
+                        repeat (4) begin
+                            @(posedge clk);
+                            seen = $test$plusargs("go");
+                            missing = $test$plusargs("stop");
+                            got = $value$plusargs("n=%d", n);
+                            void'($value$plusargs("h=%h", h));
+                            $fwrite(fd, "%0d %0d %0d %0d %0d %h\n", count, seen, missing, got, n, h);
+                            $fflush(fd);
+                            count = count + 1;
+                        end
+                        $fclose(fd);
+                        forever @(posedge clk) count = count + 1;
+                    end
+                endmodule"#,
+                path.display()
+            );
+            let mut simulation = crate::Simulation::from_sv_sources(
+                vec![(source.as_str(), std::path::Path::new("services.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+            .scheduler_mode(mode)
+            .plusargs(["go", "n=7", "h=1z"])
+            .build_native()
+            .unwrap();
+            simulation.run_until(20).unwrap();
+            assert_eq!(
+                simulation.get(simulation.signal("count")),
+                num_bigint::BigUint::from(10u32)
+            );
+            if mode == crate::SchedulerMode::Compiled {
+                let stats = simulation.scheduler_stats();
+                assert!(
+                    stats.compiled_slots > 0 && stats.reference_steps < stats.compiled_slots,
+                    "{stats:?}"
+                );
+                assert!(
+                    stats
+                        .kernels
+                        .iter()
+                        .all(|kernel| matches!(kernel, crate::KernelSchedule::Compiled)),
+                    "{stats:?}"
+                );
+            }
+            drop(simulation);
+            contents.push(std::fs::read_to_string(&path).unwrap());
+        }
+        assert_eq!(contents[0], contents[1]);
+        // A two-state run reads a plusarg's unknown bits as zero.
+        let h = if four_state { "1x" } else { "10" };
+        let line = |count| format!("{count} 1 0 1 7 {h}\n");
+        assert_eq!(contents[1], (0..4).map(line).collect::<String>());
     }
 }
 
@@ -2827,4 +2919,128 @@ endmodule"#;
             "{stats:?}"
         );
     }
+}
+
+/// A one-bit input of the top that only a process waits for is an event,
+/// so that a host can clock it. It takes a host clock slot only when no
+/// event derives from it: a slot would make the reset computed from a
+/// waited reset input, or the clock gated by a waited enable, a derived
+/// clock that every slot of the run evaluates, where a design that never
+/// clocks the input holds them stable.
+#[test]
+fn waited_inputs_other_events_derive_from_take_no_clock_slot() {
+    let plan = |ports: &str, body: &str| {
+        let source = format!(
+            "`timescale 1ns/1ns\nmodule Top(input logic clk, {ports}, output logic [7:0] q, \
+             output int done);\n{body}\nendmodule"
+        );
+        let (program, ..) = crate::Simulation::from_sv_sources(
+            vec![(source.as_str(), std::path::Path::new("waited-slots.sv"))],
+            "Top",
+        )
+        .four_state(false)
+        .emit_triggers()
+        .into_laid_out_program(crate::MemoryLayoutMode::Packed, false, false)
+        .unwrap();
+        let summary = crate::scheduler::plan_for_test(&program).unwrap();
+        let names = |events: &[crate::ir::AbsoluteAddr]| -> Vec<String> {
+            events.iter().map(|event| program.get_path(event)).collect()
+        };
+        (names(&summary.clocks), names(&summary.derived))
+    };
+    // The reset the flip-flops sense is computed from the waited input.
+    let reset = "wire rst = ~rst_n;
+        always_ff @(posedge clk or posedge rst) if (rst) q <= '0; else q <= q + 8'd1;";
+    let (clocks, derived) = plan("input logic rst_n", reset);
+    assert_eq!(clocks, ["clk"]);
+    assert_eq!(derived, [""; 0]);
+    let waited = format!("{reset}\ninitial begin wait (rst_n); done = 1; end");
+    assert_eq!(
+        plan("input logic rst_n", &waited),
+        (clocks.clone(), derived.clone())
+    );
+    // The same for the enable of a gated clock.
+    let gate = "wire gated = clk & en;
+        always_ff @(posedge clk) done <= done + 1;
+        always_ff @(posedge gated) q <= q + 8'd1;";
+    let unwaited = plan("input logic en", gate);
+    assert_eq!(unwaited.0, ["clk"]);
+    let waited = format!("{gate}\nlogic seen; initial begin @(posedge en); seen = 1; end");
+    assert_eq!(plan("input logic en", &waited), unwaited);
+    // An input nothing derives from has its slot, in which a host clock on
+    // it runs.
+    let (clocks, derived) = plan(
+        "input logic go",
+        "always_ff @(posedge clk) q <= q + 8'd1;
+        initial forever begin @(posedge go); done++; end",
+    );
+    assert_eq!(clocks, ["clk", "go"]);
+    assert_eq!(derived, [""; 0]);
+}
+
+/// A native image's compiled scheduler calls its larger bodies as callees
+/// (`SirPass::SchedulerCallees`), so its own unit holds less than the
+/// bodies; without the pass it inlines them all.
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+#[test]
+fn native_scheduler_calls_its_larger_bodies() {
+    let mut source =
+        String::from("`timescale 1ns/1ns\nmodule Top; bit clk = 0; always #1 clk = ~clk;\n");
+    for index in 0..72 {
+        source += &format!("logic [31:0] r{index} = {index}; logic [31:0] w{index};\n");
+    }
+    for index in 0..72 {
+        source += &format!(
+            "assign w{index} = (r{index} ^ (r{} << 3)) + (r{} >> 2);\n",
+            (index + 1) % 72,
+            (index + 7) % 72
+        );
+    }
+    source += "always_ff @(posedge clk) begin\n";
+    for index in 0..72 {
+        source += &format!("  r{index} <= w{index} ^ {{w{index}[15:0], w{index}[31:16]}};\n");
+    }
+    source += "end\ninitial begin #20 $display(\"%h\", w0); $finish; end\nendmodule\n";
+    let program = |outline: bool| {
+        let mut builder = crate::Simulation::from_sv_sources(
+            vec![(source.as_str(), std::path::Path::new("callees.sv"))],
+            "Top",
+        )
+        .emit_triggers();
+        if !outline {
+            builder = builder.disable_pass(crate::SirPass::SchedulerCallees);
+        }
+        builder.native_file_calls = true;
+        builder
+            .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, true, false)
+            .unwrap()
+            .0
+    };
+    let size = |unit: &crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>| {
+        unit.blocks
+            .values()
+            .map(|block| block.instructions.len())
+            .sum::<usize>()
+    };
+    let scheduler = |program: &crate::ir::LaidOutProgram| {
+        let index = program
+            .runtime
+            .runtime_schema
+            .scheduler
+            .as_ref()
+            .and_then(|scheduler| scheduler.unit)
+            .expect("a compiled scheduler");
+        size(&program.sir.processes[index])
+    };
+    let outlined = program(true);
+    let inlined = program(false);
+    assert!(!outlined.scheduler_callees.is_empty());
+    assert!(inlined.scheduler_callees.is_empty());
+    let callees: usize = outlined.scheduler_callees.iter().map(size).sum();
+    assert!(
+        scheduler(&outlined) < scheduler(&inlined) && callees > 0,
+        "outlined {} + callees {callees}, inlined {}",
+        scheduler(&outlined),
+        scheduler(&inlined)
+    );
 }

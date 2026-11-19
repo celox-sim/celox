@@ -1,7 +1,10 @@
 use super::*;
 
+// Strict mode restores the rejection these regressions assert; by
+// default the same diagnostics are warnings and the design compiles.
 fn cranelift_build_error(source: &str) -> String {
     match Simulator::from_sv_sources(vec![(source, Path::new("review.sv"))], "Top")
+        .strict(true)
         .build_cranelift()
     {
         Ok(_) => panic!("unsupported SystemVerilog unexpectedly compiled:\n{source}"),
@@ -11,6 +14,7 @@ fn cranelift_build_error(source: &str) -> String {
 
 fn four_state_cranelift_build_error(source: &str) -> String {
     match Simulator::from_sv_sources(vec![(source, Path::new("review.sv"))], "Top")
+        .strict(true)
         .four_state(true)
         .build_cranelift()
     {
@@ -2272,6 +2276,8 @@ fn rejects_child_outputs_connected_to_parameters() {
     );
 }
 
+/// The implicit net `w` is a `wire` (IEEE 1800-2023 6.10), whose drivers
+/// below instances stay rejected as those of a declared one are.
 #[test]
 fn rejects_multiple_child_outputs_driving_an_implicit_net() {
     let error = cranelift_build_error(
@@ -2286,7 +2292,7 @@ fn rejects_multiple_child_outputs_driving_an_implicit_net() {
         "#,
     );
     assert!(
-        error.contains("multiple child outputs drive implicit net `w`"),
+        error.contains("multiple net drivers for `w`"),
         "unexpected error: {error}"
     );
 }
@@ -5636,7 +5642,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         (
             "non-ANSI port expressions",
             r#"
-            module Top({y, z}); output y, z; assign y = 1'b1; assign z = 1'b0; endmodule
+            module Top(y, y); inout y; endmodule
         "#,
         ),
         (
@@ -5795,8 +5801,12 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         (
             "loop-generate unroll limit exceeded",
             r#"
-            module Top(input logic [10000:0] a, output logic [10000:0] y);
-                for (genvar i = 0; i < 10001; i++) assign y[i] = a[i];
+            module Top(output logic y);
+                assign y = 1'b0;
+                for (genvar i = 0; i < 1001; i++) begin : outer_loop
+                    for (genvar j = 0; j < 1000; j++) begin : inner_loop
+                    end
+                end
             endmodule
         "#,
         ),
@@ -5842,14 +5852,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             r#"
             module Child(input logic a, output logic y); assign y = a; endmodule
             module Top(input logic a, output logic y); Child child(.aa(a), .y(y)); endmodule
-        "#,
-        ),
-        (
-            "always_ff event expression",
-            r#"
-            module Top(input logic clk, enable, d, output logic q);
-                always_ff @(posedge (clk & enable)) q <= d;
-            endmodule
         "#,
         ),
         (
@@ -5943,7 +5945,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "implicit net `missing` disabled",
+            "`missing` is not declared",
             r#"
             `default_nettype none
             module Child(output logic y); assign y = 1'b1; endmodule
@@ -5959,8 +5961,22 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             module Top(input wire a, output wire y = 1'b1); assign y = a; endmodule
         "#,
         ),
+    ];
+
+    for (expected, source) in cases {
+        let error = cranelift_build_error(source);
+        assert!(error.contains(expected), "{expected}: {error}");
+    }
+}
+
+#[test]
+fn rejects_misused_or_unresolved_interconnect() {
+    // IEEE 1800-2023 6.6.8: an interconnect net may only carry port and
+    // terminal connections; 23.3.3.7.1: a simulated net may not remain an
+    // interconnect at the end of elaboration.
+    let cases: &[(&str, &str)] = &[
         (
-            "interconnect net declaration",
+            "interconnect",
             r#"
             module Top(output wire y);
                 interconnect link;
@@ -5968,8 +5984,87 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             endmodule
         "#,
         ),
+        (
+            "interconnect",
+            r#"
+            module Child(output logic y); assign y = 1'b1; endmodule
+            module Top(output logic y);
+                interconnect link;
+                Child child(.y(link));
+                assign y = link;
+            endmodule
+        "#,
+        ),
+        (
+            "interconnect",
+            r#"
+            module Child(output logic y); assign y = 1'b1; endmodule
+            module Top(output logic y);
+                interconnect link;
+                Child child(.y(link));
+                always_comb y = link;
+            endmodule
+        "#,
+        ),
+        (
+            "interconnect",
+            r#"
+            module Child(output logic [7:0] y); assign y = 8'hff; endmodule
+            module Sink(input real a, output logic y); assign y = (a > 0.0); endmodule
+            module Top(output logic y);
+                interconnect link;
+                Child child(.y(link));
+                Sink sink(.a(link), .y(y));
+            endmodule
+        "#,
+        ),
+        (
+            "interconnect net with a data type",
+            r#"
+            module Child(output logic [3:0] y); assign y = 4'ha; endmodule
+            module Top(output logic [3:0] y);
+                interconnect logic [3:0] link;
+                Child child(.y(link));
+                assign y = 4'b0;
+            endmodule
+        "#,
+        ),
+        (
+            "interconnect net `bus` does not resolve to a net type",
+            r#"
+            module Top(output logic [3:0] y);
+                interconnect [3:0] bus;
+                assign y = 4'b0;
+            endmodule
+        "#,
+        ),
+        (
+            "interconnect net `bus` used outside a port or terminal connection",
+            r#"
+            module Child(output logic y); assign y = 1'b1; endmodule
+            module Top(output logic y);
+                interconnect bus;
+                wire copy = bus;
+                Child child(.y(bus));
+                assign y = copy;
+            endmodule
+        "#,
+        ),
+        (
+            "interconnect port with a data type",
+            r#"
+            module Leaf(input logic [3:0] a, output logic [3:0] y);
+                assign y = a;
+            endmodule
+            module Mid(input interconnect logic [3:0] p, output logic [3:0] y);
+                Leaf leaf(.a(p), .y(y));
+            endmodule
+            module Top(output logic [3:0] y);
+                Mid mid(.p(4'ha), .y(y));
+            endmodule
+        "#,
+        ),
     ];
-
     for (expected, source) in cases {
         let error = cranelift_build_error(source);
         assert!(error.contains(expected), "{expected}: {error}");
@@ -6506,7 +6601,8 @@ fn rejects_invalid_systemverilog_hierarchy_when_mixed_design_reaches_it() {
 fn rejects_duplicate_modules_across_source_files() {
     let first = "module Top(output logic y); assign y = 1'b0; endmodule";
     let second = "module Top(output logic y); assign y = 1'b1; endmodule";
-    let error = match Simulator::from_sv_sources(
+    // By default the first declaration wins, with a warning.
+    let mut sim = Simulator::from_sv_sources(
         vec![
             (first, Path::new("first.sv")),
             (second, Path::new("second.sv")),
@@ -6514,8 +6610,20 @@ fn rejects_duplicate_modules_across_source_files() {
         "Top",
     )
     .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.warnings().len(), 1, "{:?}", sim.warnings());
+    assert_eq!(sim.get(sim.signal("y")), 0u8.into());
+    let error = match Simulator::from_sv_sources(
+        vec![
+            (first, Path::new("first.sv")),
+            (second, Path::new("second.sv")),
+        ],
+        "Top",
+    )
+    .strict(true)
+    .build_cranelift()
     {
-        Ok(_) => panic!("duplicate module unexpectedly compiled"),
+        Ok(_) => panic!("duplicate module unexpectedly compiled in strict mode"),
         Err(error) => error.to_string(),
     };
     assert!(

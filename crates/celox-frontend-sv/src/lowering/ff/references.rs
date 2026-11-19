@@ -391,7 +391,10 @@ impl Alias {
         let Target::Element { element, .. } = &self.target else {
             return None;
         };
-        let LValue::Select { name, .. } = &**element else {
+        let LValue::Select {
+            name, lsb: base, ..
+        } = &**element
+        else {
             return None;
         };
         Some(match lvalue {
@@ -406,6 +409,19 @@ impl Alias {
             } => {
                 let (msb, lsb) =
                     self.place(self.const_expr(msb.clone()), self.const_expr(lsb.clone()));
+                // The window counts from bit 0 of the formal, or of its
+                // element at `at`; in the caller's array the formal starts
+                // at the element's base.
+                let window = window.as_ref().map(|window| {
+                    let at = window.at.as_deref().map_or_else(
+                        || ConstExpr::Literal("0".into()),
+                        |at| self.const_expr(at.clone()),
+                    );
+                    sv::ir::SelectWindow {
+                        at: Some(Box::new(offset(base, at))),
+                        ..window.clone()
+                    }
+                });
                 LValue::Select {
                     name: name.clone(),
                     msb,
@@ -414,7 +430,7 @@ impl Alias {
                         .as_deref()
                         .map(|width| Box::new(self.const_expr(width.clone()))),
                     array_slice_reversed: *array_slice_reversed,
-                    window: *window,
+                    window,
                 }
             }
         })
@@ -469,7 +485,11 @@ impl Alias {
                 lsb: self.const_expr(lsb),
                 array_slice_width: array_slice_width.map(|width| Box::new(self.const_expr(*width))),
                 array_slice_reversed,
-                window,
+                // The position of a run-time element names the index.
+                window: window.map(|window| sv::ir::SelectWindow {
+                    at: window.at.map(|at| Box::new(self.const_expr(*at))),
+                    ..window
+                }),
             },
             lvalue => lvalue,
         }

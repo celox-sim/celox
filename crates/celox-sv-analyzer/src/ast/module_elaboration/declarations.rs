@@ -23,11 +23,11 @@ impl ScopeElaboration<'_> {
             });
         }
         self.ports.extend(self.imported.ports.iter().cloned());
-        let mut port_names = HashSet::default();
+        let mut port_names: HashSet<String> = HashSet::default();
         if let Some(port) = self
             .ports
             .iter()
-            .find(|port| !port_names.insert(port.name()))
+            .find(|port| !port_names.insert(port.name().to_string()))
         {
             return Err(AnalyzerError::DuplicatePort {
                 module: self.name.clone(),
@@ -63,6 +63,19 @@ impl ScopeElaboration<'_> {
         self.signals.extend(self.imported.signals.iter().cloned());
         self.signals
             .extend(self.imported.state_signals.iter().cloned());
+        // The specializations of parameterized interfaces that the scope's
+        // declarations name reach their instances like those the packages
+        // name (25.9).
+        let specialized = virtual_interfaces::specialization_signals(session, self.signals.iter());
+        self.signals.extend(specialized);
+        // The expressions of explicitly named ports may name the module's
+        // variables and those it imports (23.2.1).
+        self.explicit_port_types(syntax_tree, session)?;
+        if let Some(port) = self.ports.iter().find(|port| port.r#type.holds_chandle()) {
+            return Err(AnalyzerError::IllegalChandleUse {
+                detail: format!("port `{}` of chandle type", port.name),
+            });
+        }
         for r#type in self
             .ports
             .iter()
@@ -83,6 +96,134 @@ impl ScopeElaboration<'_> {
                 "parameter name collides with port or signal `{}`",
                 parameter.name()
             )));
+        }
+        Ok(())
+    }
+
+    /// Give each explicitly named port the self-determined type of its
+    /// expression (IEEE 1800-2023 23.2.2.2): the type of the object a simple
+    /// identifier names or of the unpacked array element it selects, or an
+    /// unsigned vector of the expression's width.
+    /// The port's name is its own (23.2.2.2), which a declaration of the
+    /// module may not share here, since the port is a variable of the
+    /// module.
+    fn explicit_port_types(
+        &mut self,
+        syntax_tree: &AnalysisContext<'_>,
+        session: &mut Session,
+    ) -> Result<(), AnalyzerError> {
+        if self.ports.iter().all(|port| port.expression().is_none()) {
+            return Ok(());
+        }
+        // The expression references the module's declarations, or the
+        // ports an ANSI header declares beside it.
+        let declared: Vec<_> = self
+            .ports
+            .iter()
+            .filter(|port| port.expression().is_none())
+            .cloned()
+            .collect();
+        let dimensions = packed_dimensions_from_ports_and_signals(
+            &declared,
+            &self.signals,
+            &self.const_env,
+            &self.type_aliases,
+        );
+        for port in &mut self.ports {
+            let Some(expression) = port.expression() else {
+                continue;
+            };
+            if self
+                .signals
+                .iter()
+                .any(|signal| signal.name() == port.name())
+            {
+                return Err(AnalyzerError::Unsupported(format!(
+                    "explicitly named port `{}` named like a declaration of the module",
+                    port.name()
+                )));
+            }
+            let native = syntax_tree.declarations();
+            let object = |name: &celox_sv_syntax::Name| {
+                let name = instances::normalize_identifier(&name.spelling);
+                self.signals
+                    .iter()
+                    .find(|signal| signal.name() == name)
+                    .map(Signal::r#type)
+                    .or_else(|| {
+                        declared
+                            .iter()
+                            .find(|port| port.name() == name)
+                            .map(Port::r#type)
+                    })
+            };
+            // An identifier, or an element of an unpacked array, has the
+            // type of the object or element.
+            let mut base = expression;
+            let mut selects = 0;
+            let mut indexes = true;
+            while let celox_sv_syntax::ExprKind::Select {
+                expression,
+                dimension,
+            } = &native.expression(base).kind
+            {
+                indexes &= matches!(dimension.kind, celox_sv_syntax::DimensionKind::Index(_));
+                selects += 1;
+                base = *expression;
+            }
+            if let celox_sv_syntax::ExprKind::Name(name) = &native.expression(base).kind
+                && let Some(r#type) = object(name)
+                && indexes
+                && selects <= r#type.unpacked_ranges.len()
+            {
+                let mut r#type = r#type.clone();
+                r#type.unpacked_ranges.drain(..selects);
+                port.set_type(r#type);
+                continue;
+            }
+            // Any other select or concatenation is an unsigned vector, of
+            // two-state bits when the objects it references are (IEEE
+            // 1800-2023 11.8.1).
+            let mut two_state = true;
+            let mut pending = vec![expression];
+            while let Some(id) = pending.pop() {
+                match &native.expression(id).kind {
+                    celox_sv_syntax::ExprKind::Concatenation(parts) => pending.extend(parts),
+                    celox_sv_syntax::ExprKind::Select { expression, .. } => {
+                        pending.push(*expression)
+                    }
+                    celox_sv_syntax::ExprKind::Name(name) => {
+                        two_state &=
+                            object(name).is_some_and(|r#type| r#type.kind == TypeKind::Bit);
+                    }
+                    _ => two_state = false,
+                }
+            }
+            let value = expression_binding::value(
+                expression,
+                syntax_tree.declarations(),
+                syntax_tree,
+                session,
+                &dimensions,
+            )?;
+            let width = expr_static_width(syntax_tree, &value, &dimensions).ok_or_else(|| {
+                AnalyzerError::Unsupported(format!(
+                    "expression of explicitly named port `{}` of no constant width",
+                    port.name()
+                ))
+            })?;
+            let mut r#type = Type::new(if two_state {
+                TypeKind::Bit
+            } else {
+                TypeKind::Logic
+            });
+            if width > 1 {
+                r#type.packed_ranges.push(PackedRange::new(
+                    ConstExpr::Literal((width - 1).to_string()),
+                    ConstExpr::Literal("0".into()),
+                ));
+            }
+            port.set_type(r#type);
         }
         Ok(())
     }
@@ -131,7 +272,7 @@ impl ScopeElaboration<'_> {
     /// The declaration types of the constants the scope sees: the enum
     /// constants and parameters of the packages it uses and its own, as far
     /// as they are known; a parameter has no binding until its type is.
-    pub(super) fn constant_types(&self) -> Arc<HashMap<String, semantic_types::ConstantType>> {
+    pub(super) fn constant_types(&self) -> ConstantTypes {
         let mut bindings = self.imported.constant_types.clone();
         bindings.extend(self.enum_constants.declarations.clone());
         for parameter in self.imported.parameters.iter().chain(&self.parameters) {
@@ -140,7 +281,7 @@ impl ScopeElaboration<'_> {
                 bindings.insert(parameter.name().into(), ty.clone());
             }
         }
-        Arc::new(bindings)
+        bindings.into_iter().collect()
     }
 
     /// The argument names, shapes and directions of the subroutines the scope may
@@ -184,6 +325,17 @@ impl ScopeElaboration<'_> {
                         .map(|param| param.direction)
                         .collect()
                 });
+        }
+        // The subroutines of other instances that hierarchical names call.
+        for subroutine in &self.imported.hierarchical_subroutines {
+            self.subroutine_directions.insert(
+                subroutine.name.clone(),
+                subroutine
+                    .formals
+                    .iter()
+                    .map(|formal| formal.direction)
+                    .collect(),
+            );
         }
         for (name, target) in &self.imported.aliases {
             if let Some(directions) = self.subroutine_directions.get(target).cloned() {
@@ -470,6 +622,25 @@ impl ScopeElaboration<'_> {
         dimensions::all_class_signatures(syntax_tree, session, &mut self.packed_dimensions);
         self.packed_dimensions.functions = Arc::new(self.functions.clone());
         self.packed_dimensions.expression_signedness = expression_signedness.clone().into();
+        // A connection takes the values of the parameters that the numeric
+        // environment cannot hold, as the bodies do: among them those wider
+        // than 128 bits, also of a package, whose elements the generate scopes
+        // of the instances leave as names. The other parameters stay names
+        // that the frontend resolves through the numeric environment.
+        let mut connection_literals: HashMap<String, Expr> = HashMap::default();
+        if self
+            .instances
+            .iter()
+            .any(|instance| !instance.port_connections.is_empty())
+        {
+            connection_literals.extend(
+                self.parameter_values
+                    .iter()
+                    .filter(|(name, _)| !self.const_env.contains_key(*name))
+                    .chain(&self.enum_constants.exprs)
+                    .map(|(name, value)| (name.clone(), value.clone())),
+            );
+        }
         for instance in &mut self.instances {
             for connection in &mut instance.port_connections {
                 if let Some(pattern) = &mut connection.bound_pattern {
@@ -483,7 +654,7 @@ impl ScopeElaboration<'_> {
                         session,
                         expr,
                         &self.const_env,
-                        &self.enum_constants.exprs,
+                        &connection_literals,
                     )
                 });
             }

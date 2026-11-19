@@ -568,6 +568,7 @@ impl<'a> PlanBuilder<'a> {
                 incremental_instructions = plan.incremental.as_ref().map(|cone| cone.units.iter().flat_map(instructions).count()),
                 incremental_source = ?plan.incremental.as_ref().map(|cone| program.get_path(&cone.source)),
                 deferred_settles = plan.lazy.is_some(),
+                skips_unchanged_settles = plan.settle_reads.is_some(),
                 comb_effects = effects,
                 comb_fallible = sir.eval_comb.iter().any(fails),
                 stateful_targets = ?sir.eval_comb_stateful.as_ref().map(Vec::len),

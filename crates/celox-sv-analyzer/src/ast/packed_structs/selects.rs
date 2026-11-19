@@ -64,6 +64,8 @@ fn unknown_member(
         }
         return AnalyzerError::HierarchicalReference {
             path: path.join("."),
+            components: path.to_vec(),
+            interface: None,
         };
     }
     unsupported(format!("structure member `{}`", path.join(".")))
@@ -205,21 +207,32 @@ fn member_dimensions(name: &str, r#type: &Type, dimensions: &PackedDimensions) -
             container: None,
             chandle: false,
             randomizable: true,
-            enum_domain: None,
-            packed_enum: false,
             real: false,
             string: false,
-            class: None,
             packed: function_packed_dimension_widths(&r#type.packed_ranges),
             unpacked: dimensions::unpacked_dimension_widths(&r#type.unpacked_ranges),
             signed: r#type.is_signed,
             is_2state: matches!(r#type.kind, TypeKind::Bit | TypeKind::Chandle),
             members: r#type.members.clone(),
             signed_element_depth: r#type.signed_element_depth,
-            unpacked_struct: None,
         }),
     );
     result
+}
+
+/// Whether a select of a member may have run-time bounds, and where a bit
+/// outside the member goes.
+#[derive(Clone, Copy)]
+enum RunTime {
+    /// Only constant bounds.
+    Rejected,
+    /// A member of the structure variable `path[0]`: past the variable.
+    Structure,
+    /// A member of an element of array variable `path[0]`, whose element
+    /// the select is then placed in: bit `beyond` of the element, past the
+    /// whole variable wherever the element is. The window of a part-select
+    /// counts from the element's bit 0.
+    Element { beyond: usize },
 }
 
 fn finish_lvalue(
@@ -228,7 +241,7 @@ fn finish_lvalue(
     offset: usize,
     r#type: &Type,
     relative: LValue,
-    dynamic: bool,
+    run_time: RunTime,
     dimensions: &PackedDimensions,
 ) -> Option<LValue> {
     let functions = &tree.functions;
@@ -248,9 +261,9 @@ fn finish_lvalue(
             // member is moved above the whole structure, where a read gives
             // X and a write is ignored (IEEE 1800-2023 11.5.1), so that it
             // never reaches a neighboring member.
-            _ if dynamic && !r#type.packed_ranges.is_empty() => {
+            _ if !matches!(run_time, RunTime::Rejected) && !r#type.packed_ranges.is_empty() => {
                 return dynamic_member_select(
-                    tree, path, offset, r#type, width, msb, lsb, signed, dimensions,
+                    tree, path, offset, r#type, width, msb, lsb, signed, run_time, dimensions,
                 );
             }
             _ => return None,
@@ -277,12 +290,20 @@ fn finish_lvalue(
 ///
 /// A bit-select arrives as a position in the member, which is the member's
 /// width when the index is outside its range; such a select is moved above
-/// the whole structure, where a read gives X and a write is ignored.
+/// the whole structure, where a read gives X and a write is ignored. The
+/// member's bits are its [`crate::ir::SelectWindow`]: they are all a write
+/// of it may drive (IEEE 1800-2023 6.5).
+///
+/// A select of the elements of a member of several packed dimensions
+/// arrives in positions of the member's bits too, those of an index outside
+/// its range at the member's width. It becomes a select at those positions
+/// in the structure, confined to the member's bits by a
+/// [`crate::ast::SelectWindow`].
 ///
 /// An indexed part-select arrives in the index coordinates of the member's
 /// declared range, its width a constant. It becomes a select at the
 /// positions of those indices in the structure, confined to the member's
-/// bits by a [`crate::ir::SelectWindow`]: the bits it selects outside the
+/// bits by a [`crate::ast::SelectWindow`]: the bits it selects outside the
 /// member read X and are not written, as those outside a vector are (IEEE
 /// 1800-2023 11.5.1), and never those of a neighboring member.
 #[allow(clippy::too_many_arguments)]
@@ -295,6 +316,7 @@ fn dynamic_member_select(
     msb: ConstExpr,
     lsb: ConstExpr,
     signed: bool,
+    run_time: RunTime,
     dimensions: &PackedDimensions,
 ) -> Option<LValue> {
     let functions = &tree.functions;
@@ -309,9 +331,15 @@ fn dynamic_member_select(
         window,
         is_2state: matches!(r#type.kind, TypeKind::Bit | TypeKind::Chandle),
     };
+    let window = crate::ast::SelectWindow::bits(
+        u32::try_from(offset).ok()?,
+        u32::try_from(offset.checked_add(width.checked_sub(1)?)?).ok()?,
+    );
     if msb == lsb {
-        let structure =
-            lvalue_expr_type(functions, &LValue::Ident(path[0].clone()), dimensions)?.width;
+        let structure = match run_time {
+            RunTime::Element { beyond } => beyond,
+            _ => lvalue_expr_type(functions, &LValue::Ident(path[0].clone()), dimensions)?.width,
+        };
         let position = ConstExpr::Mux {
             condition: Box::new(ConstExpr::Binary {
                 left: Box::new(lsb.clone()),
@@ -321,7 +349,15 @@ fn dynamic_member_select(
             then_expr: Box::new(add_expr(literal(offset), lsb)),
             else_expr: Box::new(literal(structure)),
         };
-        return Some(select(position.clone(), position, None));
+        return Some(select(position.clone(), position, Some(window)));
+    }
+    let window = Some(window);
+    if r#type.packed_ranges.len() > 1 {
+        return Some(select(
+            add_expr(literal(offset), msb),
+            add_expr(literal(offset), lsb),
+            window,
+        ));
     }
     let [range] = r#type.packed_ranges.as_slice() else {
         return None;
@@ -375,15 +411,7 @@ fn dynamic_member_select(
         op: BinaryOp::Add,
         right: Box::new(const_expr_from_i128(constant)),
     };
-    let offset = u32::try_from(offset).ok()?;
-    Some(select(
-        at(msb),
-        at(lsb),
-        Some(crate::ir::SelectWindow {
-            lsb: offset,
-            msb: offset.checked_add(u32::try_from(width.checked_sub(1)?).ok()?)?,
-        }),
-    ))
+    Some(select(at(msb), at(lsb), window))
 }
 
 /// A whole native member path uses the same interface shadowing, type/offset
@@ -412,7 +440,7 @@ pub(in crate::ast) fn whole_member(
         offset,
         &ty,
         LValue::Ident(path[0].clone()),
-        false,
+        RunTime::Rejected,
         dimensions,
     )
     .ok_or_else(|| {
@@ -449,12 +477,47 @@ pub(in crate::ast) fn select_member(
         &member_dimensions(&path[0], &ty, dimensions),
         true,
     )?;
-    finish_lvalue(tree, &path, offset, &ty, relative, true, dimensions).ok_or_else(|| {
+    finish_lvalue(
+        tree,
+        &path,
+        offset,
+        &ty,
+        relative,
+        RunTime::Structure,
+        dimensions,
+    )
+    .ok_or_else(|| {
         unsupported(format!(
             "select of structure member `{}` outside the member",
             path.join(".")
         ))
     })
+}
+
+/// An upper bound of the bits of variable `name`: a bit past it is in no
+/// element of the variable.
+fn variable_bits_bound(
+    tree: &AnalysisContext<'_>,
+    name: &str,
+    dimensions: &PackedDimensions,
+) -> Option<usize> {
+    let variable = dimensions.get(name)?;
+    let mut bits = lvalue_expr_type(
+        &tree.functions,
+        &LValue::Ident(name.to_string()),
+        dimensions,
+    )?
+    .width;
+    for width in variable
+        .unpacked
+        .iter()
+        .map(|dimension| &dimension.width)
+        .chain(variable.packed.iter().map(|dimension| &dimension.width))
+    {
+        let width = eval_ast_const_expr(&tree.functions, width, &dimensions.const_env)?;
+        bits = bits.checked_mul(usize::try_from(width).ok()?)?;
+    }
+    Some(bits)
 }
 
 /// Select member path `members` of the element of fixed array variable
@@ -482,29 +545,72 @@ pub(in crate::ast) fn select_element_member(
     if !ty.unpacked_ranges.is_empty() {
         return array_member_selection(tree, name, indices, (offset, ty), relative, dimensions);
     }
+    let beyond = variable_bits_bound(tree, &name, dimensions);
+    let run_time = beyond.map_or(RunTime::Rejected, |beyond| RunTime::Element { beyond });
     let Some(LValue::Select {
         msb,
         lsb,
         signed,
         is_2state,
+        window,
         ..
-    }) = finish_lvalue(tree, &path, offset, ty, relative, false, dimensions)
+    }) = finish_lvalue(tree, &path, offset, ty, relative, run_time, dimensions)
     else {
         return Err(unsupported(format!(
             "select of structure member `{}` outside the member",
             path.join(".")
         )));
     };
+    // A window counts from the bit 0 of the element, which is at a run-time
+    // position for a run-time index.
+    let window = match window {
+        Some(window) => {
+            let zero = || ConstExpr::Literal("0".into());
+            let LValue::Select { lsb: element, .. } = crate::ast::selects::lvalue_from_range(
+                tree,
+                name.clone(),
+                indices.clone(),
+                zero(),
+                zero(),
+                false,
+                dimensions,
+            )?
+            else {
+                return Err(unsupported("element of a structure array"));
+            };
+            Some(
+                match eval_ast_const_expr(&tree.functions, &element, &dimensions.const_env)
+                    .and_then(|element| u32::try_from(element).ok())
+                {
+                    Some(element) => crate::ast::SelectWindow::bits(
+                        element
+                            .checked_add(window.lsb)
+                            .ok_or_else(|| unsupported("window"))?,
+                        element
+                            .checked_add(window.msb)
+                            .ok_or_else(|| unsupported("window"))?,
+                    ),
+                    None => crate::ast::SelectWindow {
+                        at: Some(Box::new(element)),
+                        ..window
+                    },
+                },
+            )
+        }
+        None => None,
+    };
     let mut lvalue =
         crate::ast::selects::lvalue_from_range(tree, name, indices, msb, lsb, false, dimensions)?;
     if let LValue::Select {
         signed: selected_signed,
         is_2state: selected_2state,
+        window: selected_window,
         ..
     } = &mut lvalue
     {
         *selected_signed = signed;
         *selected_2state = is_2state;
+        *selected_window = window;
     }
     Ok(lvalue)
 }
@@ -516,7 +622,8 @@ pub(in crate::ast) fn select_element_member(
 /// selects one of a variable, and placed at the member's offset. A
 /// selection outside the member, of an index outside the array, is placed
 /// past the whole variable, where it reads X and writes nothing, rather
-/// than reach the member next to it.
+/// than reach the member next to it. The member's bits are the select's
+/// window: they are all a write of it may drive (IEEE 1800-2023 6.5).
 pub(in crate::ast) fn select_member_element_member(
     tree: &AnalysisContext<'_>,
     path: Vec<String>,
@@ -542,11 +649,23 @@ pub(in crate::ast) fn select_member_element_member(
         signed,
         array_slice_width: None,
         is_2state,
+        window,
         ..
     } = relative
     else {
         return Err(outside());
     };
+    // A run-time part-select or element select of the member of the
+    // element stays within that member by its window, which this placement
+    // in the enclosing member does not carry over: one that reaches past
+    // the member could write the member next to it.
+    if window.is_some() && msb != lsb {
+        return Err(unsupported(format!(
+            "run-time part-select of member `{}` of an element of packed array member `{}`",
+            members.join("."),
+            path.join(".")
+        )));
+    }
     let width = expr_type_from_type(&tree.functions, &ty, &dimensions.const_env)
         .ok_or_else(outside)?
         .width;
@@ -580,6 +699,11 @@ pub(in crate::ast) fn select_member_element_member(
         then_expr: Box::new(add_expr(literal(offset), lsb)),
         else_expr: Box::new(literal(whole)),
     };
+    let window = offset
+        .checked_add(width)
+        .and_then(|end| end.checked_sub(1))
+        .and_then(|top| u32::try_from(offset).ok().zip(u32::try_from(top).ok()))
+        .ok_or_else(outside)?;
     Ok(LValue::Select {
         name: path[0].clone(),
         msb: add_expr(placed.clone(), span),
@@ -587,7 +711,7 @@ pub(in crate::ast) fn select_member_element_member(
         signed,
         array_slice_width: None,
         array_slice_reversed: false,
-        window: None,
+        window: Some(crate::ast::SelectWindow::bits(window.0, window.1)),
         is_2state,
     })
 }

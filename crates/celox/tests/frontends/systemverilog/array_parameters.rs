@@ -54,6 +54,214 @@ endmodule"#;
     }
 }
 
+/// An element of an array parameter is an elaboration constant (11.2.1): it
+/// sizes a declaration and a member of a structure, gives a parameter its
+/// value and selects a generate branch, with the value of each instance: the
+/// default, one an instantiation gives as a pattern, and one it forwards.
+/// Verilator 5.054 prints the same lines.
+#[test]
+fn array_parameter_elements_are_elaboration_constants() {
+    let source = r#"`timescale 1ns/1ns
+module leaf #(parameter int dims_p = 2, parameter int pos_p [dims_p:0] = '{5, 4, 0}, parameter int idx_p = 0) ();
+  typedef struct packed {
+    logic [3:0] len;
+    logic [pos_p[dims_p]-1:0] cord;
+  } hdr_s;
+  hdr_s hdr;
+  localparam int top_lp = pos_p[1];
+  if (pos_p[dims_p] == 5) begin : five initial #1 $display("leaf %0d: five bits=%0d top=%0d", idx_p, $bits(hdr), top_lp); end
+  else begin : other initial #1 $display("leaf %0d: other bits=%0d top=%0d", idx_p, $bits(hdr), top_lp); end
+  for (genvar i = 0; i <= dims_p; i++) begin : g
+    localparam int e_lp = pos_p[i];
+    logic [pos_p[i]:0] w;
+    initial #1 $display("leaf %0d elem %0d = %0d bits=%0d", idx_p, i, e_lp, $bits(w));
+  end
+endmodule
+module top;
+  localparam int tbl_lp [2:0] = '{9, 6, 1};
+  leaf #(.idx_p(0)) l0 ();
+  leaf #(.pos_p('{7, 3, 2}), .idx_p(1)) l1 ();
+  leaf #(.pos_p(tbl_lp), .idx_p(2)) l2 ();
+  initial #2 $finish;
+endmodule"#;
+    for four_state in [false, true] {
+        assert_eq!(
+            sorted_lines(source, four_state),
+            [
+                "leaf 0 elem 0 = 0 bits=1",
+                "leaf 0 elem 1 = 4 bits=5",
+                "leaf 0 elem 2 = 5 bits=6",
+                "leaf 0: five bits=9 top=4",
+                "leaf 1 elem 0 = 2 bits=3",
+                "leaf 1 elem 1 = 3 bits=4",
+                "leaf 1 elem 2 = 7 bits=8",
+                "leaf 1: other bits=11 top=3",
+                "leaf 2 elem 0 = 1 bits=2",
+                "leaf 2 elem 1 = 6 bits=7",
+                "leaf 2 elem 2 = 9 bits=10",
+                "leaf 2: other bits=13 top=6",
+            ],
+            "four_state={four_state}"
+        );
+    }
+}
+
+/// The elements of an array that takes its value from an earlier array, of
+/// an array whose element type an element sizes, and a parameter whose type
+/// an element sizes are constants too. Verilator 5.054 prints the same line.
+#[test]
+fn array_parameter_elements_reach_later_declarations() {
+    let source = r#"`timescale 1ns/1ns
+module top #(parameter int table_p[1:0] = '{6, 3});
+  localparam int copy_lp[1:0] = table_p;
+  logic [copy_lp[1]-1:0] w;
+  localparam logic [table_p[0]-1:0] sized_lp[0:0] = '{3'd5};
+  localparam int element_lp = sized_lp[0];
+  localparam logic [table_p[0]-1:0] q_lp = '1;
+  initial #1 $display("%0d %0d %0d %0d %b", $bits(w), $bits(sized_lp[0]), element_lp,
+                      $bits(q_lp), q_lp);
+  initial #2 $finish;
+endmodule"#;
+    for four_state in [false, true] {
+        assert_eq!(
+            sorted_lines(source, four_state),
+            ["6 3 5 3 111"],
+            "four_state={four_state}"
+        );
+    }
+}
+
+/// A select of the packed dimensions of an element is a constant too, and an
+/// element type may depend on an element of an array whose own element type
+/// depends on another. Verilator 5.054 prints the same line.
+#[test]
+fn array_parameter_element_selects_and_chains_are_elaboration_constants() {
+    let source = r#"`timescale 1ns/1ns
+module top #(parameter int table_p[1:0] = '{6, 5},
+             parameter logic [1:0][3:0] nib_p[0:1] = '{8'h3A, 8'h51});
+  localparam int a_lp[0:0] = '{4};
+  localparam logic [a_lp[0]-1:0] b_lp[0:0] = '{4'd7};
+  localparam logic [b_lp[0]-1:0] c_lp[0:0] = '{7'd9};
+  localparam logic [c_lp[0]-1:0] d_lp = '1;
+  logic [nib_p[0][1]:0] w;
+  if (table_p[0][2] && !table_p[0][1]) begin : yes
+    initial #1 $display("yes %0d %0d %0d %0d", $bits(w), nib_p[1][0], $bits(c_lp[0]), $bits(d_lp));
+  end else begin : no
+    initial #1 $display("no");
+  end
+  initial #2 $finish;
+endmodule"#;
+    for four_state in [false, true] {
+        assert_eq!(
+            sorted_lines(source, four_state),
+            ["yes 4 1 7 9"],
+            "four_state={four_state}"
+        );
+    }
+}
+
+/// The declarations of a scope bound before its array parameters are
+/// collected see their elements too: a later parameter of the header sized
+/// by an element of an array that takes its value from another, and the
+/// base type of an enumeration. Verilator 5.054 prints the same line.
+#[test]
+fn array_parameter_elements_reach_parameters_and_enumerations_of_the_scope() {
+    let source = r#"`timescale 1ns/1ns
+module top #(parameter int a[0:0] = '{4}, parameter int b[0:0] = a, parameter logic [b[0]-1:0] q = '1,
+             parameter int width_p[0:0] = '{3});
+  typedef enum logic [width_p[0]-1:0] { ALL = '1 } e_t;
+  localparam int v = ALL;
+  initial #1 $display("%0d %b %0d %0d", $bits(q), q, v, $bits(e_t));
+endmodule"#;
+    for four_state in [false, true] {
+        assert_eq!(
+            sorted_lines(source, four_state),
+            ["4 1111 7 3"],
+            "four_state={four_state}"
+        );
+    }
+}
+
+/// A constant index out of range reads the value of a nonexistent entry
+/// (Table 7-1): zero for two-state elements, X for four-state ones.
+#[test]
+fn array_parameter_element_out_of_range_reads_the_default_of_its_type() {
+    let source = r#"`timescale 1ns/1ns
+module top #(parameter int two_p[1:0] = '{6, 3}, parameter logic [3:0] four_p[1:0] = '{4'd6, 4'd3});
+  localparam logic [3:0] unknown_lp = four_p[5];
+  if (two_p[7] == 0) begin : zero
+    initial #1 $display("zero %b", unknown_lp);
+  end else begin : other
+    initial #1 $display("other %b", unknown_lp);
+  end
+  initial #2 $finish;
+endmodule"#;
+    assert_eq!(sorted_lines(source, true), ["zero xxxx"]);
+    assert_eq!(sorted_lines(source, false), ["zero 0000"]);
+}
+
+/// A variable of a generate block hides an array parameter of the same
+/// name, whose elements are no constants there.
+#[test]
+fn generate_local_variable_hides_the_elements_of_an_array_parameter() {
+    let source = r#"`timescale 1ns/1ns
+module top #(parameter int pos_p[1:0] = '{6, 2}) ();
+  localparam int outer_lp = pos_p[1];
+  if (1) begin : g
+    logic [3:0] pos_p;
+    initial begin
+      pos_p = 4'b0101;
+      #1 $display("%0d %b %b", outer_lp, pos_p[1], pos_p[0]);
+    end
+  end
+  initial #2 $finish;
+endmodule"#;
+    for four_state in [false, true] {
+        assert_eq!(
+            sorted_lines(source, four_state),
+            ["6 0 1"],
+            "four_state={four_state}"
+        );
+    }
+}
+
+/// An enumeration member or a genvar of a generate block hides an array
+/// parameter of the same name: a select of the name in the block's
+/// constants selects the bits of the nearer constant. Verilator 5.054
+/// prints the same lines.
+#[test]
+fn generate_local_constants_hide_the_elements_of_an_array_parameter() {
+    let source = r#"`timescale 1ns/1ns
+module top;
+  parameter logic [3:0] a [0:1] = '{4'd1, 4'd3};
+  parameter logic [3:0] i [0:1] = '{4'd1, 4'd1};
+  if (1) begin : g
+    typedef enum logic [3:0] { a = 4'd8 } e_t;
+    localparam logic b0 = a[0];
+    localparam logic b3 = a[3];
+    logic [1:0] o;
+    if (a[0]) begin : outer
+      assign o = 2'd1;
+    end else begin : inner
+      assign o = 2'd2;
+    end
+    initial #1 $display("enum %b %b %0d", b0, b3, o);
+  end
+  for (genvar i = 2; i < 3; i++) begin : l
+    localparam logic b1 = i[1];
+    initial #1 $display("genvar %b", b1);
+  end
+  initial #2 $finish;
+endmodule"#;
+    for four_state in [false, true] {
+        assert_eq!(
+            sorted_lines(source, four_state),
+            ["enum 0 1 2", "genvar 1"],
+            "four_state={four_state}"
+        );
+    }
+}
+
 /// Every operand of a conditional array value is a value of the parameter,
 /// also the one its condition does not select (11.4.11).
 #[test]
@@ -123,6 +331,307 @@ endmodule"#;
                 "top.g[1].c 40 50 60 70 0101 0101".to_string(),
                 "top.named 6 8 10 12 0101 0101".to_string(),
                 format!("top.s 0 5 0 0 0011 {x}"),
+            ],
+            "four_state={four_state}"
+        );
+    }
+}
+
+/// A parameter of a packed structure given by an assignment pattern is
+/// formed once the constants that size its members are known, also one that
+/// a package gives by its qualified name (IEEE 1800-2023 7.2.1, 26.3), as
+/// OpenTitan's `tlul_pkg::TL_A_USER_DEFAULT`. Verilator 5.054 prints the
+/// same lines.
+#[test]
+fn pattern_parameters_of_structures_sized_by_package_constants() {
+    let source = r#"`timescale 1ns/1ns
+package a_pkg;
+  localparam int W = 4;
+endpackage
+package b_pkg;
+  localparam int R = a_pkg::W + 1;
+  typedef struct packed { logic [R-1:0] x; logic y; } s_t;
+  parameter s_t D = '{x: '1, y: 1'b0};
+endpackage
+module top;
+  localparam int R = a_pkg::W + 2;
+  typedef struct packed { logic [R-1:0] x; logic y; } t_t;
+  localparam t_t D = '{x: '1, y: 1'b1};
+  initial #1 $display("%m %b %0d %b %0d", b_pkg::D, $bits(b_pkg::s_t), D, $bits(t_t));
+  initial #2 $finish;
+endmodule"#;
+    for four_state in [false, true] {
+        assert_eq!(
+            sorted_lines(source, four_state),
+            ["top 111110 6 1111111 7"],
+            "four_state={four_state}"
+        );
+    }
+}
+
+/// An array parameter takes its value from an array parameter of a package
+/// by its qualified name, as a default and forwarded to a child (26.3).
+/// Verilator 5.054 prints the same line.
+#[test]
+fn array_parameter_value_from_a_package_array_parameter() {
+    let source = r#"`timescale 1ns/1ns
+package p;
+  typedef struct packed { logic lock; logic [1:0] mode; } c_t;
+  localparam c_t R[4] = '{'{1'b0, 2'd0}, '{1'b1, 2'd1}, '{1'b0, 2'd2}, '{1'b1, 2'd3}};
+endpackage
+module leaf #(parameter p::c_t C[4] = p::R, parameter int tag_p = 0)(output logic [11:0] y);
+  assign y = {C[3], C[2], C[1], C[0]};
+  initial #1 $display("%0d y=%h", tag_p, y);
+endmodule
+module mid #(parameter p::c_t T[4] = p::R)();
+  logic [11:0] forwarded, defaulted, direct;
+  leaf #(.C(T), .tag_p(0)) a (.y(forwarded));
+  leaf #(.tag_p(1)) b (.y(defaulted));
+  leaf #(.C(p::R), .tag_p(2)) c (.y(direct));
+endmodule
+module top;
+  mid u ();
+  initial #2 $finish;
+endmodule"#;
+    for four_state in [false, true] {
+        assert_eq!(
+            sorted_lines(source, four_state),
+            ["0 y=ea8", "1 y=ea8", "2 y=ea8"],
+            "four_state={four_state}"
+        );
+    }
+}
+
+/// The elements of an array parameter whose pattern names members of an
+/// enumeration, of a package or of the module, are constants too (6.19.3).
+/// Verilator 5.054 prints the same line.
+#[test]
+fn array_parameter_elements_given_by_enumeration_members() {
+    let source = r#"`timescale 1ns/1ns
+package K; typedef enum logic [2:0] { KeyA, KeyB } key_sel_e; endpackage
+package P;
+  import K::*;
+  typedef enum logic [1:0] { Unbuffered, Buffered, LifeCycle } part_variant_e;
+  typedef struct packed { part_variant_e variant; logic [3:0] offset; key_sel_e key_sel; } part_info_t;
+  localparam part_info_t PartInfo [2] = '{
+    '{variant: Unbuffered, offset: 4'd5, key_sel: key_sel_e'('0)},
+    '{variant: LifeCycle, offset: 4'd9, key_sel: KeyB}
+  };
+endpackage
+module top import P::*; ;
+  typedef enum logic [1:0] { Red, Green, Blue } color_e;
+  localparam color_e Colors [3] = '{Blue, Red, Green};
+  localparam part_info_t E1 = PartInfo[1];
+  localparam int O = E1[6:3];
+  localparam int V = E1[8:7];
+  localparam int C = Colors[0];
+  logic [O-1:0] w;
+  if (V == 2 && C == 2) begin : selected
+    initial #1 $display("%0d %0d %0d %0d %0d", $bits(w), O, V, C, E1[2:0]);
+  end
+  initial #2 $finish;
+endmodule"#;
+    for four_state in [false, true] {
+        assert_eq!(
+            sorted_lines(source, four_state),
+            ["9 9 2 2 1"],
+            "four_state={four_state}"
+        );
+    }
+}
+
+/// A pattern item may name a parameter of the module, of its own type, also
+/// one that hides a member of an enumeration of a package the module uses
+/// (IEEE 1800-2023 26.3). Verilator 5.054 prints the same line.
+#[test]
+fn array_parameter_pattern_items_name_parameters_that_hide_imports() {
+    let source = r#"`timescale 1ns/1ns
+package P;
+  typedef enum logic [1:0] {A = 2'd1, B = 2'd2} pe_t;
+endpackage
+module top
+  import P::*;
+  ;
+  typedef enum logic [3:0] {X = 4'd5, Y = 4'd9} le_t;
+  localparam le_t A = Y;
+  localparam le_t Q = X;
+  localparam le_t tbl_p [0:1] = '{A, Q};
+  logic [tbl_p[0]-1:0] w;
+  initial #1 $display("%0d %0d %0d %0d", tbl_p[0], tbl_p[1], $bits(w), B);
+endmodule"#;
+    for four_state in [false, true] {
+        assert_eq!(
+            sorted_lines(source, four_state),
+            ["9 5 9 2"],
+            "four_state={four_state}"
+        );
+    }
+}
+
+/// An element of an array parameter is a constant (IEEE 1800-2023 11.2.1):
+/// the width of an indexed part-select (11.5.1), also by an enumeration
+/// member, the operand of a cast in a parameter initializer (6.24.1), a
+/// packed bound and a generate condition, as OpenTitan's KMAC application
+/// interface clears `state[StateW-1-:KeccakBitCapacity[L128]]`.
+#[test]
+fn array_parameter_elements_size_part_selects_and_casts() {
+    let source = r#"`timescale 1ns/1ns
+package S;
+  typedef enum logic [2:0] { L128 = 3'b000, L224 = 3'b001 } strength_e;
+  parameter int StateW = 16;
+  parameter int unsigned Cap [2] = '{2 * 2, 2 * 3};
+endpackage
+module top;
+  import S::Cap;
+  import S::L128;
+  import S::L224;
+  localparam int W = int'(Cap[L224]);
+  logic [Cap[L128]-1:0] narrow;
+  logic [15:0] state, low;
+  if (Cap[L224] > 5) begin : wide
+    initial #2 $display("wide");
+  end
+  initial begin
+    state = '1;
+    low = '1;
+    state[S::StateW-1-:Cap[L224]] = '0;
+    low[0+:int'(Cap[0])] = '0;
+    #1 $display("W=%0d bits=%0d state=%h low=%h", W, $bits(narrow), state, low);
+  end
+  initial #3 $finish;
+endmodule"#;
+    for four_state in [false, true] {
+        assert_eq!(
+            sorted_lines(source, four_state),
+            ["W=6 bits=4 state=03ff low=fff0", "wide"],
+            "four_state={four_state}"
+        );
+    }
+}
+
+/// A constant function may take an unpacked array parameter as an argument,
+/// by value (IEEE 1800-2023 13.4.3), such as OpenTitan's
+/// `InfosPerBank = max_info_pages(InfoTypeSize)`: the call is a constant
+/// that sizes a declaration, its elements in the order of the formal's
+/// range. Verilator 5.054 prints the same line.
+#[test]
+fn constant_functions_take_array_parameters_as_arguments() {
+    let source = r#"`timescale 1ns/1ns
+package fp;
+  parameter int InfoTypes = 3;
+  parameter int InfoTypeSize [InfoTypes] = '{10, 1, 2};
+  parameter int InfosPerBank = max_info_pages(InfoTypeSize);
+  function automatic integer max_info_pages(int infos[InfoTypes]);
+    int current_max = 0;
+    for (int i = 0; i < InfoTypes; i++) begin
+      if (infos[i] > current_max) begin
+        current_max = infos[i];
+      end
+    end
+    return current_max;
+  endfunction
+endpackage
+module Top;
+  localparam logic [7:0] Down [2:0] = '{8'd5, 8'd6, 8'd7};
+  function automatic int first(int infos[3]);
+    return infos[0] * 100 + infos[1] * 10 + infos[2];
+  endfunction
+  function automatic int down(logic [7:0] a [2:0]);
+    return a[2] * 100 + a[1] * 10 + a[0];
+  endfunction
+  localparam int F = first(fp::InfoTypeSize);
+  localparam int D = down(Down);
+  localparam int Bits = 4 * fp::InfosPerBank;
+  logic [Bits-1:0] w;
+  logic [F-1:0] f;
+  logic [D-1:0] d;
+  initial #1 $display("%0d %0d %0d %0d %0d", fp::InfosPerBank, $bits(w), F, $bits(f), $bits(d));
+endmodule"#;
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, Path::new("array_arguments.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<String> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lines, ["10 40 1012 1012 567"], "four_state={four_state}");
+    }
+}
+
+/// A package parameter whose value calls a constant function with an array
+/// parameter of the package, such as OpenTitan flash_ctrl_pkg's
+/// `InfosPerBank = max_info_pages(InfoTypeSize)`, sizes the ports of the
+/// modules that use it, also for the output connections of their children
+/// that drive elements of such a port (IEEE 1800-2023 13.4.3, 23.3.3).
+/// Verilator 5.054 prints the same lines.
+#[test]
+fn package_parameters_of_array_argument_calls_size_ports() {
+    let source = r#"`timescale 1ns/1ns
+package fp;
+  parameter int Types = 3;
+  parameter int Sizes [Types] = '{10, 1, 2};
+  parameter int PerBank = max_size(Sizes);
+  function automatic integer max_size(int s[Types]);
+    int m = 0;
+    for (int i = 0; i < Types; i++) if (s[i] > m) m = s[i];
+    return m;
+  endfunction
+endpackage
+module child import fp::*; (output logic [PerBank-1:0][3:0] o);
+  assign o = {PerBank{4'h5}};
+  initial #1 $display("child %0d", $bits(o));
+endmodule
+module region import fp::*; (output logic [1:0][PerBank-1:0][3:0] r);
+  for (genvar i = 0; i < 2; i++) begin : g
+    child u(.o(r[i]));
+  end
+  initial #1 $display("region %0d", $bits(r));
+endmodule
+module tb;
+  import fp::*;
+  logic [1:0][PerBank-1:0][3:0] o;
+  region u(.r(o));
+  initial #2 $display("%0d %0d %h", PerBank, $bits(o), o);
+endmodule"#;
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, Path::new("package_array_arguments.sv"))],
+            "tb",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        sim.run_until(10).unwrap();
+        let mut lines: Vec<String> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        lines.sort();
+        assert_eq!(
+            lines,
+            [
+                "10 80 55555555555555555555",
+                "child 40",
+                "child 40",
+                "region 80"
             ],
             "four_state={four_state}"
         );

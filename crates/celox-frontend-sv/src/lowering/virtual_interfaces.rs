@@ -17,7 +17,7 @@ use celox_sv_analyzer as sv;
 use fxhash::FxHashMap as HashMap;
 use num_bigint::BigUint;
 
-use super::hierarchy::{ElaboratedModule, HierarchicalReference};
+use super::hierarchy::{ElaboratedModule, HierarchicalReference, OutwardObject};
 use super::{LoweredSvInstance, LoweredSvModule, LoweredSvModuleKey};
 
 /// An interface instance of the elaborated design.
@@ -28,6 +28,11 @@ struct Instance {
     interface: String,
     /// The signal of the module that holds each member.
     members: Vec<(String, String)>,
+    /// The objects that the hierarchical names of the interface's tasks and
+    /// functions denote in this instance, as members (see
+    /// [`Definitions::outward`]): each by the path from the top of the
+    /// instance that holds it and its name in each of its specializations.
+    outward: Vec<(String, Vec<(String, usize)>, Vec<(ModuleId, String)>)>,
 }
 
 /// The definitions whose instances are numbered: the interfaces virtual
@@ -36,6 +41,10 @@ struct Instance {
 pub(super) struct Definitions<'a> {
     pub(super) interfaces: Option<&'a sv::VirtualInterfaces>,
     pub(super) modules: HashMap<String, Vec<sv::ast::virtual_interfaces::VirtualInterfaceMember>>,
+    /// The objects that the hierarchical names of the tasks and functions
+    /// of each interface instance, by the module that holds it and its
+    /// handle, denote, as the members of the interface they become.
+    pub(super) outward: HashMap<(ModuleId, String), Vec<(String, OutwardObject)>>,
 }
 
 impl Definitions<'_> {
@@ -108,11 +117,25 @@ impl Instances {
                         None => continue,
                     }
                 } else {
+                    let outward = definitions
+                        .outward
+                        .get(&(module_id, handle.handle.clone()))
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|(member, object)| {
+                            Some((
+                                member.clone(),
+                                object.rooted(&path)?,
+                                object.targets.clone(),
+                            ))
+                        })
+                        .collect();
                     found.instances.push(Instance {
                         path: path.clone(),
                         module: module_id,
                         interface: handle.interface.clone(),
                         members: handle.members.clone(),
+                        outward,
                     });
                     found.instances.len() as u32
                 };
@@ -188,11 +211,12 @@ impl Instances {
     }
 
     /// The references of the signals of `module` that denote a member of an
-    /// instance.
+    /// instance, with the types the analyses of `design` read.
     pub(super) fn references(
         &self,
         module: &sv::ir::Module,
         definitions: &Definitions<'_>,
+        design: &mut sv::Design,
     ) -> Vec<HierarchicalReference> {
         module
             .signals()
@@ -206,15 +230,38 @@ impl Instances {
                 let instance = self
                     .instances
                     .get(usize::try_from(id).ok()?.checked_sub(1)?)?;
-                let (_, target) = instance.members.iter().find(|(name, _)| *name == member)?;
                 let declared = definitions.member(&instance.interface, &member)?;
+                // An object a hierarchical name of a task or function of the
+                // interface denotes in this instance.
+                if let Some((_, path, targets)) =
+                    instance.outward.iter().find(|(name, ..)| *name == member)
+                {
+                    return Some(HierarchicalReference::rooted(
+                        sv::ast::HierarchicalSignal {
+                            paths: Vec::new(),
+                            name: signal.name().to_string(),
+                            r#type: declared.declared_type(design),
+                            is_net: declared.is_net,
+                            local: false,
+                            interface_instance: None,
+                            aliased: None,
+                            constant: None,
+                        },
+                        path.clone(),
+                        targets.clone(),
+                    ));
+                }
+                let (_, target) = instance.members.iter().find(|(name, _)| *name == member)?;
                 Some(HierarchicalReference::rooted(
                     sv::ast::HierarchicalSignal {
                         paths: Vec::new(),
                         name: signal.name().to_string(),
-                        r#type: declared.r#type.clone(),
+                        r#type: declared.declared_type(design),
                         is_net: declared.is_net,
                         local: false,
+                        interface_instance: None,
+                        aliased: None,
+                        constant: None,
                     },
                     instance.path.clone(),
                     vec![(instance.module, target.clone())],

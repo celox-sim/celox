@@ -398,6 +398,11 @@ impl Parser<'_> {
                 let start = self.at;
                 let var = self.eat("var");
                 let data_type = self.data_type()?;
+                // A for-loop variable declaration names its data type, also
+                // after `var` (IEEE 1800-2023 12.7.1, Syntax 12-5).
+                if matches!(self.types[data_type.0].kind, DataTypeKind::Implicit) {
+                    return Err(self.error("for-loop variable declaration without a data type"));
+                }
                 let mut variables = Vec::new();
                 loop {
                     let start = self.at;
@@ -1607,10 +1612,10 @@ impl Parser<'_> {
                     if end {
                         let join = self.peek().to_owned();
                         self.at += 1;
-                        let end_label = if !braced && self.eat(":") {
-                            Some(self.name()?)
-                        } else {
+                        let end_label = if braced {
                             None
+                        } else {
+                            self.end_label(label.as_ref().or(header.label.as_ref()))?
                         };
                         let kind = if parallel {
                             StatementKind::Parallel {

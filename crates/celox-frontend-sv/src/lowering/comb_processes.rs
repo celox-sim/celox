@@ -143,6 +143,8 @@ pub(super) fn lower_comb_processes(
             symbolic_star(index, process) && !pm.callees_read_beyond_wildcard(process);
         if (process.kind() == sv::ir::CombProcessKind::AlwaysStar && !symbolic_star)
             || pm.reads_simulation_state(process.body())
+            // A memory file is read when the task executes.
+            || pm.loads_memory_file(process.body())
             // The symbolic form would expand every call.
             || pm.calls_out_of_line(process.body())
             || (process.kind() != sv::ir::CombProcessKind::ContinuousAssign
@@ -171,7 +173,20 @@ pub(super) fn lower_comb_processes(
         let mut comb = comb::Comb::new(&mut pm, &mut arena);
         comb.events.site_base = sites.len() as u32;
         comb.continuous = process.kind() == sv::ir::CombProcessKind::ContinuousAssign;
+        // A latch whose bits keep their value, and are not computed from
+        // it, is defined bit by bit as any other logic: each output depends
+        // on what it reads, and not on the other outputs' reads.
+        comb.hold_latches = !comb.continuous
+            && (allow_inferred_latches
+                || matches!(
+                    process.kind(),
+                    sv::ir::CombProcessKind::AlwaysLatch | sv::ir::CombProcessKind::AlwaysStar
+                ));
         let lowered = comb.lower_process(process.body());
+        if lowered.is_ok() && comb.held && process.kind() == sv::ir::CombProcessKind::AlwaysComb {
+            comb.m
+                .warn(crate::FrontendWarningKind::InferredLatch, process.site());
+        }
         // The guarded unit accepts whatever the symbolic form refuses of an
         // `always @*`, as it did before the symbolic attempt, and runs a
         // loop whose condition the symbolic form cannot bound, as in

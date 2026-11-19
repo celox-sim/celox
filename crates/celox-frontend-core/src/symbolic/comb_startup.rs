@@ -75,6 +75,9 @@ pub(super) fn initial_values<'a>(
                             mask = (mask & (&all ^ &written)) | (incoming_mask << shift);
                         }
                     }
+                    // Memory files are loaded by `initial` procedures, which
+                    // run after the declarations these snapshots precede.
+                    InitialStateData::MemoryFile(_) => {}
                 }
             }
             result.push(InitialStateValue {

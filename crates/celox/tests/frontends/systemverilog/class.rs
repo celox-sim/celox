@@ -2052,6 +2052,258 @@ sv_backends! {
     }
 }
 
+/// Clocked processes that write no variable of the module: all each does
+/// is call the heap, for a method that updates a property (called as a
+/// statement, in a block, for a discarded result, behind a null check and
+/// through a module function) or for a property update of its own. Each
+/// has a specialization of the class to itself, since procedures that call
+/// one method share its variables, and an `always` that shares a variable
+/// runs as a waiting process, not in the flip-flop form this is about; the
+/// two `always_ff` of `first` and `second` call one method all the same,
+/// and two more one function that prints. `lone` clocks nothing else;
+/// `edges` counts the edges of `clk` in a module variable.
+const HEAP_ONLY_PROCESSES: &str = r#"`timescale 1ns/1ns
+module Top(output int n_call, n_block, n_void, n_ff, n_incr, n_assign, n_fn, n_guard,
+           n_lone, n_first, n_second, edges);
+    class C #(int ID = 0);
+        int n;
+        function void bump(); n++; endfunction
+        function int bump_ret(); n++; return n; endfunction
+    endclass
+    bit clk, lone;
+    C #(1) c_call = new;
+    C #(2) c_block = new;
+    C #(3) c_void = new;
+    C #(4) c_ff = new;
+    C #(5) c_incr = new;
+    C #(6) c_assign = new;
+    C #(7) c_fn = new;
+    C #(8) c_guard = new;
+    C #(9) c_lone = new;
+    C #(10) c_first = new, c_second = new;
+    function void module_fn(); c_fn.bump(); endfunction
+    function void show(); $display("edge"); endfunction
+    always @(posedge clk) c_call.bump();
+    always @(posedge clk) begin c_block.bump(); end
+    always @(posedge clk) void'(c_void.bump_ret());
+    always_ff @(posedge clk) c_ff.bump();
+    always @(posedge clk) c_incr.n++;
+    always @(posedge clk) c_assign.n = c_assign.n + 1;
+    always @(posedge clk) module_fn();
+    always @(posedge clk) if (c_guard != null) c_guard.bump();
+    always @(posedge lone) c_lone.bump();
+    always_ff @(posedge clk) c_first.bump();
+    always_ff @(posedge clk) c_second.bump();
+    always_ff @(posedge clk) show();
+    always_ff @(posedge clk) show();
+    always @(posedge clk) edges++;
+    initial repeat (6) #1 begin clk = ~clk; lone = ~lone; end
+    initial #9 begin
+        n_call = c_call.n; n_block = c_block.n; n_void = c_void.n; n_ff = c_ff.n;
+        n_incr = c_incr.n; n_assign = c_assign.n; n_fn = c_fn.n; n_guard = c_guard.n;
+        n_lone = c_lone.n; n_first = c_first.n; n_second = c_second.n;
+    end
+endmodule"#;
+
+fn heap_only_processes() -> celox::SimulatorBuilder<'static, celox::Simulation> {
+    celox::Simulation::from_sv_sources(
+        vec![(HEAP_ONLY_PROCESSES, Path::new("heap_only.sv"))],
+        "Top",
+    )
+}
+
+/// Every process of [`HEAP_ONLY_PROCESSES`] ran at each of the three rising
+/// edges.
+fn check_heap_only_processes<B: celox::SimBackend>(mut sim: celox::Simulation<B>) {
+    sim.run_until(9).unwrap();
+    let expected = [
+        ("edges", 3u8),
+        ("n_call", 3),
+        ("n_block", 3),
+        ("n_void", 3),
+        ("n_ff", 3),
+        ("n_incr", 3),
+        ("n_assign", 3),
+        ("n_fn", 3),
+        ("n_guard", 3),
+        ("n_lone", 3),
+        ("n_first", 3),
+        ("n_second", 3),
+    ];
+    let counts = expected.map(|(name, _)| {
+        let signal = sim.signal(name);
+        (name, sim.get(signal))
+    });
+    // Both printing processes print at each edge.
+    let shown = sim
+        .drain_runtime_events()
+        .into_iter()
+        .filter(|event| matches!(event, celox::RuntimeEvent::Display { .. }))
+        .count();
+    assert_eq!(
+        (counts, shown),
+        (
+            expected.map(|(name, count)| (name, BigUint::from(count))),
+            6
+        )
+    );
+}
+
+// A clocked process runs at each edge of its clock whatever it does there
+// (IEEE 1800-2023 9.2.2): one whose only effect is a heap call is no less a
+// process than one that assigns a variable.
+sv_backends! {
+    fn heap_only_clocked_processes_run_each_edge(sim) {
+        @setup {}
+        @build heap_only_processes();
+        check_heap_only_processes(sim);
+    }
+
+    fn heap_only_clocked_processes_run_each_edge_at_o0(sim) {
+        @setup {}
+        @build heap_only_processes().opt_level(celox::OptLevel::O0);
+        check_heap_only_processes(sim);
+    }
+
+    fn heap_only_clocked_processes_run_each_edge_at_o2(sim) {
+        @setup {}
+        @build heap_only_processes().opt_level(celox::OptLevel::O2);
+        check_heap_only_processes(sim);
+    }
+
+    fn heap_only_clocked_processes_run_each_edge_in_four_state(sim) {
+        @setup {}
+        @build heap_only_processes().four_state(true);
+        check_heap_only_processes(sim);
+    }
+
+    // The methods and the module functions are function units here, which
+    // the processes call: a process is kept for what its callees do, also
+    // one whose callee another process lowered first, as the second of the
+    // two that call one method and of the two that print.
+    fn heap_only_clocked_processes_run_each_edge_out_of_line(sim) {
+        @setup {}
+        @build heap_only_processes().force_out_of_line_calls();
+        check_heap_only_processes(sim);
+    }
+
+    // The untimed API, where a clocked process makes the object: `clk` has
+    // no process but the one that calls its method.
+    fn heap_only_clocked_processes_run_each_edge_under_simulator(sim) {
+        @setup {
+            let source = r#"module Top(input bit make, clk, rd, output int n);
+                class C;
+                    int n;
+                    function void bump(); n++; endfunction
+                endclass
+                C c;
+                always @(posedge make) if (c == null) c = new;
+                always @(posedge clk) if (c != null) c.bump();
+                always @(posedge rd) n = c.n;
+            endmodule"#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("heap_only.sv"))], "Top");
+        let (make, clk, rd) = (sim.event("make"), sim.event("clk"), sim.event("rd"));
+        let n = sim.signal("n");
+        // Before the object exists the process has nothing to call.
+        sim.tick(clk).unwrap();
+        sim.tick(make).unwrap();
+        for expected in 1..=3u8 {
+            sim.tick(clk).unwrap();
+            sim.tick(rd).unwrap();
+            assert_eq!(sim.get(n), BigUint::from(expected));
+        }
+    }
+}
+
+/// A clocked process that lowers to nothing is not kept: with an empty
+/// body or a call of an empty subroutine, inlined or out of line, also
+/// behind a condition the process would have to evaluate, the flip-flop
+/// units and the function units of the design are those of the design
+/// without the process. A call that reaches the heap adds a flip-flop unit
+/// with its instructions and, out of line, its function units.
+#[test]
+fn clocked_process_calling_an_empty_function_is_still_dropped() {
+    // The number of flip-flop units of each kind, the number of their
+    // instructions, and the number of function units, for the design with a
+    // process of `clk` that has this body, or without one. The units are
+    // counted as well as their instructions because a process that is kept
+    // is a unit of its clock even when it lowers to no instruction, and
+    // `clk` has no other process.
+    let lowered = |body: Option<&str>, forced: bool| {
+        let process = body.map_or_else(String::new, |body| format!("always @(posedge clk) {body}"));
+        let source = format!(
+            "module Top(input bit clk, tick, output int count);
+                 class C;
+                     int n;
+                     function void bump(); n++; endfunction
+                 endclass
+                 C c;
+                 function void nothing(); endfunction
+                 task idle(); endtask
+                 function void reach(); if (c != null) c.bump(); endfunction
+                 {process}
+                 always @(posedge tick) begin nothing(); idle(); count <= count + 1; end
+             endmodule"
+        );
+        let builder = celox::SimulatorBuilder::<Simulator>::from_sv_sources(
+            vec![(source.as_str(), Path::new("empty.sv"))],
+            "Top",
+        )
+        .trace_pre_optimized_sir();
+        let builder = if forced {
+            builder.force_out_of_line_calls()
+        } else {
+            builder
+        };
+        let result = builder.build_with_trace();
+        if let Err(error) = &result.res {
+            panic!("`{process}`, forced {forced}: {error}");
+        }
+        let program = result.trace.pre_optimized_sir.unwrap().sir;
+        let kinds = [
+            &program.eval_apply_ffs,
+            &program.eval_only_ffs,
+            &program.apply_ffs,
+        ];
+        let units = kinds.map(|units| units.values().flatten().count());
+        let instructions: usize = kinds
+            .into_iter()
+            .flat_map(|units| units.values().flatten())
+            .flat_map(|unit| unit.blocks.values())
+            .map(|block| block.instructions.len())
+            .sum();
+        (units, instructions, program.functions.len())
+    };
+    for forced in [false, true] {
+        // The process of `tick` calls the empty subroutines as well: they
+        // are function units when forced, so a call of them from a clocked
+        // process is a call, not an expansion of the empty body.
+        let without = lowered(None, forced);
+        assert_eq!(without.2 == 0, !forced, "{without:?}");
+        for body in [
+            "begin end",
+            "nothing();",
+            "begin nothing(); idle(); end",
+            "if (count == 3) nothing();",
+        ] {
+            assert_eq!(
+                lowered(Some(body), forced),
+                without,
+                "`{body}`, forced {forced}"
+            );
+        }
+        // The first kind is the unit that evaluates and applies in one.
+        let reaching = lowered(Some("reach();"), forced);
+        assert!(
+            reaching.0[0] == without.0[0] + 1
+                && reaching.1 > without.1
+                && (reaching.2 > without.2) == forced,
+            "forced {forced}: {reaching:?}, without the process {without:?}"
+        );
+    }
+}
+
 sv_backends! {
     fn class_random_modes_checkpoint_four_state(sim) {
         @setup { let source = r#"

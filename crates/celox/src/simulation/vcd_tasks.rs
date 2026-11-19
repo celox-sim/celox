@@ -214,7 +214,19 @@ impl<B: SimBackend> Simulator<B> {
                         external.push((index, desc));
                     }
                 }
-                if descs.is_empty() && external.is_empty() {
+                // A module instance whose levels hold no variable selects
+                // nothing, which is no error (IEEE 1800-2023 21.7.1.2); a
+                // name of nothing dumpable is.
+                let names_instances = || {
+                    targets.iter().all(|target| {
+                        !target.package
+                            && self.program.design.instances().any(|instance| {
+                                !self.program.design.is_package_instance(instance.id)
+                                    && instance_dump_components(instance, &top) == target.components
+                            })
+                    })
+                };
+                if descs.is_empty() && external.is_empty() && !names_instances() {
                     return Err("$dumpvars selection matches no dumpable variables".into());
                 }
                 for desc in descs {

@@ -537,16 +537,57 @@ fn rejects_malformed_non_ansi_port_declarations() {
             "its net or variable declaration differ",
         ),
         (
+            "module Top(x); output [7:0] x; reg x; endmodule",
+            "its net or variable declaration of `x` differ",
+        ),
+        (
+            "module Top(x); output [3:0] x; real x; endmodule",
+            "its net or variable declaration of `x` differ",
+        ),
+        (
+            "typedef struct packed { logic [31:0] a; logic [7:0] b; } T; \
+             module Top(x); output [47:0] x; T x; endmodule",
+            "its net or variable declaration of `x` differ",
+        ),
+        (
+            "module Top; input [1:0] x; wire [3:0] x; endmodule",
+            "port declaration in the body of a design element without a list of ports",
+        ),
+        (
+            "module Top(input a); input b; endmodule",
+            "port declaration in the body of a design element without a list of ports",
+        ),
+        (
             "module Top(q); output reg q; reg q; endmodule",
             "port `q` with a net or variable type is declared again",
         ),
         (
-            "module Top(q); output q; reg q = 1'b1; endmodule",
-            "variable declaration of non-ANSI port `q` with an initializer",
+            "module Top(q); input q; reg q = 1'b1; endmodule",
+            "initializer of non-ANSI port `q` that is not an output",
         ),
         (
-            "module Top({y, z}); output y, z; assign y = 1'b1; assign z = 1'b0; endmodule",
+            "module Top(a, a); inout a; endmodule",
             "non-ANSI port expressions",
+        ),
+        (
+            "module Top(.p({a, y})); input a; output y; assign y = a; endmodule",
+            "non-ANSI port expressions",
+        ),
+        (
+            "module Top(a[1:0]); input [3:0] a; input b; endmodule",
+            "port declaration `b` names no port",
+        ),
+        (
+            "module Top(a[1:0]); input [3:0] a; wire [7:0] a; endmodule",
+            "written differently in its port and its net or variable declaration",
+        ),
+        (
+            "module Top(output .p(h)); chandle h; endmodule",
+            "port `p` of chandle type",
+        ),
+        (
+            "module Top(a[1:0]); input a; wire [3:0] a; endmodule",
+            "its net or variable declaration differ",
         ),
     ] {
         let error = Simulator::from_sv_sources(vec![(source, Path::new("ports.sv"))], "Top")
@@ -720,6 +761,121 @@ endmodule"#;
             lines,
             ["R 0 3", "R 1 4", "R 2 5", "R 3 6", "W 0062906 0062926"],
             "four_state={four_state}"
+        );
+    }
+}
+
+/// The `$display` lines a timed simulation of `source` prints by time 10.
+fn implicit_net_lines(source: &str, four_state: bool) -> Vec<String> {
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("implicit.sv"))], "tb")
+            .four_state(four_state)
+            .build()
+            .unwrap();
+    sim.run_until(10).unwrap();
+    sim.drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => {
+                Some(String::from_utf8_lossy(&message).into_owned())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// An identifier that a port connection uses and no declaration names is
+/// an implicit scalar net (IEEE 1800-2023 6.10), which the port connections
+/// convert as assignments do (23.3.3.7): an undriven one reads `z` (0 in
+/// two-state), zero-extended to a wider input. An output drives one, which
+/// inputs of other instances, continuous assignments and procedures read.
+/// This is the shape of OpenTitan's `chip_earlgrey_verilator` `u_ast`.
+/// Icarus 13 prints the four-state lines, Verilator 5.054 the two-state
+/// ones.
+#[test]
+fn port_connections_declare_implicit_nets() {
+    let source = r#"`timescale 1ns/1ns
+module ast(input logic [3:0] req_i, input logic flag_req_i, output logic [3:0] req_o,
+           output logic flag_req_o, output logic [3:0] ack_o, output logic [3:0] scan_md_o,
+           output logic flag_o);
+  assign req_o = req_i;
+  assign flag_req_o = flag_req_i;
+  assign ack_o = 4'b0101;
+  assign scan_md_o = 4'b1010;
+  assign flag_o = 1'b1;
+endmodule
+module sink(input logic [3:0] scanmode_i, input logic ack_i, input logic [1:0] flag_i,
+            output logic [3:0] s_o, output logic a_o, output logic [1:0] f_o);
+  assign s_o = scanmode_i;
+  assign a_o = ack_i;
+  assign f_o = flag_i;
+endmodule
+module tb;
+  logic [3:0] req, s; logic flag_req, a, nf; logic [1:0] f;
+  ast u_ast(.req_i(clk_byp_req), .flag_req_i(flag_byp_req), .req_o(req), .flag_req_o(flag_req),
+            .ack_o(clk_byp_ack), .scan_md_o(scanmode), .flag_o(flag));
+  sink u_sink(.scanmode_i(scanmode), .ack_i(clk_byp_ack), .flag_i(flag), .s_o(s), .a_o(a),
+              .f_o(f));
+  assign nf = ~flag;
+  initial #1 $display("%b %b %b %b %b %b %b %b", req, flag_req, s, a, f, flag, nf, scanmode);
+endmodule"#;
+    assert_eq!(
+        implicit_net_lines(source, false),
+        ["0000 0 0000 1 01 1 0 0"]
+    );
+    assert_eq!(implicit_net_lines(source, true), ["000z z 0000 1 01 1 0 0"]);
+}
+
+/// Implicit nets in two connections of one instance: an output drives one
+/// that an input of the same instance reads, and another input reads an
+/// undriven one. A wildcard import that supplies one name of the
+/// connections leaves the others implicit nets (IEEE 1800-2023 6.10, 26.3).
+/// Verilator 5.054 prints the two-state line. Icarus 13 prints `000x z`,
+/// as it does with `n` declared `wire n;`, for the loop through one
+/// instance.
+#[test]
+fn implicit_nets_of_one_instance_and_wildcard_imports() {
+    let source = r#"`timescale 1ns/1ns
+package p; localparam logic [3:0] K = 4'b0110; endpackage
+module c(input logic [3:0] i, input logic [3:0] k, input logic j, output logic [3:0] o,
+         output logic [3:0] q, output logic z);
+  assign o = 4'b1011;
+  assign q = i ^ k;
+  assign z = j;
+endmodule
+module tb;
+  import p::*;
+  logic [3:0] q; logic z;
+  c u(.i(n), .k(K), .j(m), .o(n), .q(q), .z(z));
+  initial #1 $display("%b %b", q, z);
+endmodule"#;
+    assert_eq!(implicit_net_lines(source, false), ["0111 0"]);
+    assert_eq!(implicit_net_lines(source, true), ["0111 z"]);
+}
+
+/// Under `default_nettype none` a port connection declares no implicit net
+/// (IEEE 1800-2023 22.8): its undeclared identifier is an error.
+#[test]
+fn default_nettype_none_rejects_undeclared_port_connection_identifiers() {
+    for connection in [".i(undeclared_in), .o(o)", ".i(4'd0), .o(undeclared_out)"] {
+        let source = format!(
+            "`default_nettype none
+            module c(input logic [3:0] i, output logic [3:0] o); assign o = i; endmodule
+            module tb; logic [3:0] o; c u({connection}); endmodule
+            `default_nettype wire"
+        );
+        let error = Simulator::from_sv_sources(vec![(source.as_str(), Path::new("none.sv"))], "tb")
+            .build_cranelift()
+            .expect_err("an undeclared identifier under `default_nettype none` is rejected")
+            .to_string();
+        let name = if connection.contains("undeclared_in") {
+            "undeclared_in"
+        } else {
+            "undeclared_out"
+        };
+        assert!(
+            error.contains(&format!("`{name}` is not declared")),
+            "{error}"
         );
     }
 }

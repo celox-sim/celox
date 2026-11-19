@@ -58,9 +58,6 @@ impl FunctionReturnMetadata {
             signed: ty.is_some_and(Type::is_signed),
             is_2state: ty.is_some_and(|ty| matches!(ty.kind(), TypeKind::Bit | TypeKind::Chandle)),
             string: ty.is_some_and(|ty| ty.kind() == TypeKind::String),
-            enum_domain: ty
-                .filter(|ty| ty.unpacked_ranges.is_empty())
-                .and_then(|ty| ty.enum_domain.clone()),
             container: ty.and_then(|ty| ty.container.clone()),
             chandle: ty.is_some_and(|ty| ty.is_chandle() && ty.unpacked_ranges.is_empty()),
             pattern_type: ty
@@ -90,7 +87,6 @@ impl FunctionReturnMetadata {
             string: function.return_string,
             chandle: function.return_chandle,
             pattern_type: function.return_type.clone(),
-            enum_domain: function.return_enum_domain.clone(),
             container: function.return_container.clone(),
         }
     }
@@ -137,7 +133,6 @@ impl FunctionReturnMetadata {
             string: ty == DpiType::String,
             chandle: ty == DpiType::Chandle,
             pattern_type: None,
-            enum_domain: None,
             container: None,
         })
     }

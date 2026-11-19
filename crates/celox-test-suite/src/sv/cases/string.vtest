@@ -521,3 +521,64 @@ module Top(output bit ok);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq ok 1))
+
+; A case statement on a string compares its items as strings, an integral
+; one with its bytes, as `==` does (IEEE 1800-2023 12.5, 11.4.5): a local,
+; a module variable and a function result select their arm, as does an
+; integral selector with a string item, also one a cast makes, a case
+; inside, and a randsequence case.
+(case string_case_statements
+  (source "string_case_statements.sv" #"
+module Top(output bit done);
+  string m = "RW";
+  function automatic string rights(int k);
+    if (k > 1) return "RW";
+    return "RO";
+  endfunction
+  initial begin
+    string s = "WO", item = "RO";
+    case (s) "RO": $display("s RO"); "WO", "RW": $display("s WO/RW"); default: $display("s none"); endcase
+    case (m) "RW": $display("m RW"); default: $display("m none"); endcase
+    case (rights(2)) "RO": $display("f RO"); "RW": $display("f RW"); default: $display("f none"); endcase
+    case (rights(0)) item: $display("f item"); default: $display("f none"); endcase
+    case ("RO") item: $display("literal item"); default: $display("literal none"); endcase
+    case (s) "W": $display("prefix"); default: $display("default"); endcase
+    case (16'h524f) string'(item): $display("cast item"); default: $display("cast none"); endcase
+    case (s) inside "RO", "WO": $display("inside WO"); default: $display("inside none"); endcase
+    randsequence(main)
+      main: case (s) "WO": w; default: d; endcase;
+      w: { $display("rs WO"); };
+      d: { $display("rs default"); };
+    endsequence
+    done = 1;
+  end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "s WO/RW\nm RW\nf RW\nf item\nliteral item\ndefault\ncast item\ninside WO\nrs WO\n"))
+
+; An inside set on strings compares its values as strings, an integral one
+; with its bytes, as `==` does (IEEE 1800-2023 11.4.13, 11.4.5): a local, a
+; module variable, a function result and a cast are members. An integral
+; member or case item becomes a string without its NUL bytes, as a cast
+; makes it (6.16): 109 is "m", 32'h6d00_006e is "mn".
+(case string_inside_sets
+  (source "string_inside_sets.sv" #"
+module Top(output bit done);
+  string m = "m";
+  function automatic string f();
+    return "q";
+  endfunction
+  initial begin
+    string s = "m", t = "x", mn = "mn";
+    int c = 109, e = 32'h6d00_006e;
+    $display("%0d %0d %0d", s inside {"m", "q"}, s inside {"a", "b"}, m inside {t, "m"});
+    $display("%0d %0d %0d", f() inside {"m", "q"}, 8'h71 inside {f()}, s inside {string'(8'h6d)});
+    $display("%0d %0d", s inside {c}, mn inside {e});
+    case (mn) e: $display("case nul"); default: $display("case none"); endcase
+    done = 1;
+  end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "1 0 1\n1 1 1\n1 1\ncase nul\n"))

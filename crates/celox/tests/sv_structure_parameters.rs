@@ -316,3 +316,257 @@ fn rejects_members_that_are_no_constants() {
     );
     assert!(unknown.contains("nothing.n"), "{unknown}");
 }
+
+/// A later parameter of the same port list is sized by a member of an
+/// earlier one (6.20.2): `logic [Info.size*8-1:0]`, from the default value
+/// of the parameter and from overrides by a parameter and by a pattern.
+#[test]
+fn members_size_later_parameters() {
+    let source = r#"
+    `timescale 1ns/1ns
+    package Parts;
+      typedef struct packed { logic [10:0] offset; logic [10:0] size; } part_t;
+      parameter part_t Default = '{offset: 11'd0, size: 11'd2};
+    endpackage
+    module Buffer import Parts::*; #(
+      parameter part_t Info = Default,
+      parameter logic [Info.size*8-1:0] Init = '0
+    ) (output logic [Info.size*8-1:0] data_o);
+      assign data_o = Init;
+      initial #1 $display("%m size=%0d bits=%0d init=%0d data=%h", Info.size, $bits(data_o),
+                          $bits(Init), data_o);
+    endmodule
+    module Top import Parts::*; ;
+      localparam logic [63:0] Inv = 64'h0123_4567_89ab_cdef;
+      localparam part_t Wide = '{offset: 11'd2, size: 11'd4};
+      logic [15:0] a;
+      logic [31:0] b, c;
+      Buffer u_default(.data_o(a));
+      Buffer #(.Info(Wide), .Init(Inv[Wide.offset*8 +: Wide.size*8])) u_wide(.data_o(b));
+      Buffer #(.Info('{offset: 11'd0, size: 11'd4}), .Init(32'hcafe_f00d)) u_pattern(.data_o(c));
+    endmodule
+    "#;
+    for four_state in [false, true] {
+        let mut lines = display(source, four_state);
+        lines.sort();
+        assert_eq!(
+            lines,
+            [
+                "Top.u_default size=2 bits=16 init=16 data=0000",
+                "Top.u_pattern size=4 bits=32 init=32 data=cafef00d",
+                "Top.u_wide size=4 bits=32 init=32 data=456789ab",
+            ],
+            "four-state {four_state}"
+        );
+    }
+}
+
+/// A member of an element of an unpacked array parameter of packed
+/// structures is a constant when the index is one (IEEE 1800-2023 11.2.1):
+/// in a parameter initializer, a generate condition and the bounds of a
+/// part-select, with a genvar index; with a run-time index it is a value.
+/// The array may be one of a package, named with its scope or imported, or
+/// of the module.
+#[test]
+fn members_of_array_parameter_elements() {
+    let source = r#"
+    `timescale 1ns/1ns
+    package Parts;
+      typedef struct packed { logic secret; logic [10:0] offset; logic [10:0] size; } part_t;
+      parameter int Count = 3;
+      localparam part_t Info [Count] = '{
+        '{secret: 1'b0, offset: 11'd0,  size: 11'd8},
+        '{secret: 1'b1, offset: 11'd8,  size: 11'd16},
+        '{secret: 1'b0, offset: 11'd24, size: 11'd8}
+      };
+    endpackage
+    module Top import Parts::*; ;
+      localparam part_t Local [2] = '{'{1'b1, 11'd4, 11'd2}, '{1'b0, 11'd6, 11'd3}};
+      logic [31:0] data;
+      logic [Count-1:0] sel;
+      logic [10:0] addr;
+      logic [1:0] idx;
+      logic [10:0] base;
+      logic [Parts::Info[1].size-1:0] qualified;
+      logic [Local[1].offset:Local[0].offset] local_bits;
+      for (genvar k = 0; k < Count; k++) begin : gen_part
+        localparam int unsigned PartEnd = 32'(Info[k].offset) + 32'(Info[k].size);
+        if (Info[k].offset == 0) begin : gen_zero
+          assign sel[k] = addr < PartEnd;
+        end else begin : gen_nonzero
+          assign sel[k] = (addr >= Info[k].offset) & (addr < PartEnd);
+        end
+        assign data[Info[k].offset +: Info[k].size] = {4{8'(k + 1)}};
+        initial #1 $display("k=%0d end=%0d secret=%b", k, PartEnd, Info[k].secret);
+      end
+      always_comb base = Info[idx].offset;
+      initial begin
+        addr = 11'd10;
+        idx = 2;
+        #2 $display("sel=%b base=%0d data=%h", sel, base, data);
+        $display("qualified=%0d local=%0d", $bits(qualified), $bits(local_bits));
+      end
+    endmodule
+    "#;
+    for four_state in [false, true] {
+        let mut lines = display(source, four_state);
+        lines.sort();
+        assert_eq!(
+            lines,
+            [
+                "k=0 end=8 secret=0",
+                "k=1 end=24 secret=1",
+                "k=2 end=32 secret=0",
+                "qualified=16 local=3",
+                "sel=010 base=24 data=03020201",
+            ],
+            "four-state {four_state}"
+        );
+    }
+}
+
+/// The elements may be given by enumeration members and casts, and a member
+/// of enumerated type compares with the enumeration's members.
+#[test]
+fn enumerated_members_of_array_parameter_elements() {
+    let source = r#"
+    `timescale 1ns/1ns
+    package Keys;
+      typedef enum logic [2:0] { KeyA, KeyB } key_e;
+    endpackage
+    package Parts;
+      import Keys::*;
+      typedef enum logic [1:0] { Unbuffered, Buffered, LifeCycle } variant_e;
+      typedef struct packed {
+        variant_e    variant;
+        logic [10:0] offset;
+        logic [10:0] size;
+        key_e        key;
+      } part_t;
+      parameter int Count = 2;
+      localparam part_t Info [Count] = '{
+        '{variant: Unbuffered, offset: 11'd0,  size: 64, key: key_e'('0)},
+        '{variant: Buffered,   offset: 11'd64, size: 32, key: KeyB}
+      };
+    endpackage
+    module Top import Parts::*; ;
+      for (genvar k = 0; k < Count; k++) begin : gen_part
+        localparam int End = 32'(Info[k].offset) + 32'(Info[k].size);
+        if (Info[k].variant == Buffered) begin : gen_buffered
+          initial #1 $display("k=%0d end=%0d buffered key=%0d", k, End, Info[k].key);
+        end else begin : gen_unbuffered
+          initial #1 $display("k=%0d end=%0d unbuffered key=%0d", k, End, Info[k].key);
+        end
+      end
+    endmodule
+    "#;
+    for four_state in [false, true] {
+        let mut lines = display(source, four_state);
+        lines.sort();
+        assert_eq!(
+            lines,
+            ["k=0 end=64 unbuffered key=0", "k=1 end=96 buffered key=1"],
+            "four-state {four_state}"
+        );
+    }
+}
+
+/// A member of a parameter wider than 128 bits is a constant as well, of
+/// 128 bits or more itself: it initializes a parameter and overrides one of
+/// an instance, from the default value of the parameter, which names a
+/// package's constant, and from an override.
+#[test]
+fn members_of_parameters_wider_than_128_bits() {
+    let source = r#"
+    `timescale 1ns/1ns
+    package Keys;
+      typedef logic [127:0] key_t;
+      typedef struct packed { key_t key; key_t nonce; logic [7:0] tag; } init_t;
+      localparam init_t Default =
+          264'hcebeb96ffe0eced795f8b2cfe23c1e519e4fa08047a6bcfb811b04f0a479006e_5a;
+    endpackage
+    module Flop #(parameter int Width = 8, parameter logic [Width-1:0] ResetValue = 0) ();
+      initial #1 $display("%m %h", ResetValue);
+    endmodule
+    module Child import Keys::*; #(parameter init_t Init = Default) ();
+      localparam key_t Key = Init.key;
+      Flop #(.Width(128), .ResetValue(Init.key)) u_key();
+      Flop #(.Width(128), .ResetValue(Init.nonce)) u_nonce();
+      Flop #(.Width(8), .ResetValue(Init.tag)) u_tag();
+      initial #2 $display("%m key=%h", Key);
+    endmodule
+    module Top import Keys::*; ;
+      Child u_default();
+      Child #(.Init({128'h1111_2222_3333_4444_5555_6666_7777_8888,
+                     128'h9999_aaaa_bbbb_cccc_dddd_eeee_ffff_0000, 8'h3c})) u_over();
+    endmodule
+    "#;
+    for four_state in [false, true] {
+        let mut lines = display(source, four_state);
+        lines.sort();
+        assert_eq!(
+            lines,
+            [
+                "Top.u_default key=cebeb96ffe0eced795f8b2cfe23c1e51",
+                "Top.u_default.u_key cebeb96ffe0eced795f8b2cfe23c1e51",
+                "Top.u_default.u_nonce 9e4fa08047a6bcfb811b04f0a479006e",
+                "Top.u_default.u_tag 5a",
+                "Top.u_over key=11112222333344445555666677778888",
+                "Top.u_over.u_key 11112222333344445555666677778888",
+                "Top.u_over.u_nonce 9999aaaabbbbccccddddeeeeffff0000",
+                "Top.u_over.u_tag 3c",
+            ],
+            "four-state {four_state}"
+        );
+    }
+}
+
+/// A package parameter of a packed structure given by an assignment
+/// pattern is a constant also when a constant of another package sizes the
+/// structure, by its qualified name or through an import (IEEE 1800-2023
+/// 26.3, 10.9.2), such as OpenTitan's `flash_ctrl_pkg::IsolatedPageSel`,
+/// which a generate condition compares. Verilator 5.054 prints the same
+/// line.
+#[test]
+fn pattern_parameters_sized_by_constants_of_other_packages() {
+    let source = r#"`timescale 1ns/1ns
+package reg_pkg;
+  parameter int Width = 9;
+endpackage
+package flash_pkg;
+  parameter int AllPagesW = reg_pkg::Width;
+  typedef struct packed { logic [1:0] sel; logic [AllPagesW-1:0] addr; } page_addr_t;
+  parameter page_addr_t IsolatedPageSel = '{sel: 2'd1, addr: 9'd3};
+endpackage
+package other_pkg;
+  import reg_pkg::*;
+  parameter int Bits = Width - 4;
+  typedef struct packed { logic [Bits-1:0] lo; logic hi; } pair_t;
+  parameter pair_t Pair = '{lo: 5'd4, hi: 1'b1};
+endpackage
+module Top;
+  import flash_pkg::*;
+  logic [5:0] o, p;
+  for (genvar i = 0; i < 6; i++) begin : g
+    localparam page_addr_t CurAddr = '{sel: 2'd1, addr: 9'(i)};
+    if (CurAddr == IsolatedPageSel) begin : s
+      assign o[i] = 1'b1;
+    end else begin : n
+      assign o[i] = 1'b0;
+    end
+    if (other_pkg::Pair.lo == 5'(i)) begin : t
+      assign p[i] = other_pkg::Pair.hi;
+    end else begin : m
+      assign p[i] = 1'b0;
+    end
+  end
+  initial #1 $display("%b %b %h %0d", o, p, IsolatedPageSel, $bits(page_addr_t));
+endmodule"#;
+    for four_state in [false, true] {
+        assert_eq!(
+            display(source, four_state),
+            ["001000 010000 203 11"],
+            "four-state {four_state}"
+        );
+    }
+}

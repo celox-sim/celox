@@ -177,8 +177,15 @@ pub(in crate::lowering) fn lvalue_calls(
 ) -> bool {
     match lvalue {
         sv::ir::LValue::Ident(_) => false,
-        sv::ir::LValue::Select { msb, lsb, .. } => {
-            const_calls(msb, is_callee) || const_calls(lsb, is_callee)
+        sv::ir::LValue::Select {
+            msb, lsb, window, ..
+        } => {
+            const_calls(msb, is_callee)
+                || const_calls(lsb, is_callee)
+                || window
+                    .as_ref()
+                    .and_then(|window| window.at.as_deref())
+                    .is_some_and(|at| const_calls(at, is_callee))
         }
     }
 }

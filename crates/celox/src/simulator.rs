@@ -21,10 +21,11 @@ pub use builder::NativeCompilation;
 pub use builder::{DeadStorePolicy, SimulatorBuilder, SimulatorOptions, TierPromotion};
 pub use builder::{
     compile_frontend_to_sir, compile_to_sir, compile_to_sir_with_diagnostic_policy,
-    compile_to_sir_with_file_dependencies, compile_to_sir_with_latch_policy,
+    compile_to_sir_with_latch_policy,
 };
 pub use builder::{
-    compile_mixed_to_sir, compile_mixed_to_sir_with_file_dependencies, compile_sv_to_sir,
+    compile_mixed_to_sir, compile_mixed_to_sir_with_diagnostic_policy, compile_sv_to_sir,
+    compile_sv_to_sir_with_diagnostic_policy,
 };
 #[cfg(feature = "host-runtime")]
 pub use checkpoint::{Checkpoint, CheckpointError, StateImage};
