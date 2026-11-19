@@ -240,6 +240,18 @@ pub(super) fn substitute_lvalue_constants(
     }
 }
 
+/// Whether the literal `text` has X or Z bits. Only a digit `x`, `z` or
+/// `?` gives a literal unknown bits (IEEE 1800-2023 5.7.1), so a literal
+/// without one, such as the hundreds of digits of a wide parameter's value
+/// substituted into each of its selects, is known to have none without
+/// parsing it.
+pub(super) fn literal_has_unknown_bits(text: &str) -> bool {
+    text.bytes()
+        .any(|byte| matches!(byte, b'x' | b'X' | b'z' | b'Z' | b'?'))
+        && typecheck::parse_integral_literal(text)
+            .is_some_and(|literal| literal.mask != num_bigint::BigUint::default())
+}
+
 pub(super) fn substitute_expr_constants_with_parameter_literals(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
@@ -290,9 +302,8 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
                 const_env,
                 parameter_literals,
             );
-            let unknown_bits = matches!(&expr, Expr::Literal(text)
-                if typecheck::parse_integral_literal(text)
-                    .is_some_and(|literal| literal.mask != num_bigint::BigUint::default()));
+            let unknown_bits =
+                matches!(&expr, Expr::Literal(text) if literal_has_unknown_bits(text));
             let select = Expr::Select {
                 expr: Box::new(expr),
                 msb: substitute_const_expr_constants_with_literals(
