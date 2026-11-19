@@ -59,7 +59,13 @@ impl Comb<'_, '_> {
                 drop: 0,
                 lvalue,
             }),
-            sv::ir::LValue::Select { msb, lsb, .. } => {
+            sv::ir::LValue::Select {
+                msb,
+                lsb,
+                array_slice_width,
+                window: member,
+                ..
+            } => {
                 let msb_value =
                     sv::typecheck::eval_const_expr_with_types(msb, constants, parameter_types);
                 let lsb_value =
@@ -83,6 +89,11 @@ impl Comb<'_, '_> {
                         drop,
                         lvalue: lvalue.clone(),
                     });
+                }
+                if array_slice_width.is_none()
+                    && let Some(target) = self.enumerated_target(id, msb, lsb, member.as_ref())
+                {
+                    return Ok(target);
                 }
                 if let Some((_, element_width, offset, access)) = dynamic_array_element_lvalue(
                     &lvalue,
@@ -127,6 +138,77 @@ impl Comb<'_, '_> {
                 )))
             }
         }
+    }
+
+    /// A select whose position one small run-time variable decides, as the
+    /// constant select at each value of it (see [`enumerated_select`]), when
+    /// that costs less than placing the value by shifts of the whole vector.
+    /// A select of a member writes only the member's bits at each value.
+    fn enumerated_target(
+        &self,
+        id: SourceVarId,
+        msb: &sv::ir::ConstExpr,
+        lsb: &sv::ir::ConstExpr,
+        member: Option<&sv::ir::SelectWindow>,
+    ) -> Option<Target> {
+        let variable = self.m.var(id);
+        let choice = enumerated_select(
+            variable,
+            msb,
+            lsb,
+            member.and_then(|member| member.at.as_deref()),
+            self.m.variables,
+            self.m.name_to_id,
+            self.m.constants,
+            self.m.parameter_types,
+            self.m.four_state,
+        )?;
+        let width = usize::try_from(choice.cases[0].msb.abs_diff(choice.cases[0].lsb)).ok()? + 1;
+        if !enumeration_pays(choice.cases.len(), width, variable.width) {
+            return None;
+        }
+        let mut cases = Vec::with_capacity(choice.cases.len());
+        for case in &choice.cases {
+            let (access, drop) = constant_select_write(variable, case.msb, case.lsb)?;
+            // A select of a member writes only the member's bits, at a fixed
+            // offset or above its element's run-time position (IEEE
+            // 1800-2023 11.5.1); the rest of the select is past the member.
+            let access = match (access, member) {
+                (Some(access), Some(member)) => {
+                    let base = match (&member.at, case.at) {
+                        (Some(_), Some(at)) => at,
+                        (None, _) => 0,
+                        (Some(_), None) => return None,
+                    };
+                    let low = base.checked_add(i128::from(member.lsb))?;
+                    let high = base.checked_add(i128::from(member.msb))?;
+                    let start = i128::try_from(access.lsb).ok()?.max(low);
+                    let end = i128::try_from(access.msb).ok()?.min(high);
+                    if start <= end {
+                        let start = usize::try_from(start).ok()?;
+                        let end = usize::try_from(end).ok()?;
+                        Some((BitAccess::new(start, end), drop + (start - access.lsb)))
+                    } else {
+                        None
+                    }
+                }
+                (access, None) => access.map(|access| (access, drop)),
+                (None, Some(_)) => None,
+            };
+            cases.push(EnumeratedWrite {
+                value: case.value,
+                access,
+            });
+        }
+        Some(Target::Dynamic {
+            id,
+            offset: Offset::Enumerated {
+                selector: choice.selector,
+                selector_width: choice.selector_width,
+                cases,
+            },
+            width,
+        })
     }
 
     /// Assign `rhs` to `lhs`.
@@ -253,6 +335,51 @@ impl Comb<'_, '_> {
                 }
                 self.write(store, id, access, (node, sources))
             }
+            Target::Dynamic {
+                id,
+                offset:
+                    Offset::Enumerated {
+                        selector,
+                        selector_width,
+                        cases,
+                    },
+                width,
+            } => {
+                // At each value of the selector, its constant select keeps
+                // what the variable holds or takes the value.
+                let (selected, selected_sources) =
+                    self.eval(store, frames, &sv::ir::Expr::Ident(selector), None)?;
+                let selected = coerce_node_width(self.arena, selected, Some(selector_width), false)
+                    .map_err(slt_error)?;
+                sources.extend(selected_sources);
+                for case in cases {
+                    let Some((access, drop)) = case.access else {
+                        continue;
+                    };
+                    let written = access.msb - access.lsb + 1;
+                    let part = if written == width {
+                        node
+                    } else {
+                        self.alloc(SLTNode::Slice {
+                            expr: node,
+                            access: BitAccess::new(drop, drop + written - 1),
+                        })?
+                    };
+                    let (current, current_sources) = self.read(store, id, access)?;
+                    let mut case_sources = sources.clone();
+                    case_sources
+                        .extend(current_sources.into_iter().filter(|source| source.id != id));
+                    let value = self.constant(case.value as u64, selector_width)?;
+                    let chosen = self.alloc(SLTNode::Binary(selected, BinaryOp::Eq, value))?;
+                    let chosen = self.alloc(SLTNode::Mux {
+                        cond: chosen,
+                        then_expr: part,
+                        else_expr: current,
+                    })?;
+                    self.write(store, id, access, (chosen, case_sources))?;
+                }
+                Ok(())
+            }
             Target::Dynamic { id, offset, width } => {
                 let var_width = self.m.var(id).width;
                 let (current, current_sources) = self.read(store, id, full(var_width))?;
@@ -263,6 +390,9 @@ impl Comb<'_, '_> {
                 let mut moving = None;
                 let (up, down) = match offset {
                     Offset::Nothing => return Ok(()),
+                    Offset::Enumerated { .. } => {
+                        unreachable!("an enumerated select has its own arm")
+                    }
                     Offset::Element {
                         offset,
                         element_width,
@@ -278,7 +408,6 @@ impl Comb<'_, '_> {
                         let (bit_offset, offset_sources) =
                             self.eval(store, frames, &offset_expr, None)?;
                         sources.extend(offset_sources);
-                        let wide = 64.max(var_width);
                         let bit_offset = coerce_node_width(self.arena, bit_offset, Some(64), false)
                             .map_err(slt_error)?;
                         // The element index; an unknown or out-of-range one writes nothing.
@@ -299,9 +428,7 @@ impl Comb<'_, '_> {
                             then_expr: position,
                             else_expr: outside,
                         })?;
-                        let position = coerce_node_width(self.arena, position, Some(wide), false)
-                            .map_err(slt_error)?;
-                        let zero = self.constant(0, wide)?;
+                        let zero = self.constant(0, 64)?;
                         (position, zero)
                     }
                     Offset::Packed {
@@ -332,9 +459,11 @@ impl Comb<'_, '_> {
                     coerce_node_width(self.arena, node, Some(wide), false).map_err(slt_error)?;
                 let current =
                     coerce_node_width(self.arena, current, Some(wide), false).map_err(slt_error)?;
-                let up = coerce_node_width(self.arena, up, Some(wide), false).map_err(slt_error)?;
+                // Shift amounts keep their own width: one widened to the vector
+                // would be compared and clamped at the vector's width.
+                let up = coerce_node_width(self.arena, up, Some(64), false).map_err(slt_error)?;
                 let down =
-                    coerce_node_width(self.arena, down, Some(wide), false).map_err(slt_error)?;
+                    coerce_node_width(self.arena, down, Some(64), false).map_err(slt_error)?;
                 let place = |this: &mut Self, value| -> Result<NodeId, sv::AnalyzerError> {
                     let raised = this.alloc(SLTNode::Binary(value, BinaryOp::Shl, up))?;
                     this.alloc(SLTNode::Binary(raised, BinaryOp::Shr, down))
@@ -343,7 +472,7 @@ impl Comb<'_, '_> {
                 // Only the bits of a window at a run-time position are written.
                 if let Some((at, lsb, window_width)) = moving {
                     let at =
-                        coerce_node_width(self.arena, at, Some(wide), false).map_err(slt_error)?;
+                        coerce_node_width(self.arena, at, Some(64), false).map_err(slt_error)?;
                     let window_bits = slt_constant(
                         self.arena,
                         ((BigUint::from(1u8) << window_width) - BigUint::from(1u8)) << lsb,
@@ -472,6 +601,14 @@ impl Comb<'_, '_> {
     }
 }
 
+/// The constant select of an [`Offset::Enumerated`] write at one value of
+/// its selector: the bits of the variable it writes and the low bits of the
+/// value below them, none for a select outside the variable.
+pub(super) struct EnumeratedWrite {
+    value: u128,
+    access: Option<(BitAccess, usize)>,
+}
+
 pub(super) enum Target {
     /// A constant select: the select's `width` bits of the value from
     /// `drop` up go to the bits `access` of the variable, the part of the
@@ -493,6 +630,13 @@ pub(super) enum Target {
 pub(super) enum Offset {
     /// A constant select outside the vector.
     Nothing,
+    /// A select whose position one small run-time variable decides, at each
+    /// value of it (see `Comb::enumerated_target`).
+    Enumerated {
+        selector: String,
+        selector_width: usize,
+        cases: Vec<EnumeratedWrite>,
+    },
     /// An element of an unpacked array at a run-time index.
     Element {
         offset: sv::ir::ConstExpr,
