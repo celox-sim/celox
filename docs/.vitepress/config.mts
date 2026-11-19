@@ -49,7 +49,7 @@ export default defineConfig({
                   link: "/ja/guide/systemverilog",
                   items: [
                     {
-                      text: "SystemVerilog の逸脱事項",
+                      text: "対応範囲と逸脱事項",
                       link: "/ja/guide/systemverilog-reference",
                     },
                   ],
@@ -176,7 +176,7 @@ export default defineConfig({
               link: "/guide/systemverilog",
               items: [
                 {
-                  text: "SystemVerilog Deviations",
+                  text: "Conformance and Deviations",
                   link: "/guide/systemverilog-reference",
                 },
               ],
