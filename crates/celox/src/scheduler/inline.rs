@@ -156,10 +156,29 @@ impl Generator<'_> {
         unit: &Unit,
         finish_exit: Option<celox_sir::BlockId>,
     ) {
+        // A settle unit instrumented where it is has its records and
+        // flags already.
+        let instrumented = self.program.settle_instrumented
+            && self
+                .program
+                .sir
+                .eval_comb
+                .iter()
+                .any(|settle| std::ptr::eq(settle, unit))
+            && !self.unit_finishes(unit)
+            && !instructions(unit)
+                .any(|inst| matches!(inst, SIRInstruction::CombCaptureEvent { .. }));
         // Compiled code commits wide runs by their raw words alone.
         let unit = &*crate::settle::without_shadow_commits(unit);
         let captures = self.observers.is_some();
         let finishes = self.unit_finishes(unit);
+        if instrumented {
+            self.inline_body(unit);
+            if finishes && let Some(finish_exit) = finish_exit {
+                self.check_finish(finish_exit);
+            }
+            return;
+        }
         let counts = self.event_batch.is_some()
             && instructions(unit).any(|inst| {
                 matches!(inst, SIRInstruction::RuntimeEvent { .. })
