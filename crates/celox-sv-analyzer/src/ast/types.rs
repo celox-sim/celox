@@ -812,7 +812,7 @@ pub(super) fn invalid_enumeration<T>(detail: String) -> Result<T, AnalyzerError>
 /// dimension, also through a type name (IEEE 1800-2023 6.19, Syntax 6-5
 /// and its footnote 19). A chandle base has its own error.
 pub(super) fn illegal_enum_base(base: &Type) -> Option<&'static str> {
-    if base.is_container() || !base.unpacked_ranges.is_empty() || base.unpacked_struct.is_some() {
+    if base.is_container() || !base.unpacked_ranges.is_empty() || base.unpacked_struct().is_some() {
         return Some("its base type is an unpacked type");
     }
     match base.kind {

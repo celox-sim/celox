@@ -261,7 +261,7 @@ pub(in crate::ast) fn pattern(
     // A cast to, or a call of a function that returns, a structure or an
     // unpacked array.
     let aggregate = |ty: &Type| {
-        !ty.members.is_empty() || ty.unpacked_struct.is_some() || !ty.unpacked_ranges.is_empty()
+        !ty.members.is_empty() || ty.unpacked_struct().is_some() || !ty.unpacked_ranges.is_empty()
     };
     let aggregate_value = match expression {
         ExprKind::Cast { target, .. } => {

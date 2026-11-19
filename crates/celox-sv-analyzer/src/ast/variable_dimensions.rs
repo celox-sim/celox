@@ -173,7 +173,16 @@ impl VariableDimensions {
     /// The declaration of the unpacked structure type the variable is, or
     /// whose elements it has, as the variable keeps it.
     pub(super) fn structure_declaration(&self) -> Option<&Arc<unpacked_structs::UnpackedStruct>> {
-        self.structure.declaration()
+        let kept = self.structure.declaration();
+        debug_assert_eq!(
+            kept.map(|aggregate| aggregate.identity()),
+            self.shape
+                .unpacked_struct
+                .as_ref()
+                .map(|aggregate| aggregate.identity()),
+            "the structure a shape keeps is not that of its field: {self:?}"
+        );
+        kept
     }
 
     /// What declares the enumerated type the variable is, or whose
@@ -272,7 +281,11 @@ impl VariableDimensions {
     /// Whether the variable's type is an unpacked structure type, or a
     /// fixed-size array of them, as its semantic type in `table` tells.
     pub(super) fn is_unpacked_struct_in(&self, table: &semantic_types::TyTable) -> bool {
-        unpacked_structs::is_struct(self.bound(table), table, self.unpacked_struct.is_some())
+        unpacked_structs::is_struct(
+            self.bound(table),
+            table,
+            self.structure_declaration().is_some(),
+        )
     }
 
     /// The declaration of the variable's unpacked structure type, or of the
@@ -282,7 +295,7 @@ impl VariableDimensions {
         &'a self,
         table: &'a semantic_types::TyTable,
     ) -> Option<&'a Arc<unpacked_structs::UnpackedStruct>> {
-        unpacked_structs::declaration_of(self.bound(table), table, self.unpacked_struct.as_ref())
+        unpacked_structs::declaration_of(self.bound(table), table, self.structure_declaration())
     }
 
     /// What the variable's type is of an enumeration, as its semantic type
@@ -505,7 +518,7 @@ impl VariableShape {
 pub(super) fn type_is_closed(ty: &Type) -> bool {
     ty.enumeration().is_none()
         && ty.container.is_none()
-        && ty.unpacked_struct.is_none()
+        && ty.unpacked_struct().is_none()
         && ty
             .packed_ranges
             .iter()
