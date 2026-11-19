@@ -246,6 +246,63 @@ fn shared_always_rearms_before_flip_flop_nba_updates() {
 }
 
 #[test]
+fn shared_always_runs_at_time_zero_in_two_state_mode() {
+    // Regression for #4439: `always @*` blocks converted to repeating processes
+    // (for example because they share a loop index) must still run once at
+    // time zero in two-state mode, matching `lower_comb_process`.
+    let source = r#"`timescale 1ns/1ns
+module top;
+  reg q = 1'b0;
+  wire [1:0] indic = {1'b0, ~q};
+  wire [1:0] o_rdy = {1'b0, ~q};
+  wire [1:0] rsp_id = 2'b00;
+  wire [1:0] rsp_err = 2'b00;
+  reg sel_rdy, sel_err;
+  integer j;
+
+  always @(*) begin : p1
+    sel_rdy = 1'b0;
+    for (j = 0; j < 2; j = j + 1) begin
+      sel_rdy = sel_rdy | (indic[j] & o_rdy[j]);
+    end
+  end
+
+  always @(*) begin : p2
+    sel_err = 1'b0;
+    for (j = 0; j < 2; j = j + 1) begin
+      sel_err = sel_err | (rsp_id[j] & rsp_err[j]);
+    end
+  end
+
+  initial begin
+    #1 $display("%b %b", sel_rdy, sel_err);
+    $finish;
+  end
+endmodule
+"#;
+    for mode in [
+        celox::SchedulerMode::Compiled,
+        celox::SchedulerMode::Differential,
+        celox::SchedulerMode::DifferentialRuns,
+    ] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("shared-t0.sv"))], "top")
+                .four_state(false)
+                .scheduler_mode(mode)
+                .build()
+                .unwrap();
+        assert!(sim.warnings().is_empty());
+        sim.run_until(10).unwrap();
+        assert!(
+            sim.scheduler_stats().compiled_slots > 0,
+            "{mode:?}: {:?}",
+            sim.scheduler_stats()
+        );
+        assert_eq!(display_lines(&mut sim), ["1 0"], "{mode:?}");
+    }
+}
+
+#[test]
 fn shared_always_active_continuations_survive_stop() {
     let source = SHARED_INDEX.replace("endmodule", "initial #1 $stop;\nendmodule");
     for four_state in [false, true] {
