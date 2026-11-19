@@ -1983,6 +1983,7 @@ pub fn lower_frontend_artifact(
         time_slot: None,
         sample_shadows: Vec::new(),
         initial_copies: Vec::new(),
+        next_state: Default::default(),
     };
     let symbolic = SymbolicRtl {
         modules: [(module_id, sim_module.clone())].into_iter().collect(),

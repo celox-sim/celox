@@ -101,6 +101,10 @@ pub struct AnalysisOptions {
     /// module's `always_ff` processes, a diagnostic: the form is lowered
     /// and checked beside the units that run, which it leaves unchanged.
     pub ff_next_state_report: Option<std::sync::Arc<std::path::Path>>,
+    /// Lower the `always_ff` processes that can be into next-state forms
+    /// too, and keep them in the lowered modules for assembly, which may
+    /// run them instead of the processes' units.
+    pub ff_next_state: bool,
 }
 
 /// Errors reported by the SystemVerilog analyzer.

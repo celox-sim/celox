@@ -269,7 +269,7 @@ pub(super) fn specialize_module(
         four_state,
         module.implicit_nets_allowed,
         ff_parts,
-        hierarchical.next_state_report,
+        hierarchical.next_state,
         warnings,
         &local_forces,
         level_lists,
