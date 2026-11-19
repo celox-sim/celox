@@ -1,5 +1,5 @@
 use super::*;
-use celox_sir::{BasicBlock, SIRSwitchCase};
+use crate::{BasicBlock, SIRSwitchCase};
 
 #[derive(Default)]
 struct FakeMachine {
@@ -465,12 +465,12 @@ fn factorial() -> FunctionUnit<u32> {
     FunctionUnit {
         unit,
         effects: Default::default(),
-        frame: celox_sir::FrameLayout {
+        frame: crate::FrameLayout {
             size: 8,
             slots: [N, RESULT]
                 .into_iter()
                 .enumerate()
-                .map(|(index, addr)| celox_sir::FrameSlot {
+                .map(|(index, addr)| crate::FrameSlot {
                     addr,
                     offset: index * 4,
                     width: 32,
@@ -598,12 +598,12 @@ fn passes_wide_four_state_values_through_a_frame() {
             .collect(),
             register_map: [(reg(0), logic.clone())].into_iter().collect(),
         },
-        frame: celox_sir::FrameLayout {
+        frame: crate::FrameLayout {
             size: 52,
             slots: [N, RESULT]
                 .into_iter()
                 .enumerate()
-                .map(|(index, addr)| celox_sir::FrameSlot {
+                .map(|(index, addr)| crate::FrameSlot {
                     addr,
                     offset: index * 26,
                     width: 100,
