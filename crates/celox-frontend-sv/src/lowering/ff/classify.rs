@@ -92,7 +92,15 @@ impl Ff<'_, '_> {
             self.m.constants,
             self.m.parameter_types,
         )
-        .is_some();
+        .is_some()
+            || dynamic_array_bit_lvalue(
+                lvalue,
+                self.m.variables,
+                self.m.name_to_id,
+                self.m.constants,
+                self.m.parameter_types,
+            )
+            .is_some();
         let whole = (!element_write)
             .then(|| {
                 dynamic_packed_write(

@@ -1602,6 +1602,43 @@ pub(super) fn dynamic_array_element_lvalue(
     (access.msb < element_width).then_some((id, element_width, offset, access))
 }
 
+/// A select of one bit of an unpacked array at a run-time position that may
+/// move within an element too, such as `mem[addr][i]` in a loop that is not
+/// unrolled: the variable, its element width and the flattened position.
+/// The analyzer moves a bit select whose inner or outer index is out of
+/// range past the whole array, so the position's element is the selected
+/// one, or none, and the bit stays in it.
+pub(super) fn dynamic_array_bit_lvalue(
+    lvalue: &sv::ir::LValue,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> Option<(SourceVarId, usize, sv::ir::ConstExpr)> {
+    let sv::ir::LValue::Select {
+        name,
+        msb,
+        lsb,
+        array_slice_width: None,
+        ..
+    } = lvalue
+    else {
+        return None;
+    };
+    if msb != lsb
+        || sv::typecheck::eval_const_expr_with_types(lsb, constants, parameter_types).is_some()
+    {
+        return None;
+    }
+    let id = *name_to_id.get(name)?;
+    let variable = variables.get(&id)?;
+    if variable.is_unpacked_struct {
+        return None;
+    }
+    let element_width = unpacked_element_width(variable).filter(|width| *width > 1)?;
+    Some((id, element_width, lsb.clone()))
+}
+
 pub(super) fn lower_dynamic_array_element_index_slt(
     offset: &sv::ir::ConstExpr,
     variables: &HashMap<SourceVarId, SvVariable>,
