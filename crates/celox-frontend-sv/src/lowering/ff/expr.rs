@@ -130,6 +130,7 @@ impl Ff<'_, '_> {
             self.m.constants,
             self.m.parameter_types,
             self.m.four_state,
+            false,
         ) {
             Some(rewritten) => std::borrow::Cow::Owned(rewritten),
             None => expr,
