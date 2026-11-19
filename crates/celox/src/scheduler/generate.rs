@@ -295,12 +295,45 @@ impl Plan {
         self.rearm_clocks(&mut g, &cx, slot_end, started, time);
         self.drain_woken(&mut g, &cx, &guards, time, pick, internal_exit);
         self.assertion_regions(&mut g, &cx, pick);
+        // The slot's deferred assertion reports mature, and the heap may
+        // want the host (`native_slot_end`).
+        let heap_returns = self
+            .service_function
+            .filter(|_| super::native_slot_end(&program.runtime))
+            .map(|service| {
+                let context = g.load_at(
+                    slots.defer_limit_settle,
+                    celox_design::SCHEDULER_HOST_CONTEXT_BIT,
+                    64,
+                );
+                let process = g.constant(u64::MAX, 64);
+                let request = g.constant(crate::simulator::native_io::SLOT_END, 64);
+                let first = g.constant(0, 64);
+                let result = g.b.alloc_bit(64, false);
+                g.b.emit(SIRInstruction::ExternCall {
+                    dst: Some(result),
+                    func: service,
+                    args: vec![context, process, request, time, first],
+                });
+                let failed = g.equals(result, 1);
+                let next = g.b.new_block();
+                g.b.seal_block(SIRTerminator::Branch {
+                    cond: failed,
+                    true_block: (internal_exit, Vec::new()),
+                    false_block: (next, Vec::new()),
+                });
+                g.b.switch_to_block(next);
+                g.equals(result, 2)
+            });
         // The run returns after the slot that reaches its budget, or in
         // which its runtime events reach a batch, so that the host drains
         // them before the ring buffer overflows.
         let count = g.load(slots.count, SCHEDULER_TIME_WIDTH);
         let budget = g.load(slots.budget, SCHEDULER_TIME_WIDTH);
         let mut returns = g.binary(1, count, BinaryOp::GeU, budget);
+        if let Some(heap_returns) = heap_returns {
+            returns = g.binary(1, returns, BinaryOp::Or, heap_returns);
+        }
         if let Some(batch) = g.event_batch {
             let events = g.load(slots.events, SCHEDULER_TIME_WIDTH);
             let batch = g.constant(batch, SCHEDULER_TIME_WIDTH);
