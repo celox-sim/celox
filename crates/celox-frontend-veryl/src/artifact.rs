@@ -703,6 +703,7 @@ pub(crate) fn project_module_with_ids(
             time_slot: None,
             sample_shadows: Vec::new(),
             initial_copies: Vec::new(),
+            next_state: Default::default(),
         },
         ids,
         inferred_latch_diagnostics,

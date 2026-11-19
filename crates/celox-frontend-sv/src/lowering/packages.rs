@@ -121,7 +121,7 @@ pub(super) fn lower_package_states(
                 four_state,
                 true,
                 ff_parts,
-                None,
+                NextStateOptions::default(),
                 warnings,
                 &[],
                 LevelLists::Processes,

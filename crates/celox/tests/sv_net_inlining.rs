@@ -139,6 +139,20 @@ fn outputs_are_unchanged_by_inlining() {
     assert_eq!(trace!(partitioned), expected);
 }
 
+/// Lowering the flip-flops into next-state forms and building the DAG of
+/// their domain (`SirPass::NextStateDag`) measures them and runs nothing
+/// else: the outputs are the same.
+#[test]
+fn next_state_dags_change_nothing() {
+    let mut reference = design().build().unwrap();
+    let mut measured = design()
+        .opt_level(OptLevel::O2)
+        .enable_pass(SirPass::NextStateDag)
+        .build()
+        .unwrap();
+    assert_eq!(trace!(measured), trace!(reference));
+}
+
 /// With the top ports alone observed, the nets inside the instances and the
 /// connecting wires leave the settle; the top outputs stay. Disabling the
 /// pass, or building without a dead-store policy, keeps them.

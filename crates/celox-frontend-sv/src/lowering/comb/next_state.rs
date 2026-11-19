@@ -22,34 +22,13 @@ use super::assign::{Offset, Target};
 use super::*;
 
 /// One bit range of a target and its next value.
-#[derive(Clone, Debug)]
-pub(in crate::lowering) struct NextStateRoot {
-    pub target: SourceVarId,
-    pub access: BitAccess,
-    pub value: NodeId,
-}
+pub(in crate::lowering) type NextStateRoot = celox_slt::next_state::FlopRoot<SourceVarId>;
 
 /// A nonblocking write of an unpacked-array element at a run-time index.
-#[derive(Clone, Debug)]
-pub(in crate::lowering) struct RamWritePort {
-    pub array: SourceVarId,
-    /// The element index, 64 bits wide.
-    pub index: NodeId,
-    pub element_width: usize,
-    /// The bits of the element written.
-    pub access: BitAccess,
-    pub value: NodeId,
-    /// The condition the write happens under: the path to the statement
-    /// and an index inside the array.
-    pub guard: NodeId,
-}
+pub(in crate::lowering) type RamWritePort = celox_slt::next_state::RamWritePort<SourceVarId>;
 
 /// The next-state form of one process.
-#[derive(Clone, Debug, Default)]
-pub(in crate::lowering) struct NextState {
-    pub roots: Vec<NextStateRoot>,
-    pub ports: Vec<RamWritePort>,
-}
+pub(in crate::lowering) type NextState = celox_slt::next_state::NextStateForm<SourceVarId>;
 
 /// Where the nonblocking assignments of the next-state form go while the
 /// body executes.
