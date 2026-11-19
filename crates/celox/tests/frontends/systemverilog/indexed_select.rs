@@ -1407,3 +1407,82 @@ sv_backends! {
         check_masked_bit_memory(&mut sim, true);
     }
 }
+
+/// Selects of a packed array of structures at indices taken from a packed
+/// array of pointers, as Ariane's scoreboard takes `trans_id_i[i]` for each
+/// write-back port: the select's position reads one 3-bit part of the
+/// 12-bit pointer array, which is what decides it. One pointer is signed.
+const POINTER_SELECTS: &str = r#"
+    module Top(input logic [3:0][2:0] ids, input logic signed [2:0] s, input logic [7:0] v,
+               output logic [767:0] ym, output logic [7:0] r0, output logic [3:0] r1);
+        typedef struct packed { logic [3:0] a; logic [7:0] b; logic [115:0] pad; } e_t;
+        e_t [5:0] m;
+        logic [1:0][2:0] sp;
+        always_comb begin
+            m = '0;
+            sp = {s, s};
+            for (int i = 0; i < 4; i++)
+                m[ids[i]].b = v + 8'(i);
+            m[$signed(sp[1]) + 4].a = v[3:0];
+            r0 = m[ids[2]].b;
+            r1 = m[$signed(sp[0]) + 4].a;
+        end
+        assign ym = m;
+    endmodule
+"#;
+
+fn check_pointer_selects<B: celox::SimBackend>(sim: &mut celox::Simulator<B>) {
+    let (ids, s, v) = (sim.signal("ids"), sim.signal("s"), sim.signal("v"));
+    for step in 0u32..64 {
+        let pointers = [
+            step % 8,
+            (step / 8) % 8,
+            (step * 3 + 1) % 8,
+            (step * 5 + 2) % 8,
+        ];
+        let signed = i32::try_from(step % 8).unwrap() - 4;
+        let value = (step * 37 + 11) as u8;
+        sim.modify(|io| {
+            let packed = pointers
+                .iter()
+                .rev()
+                .fold(0u16, |acc, &p| (acc << 3) | p as u16);
+            io.set(ids, packed);
+            io.set(s, (signed as u8) & 7);
+            io.set(v, value);
+        })
+        .unwrap();
+        let mut m = [(0u8, 0u8); 6];
+        for (i, &p) in pointers.iter().enumerate() {
+            if let Some(element) = m.get_mut(p as usize) {
+                element.1 = value.wrapping_add(i as u8);
+            }
+        }
+        let at = usize::try_from(signed + 4).ok().filter(|at| *at < 6);
+        if let Some(at) = at {
+            m[at].0 = value & 0xf;
+        }
+        let mut bits = BigUint::from(0u8);
+        for (index, (a, b)) in m.iter().enumerate() {
+            let element = (u64::from(*a & 0xf) << 8) | u64::from(*b);
+            bits |= BigUint::from(element) << (128 * index + 116);
+        }
+        let case = format!("ids={pointers:?} s={signed} v={value:#x}");
+        assert_eq!(sim.get(sim.signal("ym")), bits, "ym {case}");
+        let r0 = m.get(pointers[2] as usize).map_or(0, |element| element.1);
+        assert_eq!(sim.get(sim.signal("r0")), BigUint::from(r0), "r0 {case}");
+        let r1 = at.map_or(0, |at| m[at].0);
+        assert_eq!(sim.get(sim.signal("r1")), BigUint::from(r1), "r1 {case}");
+    }
+}
+
+sv_backends! {
+    fn pointer_array_selects(sim) {
+        @setup {}
+        @build Simulator::from_sv_sources(
+            vec![(POINTER_SELECTS, Path::new("pointers.sv"))],
+            "Top",
+        ).four_state(false);
+        check_pointer_selects(&mut sim);
+    }
+}

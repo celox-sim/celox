@@ -509,14 +509,15 @@ pub(super) fn constant_select_write(
 /// over (see [`enumerated_select`]): 64 constant selects.
 const ENUMERATED_SELECTOR_BITS: usize = 6;
 
-/// A select whose position one run-time variable decides, at each value of
-/// it: a constant select per value, which reads or writes only its bits,
+/// A select whose position one small run-time value decides, at each value
+/// of it: a constant select per value, which reads or writes only its bits,
 /// instead of shifts of the whole vector by the run-time position.
 pub(super) struct EnumeratedSelect {
-    /// The variable, two-state or of a two-state simulation, and its width.
-    pub(super) selector: String,
+    /// The value, a variable or a constant select of one, two-state or of a
+    /// two-state simulation, and its width.
+    pub(super) selector: sv::ir::Expr,
     pub(super) selector_width: usize,
-    /// For each value of the variable, as an unsigned number of its width:
+    /// For each value of the selector, as an unsigned number of its width:
     /// the declared bounds of the select and, when given, the position of
     /// its window.
     pub(super) cases: Vec<EnumeratedCase>,
@@ -529,32 +530,42 @@ pub(super) struct EnumeratedCase {
     pub(super) at: Option<i128>,
 }
 
-/// The module's constants with one more name bound.
-struct BoundConstants<'a> {
-    constants: &'a HashMap<String, i128>,
-    name: &'a str,
-    value: i128,
-}
-
-impl sv::typecheck::Constants for BoundConstants<'_> {
-    fn constant(&self, name: &str) -> Option<&i128> {
-        if name == self.name {
-            Some(&self.value)
-        } else {
-            self.constants.get(name)
-        }
-    }
-}
-
-/// The names `expr` reads, `None` when it calls a function, whose body may
-/// read others.
-fn const_expr_names<'a>(expr: &'a sv::ir::ConstExpr, names: &mut Vec<&'a str>) -> Option<()> {
+/// The run-time values `expr` reads, each a variable or a constant bit or
+/// part-select of one, such as `trans_id_i[1]` of a packed array of
+/// pointers; `None` when it calls a function, whose body may read others.
+fn selector_terms(
+    expr: &sv::ir::ConstExpr,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+    terms: &mut Vec<sv::ir::ConstExpr>,
+) -> Option<()> {
     use sv::ir::ConstExpr;
+    let runtime =
+        |expr: &ConstExpr| matches!(expr, ConstExpr::Ident(name) if !constants.contains_key(name));
+    let constant = |expr: &ConstExpr| {
+        sv::typecheck::eval_const_expr_with_types(expr, constants, parameter_types).is_some()
+    };
+    let mut push = |term: &ConstExpr| {
+        if !terms.contains(term) {
+            terms.push(term.clone());
+        }
+    };
     let mut pending = vec![expr];
     while let Some(expr) = pending.pop() {
         match expr {
             ConstExpr::Literal(_) => {}
-            ConstExpr::Ident(name) => names.push(name),
+            ConstExpr::Ident(_) => {
+                if runtime(expr) {
+                    push(expr);
+                }
+            }
+            ConstExpr::Select { expr: base, bit } if runtime(base) && constant(bit) => push(expr),
+            ConstExpr::SelectRange {
+                expr: base,
+                msb,
+                lsb,
+                ..
+            } if runtime(base) && constant(msb) && constant(lsb) => push(expr),
             ConstExpr::Select { expr, bit } => pending.extend([&**expr, &**bit]),
             ConstExpr::SelectRange { expr, msb, lsb, .. } => {
                 pending.extend([&**expr, &**msb, &**lsb]);
@@ -572,13 +583,72 @@ fn const_expr_names<'a>(expr: &'a sv::ir::ConstExpr, names: &mut Vec<&'a str>) -
     Some(())
 }
 
+/// `expr` with each occurrence of `term` replaced by `value`.
+fn substituted(
+    expr: &sv::ir::ConstExpr,
+    term: &sv::ir::ConstExpr,
+    value: &sv::ir::ConstExpr,
+) -> sv::ir::ConstExpr {
+    use sv::ir::ConstExpr;
+    if expr == term {
+        return value.clone();
+    }
+    let sub = |expr: &ConstExpr| Box::new(substituted(expr, term, value));
+    match expr {
+        ConstExpr::Literal(_) | ConstExpr::Ident(_) | ConstExpr::Function { .. } => expr.clone(),
+        ConstExpr::Select { expr, bit } => ConstExpr::Select {
+            expr: sub(expr),
+            bit: sub(bit),
+        },
+        ConstExpr::SelectRange {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => ConstExpr::SelectRange {
+            expr: sub(expr),
+            msb: sub(msb),
+            lsb: sub(lsb),
+            signed: *signed,
+        },
+        ConstExpr::Resize {
+            expr,
+            width,
+            signed,
+        } => ConstExpr::Resize {
+            expr: sub(expr),
+            width: *width,
+            signed: *signed,
+        },
+        ConstExpr::Unary { op, expr } => ConstExpr::Unary {
+            op: *op,
+            expr: sub(expr),
+        },
+        ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
+            left: sub(left),
+            op: *op,
+            right: sub(right),
+        },
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => ConstExpr::Mux {
+            condition: sub(condition),
+            then_expr: sub(then_expr),
+            else_expr: sub(else_expr),
+        },
+    }
+}
+
 /// The select `[msb:lsb]` of packed vector `variable` (and the window at
-/// `at`) at each value of the one run-time variable its position reads,
-/// when that variable has at most [`ENUMERATED_SELECTOR_BITS`] bits and no
-/// unknown value: a two-state variable, or any in a two-state simulation.
-/// An unknown position reads X and writes nothing (IEEE 1800-2023 11.5.1),
-/// which a choice between its known values would not do. `None` otherwise,
-/// and for a position below the vector at some value.
+/// `at`) at each value of the one run-time value its position reads (see
+/// [`selector_terms`]), when that value has at most
+/// [`ENUMERATED_SELECTOR_BITS`] bits and its variable no unknown value: a
+/// two-state variable, or any in a two-state simulation. An unknown
+/// position reads X and writes nothing (IEEE 1800-2023 11.5.1), which a
+/// choice between its known values would not do. `None` otherwise, and for
+/// a position below the vector at some value.
 pub(super) fn enumerated_select(
     variable: &SvVariable,
     msb: &sv::ir::ConstExpr,
@@ -590,60 +660,71 @@ pub(super) fn enumerated_select(
     parameter_types: &HashMap<String, (usize, bool)>,
     four_state: bool,
 ) -> Option<EnumeratedSelect> {
+    use sv::ir::ConstExpr;
     // Positions in an unpacked array count within its elements (see
     // `keep_element_window`).
     if !variable.array_dims.is_empty() || variable.is_unpacked_struct {
         return None;
     }
-    let mut names = Vec::new();
+    let mut terms = Vec::new();
     for expr in [msb, lsb].into_iter().chain(at) {
-        const_expr_names(expr, &mut names)?;
+        selector_terms(expr, constants, parameter_types, &mut terms)?;
     }
-    names.retain(|name| !constants.contains_key(*name));
-    names.sort_unstable();
-    names.dedup();
-    let [selector] = names[..] else {
+    let [term] = &terms[..] else {
         return None;
     };
-    let source = name_to_id.get(selector).and_then(|id| variables.get(id))?;
-    let width = source.width;
+    let eval = |expr: &ConstExpr| {
+        sv::typecheck::eval_const_expr_with_types(expr, constants, parameter_types)
+    };
+    let (name, width, signed) = match term {
+        ConstExpr::Ident(name) => {
+            let source = name_to_id.get(name).and_then(|id| variables.get(id))?;
+            (name, source.width, source.signed)
+        }
+        ConstExpr::Select { expr, .. } => {
+            let ConstExpr::Ident(name) = &**expr else {
+                return None;
+            };
+            (name, 1, false)
+        }
+        ConstExpr::SelectRange {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => {
+            let ConstExpr::Ident(name) = &**expr else {
+                return None;
+            };
+            let width = usize::try_from(eval(msb)?.abs_diff(eval(lsb)?)).ok()? + 1;
+            (name, width, *signed)
+        }
+        _ => return None,
+    };
+    let source = name_to_id.get(name).and_then(|id| variables.get(id))?;
     if !source.array_dims.is_empty()
         || source.float.is_some()
         || source.value_kind != celox_design::ValueKind::Bits
         || (four_state && source.is_4state)
         || width == 0
         || width > ENUMERATED_SELECTOR_BITS
+        || width > source.width
     {
         return None;
     }
-    // The selector's own type, for the arithmetic of the position.
-    let mut types = HashMap::default();
-    let mut constant_names = Vec::new();
-    for expr in [msb, lsb].into_iter().chain(at) {
-        const_expr_names(expr, &mut constant_names)?;
-    }
-    for name in constant_names {
-        if let Some(ty) = parameter_types.get(name) {
-            types.insert(name.to_string(), *ty);
-        }
-    }
-    types.insert(selector.to_string(), (width, source.signed));
     let count = 1u128 << width;
     let mut cases = Vec::with_capacity(count as usize);
     for value in 0..count {
-        let bound = BoundConstants {
-            constants,
-            name: selector,
-            value: if source.signed && value >= count / 2 {
-                i128::try_from(value).ok()? - i128::try_from(count).ok()?
-            } else {
-                i128::try_from(value).ok()?
-            },
-        };
-        let eval = |expr| sv::typecheck::eval_const_expr_with_types(expr, &bound, &types);
-        let (case_msb, case_lsb) = (eval(msb)?, eval(lsb)?);
+        // The term at this value, of its width and signedness, as typed
+        // constants are substituted.
+        let literal = ConstExpr::Literal(format!(
+            "{width}'{}h{value:x}",
+            if signed { "s" } else { "" }
+        ));
+        let at_value = |expr: &ConstExpr| eval(&substituted(expr, term, &literal));
+        let (case_msb, case_lsb) = (at_value(msb)?, at_value(lsb)?);
         let case_at = match at {
-            Some(at) => Some(eval(at)?),
+            Some(at) => Some(at_value(at)?),
             None => None,
         };
         if packed_index_position(variable, case_msb)?
@@ -667,7 +748,7 @@ pub(super) fn enumerated_select(
         return None;
     }
     Some(EnumeratedSelect {
-        selector: selector.to_string(),
+        selector: expr_from_const_expr(term)?,
         selector_width: width,
         cases,
     })
@@ -1872,7 +1953,7 @@ pub(super) fn out_of_range_constant_selects(
                 for case in rest.iter().rev() {
                     chosen = Expr::Mux {
                         condition: Box::new(Expr::Binary {
-                            left: Box::new(Expr::Ident(choice.selector.clone())),
+                            left: Box::new(choice.selector.clone()),
                             op: sv::ir::BinaryOp::Eq,
                             right: Box::new(Expr::Literal(format!(
                                 "{}'d{}",
