@@ -210,14 +210,13 @@ impl Module {
         self
     }
 
-    /// Run selected `always @*` processes, by index among
-    /// [`Self::comb_processes`], as ordinary processes that wait on their
-    /// Convert the selected `always @*` processes from combinational
-    /// processes into repeating processes that wait on their implicit event
-    /// expression (IEEE 1800-2023 9.4.2.2) before each run of their statement.
-    /// When `run_at_time_zero` is set (two-state mode, matching
-    /// `lower_comb_process`), each process runs once at time zero after active
-    /// startup work (`#0`) before its first wait.
+    /// Convert selected `always @*` processes, by index among
+    /// [`Self::comb_processes`], from combinational processes into repeating
+    /// processes that wait on their implicit event expression (IEEE 1800-2023
+    /// 9.4.2.2) before each run of their statement. When `run_at_time_zero` is
+    /// set (two-state mode, matching `lower_comb_process`), each process runs
+    /// once at time zero after active startup work (`#0`) before its first
+    /// wait.
     pub fn run_comb_processes_as_processes(
         self,
         run_at_time_zero: bool,
