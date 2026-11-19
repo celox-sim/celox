@@ -43,6 +43,52 @@ struct Slot<'a> {
 }
 
 impl Plan {
+    /// Each settle unit with the record counts the generated unit
+    /// instruments into its copy of it (`Generator::inline_with_exit`), or
+    /// `None` for one it runs as it is or one that may `$finish`. Only a
+    /// compiled run reads the counts, and it clears them when it starts.
+    pub(crate) fn settle_instrumentation(
+        &self,
+        program: &LaidOutProgram,
+        slots: &SchedulerSlots<AbsoluteAddr>,
+    ) -> Vec<Option<Unit>> {
+        let schema = &program.runtime.runtime_schema;
+        let capacity = program.layout().runtime_event_capacity;
+        let batch = capacity > 0
+            && (!schema.runtime_event_sites.is_empty() || !self.service_processes.is_empty());
+        let captures = self.observers.is_some();
+        program
+            .sir
+            .eval_comb
+            .iter()
+            .map(|unit| {
+                let finishes = !self.finish_sites.is_empty()
+                    && (emits_finish(unit, &self.finish_sites)
+                        || captures
+                            && instructions(unit).any(|inst| {
+                                matches!(inst,
+                                SIRInstruction::CombCaptureEvent { site_id, .. }
+                                    if self.finish_sites.contains(site_id))
+                            }));
+                let counts = batch
+                    && instructions(unit).any(|inst| {
+                        matches!(inst, SIRInstruction::RuntimeEvent { .. })
+                            || captures && matches!(inst, SIRInstruction::CombCaptureEvent { .. })
+                    });
+                // A `$finish` flag would end a run that does not read it,
+                // as a settle of the runtime's own loop: such a unit keeps
+                // its instrumented copy.
+                // Nor do units that capture combinational events, which
+                // the runtime's own settles report.
+                let captures_any = instructions(unit)
+                    .any(|inst| matches!(inst, SIRInstruction::CombCaptureEvent { .. }));
+                (counts && !finishes && !captures_any).then(|| {
+                    Generator::instrument_records(unit, &self.finish_sites, slots, counts, captures)
+                })
+            })
+            .collect()
+    }
+
     pub(super) fn generate(
         &self,
         program: &LaidOutProgram,

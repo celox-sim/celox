@@ -723,6 +723,11 @@ pub struct LaidOutProgram {
     /// binds to its slot.
     #[cfg(feature = "host-runtime")]
     pub(crate) scheduler_callees: Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
+    /// The settle units carry the records and `$finish` flags of the
+    /// compiled scheduler that calls them, so that the scheduler calls the
+    /// settle's own code (`Plan::settle_instrumentation` in the scheduler).
+    #[cfg(feature = "host-runtime")]
+    pub(crate) settle_instrumented: bool,
 }
 
 impl LaidOutProgram {
@@ -1120,6 +1125,8 @@ impl OptimizedSir {
             cone_homes: None,
             #[cfg(feature = "host-runtime")]
             scheduler_callees: Vec::new(),
+            #[cfg(feature = "host-runtime")]
+            settle_instrumented: false,
         };
         if !defer_instrumentation {
             laid_out.prune_stale_marks();

@@ -376,7 +376,23 @@ pub(crate) fn attach(program: &mut LaidOutProgram, wiring_clocks: bool, outline:
                     || (cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen")))
                         && plan.service_function.is_some()
                         && program.runtime.runtime_schema.scheduler.is_some()))
-                .then(|| generate_unit(&plan, program, &schema.slots, outline, &mut callees));
+                .then(|| {
+                    if outline && !program.settle_instrumented {
+                        // Instrument the settle where it is, as the
+                        // scheduler would its inlined copy: it then calls
+                        // the settle's own code instead of a copy.
+                        let instrumented = plan.settle_instrumentation(program, &schema.slots);
+                        for (unit, instrumented) in
+                            program.sir.eval_comb.iter_mut().zip(instrumented)
+                        {
+                            if let Some(instrumented) = instrumented {
+                                *unit = instrumented;
+                            }
+                        }
+                        program.settle_instrumented = true;
+                    }
+                    generate_unit(&plan, program, &schema.slots, outline, &mut callees)
+                });
                 let tracked = plan.tracked();
                 let kernel_events = plan
                     .kernels

@@ -3072,3 +3072,57 @@ fn opposite_edge_clock_copies_share_one_domain() {
         .count();
     assert!(domains <= 3, "{domains} FF domains for 24 copies");
 }
+
+/// The compiled scheduler calls the settle's own code for a settle unit it
+/// does not instrument, and keeps an instrumented copy of one whose
+/// combinational events it captures, so that the runtime's own settles
+/// report them as before.
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+#[test]
+fn the_scheduler_calls_the_settle_unless_it_instruments_it() {
+    for (record, bound) in [
+        ("", true),
+        (
+            "always_comb if (w3 == 32'hffff_ffff) $display(\"all ones\");\n",
+            false,
+        ),
+    ] {
+        let mut source =
+            String::from("`timescale 1ns/1ns\nmodule Top; bit clk = 0; always #1 clk = ~clk;\n");
+        for index in 0..72 {
+            source += &format!("logic [31:0] r{index} = {index}; logic [31:0] w{index};\n");
+        }
+        for index in 0..72 {
+            source += &format!(
+                "assign w{index} = (r{index} ^ (r{} << 3)) + (r{} >> 2);\n",
+                (index + 1) % 72,
+                (index + 7) % 72
+            );
+        }
+        source += record;
+        source += "always_ff @(posedge clk) begin\n";
+        for index in 0..72 {
+            source += &format!("  r{index} <= w{index};\n");
+        }
+        source += "end\ninitial begin #20 $display(\"%h\", w0); $finish; end\nendmodule\n";
+        let mut builder = crate::Simulation::from_sv_sources(
+            vec![(source.as_str(), std::path::Path::new("settle-callee.sv"))],
+            "Top",
+        )
+        .emit_triggers();
+        builder.native_file_calls = true;
+        let program = builder
+            .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, true, false)
+            .unwrap()
+            .0;
+        assert!(!program.scheduler_callees.is_empty(), "{record}");
+        let is_settle = program.scheduler_callees.iter().any(|callee| {
+            program
+                .sir
+                .eval_comb
+                .iter()
+                .any(|unit| *crate::settle::without_shadow_commits(unit) == *callee)
+        });
+        assert_eq!(is_settle, bound, "{record}");
+    }
+}
