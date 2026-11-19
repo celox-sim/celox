@@ -1288,3 +1288,122 @@ sv_backends! {
         check_member_part_select(&mut sim);
     }
 }
+
+/// A memory written bit by bit under a mask, as
+/// `bsg_mem_1rw_sync_mask_write_bit` writes it: nonblocking writes of single
+/// bits at a run-time bit index within an element at a run-time index, then
+/// one more write of a bit of the same element, which lands last (IEEE
+/// 1800-2023 10.4.2). An element index past the 48 elements, a bit index
+/// past the 92 bits, and an unknown index write nothing (7.4.6, 11.5.1).
+const MASKED_BIT_MEMORY: &str = r#"
+    module Top(input logic clk, input logic v, input logic w, input logic [5:0] addr,
+               input logic [91:0] data, input logic [91:0] mask, input logic extra,
+               input logic [6:0] bi, input logic [5:0] ra, output logic [91:0] q);
+        logic [91:0] mem [47:0];
+        always_ff @(posedge clk)
+            if (v & w) begin
+                for (integer i = 0; i < 92; i = i + 1)
+                    if (mask[i])
+                        mem[addr][i] <= data[i];
+                if (extra)
+                    mem[addr][bi] <= ~data[0];
+            end
+        assign q = mem[ra];
+    endmodule
+"#;
+
+fn check_masked_bit_memory<B: celox::SimBackend>(sim: &mut celox::Simulator<B>, four_state: bool) {
+    let all = (1u128 << 92) - 1;
+    // Each element's value and known bits; unwritten bits of a four-state
+    // memory are X.
+    let mut mem = vec![(0u128, if four_state { 0 } else { all }); 48];
+    let clk = sim.event("clk");
+    let names =
+        ["v", "w", "addr", "data", "mask", "extra", "bi", "ra"].map(|name| sim.signal(name));
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let wide =
+        |next: &mut dyn FnMut() -> u64| (u128::from(next()) << 64 | u128::from(next())) & all;
+    for step in 0..300 {
+        let (v, w) = (next() % 4 != 0, next() % 3 != 0);
+        let addr = next() % 64;
+        let data = wide(&mut next);
+        let mask = wide(&mut next) & wide(&mut next);
+        let extra = next() % 2 == 0;
+        let bi = next() % 128;
+        // Some reads take the element written in the same slot.
+        let ra = if step % 3 == 0 { addr } else { next() % 64 };
+        let unknown_addr = four_state && step % 17 == 5;
+        let unknown_bi = four_state && step % 13 == 7;
+        sim.modify(|io| {
+            io.set(names[0], u8::from(v));
+            io.set(names[1], u8::from(w));
+            if unknown_addr {
+                io.set_four_state(names[2], BigUint::from(0u8), BigUint::from(0x3fu8));
+            } else {
+                io.set(names[2], addr);
+            }
+            io.set_wide(names[3], BigUint::from(data));
+            io.set_wide(names[4], BigUint::from(mask));
+            io.set(names[5], u8::from(extra));
+            if unknown_bi {
+                io.set_four_state(names[6], BigUint::from(0u8), BigUint::from(0x7fu8));
+            } else {
+                io.set(names[6], bi);
+            }
+            io.set(names[7], ra);
+        })
+        .unwrap();
+        // The read sees the memory before this edge's writes.
+        let (value, unknown) = sim.get_four_state(sim.signal("q"));
+        let known = BigUint::from(all) ^ &unknown;
+        let expected = match mem.get(ra as usize) {
+            Some(&(value, known)) => (value & known, all ^ known),
+            None if four_state => (0, all),
+            None => (0, 0),
+        };
+        assert_eq!(
+            (value & known, unknown),
+            (BigUint::from(expected.0), BigUint::from(expected.1)),
+            "q = mem[{ra}] before step {step}"
+        );
+        sim.tick(clk).unwrap();
+        if v && w
+            && !unknown_addr
+            && let Some(element) = mem.get_mut(addr as usize)
+        {
+            element.0 = (element.0 & !mask) | (data & mask);
+            element.1 |= mask;
+            if extra && !unknown_bi && bi < 92 {
+                let bit = 1u128 << bi;
+                element.0 = (element.0 & !bit) | if data & 1 == 0 { bit } else { 0 };
+                element.1 |= bit;
+            }
+        }
+    }
+}
+
+sv_backends! {
+    fn masked_bit_memory_two_state(sim) {
+        @setup {}
+        @build Simulator::from_sv_sources(
+            vec![(MASKED_BIT_MEMORY, Path::new("masked.sv"))],
+            "Top",
+        ).four_state(false);
+        check_masked_bit_memory(&mut sim, false);
+    }
+
+    fn masked_bit_memory_four_state(sim) {
+        @setup {}
+        @build Simulator::from_sv_sources(
+            vec![(MASKED_BIT_MEMORY, Path::new("masked.sv"))],
+            "Top",
+        ).four_state(true);
+        check_masked_bit_memory(&mut sim, true);
+    }
+}
