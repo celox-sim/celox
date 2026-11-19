@@ -278,9 +278,34 @@ fn instrument_recording_functions(
     }
 }
 
+/// The native kernel index a compiled scheduler calls its first callee
+/// ([`LaidOutProgram::scheduler_callees`]) by, until the backend binds the
+/// callees to their slots: above every real slot of an image.
+pub(crate) const CALLEE_PLACEHOLDER: u32 = 0x2000_0000;
+
+/// Whether the compiled scheduler of a native image calls the bodies it runs
+/// as functions of their own: a body of at least
+/// [`OUTLINE_MIN_INSTRUCTIONS`] is compiled once, beside the others, instead
+/// of into one function with the whole schedule, whose compilation grows
+/// faster than its size.
+/// A testbench scheduler inlines the compiled scheduler and reads the
+/// records and finishes of the units it runs from it, so a program with one
+/// keeps them inline.
+pub(crate) fn outlines_callees(program: &LaidOutProgram, native_image: bool) -> bool {
+    native_image
+        && cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen")))
+        && program
+            .runtime
+            .testbench
+            .as_ref()
+            .is_none_or(|testbench| testbench.scheduler().is_none())
+}
+
 /// Generate the compiled scheduler of `program`, if it qualifies, and record
-/// for every process kernel whether the scheduler runs it.
-pub(crate) fn attach(program: &mut LaidOutProgram, wiring_clocks: bool) {
+/// for every process kernel whether the scheduler runs it. With `outline`
+/// ([`outlines_callees`]), its larger bodies become
+/// [`LaidOutProgram::scheduler_callees`].
+pub(crate) fn attach(program: &mut LaidOutProgram, wiring_clocks: bool, outline: bool) {
     let Some(schema) = program.runtime.runtime_schema.scheduler.clone() else {
         return;
     };
@@ -289,6 +314,7 @@ pub(crate) fn attach(program: &mut LaidOutProgram, wiring_clocks: bool) {
     let mut lazy = false;
     // The points exist only in a scheduler that can call the host.
     let mut update_points = false;
+    let mut callees = Vec::new();
     let (fallback, unit, events, clocks, kernel_events) =
         match Plan::new(program, &schema.slots, wiring_clocks) {
             Err(reason) => (
@@ -308,7 +334,7 @@ pub(crate) fn attach(program: &mut LaidOutProgram, wiring_clocks: bool) {
                     || (cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen")))
                         && plan.service_function.is_some()
                         && program.runtime.runtime_schema.scheduler.is_some()))
-                .then(|| plan.generate(program, &schema.slots));
+                .then(|| generate_unit(&plan, program, &schema.slots, outline, &mut callees));
                 let tracked = plan.tracked();
                 let kernel_events = plan
                     .kernels
@@ -357,7 +383,35 @@ pub(crate) fn attach(program: &mut LaidOutProgram, wiring_clocks: bool) {
         scheduler.unit = Some(program.sir.processes.len());
         program.sir.processes.push(unit);
     }
+    program.scheduler_callees = callees;
     testbench::attach(program, lazy);
+}
+
+/// The unit of the compiled scheduler of `plan`, with its larger bodies as
+/// `callees` when it `outline`s them ([`outlines_callees`]).
+fn generate_unit(
+    plan: &Plan,
+    program: &LaidOutProgram,
+    slots: &SchedulerSlots<AbsoluteAddr>,
+    outline: bool,
+    callees: &mut Vec<Unit>,
+) -> Unit {
+    if !outline {
+        return plan.generate(program, slots);
+    }
+    // A budget of nothing outlines every body of at least
+    // OUTLINE_MIN_INSTRUCTIONS; smaller ones stay inline, where a call
+    // would cost more than the body.
+    let mut outlines = Outlines {
+        callees: Vec::new(),
+        inline_budget: Some(0),
+        budgeted: false,
+        cancel: None,
+        cancelled: false,
+    };
+    let unit = plan.generate_with_outlines(program, slots, Some(&mut outlines), CALLEE_PLACEHOLDER);
+    *callees = outlines.callees;
+    unit
 }
 
 /// [`celox_design::SchedulerSchema::domain_waits`] of `program`.
@@ -444,7 +498,11 @@ pub(crate) fn without_fused_domains(
     if !fused {
         return program;
     }
-    program.sir.processes[unit] = plan.generate(&program, &schema.slots);
+    let outline = !program.scheduler_callees.is_empty();
+    let mut callees = Vec::new();
+    program.sir.processes[unit] =
+        generate_unit(&plan, &program, &schema.slots, outline, &mut callees);
+    program.scheduler_callees = callees;
     testbench::regenerate(&mut program, true);
     program
 }

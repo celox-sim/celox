@@ -262,7 +262,7 @@ mod unknown_kinds {
                         let mut program = program.into_laid_out(four_state);
                         if mode != SchedulerMode::Reference {
                             super::super::enable_native_services(&mut program);
-                            super::super::attach(&mut program, true);
+                            super::super::attach(&mut program, true, false);
                             assert!(
                                 program
                                     .runtime
@@ -378,7 +378,7 @@ mod shared_storage {
             .unwrap();
             let mut program = program.into_laid_out(four_state);
             super::super::enable_native_services(&mut program);
-            super::super::attach(&mut program, true);
+            super::super::attach(&mut program, true, false);
             let schema = program.runtime.runtime_schema.scheduler.clone().unwrap();
             let mut plan = super::super::Plan::new(&program, &schema.slots, true).unwrap();
             assert_eq!(plan.clocks.len(), 2);

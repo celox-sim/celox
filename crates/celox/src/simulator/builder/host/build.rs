@@ -510,10 +510,16 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
                 .diagnostics
                 .phase_timing
                 .then(crate::timing::now);
+            let outline = self
+                .options
+                .optimize_options
+                .is_enabled(crate::optimizer::SirPass::SchedulerCallees)
+                && crate::scheduler::outlines_callees(&laid_out, defer_derived_edges);
             crate::scheduler::attach(
                 &mut laid_out,
                 !self.options.native_force_support
                     && self.options.signal_access.force_signals.is_empty(),
+                outline,
             );
             if let Some(start) = plan_start {
                 tracing::debug!("[phase-timing] scheduler_plan: {:?}", start.elapsed());
