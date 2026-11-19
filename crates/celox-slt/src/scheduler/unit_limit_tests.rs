@@ -3,12 +3,11 @@
 
 use super::tests::simple_path;
 use super::work::UnitLimits;
-use crate::HashMap;
-use crate::{SLTNode, SLTNodeArena};
-use celox_design::{BitAccess, VarAtomBase};
+use crate::{HashMap, SLTForFoldGroupState, SLTNode, SLTNodeArena};
+use celox_design::{BinaryOp, BitAccess, VarAtomBase};
 use celox_sir::interp::{InterpError, InterpMachine, ResolvedAccess, StoreSnapshot, execute_unit};
 use celox_sir::{ExecutionUnit, SIROffset, SIRValue, TriggerIdWithKind};
-use num_bigint::BigUint;
+use num_bigint::{BigInt, BigUint};
 use num_traits::{One, Zero};
 
 const FLAGS: u32 = 99;
@@ -344,4 +343,176 @@ fn settles_of_guarded_regions_are_cut_between_them() {
             );
         }
     }
+}
+
+/// The units of a settle without partitions of `roots` independent exact
+/// grouped folds (two projections each) followed by one ordinary path, cut at
+/// `limits`.
+fn fold_group_settle(roots: u32, limits: Option<UnitLimits>) -> Vec<ExecutionUnit<u32>> {
+    let mut arena = SLTNodeArena::new();
+    let guard = arena
+        .alloc(SLTNode::Constant(
+            BigUint::from(1u8),
+            BigUint::from(0u8),
+            1,
+            false,
+        ))
+        .unwrap();
+    let mut paths = Vec::new();
+    let mut widths = HashMap::default();
+
+    for root in 0..roots {
+        let loop_var = 200 + root;
+        let src_a = 100 + root * 2;
+        let src_b = 101 + root * 2;
+        let dst_a = 10 + root * 2;
+        let dst_b = 11 + root * 2;
+        widths.insert(src_a, 8);
+        widths.insert(src_b, 8);
+        widths.insert(dst_a, 8);
+        widths.insert(dst_b, 8);
+
+        let input = |arena: &mut SLTNodeArena<u32>, variable: u32| {
+            arena
+                .alloc(SLTNode::Input {
+                    variable,
+                    signed: false,
+                    index: Vec::new(),
+                    access: BitAccess::new(0, 7),
+                })
+                .unwrap()
+        };
+        let init_a = input(&mut arena, src_a);
+        let init_b = input(&mut arena, src_b);
+        let carried_a = input(&mut arena, dst_a);
+        let carried_b = input(&mut arena, dst_b);
+        let iter = input(&mut arena, loop_var);
+        let next_a = arena
+            .alloc(SLTNode::Binary(carried_a, BinaryOp::Add, iter))
+            .unwrap();
+        let next_b = arena
+            .alloc(SLTNode::Binary(carried_b, BinaryOp::Xor, carried_a))
+            .unwrap();
+        let group = arena
+            .alloc(SLTNode::ForFoldGroup {
+                loop_var,
+                loop_width: 8,
+                loop_signed: false,
+                start: BigInt::from(1),
+                step: BigInt::from(1),
+                trip_count: 4,
+                entry_guard: guard,
+                states: vec![
+                    SLTForFoldGroupState {
+                        target: VarAtomBase::new(dst_a, 0, 7),
+                        initial: init_a,
+                        update: next_a,
+                    },
+                    SLTForFoldGroupState {
+                        target: VarAtomBase::new(dst_b, 0, 7),
+                        initial: init_b,
+                        update: next_b,
+                    },
+                ],
+            })
+            .unwrap();
+        let proj_a = arena
+            .alloc(SLTNode::Slice {
+                expr: group,
+                access: BitAccess::new(8, 15),
+            })
+            .unwrap();
+        let proj_b = arena
+            .alloc(SLTNode::Slice {
+                expr: group,
+                access: BitAccess::new(0, 7),
+            })
+            .unwrap();
+
+        let mut path_a = simple_path(&mut arena, dst_a, None);
+        path_a.expr = proj_a;
+        path_a.sources = [VarAtomBase::new(src_a, 0, 7), VarAtomBase::new(src_b, 0, 7)]
+            .into_iter()
+            .collect();
+        let mut path_b = simple_path(&mut arena, dst_b, None);
+        path_b.expr = proj_b;
+        path_b.sources = [VarAtomBase::new(src_a, 0, 7), VarAtomBase::new(src_b, 0, 7)]
+            .into_iter()
+            .collect();
+        paths.push(path_a);
+        paths.push(path_b);
+    }
+
+    widths.insert(150, 8);
+    widths.insert(50, 8);
+    paths.push(simple_path(&mut arena, 50, Some(150)));
+
+    let result = super::sort_with_unit_limits(
+        paths,
+        &arena,
+        &crate::HashSet::default(),
+        &crate::HashMap::default(),
+        false,
+        &widths,
+        &crate::HashMap::default(),
+        1,
+        None,
+        limits.unwrap_or(UnitLimits::DEFAULT),
+    )
+    .unwrap();
+    result.execution_units
+}
+
+/// Independent exact grouped folds buffered in the pending fold window are cut
+/// between roots at an instruction budget, and work following a flushed run
+/// starts a new unit once the budget is reached.
+#[test]
+fn settles_of_deferred_fold_groups_are_cut_between_roots() {
+    let roots = 4;
+    let whole = fold_group_settle(roots, None);
+    assert_eq!(whole.len(), 1);
+    let cut = fold_group_settle(
+        roots,
+        Some(UnitLimits {
+            blocks: usize::MAX,
+            instructions: 10,
+        }),
+    );
+    assert_eq!(cut.len(), roots as usize + 1, "{} units", cut.len());
+    // Each grouped fold lowers to one entry branch and one loop branch: no unit
+    // may accumulate more than one root.
+    for unit in &cut {
+        let branches = unit
+            .blocks
+            .values()
+            .filter(|block| matches!(block.terminator, celox_sir::SIRTerminator::Branch { .. }))
+            .count();
+        assert!(branches <= 2, "{branches} branches in one unit");
+    }
+
+    let run = |units: &[ExecutionUnit<u32>]| {
+        let mut memory = Memory::default();
+        for root in 0..roots {
+            memory.write(100 + root * 2, 0, 8, &BigUint::from(3u8 + root as u8));
+            memory.write(101 + root * 2, 0, 8, &BigUint::from(0x20u8 + root as u8));
+        }
+        memory.write(150, 0, 8, &BigUint::from(0x77u8));
+        settle(units, &mut memory);
+        memory
+    };
+    let whole_mem = run(&whole);
+    assert_eq!(run(&cut), whole_mem);
+    for root in 0..roots {
+        let mut a = (3u8 + root as u8) as u16;
+        let mut b = (0x20u8 + root as u8) as u16;
+        for iter in 1u16..=4 {
+            let next_a = (a + iter) & 0xff;
+            let next_b = (b ^ a) & 0xff;
+            a = next_a;
+            b = next_b;
+        }
+        assert_eq!(whole_mem.read(10 + root * 2, 0, 8), BigUint::from(a));
+        assert_eq!(whole_mem.read(11 + root * 2, 0, 8), BigUint::from(b));
+    }
+    assert_eq!(whole_mem.read(50, 0, 8), BigUint::from(0x77u8));
 }

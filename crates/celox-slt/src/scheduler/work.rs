@@ -334,6 +334,14 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
         self.lower_cache.clear();
     }
 
+    /// End the current unit before the next piece of work when not inside a
+    /// partition and the current unit has reached its limits.
+    fn maybe_flush_unit(&mut self) {
+        if !self.in_partition && self.unit_full() {
+            self.flush_unit();
+        }
+    }
+
     /// Skip the `count` partitions from `first` together when none of their
     /// flags is set: one load of their flag bytes tests them all.
     fn open_partition_group(&mut self, flags: Addr, first: usize, count: usize) {
@@ -519,22 +527,143 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
     }
 
     /// Lower the buffered run of exact grouped-fold paths.
+    ///
+    /// Outside a partition and under unit limits, each jointly lowered family
+    /// and each remaining independent root is emitted and stored as its own
+    /// atomic piece of work, checking the unit budget between them so deferred
+    /// fold roots cannot accumulate past the limit into one execution unit.
     pub(super) fn flush_pending_folds(&mut self) {
+        if self.pending_fold_indices.is_empty() {
+            return;
+        }
         let context = self.context;
-        flush_pending_fold_paths(
-            &mut self.pending_fold_indices,
-            context.input,
-            context.fold_group_schedule_index,
-            self.lowerer,
-            &mut self.builder,
-            context.arena,
-            &mut self.lower_cache,
-            &mut self.dep_memo,
-            &mut self.inverse_dep_memo,
-            context.unpacked_element_widths,
-            context.four_state,
-        );
+        if self.in_partition || context.unit_limits.is_none() {
+            flush_pending_fold_paths(
+                &mut self.pending_fold_indices,
+                context.input,
+                context.fold_group_schedule_index,
+                self.lowerer,
+                &mut self.builder,
+                context.arena,
+                &mut self.lower_cache,
+                &mut self.dep_memo,
+                &mut self.inverse_dep_memo,
+                context.unpacked_element_widths,
+                context.four_state,
+            );
+            self.pending_fold_roots.clear();
+            return;
+        }
+
+        let pending = std::mem::take(&mut self.pending_fold_indices);
         self.pending_fold_roots.clear();
+        let schedule_index = context.fold_group_schedule_index;
+        let candidates = discover_exact_fold_groups(&pending, schedule_index);
+        let mut emitted_roots = HashSet::default();
+        if candidates.len() >= 2 {
+            let (compatible, shared_load) = joint_fold_compatibility(&candidates, context.arena);
+            let mut available = vec![true; candidates.len()];
+            let mut rejected = HashSet::<Vec<NodeId>>::default();
+            while let Some(family) = best_weighted_fold_family(
+                &candidates,
+                &available,
+                &compatible,
+                &shared_load,
+                &rejected,
+                context.four_state,
+            ) {
+                let roots = family
+                    .members
+                    .iter()
+                    .map(|member| candidates[*member].root)
+                    .collect::<Vec<_>>();
+                self.maybe_flush_unit();
+                if self.lowerer.lower_fold_groups_jointly(
+                    &mut self.builder,
+                    &roots,
+                    context.arena,
+                    &mut self.lower_cache,
+                ) {
+                    for member in family.members {
+                        available[member] = false;
+                    }
+                    let family_roots: HashSet<NodeId> = roots.into_iter().collect();
+                    let family_indices: Vec<usize> = pending
+                        .iter()
+                        .copied()
+                        .filter(|&idx| {
+                            schedule_index.direct_group_by_path[idx]
+                                .is_some_and(|root| family_roots.contains(&root))
+                        })
+                        .collect();
+                    emit_prepared_fold_group_paths(
+                        &family_indices,
+                        &family_roots,
+                        context.input,
+                        self.lowerer,
+                        &mut self.builder,
+                        context.arena,
+                        &mut self.lower_cache,
+                        &mut self.dep_memo,
+                        &mut self.inverse_dep_memo,
+                        context.unpacked_element_widths,
+                    );
+                    emitted_roots.extend(family_roots);
+                } else {
+                    rejected.insert(family_signature(&family, &candidates));
+                }
+            }
+        }
+
+        let mut remaining_roots: Vec<NodeId> = Vec::new();
+        let mut by_root: HashMap<NodeId, Vec<usize>> = HashMap::default();
+        let mut ungrouped: Vec<usize> = Vec::new();
+        for idx in pending {
+            match schedule_index.direct_group_by_path[idx] {
+                Some(root) if emitted_roots.contains(&root) => {}
+                Some(root) => {
+                    by_root
+                        .entry(root)
+                        .or_insert_with(|| {
+                            remaining_roots.push(root);
+                            Vec::new()
+                        })
+                        .push(idx);
+                }
+                None => ungrouped.push(idx),
+            }
+        }
+        let empty_joint = HashSet::default();
+        for root in remaining_roots {
+            self.maybe_flush_unit();
+            emit_prepared_fold_group_paths(
+                &by_root[&root],
+                &empty_joint,
+                context.input,
+                self.lowerer,
+                &mut self.builder,
+                context.arena,
+                &mut self.lower_cache,
+                &mut self.dep_memo,
+                &mut self.inverse_dep_memo,
+                context.unpacked_element_widths,
+            );
+        }
+        if !ungrouped.is_empty() {
+            self.maybe_flush_unit();
+            emit_prepared_fold_group_paths(
+                &ungrouped,
+                &empty_joint,
+                context.input,
+                self.lowerer,
+                &mut self.builder,
+                context.arena,
+                &mut self.lower_cache,
+                &mut self.dep_memo,
+                &mut self.inverse_dep_memo,
+                context.unpacked_element_widths,
+            );
+        }
     }
 
     /// Emit SIR for one logic path and keep the lowering cache coherent.
@@ -576,7 +705,7 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
         // partition, only its boundary ends a unit.
         if !matches!(work, ScheduledWork::Ff(_)) && !self.in_partition && self.unit_full() {
             self.flush_pending_folds();
-            self.flush_unit();
+            self.maybe_flush_unit();
         }
         let singleton;
         let scc = match work {
@@ -587,6 +716,7 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
             ScheduledWork::CombScc(scc) => scc.as_slice(),
             ScheduledWork::GuardedComb { condition, paths } => {
                 self.flush_pending_folds();
+                self.maybe_flush_unit();
                 emit_scheduled_guard_region(
                     self.lowerer,
                     &mut self.builder,
@@ -642,6 +772,7 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
         if is_loop {
             // Exact grouped folds are atomic with respect to a loop SCC.
             self.flush_pending_folds();
+            self.maybe_flush_unit();
             let mut authorized = user_safety_limit.is_some();
             'check_scc: for &v_idx in scc {
                 for &u_idx in &adj[v_idx] {
@@ -914,6 +1045,7 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
                     // and this projection's activation guard would find them
                     // unchanged.
                 } else {
+                    self.maybe_flush_unit();
                     self.emit_node(idx);
                 }
             }
