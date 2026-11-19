@@ -1540,7 +1540,7 @@ pub(super) fn dynamic_array_element_subselection(
     Some((id, element_width, access))
 }
 
-fn split_dynamic_array_offset<'a>(
+pub(super) fn split_dynamic_array_offset<'a>(
     expr: &'a sv::ir::ConstExpr,
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
@@ -1720,6 +1720,77 @@ pub(super) fn dynamic_array_bit_lvalue(
     Some((id, element_width, lsb.clone()))
 }
 
+/// The element index of `offset`, the run-time position of an element of an
+/// unpacked array with `element_width`-bit elements, read off the
+/// position's own terms. The analyzer builds the position as an index times
+/// a stride that is a multiple of the element width, summed over the
+/// dimensions and moved past the array when an index is out of range or
+/// unknown; each such term gives its index times the stride over the width,
+/// so the position need not be divided at run time. `None` when some term
+/// does not step by whole elements: the caller then divides.
+///
+/// The index this gives is in range exactly when the position's quotient
+/// is: both come from the same in-range index, and the moved position
+/// becomes the element count.
+pub(super) fn element_index_position(
+    offset: &sv::ir::ConstExpr,
+    element_width: usize,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> Option<sv::ir::ConstExpr> {
+    use sv::ir::ConstExpr;
+    let width = i128::try_from(element_width)
+        .ok()
+        .filter(|width| *width > 0)?;
+    let constant = |expr: &ConstExpr| {
+        sv::typecheck::eval_const_expr_with_types(expr, constants, parameter_types)
+    };
+    let whole = |value: i128| (value >= 0 && value % width == 0).then_some(value / width);
+    if let Some(value) = constant(offset) {
+        return whole(value).map(|index| ConstExpr::Literal(index.to_string()));
+    }
+    let index = |expr: &ConstExpr| {
+        element_index_position(expr, element_width, constants, parameter_types).map(Box::new)
+    };
+    match offset {
+        ConstExpr::Binary { left, op, right } => match op {
+            sv::ir::BinaryOp::Mul => {
+                let (scaled, stride) = match (constant(left), constant(right)) {
+                    (None, Some(stride)) => (left, stride),
+                    (Some(stride), None) => (right, stride),
+                    _ => return None,
+                };
+                let steps = whole(stride)?;
+                Some(if steps == 1 {
+                    (**scaled).clone()
+                } else {
+                    ConstExpr::Binary {
+                        left: scaled.clone(),
+                        op: sv::ir::BinaryOp::Mul,
+                        right: Box::new(ConstExpr::Literal(steps.to_string())),
+                    }
+                })
+            }
+            sv::ir::BinaryOp::Add | sv::ir::BinaryOp::Sub => Some(ConstExpr::Binary {
+                left: index(left)?,
+                op: *op,
+                right: index(right)?,
+            }),
+            _ => None,
+        },
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => Some(ConstExpr::Mux {
+            condition: condition.clone(),
+            then_expr: index(then_expr)?,
+            else_expr: index(else_expr)?,
+        }),
+        _ => None,
+    }
+}
+
 pub(super) fn lower_dynamic_array_element_index_slt(
     offset: &sv::ir::ConstExpr,
     variables: &HashMap<SourceVarId, SvVariable>,
@@ -1729,7 +1800,11 @@ pub(super) fn lower_dynamic_array_element_index_slt(
     arena: &mut SLTNodeArena<SourceVarId>,
     element_width: usize,
 ) -> Option<(celox_slt::NodeId, HashSet<VarAtomBase<SourceVarId>>)> {
-    let offset_expr = expr_from_select_position(offset, constants, parameter_types)?;
+    let index = (element_width > 1)
+        .then(|| element_index_position(offset, element_width, constants, parameter_types))
+        .flatten();
+    let offset_expr =
+        expr_from_select_position(index.as_ref().unwrap_or(offset), constants, parameter_types)?;
     let (offset, sources) = lower_expr_with_context(
         &offset_expr,
         variables,
@@ -1740,7 +1815,11 @@ pub(super) fn lower_dynamic_array_element_index_slt(
         None,
         None,
     )?;
-    let element_index = if element_width == 1 {
+    let element_index = if index.is_some() {
+        // As wide as the quotient it replaces.
+        let width = celox_slt::get_width(offset, arena).max(64);
+        coerce_node_width(arena, offset, Some(width), false).ok()?
+    } else if element_width == 1 {
         offset
     } else {
         let divisor = arena

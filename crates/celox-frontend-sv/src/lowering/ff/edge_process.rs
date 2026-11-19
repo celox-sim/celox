@@ -275,11 +275,15 @@ impl Ff<'_, '_> {
                 if stage.delay > 0 || self.m.var(stage.id).array_dims.is_empty() {
                     continue;
                 }
-                let Some(count) = array_nba_site_count(body, stage.id, self.m) else {
+                let Some(bounds) = array_nba_site_bounds(body, stage.id, self.m) else {
                     continue;
                 };
-                let sites = (0..count)
-                    .map(|_| {
+                let element_width = unpacked_element_width(self.m.var(stage.id));
+                let sites = bounds
+                    .into_iter()
+                    .map(|(msb_bound, lsb_bound)| {
+                        let (lsb_value, msb_value, elements) =
+                            NbaArraySite::bounds(msb_bound, lsb_bound, element_width, self.m);
                         let (lsb, lsb_name) = self.m.temp("nba_lsb", 64, false, false);
                         let (msb, msb_name) = self.m.temp("nba_msb", 64, false, false);
                         let (hit, hit_name) = self.m.temp("nba_hit", 1, false, false);
@@ -290,6 +294,9 @@ impl Ff<'_, '_> {
                             msb_name,
                             hit,
                             hit_name,
+                            lsb_value,
+                            msb_value,
+                            elements,
                         }
                     })
                     .collect();
