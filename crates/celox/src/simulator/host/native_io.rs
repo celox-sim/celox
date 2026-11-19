@@ -93,6 +93,13 @@ pub(crate) fn supported<A>(site: &HostRequestSite<A>) -> bool {
         (HostRequestKind::FileIo, 1) => site.results.is_empty() && site.args.len() == 1,
         // `$fflush`, of one file or of all.
         (HostRequestKind::FileIo, 6) => site.results.is_empty() && site.args.len() <= 1,
+        // `$fread` into an integral variable; a memory keeps the reference
+        // loop's service.
+        (HostRequestKind::FileIo, 13) => {
+            site.results.len() == 2
+                && !site.args.is_empty()
+                && site.strings.get(3).is_some_and(|memory| memory == "0")
+        }
         // `$test$plusargs` and `$value$plusargs`, whose arguments the run
         // fixes.
         (HostRequestKind::Plusargs, 0) => site.args.len() == 1 && site.results.len() == 1,
@@ -1249,6 +1256,16 @@ impl Scope<'_> {
                 self.files()?
                     .flush(descriptor)
                     .map_err(|error| Self::fault(format!("$fflush: {error}")))
+            }
+            (HostRequestKind::FileIo, 13) => {
+                let target = site.results[1].id;
+                let before = self.value(target)?;
+                let four_state = self.metadata.layout.four_state && target.is_4state;
+                let (value, read) =
+                    super::fread::fread(&site, &values, before, self.files()?, four_state)
+                        .map_err(Self::fault)?;
+                self.store_value(target, &value)?;
+                self.store_value(site.results[0].id, &(BigUint::from(read), zero))
             }
             (HostRequestKind::Plusargs, operation) => {
                 let query = bytes(self, 0, "plusargs query")?;
