@@ -10,7 +10,7 @@
 //!   ...
 //!
 //! Replacement:
-//!   mask = Imm((1<<A) | (1<<B) | (1<<C) | ...)
+//!   mask = Imm((1<<A) ^ (1<<B) ^ (1<<C) ^ ...)   // as wide as src
 //!   masked = Binary(src, And, mask)
 //!   result = Unary(Xor, masked)   // ISel: popcnt + and 1
 
@@ -69,7 +69,7 @@ fn fold_xor_chains(
         }
     }
 
-    let mut replacements: Vec<(usize, RegisterId, RegisterId, u64, usize)> = Vec::new();
+    let mut replacements: Vec<(usize, RegisterId, RegisterId, BigUint, usize)> = Vec::new();
     // (inst_index, dst_reg, source_reg, mask, source_width)
 
     for (idx, inst) in instructions.iter().enumerate() {
@@ -85,18 +85,18 @@ fn fold_xor_chains(
         if collect_xor_bits(*lhs, &defs, &mut bits, &mut source)
             && collect_xor_bits(*rhs, &defs, &mut bits, &mut source)
             && bits.len() >= 3
+            && let Some(src) = source
+            && let Some(src_width) = register_map.get(&src).map(RegisterType::width)
         {
-            if let Some(src) = source {
-                let src_width = register_map.get(&src).map(|t| t.width()).unwrap_or(64);
-                let mut mask: u64 = 0;
-                for &pos in &bits {
-                    if pos < 64 {
-                        mask |= 1u64 << pos;
-                    }
-                }
-                if mask != 0 {
-                    replacements.push((idx, *dst, src, mask, src_width));
-                }
+            // The mask spans the whole source, and a bit the chain takes
+            // twice cancels out of the parity.
+            let mut mask = BigUint::ZERO;
+            for &pos in &bits {
+                let bit = BigUint::from(1u8) << pos;
+                mask ^= bit;
+            }
+            if mask != BigUint::ZERO {
+                replacements.push((idx, *dst, src, mask, src_width));
             }
         }
     }
@@ -109,15 +109,13 @@ fn fold_xor_chains(
     // and replace the root XOR with an identity alias.
     // Process in reverse to preserve indices.
     for (idx, dst, src, mask, src_width) in replacements.into_iter().rev() {
-        let mask_width = src_width.min(64);
-
         // Create fresh registers
         *next_reg += 1;
         let mask_reg = RegisterId(*next_reg);
         register_map.insert(
             mask_reg,
             RegisterType::Bit {
-                width: mask_width,
+                width: src_width,
                 signed: false,
             },
         );
@@ -127,14 +125,14 @@ fn fold_xor_chains(
         register_map.insert(
             masked_reg,
             RegisterType::Bit {
-                width: mask_width,
+                width: src_width,
                 signed: false,
             },
         );
 
         // Insert: mask = Imm(mask_value)
         let mask_value = SIRValue {
-            payload: BigUint::from(mask),
+            payload: mask,
             mask: BigUint::ZERO,
         };
         instructions.insert(idx, SIRInstruction::Imm(mask_reg, mask_value));
@@ -192,3 +190,6 @@ fn collect_xor_bits(
         _ => false,
     }
 }
+
+#[cfg(test)]
+mod tests;
