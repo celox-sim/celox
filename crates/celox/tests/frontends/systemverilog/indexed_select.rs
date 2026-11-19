@@ -1074,3 +1074,217 @@ fn run_time_part_selects_of_members_of_elements_of_packed_array_members_are_reje
         "{error}"
     );
 }
+
+/// Selects of packed arrays of structures at run-time indices in a
+/// combinational process, as Ariane's scoreboard makes them: element members
+/// written and read at the index of a small selector, which may lie past the
+/// array (6 elements, 3-bit indices), wrap (`p + 3'd1`), be signed, count
+/// in an ascending array, or be too wide to take each value of (`w`). The
+/// arrays are wide enough (768 bits) for a choice of the constant selects at
+/// each index to cost less than shifting them.
+const SCOREBOARD_SELECTS: &str = r#"
+    module Top(input logic [2:0] p, input bit [2:0] q, input logic signed [2:0] s,
+               input logic [7:0] w, input logic [7:0] v,
+               output logic [767:0] ym, output logic [767:0] yn,
+               output logic [7:0] r0, output logic [7:0] r1, output logic [3:0] r2,
+               output logic [7:0] r3, output logic [3:0] r4);
+        typedef struct packed { logic [3:0] a; logic [7:0] b; logic [115:0] pad; } e_t;
+        e_t [5:0] m;
+        e_t [0:5] n;
+        always_comb begin
+            m = '0;
+            n = '0;
+            m[p].b = v;
+            m[p + 3'd1].a = v[3:0];
+            n[q].b = ~v;
+            m[s + 4].a = v[7:4];
+            m[w].b = m[w].b ^ 8'h0f;
+            r0 = m[q].b;
+            r1 = n[p].b;
+            r2 = m[s + 3].a;
+            r3 = m[w].b;
+            r4 = m[s + 4].a;
+        end
+        assign ym = m;
+        assign yn = n;
+    endmodule
+"#;
+
+/// What [`SCOREBOARD_SELECTS`] computes from its inputs: the arrays as
+/// element `(a, b)` pairs by index, and each read, `None` for one past the
+/// array, which reads X in a four-state simulation and 0 in a two-state one.
+#[allow(clippy::type_complexity)]
+fn scoreboard_model(
+    p: u8,
+    q: u8,
+    s: i8,
+    w: u8,
+    v: u8,
+) -> ([(u8, u8); 6], [(u8, u8); 6], [Option<u8>; 5]) {
+    let mut m = [(0u8, 0u8); 6];
+    let mut n = [(0u8, 0u8); 6];
+    let element = |index: i32| usize::try_from(index).ok().filter(|index| *index < 6);
+    if let Some(i) = element(p.into()) {
+        m[i].1 = v;
+    }
+    if let Some(i) = element(((p + 1) % 8).into()) {
+        m[i].0 = v & 0xf;
+    }
+    if let Some(i) = element(q.into()) {
+        n[i].1 = !v;
+    }
+    if let Some(i) = element(i32::from(s) + 4) {
+        m[i].0 = v >> 4;
+    }
+    if let Some(i) = element(w.into()) {
+        m[i].1 ^= 0x0f;
+    }
+    let reads = [
+        element(q.into()).map(|i| m[i].1),
+        element(p.into()).map(|i| n[i].1),
+        element(i32::from(s) + 3).map(|i| m[i].0),
+        element(w.into()).map(|i| m[i].1),
+        element(i32::from(s) + 4).map(|i| m[i].0),
+    ];
+    (m, n, reads)
+}
+
+fn check_scoreboard_selects<B: celox::SimBackend>(sim: &mut celox::Simulator<B>, four_state: bool) {
+    let names = ["p", "q", "s", "w", "v"].map(|name| sim.signal(name));
+    let reads = [("r0", 8), ("r1", 8), ("r2", 4), ("r3", 8), ("r4", 4)];
+    let packed = |elements: &[(u8, u8); 6], ascending: bool| {
+        let mut bits = BigUint::from(0u8);
+        for (index, (a, b)) in elements.iter().enumerate() {
+            let at = if ascending { 5 - index } else { index };
+            let element = (u64::from(*a & 0xf) << 8) | u64::from(*b);
+            bits |= BigUint::from(element) << (128 * at + 116);
+        }
+        bits
+    };
+    for i in 0u8..96 {
+        let (p, q) = (i % 8, (i / 8) % 8);
+        let s = i8::try_from(i.wrapping_mul(3) % 8).unwrap() - 4;
+        let w = [0u8, 3, 5, 6, 200][usize::from(i % 5)];
+        let v = 0xa5u8 ^ i.wrapping_mul(7);
+        let inputs = [p, q, (s as u8) & 7, w, v];
+        sim.modify(|io| {
+            for (signal, value) in names.iter().zip(inputs) {
+                io.set(*signal, value);
+            }
+        })
+        .unwrap();
+        let (m, n, expected) = scoreboard_model(p, q, s, w, v);
+        let case = format!("p={p} q={q} s={s} w={w} v={v:#x}");
+        let (ym, ym_mask) = sim.get_four_state(sim.signal("ym"));
+        assert_eq!(
+            (ym, ym_mask),
+            (packed(&m, false), BigUint::from(0u8)),
+            "ym {case}"
+        );
+        let (yn, yn_mask) = sim.get_four_state(sim.signal("yn"));
+        assert_eq!(
+            (yn, yn_mask),
+            (packed(&n, true), BigUint::from(0u8)),
+            "yn {case}"
+        );
+        for ((name, width), expected) in reads.into_iter().zip(expected) {
+            let (value, mask) = sim.get_four_state(sim.signal(name));
+            let all = BigUint::from((1u16 << width) - 1);
+            // The known bits and the unknown ones; an X bit's value bit is
+            // the backend's.
+            let known = value & (&all ^ &mask);
+            let expected = match expected {
+                Some(value) => (BigUint::from(value), BigUint::from(0u8)),
+                None if four_state => (BigUint::from(0u8), all),
+                None => (BigUint::from(0u8), BigUint::from(0u8)),
+            };
+            assert_eq!((known, mask), expected, "{name} {case}");
+        }
+    }
+}
+
+sv_backends! {
+    fn scoreboard_selects_two_state(sim) {
+        @setup {}
+        @build Simulator::from_sv_sources(
+            vec![(SCOREBOARD_SELECTS, Path::new("scoreboard.sv"))],
+            "Top",
+        ).four_state(false);
+        check_scoreboard_selects(&mut sim, false);
+    }
+
+    fn scoreboard_selects_four_state(sim) {
+        @setup {}
+        @build Simulator::from_sv_sources(
+            vec![(SCOREBOARD_SELECTS, Path::new("scoreboard.sv"))],
+            "Top",
+        ).four_state(true);
+        check_scoreboard_selects(&mut sim, true);
+    }
+}
+
+/// A part-select of a structure member at a small run-time index writes only
+/// the bits of the member: the bits past it are out of range (IEEE 1800-2023
+/// 11.5.1), and the neighbouring member keeps its value. The structure is
+/// wide enough for the select to be taken at each index.
+const MEMBER_PART_SELECT: &str = r#"
+    module Top(input bit [2:0] i, input logic [3:0] v,
+               output logic [3:0] hi, output logic [7:0] f, output logic [3:0] lo);
+        typedef struct packed {
+            logic [3:0] hi; logic [7:0] f; logic [3:0] lo; logic [255:0] pad;
+        } s_t;
+        s_t s;
+        always_comb begin
+            s = '0;
+            s.hi = 4'h5;
+            s.lo = 4'ha;
+            s.f[i +: 4] = v;
+        end
+        assign hi = s.hi;
+        assign f = s.f;
+        assign lo = s.lo;
+    endmodule
+"#;
+
+fn check_member_part_select<B: celox::SimBackend>(sim: &mut celox::Simulator<B>) {
+    let (i, v) = (sim.signal("i"), sim.signal("v"));
+    for index in 0u8..8 {
+        sim.modify(|io| {
+            io.set(i, index);
+            io.set(v, 0xfu8);
+        })
+        .unwrap();
+        let f = (0xfu16 << index) as u8;
+        assert_eq!(
+            sim.get(sim.signal("hi")),
+            BigUint::from(5u8),
+            "hi at i={index}"
+        );
+        assert_eq!(sim.get(sim.signal("f")), BigUint::from(f), "f at i={index}");
+        assert_eq!(
+            sim.get(sim.signal("lo")),
+            BigUint::from(0xau8),
+            "lo at i={index}"
+        );
+    }
+}
+
+sv_backends! {
+    fn member_part_selects_stay_in_the_member_two_state(sim) {
+        @setup {}
+        @build Simulator::from_sv_sources(
+            vec![(MEMBER_PART_SELECT, Path::new("member.sv"))],
+            "Top",
+        ).four_state(false);
+        check_member_part_select(&mut sim);
+    }
+
+    fn member_part_selects_stay_in_the_member_four_state(sim) {
+        @setup {}
+        @build Simulator::from_sv_sources(
+            vec![(MEMBER_PART_SELECT, Path::new("member.sv"))],
+            "Top",
+        ).four_state(true);
+        check_member_part_select(&mut sim);
+    }
+}
