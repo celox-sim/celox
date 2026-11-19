@@ -111,22 +111,32 @@ pub fn path_cost<Addr: Clone + Eq + Hash>(
     cost
 }
 
-/// Whether a path's expression captures a value at an evaluation position.
-pub(super) fn path_has_capture<Addr: Clone + Eq + Hash>(
+/// The nodes of a path that other paths may lower once for it through the
+/// lowering cache: its pre-lowered nodes, a capture event's guard and
+/// arguments, which its observer's statement positions pre-lower, and the
+/// captures its expressions and its local inputs hold (a formal snapshot
+/// the observer binds).
+fn shared_lowered_nodes<Addr: Clone + Eq + Hash>(
     arena: &SLTNodeArena<Addr>,
     path: &LogicPath<Addr>,
-) -> bool {
-    if matches!(path.target, LogicPathTarget::CombCaptureEvent { .. }) {
-        return true;
+) -> Vec<NodeId> {
+    let mut nodes = path.pre_lower_nodes.clone();
+    let mut stack = vec![path.expr];
+    stack.extend(path.local_inputs.iter().map(|(_, node)| *node));
+    if let LogicPathTarget::CombCaptureEvent { guard, args, .. } = &path.target {
+        nodes.extend(guard.iter().chain(args).copied());
+        stack.extend(guard.iter().chain(args).copied());
     }
     let mut seen = HashSet::default();
-    let mut stack = vec![path.expr];
     while let Some(node) = stack.pop() {
         if !seen.insert(node) {
             continue;
         }
         match arena.get(node) {
-            SLTNode::Capture { .. } => return true,
+            SLTNode::Capture { expr, .. } => {
+                nodes.push(node);
+                stack.push(*expr);
+            }
             SLTNode::Binary(lhs, _, rhs) => stack.extend([*lhs, *rhs]),
             SLTNode::Unary(_, operand) | SLTNode::Slice { expr: operand, .. } => {
                 stack.push(*operand)
@@ -140,7 +150,30 @@ pub(super) fn path_has_capture<Addr: Clone + Eq + Hash>(
             _ => {}
         }
     }
-    false
+    nodes
+}
+
+/// For each piece of scheduled work, whether a partition must not start at
+/// it: a node that work before it lowered for later work is reused at or
+/// after it (see [`shared_lowered_nodes`]).
+fn held_work<Addr: Clone + Eq + Hash>(
+    prepared: &PreparedSchedule<Addr>,
+    arena: &SLTNodeArena<Addr>,
+) -> Vec<bool> {
+    let mut spans: HashMap<NodeId, (usize, usize)> = HashMap::default();
+    for (index, work) in prepared.scheduled_work.iter().enumerate() {
+        for &path in work_paths(work) {
+            for node in shared_lowered_nodes(arena, &prepared.input[path]) {
+                let span = spans.entry(node).or_insert((index, index));
+                span.1 = index;
+            }
+        }
+    }
+    let mut held = vec![false; prepared.scheduled_work.len()];
+    for (first, last) in spans.into_values() {
+        held[first + 1..=last].fill(true);
+    }
+    held
 }
 
 /// Whether a path does more than store its value: comb capture events,
@@ -183,13 +216,9 @@ pub(super) fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Cop
     let input = &prepared.input;
     // A captured value or a pre-lowered node is materialized at one place
     // and reused at a later one through the lowering cache, which a
-    // partition boundary between them would clear.
-    if input
-        .iter()
-        .any(|path| !path.pre_lower_nodes.is_empty() || path_has_capture(arena, path))
-    {
-        return None;
-    }
+    // partition boundary between them would clear: no partition starts
+    // within the work from the first to the last that lowers it.
+    let held = held_work(prepared, arena);
     // Whole-variable copies, by target.
     let mut copy_source: HashMap<Addr, Addr> = HashMap::default();
     for work in &prepared.scheduled_work {
@@ -236,7 +265,8 @@ pub(super) fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Cop
             continue;
         }
         let clocked = clocked(work);
-        if first_work.is_empty() || cost >= partitioning.target_cost || clocked != previous_clocked
+        if first_work.is_empty()
+            || (!held[index] && (cost >= partitioning.target_cost || clocked != previous_clocked))
         {
             first_work.push(index);
             cost = 0;
@@ -715,5 +745,54 @@ mod tests {
         assert!(path_has_effects(&calling(c_call)));
         assert!(!process_interacts_with_host(&calling(Default::default())));
         assert!(!path_has_effects(&calling(Default::default())));
+    }
+
+    /// A capture event whose formal is a snapshot bound as a local input,
+    /// which an earlier path pre-lowers: the event reuses that snapshot.
+    #[test]
+    fn local_input_snapshots_are_shared_with_their_event() {
+        let mut arena = SLTNodeArena::<u32>::new();
+        let read = |arena: &mut SLTNodeArena<u32>, variable| {
+            arena
+                .alloc(SLTNode::Input {
+                    variable,
+                    signed: false,
+                    index: Vec::new(),
+                    access: celox_design::BitAccess::new(0, 7),
+                })
+                .unwrap()
+        };
+        let source = read(&mut arena, 1);
+        let snapshot = arena
+            .alloc(SLTNode::Capture {
+                expr: source,
+                key: 0,
+            })
+            .unwrap();
+        let formal = read(&mut arena, 9);
+        let event = LogicPath {
+            transparent_copy: false,
+            target: LogicPathTarget::CombCaptureEvent {
+                site_id: 0,
+                guard: None,
+                emit_on_true: true,
+                args: vec![formal],
+                loop_runner: None,
+                fatal_error_code: None,
+                consume_enabled: false,
+            },
+            sources: [celox_design::VarAtomBase::new(1, 0, 7)]
+                .into_iter()
+                .collect(),
+            previous_sources: HashSet::default(),
+            address_sources: HashSet::default(),
+            local_inputs: vec![(9, snapshot)],
+            order_before: HashSet::default(),
+            comb_capture_enable_sites: Vec::new(),
+            comb_capture_enable_always: false,
+            pre_lower_nodes: Vec::new(),
+            expr: formal,
+        };
+        assert!(shared_lowered_nodes(&arena, &event).contains(&snapshot));
     }
 }
