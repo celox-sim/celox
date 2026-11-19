@@ -63,11 +63,11 @@ x86-64 disassembly of emitted function:
 bb0:
   0x0000000f  movzx eax,byte [gs:4D0h]
   0x00000018  mov [gs:30h],al
-  0x00000021  xor eax,eax
-  0x00000023  jmp short 0000000000000025h
-  0x00000025  movq r11,xmm15
-  0x0000002a  wrgsbase r11
-  0x0000002f  ret
+  0x00000020  xor eax,eax
+  0x00000022  jmp short 0000000000000024h
+  0x00000024  movq r11,xmm15
+  0x00000029  wrgsbase r11
+  0x0000002e  ret
 
 === Native function eval_apply_ff[0] ===
 Bindings:
@@ -133,11 +133,11 @@ bb0:
   0x00000027  sub rdx,1
   0x0000002b  and eax,edx
   0x0000002d  mov [gs:30h],al
-  0x00000036  xor eax,eax
-  0x00000038  jmp short 000000000000003Ah
-  0x0000003a  movq r11,xmm15
-  0x0000003f  wrgsbase r11
-  0x00000044  ret
+  0x00000035  xor eax,eax
+  0x00000037  jmp short 0000000000000039h
+  0x00000039  movq r11,xmm15
+  0x0000003e  wrgsbase r11
+  0x00000043  ret
 
 === Native function eval_comb_apply_ff[0] ===
 Bindings:
@@ -223,35 +223,35 @@ x86-64 disassembly of emitted function:
   0x00000005  mov [rdi+510h],rax
   0x0000000c  wrgsbase rdi
   0x00000011  mov rax,[gs:8]
-  0x0000001b  test rax,rax
-  0x0000001e  jne short 0000000000000025h
-  0x00000020  mov eax,1
-  0x00000025  movq xmm15,rax
-  0x0000002a  nop
+  0x0000001a  test rax,rax
+  0x0000001d  jne short 0000000000000024h
+  0x0000001f  mov eax,1
+  0x00000024  movq xmm15,rax
+  0x00000029  nop
 bb0:
-  0x0000002b  movzx eax,byte [gs:31h]
-  0x00000034  not rax
-  0x00000037  and eax,1
-  0x0000003c  test rax,rax
-  0x0000003f  jne short 0000000000000055h
+  0x0000002a  movzx eax,byte [gs:31h]
+  0x00000033  not rax
+  0x00000036  and eax,1
+  0x0000003b  test rax,rax
+  0x0000003e  jne short 0000000000000053h
 bb2:
-  0x00000041  movzx eax,byte [gs:32h]
-  0x0000004a  mov [gs:30h],al
-  0x00000053  jmp short 000000000000005Eh
+  0x00000040  movzx eax,byte [gs:32h]
+  0x00000049  mov [gs:30h],al
+  0x00000051  jmp short 000000000000005Ch
 bb1:
-  0x00000055  mov byte [gs:30h],0
+  0x00000053  mov byte [gs:30h],0
 bb3:
-  0x0000005e  movq rax,xmm15
-  0x00000063  dec rax
-  0x00000066  movq xmm15,rax
-  0x0000006b  je short 000000000000006Fh
-  0x0000006d  jmp short 000000000000002Bh
-  0x0000006f  xor eax,eax
-  0x00000071  movq r10,xmm15
-  0x00000076  mov [gs:8],r10
-  0x0000007f  mov r11,[gs:510h]
-  0x00000088  wrgsbase r11
-  0x0000008d  ret
+  0x0000005c  movq rax,xmm15
+  0x00000061  dec rax
+  0x00000064  movq xmm15,rax
+  0x00000069  je short 000000000000006Dh
+  0x0000006b  jmp short 000000000000002Ah
+  0x0000006d  xor eax,eax
+  0x0000006f  movq r10,xmm15
+  0x00000074  mov [gs:8],r10
+  0x0000007d  mov r11,[gs:510h]
+  0x00000086  wrgsbase r11
+  0x0000008b  ret
 
 === Native function eval_only_ff[0] ===
 Bindings:
@@ -317,8 +317,8 @@ bb0:
   0x00000027  sub rdx,1
   0x0000002b  and eax,edx
   0x0000002d  mov [gs:4D0h],al
-  0x00000036  xor eax,eax
-  0x00000038  jmp short 000000000000003Ah
-  0x0000003a  movq r11,xmm15
-  0x0000003f  wrgsbase r11
-  0x00000044  ret
+  0x00000035  xor eax,eax
+  0x00000037  jmp short 0000000000000039h
+  0x00000039  movq r11,xmm15
+  0x0000003e  wrgsbase r11
+  0x00000043  ret
