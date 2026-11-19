@@ -50,16 +50,27 @@ impl SLTToSIRLowerer {
         }
     }
 
+    /// The zero-controller facts of `node` computed since the cost cache was
+    /// last reset.
+    fn memoized_zero_facts(&self, node: NodeId) -> Option<&ZeroControllerFacts> {
+        let slot = *self.cost_cache.zero_facts_slot.get(node.0)?;
+        (slot != u32::MAX).then(|| &self.cost_cache.zero_facts[slot as usize])
+    }
+
     /// Compute exact two-state zero controllers for the small algebra used by
     /// guarded lane vectors. A controller `g` is present only when assuming
     /// the one-bit value `g == 0` proves every bit of `node` is zero.
+    ///
+    /// The facts of a node depend on the fanout of the top-level root being
+    /// lowered, so they are kept until the cost cache is reset: the concats
+    /// nested in one root share the facts of their common cone.
     fn zero_controller_facts<A: Hash + Eq + Clone + std::fmt::Debug>(
-        &self,
+        &mut self,
         root: NodeId,
         arena: &SLTNodeArena<A>,
-        memo: &mut crate::HashMap<NodeId, ZeroControllerFacts>,
     ) -> ZeroControllerFacts {
-        if let Some(facts) = memo.get(&root) {
+        self.prepare_cost_cache(arena);
+        if let Some(facts) = self.memoized_zero_facts(root) {
             return facts.clone();
         }
 
@@ -67,13 +78,13 @@ impl SLTToSIRLowerer {
         // expression chains. Each node in this concat cone is analyzed once.
         let mut stack = vec![(root, false)];
         while let Some((node, expanded)) = stack.pop() {
-            if memo.contains_key(&node) {
+            if self.memoized_zero_facts(node).is_some() {
                 continue;
             }
             if !expanded {
                 stack.push((node, true));
                 for child in Self::node_children(node, arena).into_iter().rev() {
-                    if !memo.contains_key(&child) {
+                    if self.memoized_zero_facts(child).is_none() {
                         stack.push((child, false));
                     }
                 }
@@ -81,7 +92,7 @@ impl SLTToSIRLowerer {
             }
 
             let child = |node: NodeId| {
-                memo.get(&node)
+                self.memoized_zero_facts(node)
                     .cloned()
                     .expect("zero-controller postorder must analyze children first")
             };
@@ -176,36 +187,68 @@ impl SLTToSIRLowerer {
                 facts.guards.clear();
                 facts.guards.insert(node);
             }
-            memo.insert(node, facts);
+            let cache = &mut self.cost_cache;
+            let slot = u32::try_from(cache.zero_facts.len())
+                .expect("zero-controller facts exceed the arena node range");
+            cache.zero_facts.push(facts);
+            cache.touch(node);
+            cache.zero_facts_slot[node.0] = slot;
         }
 
-        memo.get(&root)
+        self.memoized_zero_facts(root)
             .cloned()
             .expect("zero-controller root must be produced by its postorder")
     }
 
+    /// Whether no node of the cone of `root` is a division, a remainder or a
+    /// loop, which a guarded concat must not skip. Memoized per node until
+    /// the cost cache is reset, so nested concats share their common cone.
     fn guarded_concat_root_is_supported<A: Hash + Eq + Clone>(
+        &mut self,
         root: NodeId,
         arena: &SLTNodeArena<A>,
     ) -> bool {
-        let mut visited = crate::HashSet::default();
-        let mut work = vec![root];
-        while let Some(node) = work.pop() {
-            if !visited.insert(node) {
+        self.prepare_cost_cache(arena);
+        if let Some(supported) = self.cost_cache.guarded_concat_supported[root.0] {
+            return supported;
+        }
+        let mut stack = vec![(root, false)];
+        while let Some((node, expanded)) = stack.pop() {
+            if self.cost_cache.guarded_concat_supported[node.0].is_some() {
                 continue;
             }
-            match arena.get(node) {
+            let supported = match arena.get(node) {
                 SLTNode::Binary(
                     _,
                     BinaryOp::DivU | BinaryOp::DivS | BinaryOp::RemU | BinaryOp::RemS,
                     _,
                 )
                 | SLTNode::ForFold { .. }
-                | SLTNode::ForFoldGroup { .. } => return false,
-                _ => work.extend(Self::node_children(node, arena)),
-            }
+                | SLTNode::ForFoldGroup { .. } => false,
+                _ => {
+                    let children = Self::node_children(node, arena);
+                    if !expanded {
+                        stack.push((node, true));
+                        stack.extend(
+                            children
+                                .into_iter()
+                                .filter(|child| {
+                                    self.cost_cache.guarded_concat_supported[child.0].is_none()
+                                })
+                                .map(|child| (child, false)),
+                        );
+                        continue;
+                    }
+                    children.iter().all(|child| {
+                        self.cost_cache.guarded_concat_supported[child.0] == Some(true)
+                    })
+                }
+            };
+            let cache = &mut self.cost_cache;
+            cache.touch(node);
+            cache.guarded_concat_supported[node.0] = Some(supported);
         }
-        true
+        self.cost_cache.guarded_concat_supported[root.0] == Some(true)
     }
 
     fn guarded_concat_region_cost<A: Hash + Eq + Clone + std::fmt::Debug>(
@@ -292,17 +335,16 @@ impl SLTToSIRLowerer {
     }
 
     pub(super) fn guarded_concat_plan<A: Hash + Eq + Clone + std::fmt::Debug>(
-        &self,
+        &mut self,
         root: NodeId,
         arena: &SLTNodeArena<A>,
         materialized: &crate::HashMap<NodeId, RegisterId>,
     ) -> Option<GuardedConcatPlan> {
-        if self.four_state || !Self::guarded_concat_root_is_supported(root, arena) {
+        if self.four_state || !self.guarded_concat_root_is_supported(root, arena) {
             return None;
         }
 
-        let mut memo = crate::HashMap::default();
-        let facts = self.zero_controller_facts(root, arena, &mut memo);
+        let facts = self.zero_controller_facts(root, arena);
         if facts.unconditional_zero {
             return None;
         }
