@@ -89,7 +89,7 @@ impl ArrayParameter {
             || shape.chandle
             || shape.class_in(&session.types).is_some()
             || shape.container.is_some()
-            || shape.unpacked_struct.is_some()
+            || shape.structure_declaration().is_some()
             || virtual_interfaces::holds_virtual_interface(&shape, tree, session, dims)
         {
             return None;

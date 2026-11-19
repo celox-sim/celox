@@ -415,7 +415,7 @@ pub(in crate::ast) fn whole(name: &str, dims: &PackedDimensions) -> Option<Expr>
     if !shape.unpacked.is_empty() {
         return None;
     }
-    let aggregate = shape.unpacked_struct.clone()?;
+    let aggregate = shape.structure_declaration()?.clone();
     Some(Expr::Concat(
         aggregate
             .leaves()
@@ -432,7 +432,7 @@ pub(in crate::ast) fn targets(name: &str, dims: &PackedDimensions) -> Option<Vec
     if !shape.unpacked.is_empty() {
         return None;
     }
-    let aggregate = shape.unpacked_struct.clone()?;
+    let aggregate = shape.structure_declaration()?.clone();
     Some(
         aggregate
             .leaves()
@@ -697,7 +697,7 @@ fn struct_of(
 ) -> Converted<Option<semantic_types::TyId>> {
     // Every shape keeps its structure metadata until declarations bind
     // their types.
-    let metadata = shape.unpacked_struct.is_some() && shape.container.is_none();
+    let metadata = shape.structure_declaration().is_some() && shape.container.is_none();
     let Some(mut ty) = shape.type_id(table, functions, env) else {
         return match metadata {
             true => Err(unsupported(
@@ -1062,7 +1062,8 @@ mod shape_struct_tests {
         // `S items[N]` where the scope has no `N`: a structure, but no
         // type to check a value against.
         let mut ty = Type::new(TypeKind::Bit);
-        ty.unpacked_struct = Some(Arc::new(UnpackedStruct {
+        ty.unpacked_ranges_mut().push(symbolic_range());
+        ty.keep_structure(Some(Arc::new(UnpackedStruct {
             owner: "S".into(),
             members: vec![Member {
                 name: "a".into(),
@@ -1070,8 +1071,7 @@ mod shape_struct_tests {
                 default: None,
                 width: 1,
             }],
-        }));
-        ty.unpacked_ranges.push(symbolic_range());
+        })));
         let shape = procedural::dimensions_from_type(&ty);
         let functions = const_functions::ConstantFunctions::default();
         let mut table = semantic_types::TyTable::default();

@@ -366,7 +366,7 @@ impl VariableDimensions {
         ty.unpacked_struct = self.unpacked_struct.clone();
         // Rebuilding the shape must retain the declaration used by native
         // array compatibility checks for structure elements.
-        if self.unpacked_struct.is_some()
+        if self.structure_declaration().is_some()
             && let Some(declared) = type_names::declared_type(self)
         {
             ty.spelling = declared.spelling.clone();

@@ -327,7 +327,7 @@ pub(in crate::ast) fn read(
 /// integral or bit-stream value (IEEE 1800-2023 6.14, 6.24.3).
 pub(in crate::ast) fn holds_chandle(shape: &VariableDimensions) -> bool {
     shape.chandle
-        || shape.unpacked_struct.as_ref().is_some_and(|aggregate| {
+        || shape.structure_declaration().is_some_and(|aggregate| {
             aggregate
                 .leaves()
                 .iter()

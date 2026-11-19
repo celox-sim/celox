@@ -44,7 +44,7 @@ impl Type {
     ) {
         if (self.enumeration().is_some()
             || !self.members.is_empty()
-            || self.unpacked_struct.is_some())
+            || self.unpacked_struct().is_some())
             && self.spelling.declaration().is_none()
         {
             let (name, typename) = name();
@@ -81,24 +81,34 @@ impl Type {
             })
     }
 
-    /// The members of an unpacked structure type.
+    /// The declaration of the unpacked structure type the type is, or
+    /// whose elements a fixed-size unpacked array of it has (IEEE 1800-2023
+    /// 7.2, 7.4.2), as the type keeps it.
     pub(in crate::ast) fn unpacked_struct(&self) -> Option<&Arc<unpacked_structs::UnpackedStruct>> {
-        self.unpacked_struct.as_ref()
+        let kept = self.structure.declaration();
+        debug_assert_eq!(
+            kept.map(|aggregate| aggregate.identity()),
+            self.shape
+                .unpacked_struct
+                .as_ref()
+                .map(|aggregate| aggregate.identity()),
+            "the structure a type keeps is not that of its field: {self:?}"
+        );
+        kept
     }
 
     pub(crate) fn structure_identity(&self) -> Option<&str> {
-        self.unpacked_struct.as_ref().map(|ty| ty.identity())
+        self.unpacked_struct().map(|ty| ty.identity())
     }
 
     /// Non-storage aggregate paths, including the root, retained for member typing.
     pub(crate) fn structure_aggregates(&self, base: &str) -> Vec<(String, Self)> {
-        self.unpacked_struct
-            .as_ref()
+        self.unpacked_struct()
             .map_or_else(Vec::new, |_| unpacked_structs::aggregates(base, self))
     }
 
     pub(crate) fn structure_leaves(&self) -> Vec<(String, Self)> {
-        self.unpacked_struct.as_ref().map_or_else(Vec::new, |ty| {
+        self.unpacked_struct().map_or_else(Vec::new, |ty| {
             ty.leaves()
                 .into_iter()
                 .map(|leaf| (leaf.path.join("."), leaf.r#type))
@@ -127,7 +137,7 @@ impl Type {
         unpacked_structs::is_struct(
             self.binding.get(table),
             table,
-            self.unpacked_struct.is_some(),
+            self.unpacked_struct().is_some(),
         )
     }
 
@@ -137,11 +147,7 @@ impl Type {
         &'a self,
         table: &'a semantic_types::TyTable,
     ) -> Option<&'a Arc<unpacked_structs::UnpackedStruct>> {
-        unpacked_structs::declaration_of(
-            self.binding.get(table),
-            table,
-            self.unpacked_struct.as_ref(),
-        )
+        unpacked_structs::declaration_of(self.binding.get(table), table, self.unpacked_struct())
     }
 
     /// What the type is of an enumeration, as its semantic type in `table`
