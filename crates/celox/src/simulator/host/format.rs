@@ -10,99 +10,120 @@ impl<B: SimBackend> Simulator<B> {
         site: &HostRequestSite<SignalRef>,
         timestamp: u64,
     ) -> Result<(), Halt> {
-        let mut args: Vec<_> = site
+        let values: Vec<_> = site
             .args
             .iter()
             .map(|arg| {
-                let (value, mask) = if arg.id.is_4state {
+                if arg.id.is_4state {
                     self.backend.get_four_state(arg.id)
                 } else {
                     (self.backend.get(arg.id), BigUint::default())
-                };
-                let mut value = RuntimeEventArgValue {
-                    values: value.to_u64_digits(),
-                    masks: mask.to_u64_digits(),
-                    width: arg.width,
-                    signed: arg.signed,
-                    is_string: false,
-                    float_precision: arg.float_precision,
-                    handle: arg.value_kind == ValueKind::StrRef,
-                };
-                value.resolve_handle(self.backend.heap());
-                value
+                }
             })
             .collect();
-        // The format of `%t` the design's `$timeformat` calls set when the
-        // call ran, its last argument.
-        let time_format = if site
-            .strings
-            .get(1)
-            .is_some_and(|text| text == celox_design::TIME_FORMAT_ARGUMENT)
-        {
-            args.pop()
-                .map_or_else(TimeFormat::default, |format| TimeFormat::of(&format))
-        } else {
-            TimeFormat::default()
-        };
-        let template = if site.operation == 0 {
-            site.strings[0].clone().into_bytes()
-        } else {
-            // A run-time format is the text of its value: the bytes of a
-            // string, or of an integral value without its NUL bytes, unknown
-            // bits reading as zero. Bytes that are not UTF-8 stay as they are.
-            let format = args.remove(0);
-            let bytes = runtime_event_words_to_biguint(&format.values, format.width)
-                .to_bytes_be()
-                .into_iter()
-                .filter(|&byte| byte != 0)
-                .collect::<Vec<_>>();
-            let ticks_per_unit = site.strings[0].parse::<u64>().unwrap_or(1);
-            scale_time_arguments(&String::from_utf8_lossy(&bytes), &mut args, ticks_per_unit);
-            bytes
-        };
-        // A run-time format's `%m` names the scope of the call: a named
-        // block, generate block or subroutine under the instance that runs
-        // it, or a scope of a package or the compilation unit.
         let process_scope = self.process_scope(site.process.index());
-        let scope = match &site.scope {
-            Some(celox_design::FormatScope::Absolute(name)) => Some(name.clone()),
-            Some(celox_design::FormatScope::Relative(path)) => Some(match process_scope {
-                Some(instance) => format!("{instance}.{path}"),
-                None => path.clone(),
-            }),
-            None => process_scope,
-        };
-        let format = RuntimeEventSite {
-            kind: RuntimeEventKind::Write,
-            template: None,
-            sizing: DisplaySizing::Ieee,
-            scope,
-            location: None,
-            assertion: None,
-            deferred: None,
-            timestamp_arg: false,
-            time_format_arg: false,
-            arg_widths: Vec::new(),
-            arg_signed: Vec::new(),
-            arg_is_string: Vec::new(),
-            arg_float_precision: Vec::new(),
-            arg_is_handle: Vec::new(),
-        };
-        let message = render_bytes(
-            &template,
-            format,
-            &args,
-            RuntimeFormatContext {
-                tb_time: Some(timestamp),
-                ..Default::default()
-            },
-            &time_format,
-        );
+        let message = format_message(site, &values, process_scope, timestamp, self.backend.heap());
         let handle = self.backend.heap_mut().intern(&message);
         self.backend.set(site.results[0].id, handle);
         self.dirty = true;
         Ok(())
     }
+}
+
+/// The text `$sformatf` request `site` makes of the values of its arguments
+/// (`values`, value and unknown planes), in a process whose `%m` names
+/// `process_scope`, at `timestamp`: what `$write` prints for the same format
+/// and arguments (IEEE 1800-2023 21.3.3).
+pub(crate) fn format_message(
+    site: &HostRequestSite<SignalRef>,
+    values: &[(BigUint, BigUint)],
+    process_scope: Option<String>,
+    timestamp: u64,
+    heap: &celox_heap::Heap,
+) -> Vec<u8> {
+    let mut args: Vec<_> = site
+        .args
+        .iter()
+        .zip(values)
+        .map(|(arg, (value, mask))| {
+            let mut value = RuntimeEventArgValue {
+                values: value.to_u64_digits(),
+                masks: mask.to_u64_digits(),
+                width: arg.width,
+                signed: arg.signed,
+                is_string: false,
+                float_precision: arg.float_precision,
+                handle: arg.value_kind == ValueKind::StrRef,
+            };
+            value.resolve_handle(heap);
+            value
+        })
+        .collect();
+    // The format of `%t` the design's `$timeformat` calls set when the call
+    // ran, its last argument.
+    let time_format = if site
+        .strings
+        .get(1)
+        .is_some_and(|text| text == celox_design::TIME_FORMAT_ARGUMENT)
+    {
+        args.pop()
+            .map_or_else(TimeFormat::default, |format| TimeFormat::of(&format))
+    } else {
+        TimeFormat::default()
+    };
+    let template = if site.operation == 0 {
+        site.strings[0].clone().into_bytes()
+    } else {
+        // A run-time format is the text of its value: the bytes of a string,
+        // or of an integral value without its NUL bytes, unknown bits reading
+        // as zero. Bytes that are not UTF-8 stay as they are.
+        let format = args.remove(0);
+        let bytes = runtime_event_words_to_biguint(&format.values, format.width)
+            .to_bytes_be()
+            .into_iter()
+            .filter(|&byte| byte != 0)
+            .collect::<Vec<_>>();
+        let ticks_per_unit = site.strings[0].parse::<u64>().unwrap_or(1);
+        scale_time_arguments(&String::from_utf8_lossy(&bytes), &mut args, ticks_per_unit);
+        bytes
+    };
+    // A run-time format's `%m` names the scope of the call: a named block,
+    // generate block or subroutine under the instance that runs it, or a
+    // scope of a package or the compilation unit.
+    let scope = match &site.scope {
+        Some(celox_design::FormatScope::Absolute(name)) => Some(name.clone()),
+        Some(celox_design::FormatScope::Relative(path)) => Some(match process_scope {
+            Some(instance) => format!("{instance}.{path}"),
+            None => path.clone(),
+        }),
+        None => process_scope,
+    };
+    let format = RuntimeEventSite {
+        kind: RuntimeEventKind::Write,
+        template: None,
+        sizing: DisplaySizing::Ieee,
+        scope,
+        location: None,
+        assertion: None,
+        deferred: None,
+        timestamp_arg: false,
+        time_format_arg: false,
+        arg_widths: Vec::new(),
+        arg_signed: Vec::new(),
+        arg_is_string: Vec::new(),
+        arg_float_precision: Vec::new(),
+        arg_is_handle: Vec::new(),
+    };
+    render_bytes(
+        &template,
+        format,
+        &args,
+        RuntimeFormatContext {
+            tb_time: Some(timestamp),
+            ..Default::default()
+        },
+        &time_format,
+    )
 }
 
 /// What `$write` prints for `template` and `args`. Text outside conversions

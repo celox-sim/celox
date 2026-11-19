@@ -71,6 +71,9 @@ pub(super) struct Metadata {
     /// [`celox_design::host_request_site`] numbers: the native service
     /// serves those [`supported`] passes other than formatted writes.
     pub requests: Vec<Vec<HostRequestSite<SignalRef>>>,
+    /// Per process, the name `%m` prints for its instance, which a
+    /// `$sformatf` of it formats with ([`super::format::format_message`]).
+    pub process_scopes: Vec<Option<String>>,
     pub runtime_sites: Vec<RuntimeEventSite>,
     pub process_names: Vec<String>,
     pub nbas: Vec<Vec<celox_design::NbaSite<SignalRef>>>,
@@ -94,6 +97,8 @@ pub(crate) fn supported<A>(site: &HostRequestSite<A>) -> bool {
         // fixes.
         (HostRequestKind::Plusargs, 0) => site.args.len() == 1 && site.results.len() == 1,
         (HostRequestKind::Plusargs, 1) => site.args.len() == 1 && site.results.len() == 2,
+        // `$sformatf`, of a constant or a run-time format.
+        (HostRequestKind::Format, _) => site.results.len() == 1,
         _ => false,
     }
 }
@@ -102,6 +107,29 @@ pub(crate) fn supported<A>(site: &HostRequestSite<A>) -> bool {
 /// ([`WriteSite`]) rather than serving it as [`Metadata::requests`] holds it.
 fn formatted(site: &HostRequestSite<SignalRef>) -> bool {
     site.kind == HostRequestKind::FileIo && matches!(site.operation, 2 | 3)
+}
+
+/// The name `%m` prints for the instance of `process`, as the reference
+/// loop's `process_scope` makes it.
+fn process_scope(program: &RuntimeProgram, process: usize) -> Option<String> {
+    let process = &program.runtime_schema.processes[process];
+    program
+        .design
+        .instance(process.status.instance_id)
+        .map(|instance| {
+            let top = program
+                .design
+                .root_instance()
+                .map(|root| root.module_name.as_str())
+                // The root of several tops is not part of a name.
+                .filter(|_| !program.design.hidden_root)
+                .unwrap_or("");
+            std::iter::once(top)
+                .chain(instance.display_path.iter().map(String::as_str))
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(".")
+        })
 }
 
 impl Metadata {
@@ -127,7 +155,7 @@ impl Metadata {
         for request in &program.runtime_schema.host_request_sites {
             if !matches!(
                 request.kind,
-                HostRequestKind::FileIo | HostRequestKind::Plusargs
+                HostRequestKind::FileIo | HostRequestKind::Plusargs | HostRequestKind::Format
             ) {
                 continue;
             }
@@ -143,24 +171,7 @@ impl Metadata {
                     .iter()
                     .all(|arg| arg.id.array_layout.is_none());
             let site = if supported {
-                let process = &program.runtime_schema.processes[request.process.index()];
-                let scope = program
-                    .design
-                    .instance(process.status.instance_id)
-                    .map(|instance| {
-                        let top = program
-                            .design
-                            .root_instance()
-                            .map(|root| root.module_name.as_str())
-                            // The root of several tops is not part of a name.
-                            .filter(|_| !program.design.hidden_root)
-                            .unwrap_or("");
-                        std::iter::once(top)
-                            .chain(instance.display_path.iter().map(String::as_str))
-                            .filter(|part| !part.is_empty())
-                            .collect::<Vec<_>>()
-                            .join(".")
-                    });
+                let scope = process_scope(program, request.process.index());
                 let format = RuntimeEventSite {
                     kind: RuntimeEventKind::Write,
                     template: request.strings.first().cloned(),
@@ -267,6 +278,9 @@ impl Metadata {
             sites,
             function_sites,
             requests,
+            process_scopes: (0..program.runtime_schema.processes.len())
+                .map(|process| process_scope(program, process))
+                .collect(),
             runtime_sites: program.runtime_schema.runtime_event_sites.clone(),
             process_names: program
                 .runtime_schema
@@ -1097,7 +1111,7 @@ impl Scope<'_> {
         let (kind, index) = HostRequestKind::decode(encoded)
             .ok_or_else(|| Self::fault("invalid native host request"))?;
         if kind != HostRequestKind::FileIo {
-            return self.serve_request(process, kind, index);
+            return self.serve_request(process, kind, index, timestamp);
         }
         let listed = if index & celox_design::FUNCTION_SITE_NUMBER != 0 {
             &self.metadata.function_sites
@@ -1110,7 +1124,7 @@ impl Scope<'_> {
             .and_then(Option::as_ref)
         else {
             // Another file request than a formatted write.
-            return self.serve_request(process, kind, index);
+            return self.serve_request(process, kind, index, timestamp);
         };
         let values = site
             .request
@@ -1153,6 +1167,7 @@ impl Scope<'_> {
         process: u64,
         kind: HostRequestKind,
         index: u32,
+        timestamp: u64,
     ) -> Result<(), RuntimeErrorCode> {
         let site = self
             .metadata
@@ -1275,6 +1290,18 @@ impl Scope<'_> {
                     site.results[0].id,
                     &(BigUint::from(u8::from(matched)), zero),
                 )
+            }
+            (HostRequestKind::Format, _) => {
+                let scope = self
+                    .metadata
+                    .process_scopes
+                    .get(usize::try_from(process).unwrap_or(usize::MAX))
+                    .cloned()
+                    .flatten();
+                let message =
+                    super::format::format_message(&site, &values, scope, timestamp, self.heap()?);
+                let handle = self.heap_mut()?.intern(&message);
+                self.store_value(site.results[0].id, &(BigUint::from(handle), zero))
             }
             _ => Err(Self::fault("native host request is not served")),
         }
@@ -1448,6 +1475,7 @@ mod tests {
             sites: vec![],
             function_sites: vec![],
             requests: vec![],
+            process_scopes: vec![],
             runtime_sites: vec![],
             process_names: vec![],
             flagged: vec![(0, 0), (0, 1)],

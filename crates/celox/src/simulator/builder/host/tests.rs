@@ -1947,6 +1947,72 @@ fn native_services_keep_file_and_plusargs_testbenches_compiled() {
     }
 }
 
+/// A testbench process that formats strings with `$sformatf`, of a constant
+/// and of a run-time format, with `%m` and a string argument, as OpenTitan's
+/// `sw_test_status_if` reports its transitions: the native service formats
+/// them, so its waits keep the scheduler compiled, and the strings are the
+/// reference loop's.
+#[cfg(any(
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+))]
+#[test]
+fn native_services_keep_formatting_testbenches_compiled() {
+    let source = r#"`timescale 1ns/1ns
+        module Top;
+            bit clk = 0;
+            int count = 0;
+            string name, line, scope, both, dynamic, format;
+            always #1 clk = ~clk;
+            always @(posedge clk) begin
+                name = "ready";
+                format = "%0d at %m";
+                count = count + 1;
+                line = $sformatf("step %0d of %s: %h", count, name, count * 3);
+                scope = $sformatf("%m");
+                dynamic = $sformatf(format, count);
+                both = {line, " ", scope, " ", dynamic};
+            end
+        endmodule"#;
+    for four_state in [false, true] {
+        let mut lines = Vec::new();
+        for mode in [
+            crate::SchedulerMode::Reference,
+            crate::SchedulerMode::Compiled,
+        ] {
+            let mut simulation = crate::Simulation::from_sv_sources(
+                vec![(source, std::path::Path::new("format.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+            .scheduler_mode(mode)
+            .build_native()
+            .unwrap();
+            simulation.run_until(20).unwrap();
+            if mode == crate::SchedulerMode::Compiled {
+                let stats = simulation.scheduler_stats();
+                assert!(
+                    stats.compiled_slots > 0 && stats.reference_steps < stats.compiled_slots,
+                    "{stats:?}"
+                );
+                assert!(
+                    stats
+                        .kernels
+                        .iter()
+                        .all(|kernel| matches!(kernel, crate::KernelSchedule::Compiled)),
+                    "{stats:?}"
+                );
+            }
+            let both = simulation.signal("both");
+            let mut text = Vec::new();
+            simulation.modify(|io| text = io.get_string(both)).unwrap();
+            lines.push(String::from_utf8(text).unwrap());
+        }
+        assert_eq!(lines[0], lines[1], "four_state={four_state}");
+        assert_eq!(lines[0], "step 10 of ready: 0000001e Top 10 at Top");
+    }
+}
+
 #[cfg(any(
     all(target_arch = "x86_64", not(feature = "arm64-codegen")),
     all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
