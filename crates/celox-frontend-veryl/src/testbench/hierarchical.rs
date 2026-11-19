@@ -36,6 +36,9 @@ pub(crate) fn hierarchical_destination_reference(
         var_path: destination.var_path.clone(),
         index: destination.index.clone(),
         select: destination.select.clone(),
+        // Celox resolves the source shape from the target variable, and a
+        // destination never selects an array range, so its shape is not kept.
+        array: Default::default(),
         comptime: destination.comptime.clone(),
     }
 }
@@ -181,7 +184,7 @@ pub(crate) fn hierarchical_reference_bits(
 
     let mut base = 0usize;
     let mut consumed = 0usize;
-    for (dimension, expression) in reference.index.0.iter().enumerate() {
+    for (dimension, expression) in reference.index.indices.iter().enumerate() {
         let Some(&dimension_stride) = strides.get(dimension) else {
             return Err(invalid("too many unpacked array indices"));
         };
@@ -358,7 +361,7 @@ pub(super) fn variable_access_width(
     if array_total == 0 || !info.width.is_multiple_of(array_total) {
         return None;
     }
-    let consumed = index.0.len();
+    let consumed = index.indices.len();
     if consumed > info.array_dims.len() {
         return None;
     }

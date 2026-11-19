@@ -33,7 +33,7 @@ impl<'a> FfParser<'a> {
         else {
             return true;
         };
-        let all_indices = index.0.iter().chain(&select.0).collect::<Vec<_>>();
+        let all_indices = index.indices.iter().chain(&select.0).collect::<Vec<_>>();
         all_indices.len() != array_dims.len()
             || all_indices.iter().zip(array_dims).any(|(expr, dim)| {
                 self.get_constant_value(expr)
@@ -98,7 +98,7 @@ impl<'a> FfParser<'a> {
                     if self.array_access_needs_view(*var_id, index, select) {
                         usage.array_views.insert(*var_id);
                     }
-                    for expr in &index.0 {
+                    for expr in &index.indices {
                         self.collect_function_input_usage(expr, usage, active_calls)?;
                     }
                     for expr in &select.0 {
@@ -131,7 +131,7 @@ impl<'a> FfParser<'a> {
                         }
                     }
                     for dst in call.outputs.values().flatten() {
-                        for expr in &dst.index.0 {
+                        for expr in &dst.index.indices {
                             self.collect_function_input_usage(expr, usage, active_calls)?;
                         }
                         for expr in &dst.select.0 {
@@ -157,7 +157,10 @@ impl<'a> FfParser<'a> {
                     | SystemFunctionKind::Finish => {}
                 },
                 Factor::HierVariable(_) => return None,
-                Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => {}
+                Factor::Value(_)
+                | Factor::ResetValue(..)
+                | Factor::Anonymous(_)
+                | Factor::Unknown(_) => {}
             },
             Expression::Binary(lhs, _, rhs, _) => {
                 self.collect_function_input_usage(lhs, usage, active_calls)?;
@@ -256,7 +259,7 @@ impl<'a> FfParser<'a> {
                                 );
                             }
                         }
-                        for expr in &index.0 {
+                        for expr in &index.indices {
                             collect(expr);
                         }
                         for expr in &select.0 {
@@ -301,7 +304,7 @@ impl<'a> FfParser<'a> {
                             }
                         }
                         for dst in call.outputs.values().flatten() {
-                            for expr in &dst.index.0 {
+                            for expr in &dst.index.indices {
                                 collect(expr);
                             }
                             for expr in &dst.select.0 {
@@ -327,7 +330,10 @@ impl<'a> FfParser<'a> {
                         | SystemFunctionKind::Finish => {}
                     },
                     Factor::HierVariable(_) => {}
-                    Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => {}
+                    Factor::Value(_)
+                    | Factor::ResetValue(..)
+                    | Factor::Anonymous(_)
+                    | Factor::Unknown(_) => {}
                 },
                 Expression::Binary(lhs, _, rhs, _) => {
                     collect(lhs);
@@ -380,7 +386,7 @@ impl<'a> FfParser<'a> {
             return None;
         }
         index
-            .0
+            .indices
             .iter()
             .chain(&select.0)
             .map(|expr| self.get_constant_value(expr).map(|value| value as usize))
@@ -436,7 +442,7 @@ impl<'a> FfParser<'a> {
     ) {
         if let Expression::Term(factor) = expr
             && let Factor::Variable(bound_var_id, index, select, _) = factor.as_ref()
-            && index.0.is_empty()
+            && index.indices.is_empty()
             && select.0.is_empty()
             && select.1.is_none()
             && let Some(source_frame) = (0..frame).rev().find(|&source_frame| {

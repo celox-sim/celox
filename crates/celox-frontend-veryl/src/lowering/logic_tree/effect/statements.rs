@@ -330,17 +330,13 @@ pub(super) fn collect_dynamic_for_effects(
             let end = bit - 1;
             let access = BitAccess::new(start, end);
             let parts = original.get_parts_ref(access).map_err(|error| {
-                super::super::range_store_error(
-                    "observer for-loop state",
-                    error,
-                    Some(&for_stmt.token),
-                )
+                super::range_store_error("observer for-loop state", error, Some(&for_stmt.token))
             })?;
             let (expr, sources) = combine_parts_with_default(id, access.lsb, parts, arena)?;
             loop_store
                 .update(access, Some((expr, sources)))
                 .map_err(|error| {
-                    super::super::range_store_error(
+                    super::range_store_error(
                         "observer for-loop state",
                         error,
                         Some(&for_stmt.token),
@@ -350,7 +346,7 @@ pub(super) fn collect_dynamic_for_effects(
         iter_store.insert(id, loop_store);
     }
     iter_store.insert(for_stmt.var_id, RangeStore::new(None, loop_width));
-    let mut loop_range = super::super::LoopRangeScope::enter(arena, for_stmt);
+    let mut loop_range = super::LoopRangeScope::enter(arena, for_stmt);
     let arena = &mut *loop_range;
     let observer_start = collector.observers.len();
     let saved = collector.loop_effects.take();

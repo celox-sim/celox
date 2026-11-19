@@ -169,7 +169,8 @@ pub(super) fn prefer_static_lane_writes(
     let mut wide = false;
     for dst in destinations {
         if iteration_owner(module, &candidate.unrolled, dst.id).is_some()
-            || !dst.index.0.is_empty()
+            || !dst.index.indices.is_empty()
+            || dst.index.range.is_some()
             || !crate::bitaccess::is_static_access(&dst.index, &dst.select)
         {
             return false;

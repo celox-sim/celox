@@ -71,7 +71,9 @@ pub(super) fn lower_store(
                     });
                     Some((old, containing_byte_off, size))
                 }
-                SIROffset::Dynamic(_) | SIROffset::Element { .. } => None,
+                SIROffset::Dynamic(_)
+                | SIROffset::Element { .. }
+                | SIROffset::ElementRun { .. } => None,
             }
         };
         let old_comb_wide_probe = if comb_capture_sites.is_empty() || *width_bits <= 64 {
@@ -103,7 +105,9 @@ pub(super) fn lower_store(
                         });
                         Some((old, containing_byte_off, size))
                     }
-                    SIROffset::Dynamic(_) | SIROffset::Element { .. } => None,
+                    SIROffset::Dynamic(_)
+                    | SIROffset::Element { .. }
+                    | SIROffset::ElementRun { .. } => None,
                 }
             };
         let old_comb_wide_mask_probe =
@@ -122,7 +126,7 @@ pub(super) fn lower_store(
             } => {
                 lower_static_value_store(ctx, block, addr, bit_off, width_bits, src_reg);
             }
-            SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
+            SIROffset::Dynamic(_) | SIROffset::Element { .. } | SIROffset::ElementRun { .. } => {
                 lower_dynamic_value_store(
                     ctx,
                     block,
@@ -148,7 +152,9 @@ pub(super) fn lower_store(
                         ctx, block, addr, bit_off, width_bits, src_reg, mask_vreg,
                     );
                 }
-                SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
+                SIROffset::Dynamic(_)
+                | SIROffset::Element { .. }
+                | SIROffset::ElementRun { .. } => {
                     lower_dynamic_mask_store(
                         ctx,
                         block,

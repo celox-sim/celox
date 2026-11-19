@@ -217,7 +217,11 @@ impl<'a> ModuleParser<'a> {
             initial_memory_values,
             ff_parser: FfParser::new(module, config.clone()),
             parallel_lanes: config.parallel_lanes,
-            arena: SLTNodeArena::new(),
+            arena: {
+                let mut arena = SLTNodeArena::new();
+                arena.reset_type = config.reset_type;
+                arena
+            },
             reset_clock_map: HashMap::default(),
             loop_candidates,
             external_modules,
@@ -399,83 +403,42 @@ impl<'a> ModuleParser<'a> {
             let child_port_id = input.id;
             let ty = get_port_type(child_module, &child_port_id)?;
             let width = ty.width();
-            let Some(first_expr) = input.exprs.first() else {
-                return Err(ParserError::illegal_context(
-                    "input port connection",
-                    "connection has no expressions",
-                    Some(&decl.token),
-                ));
-            };
+            let expression = &input.expr;
             if width == 0 {
                 return Err(ParserError::illegal_context(
                     "input port connection",
                     "child input port has zero width",
-                    Some(&first_expr.token_range()),
+                    Some(&expression.token_range()),
                 ));
             }
-            // Veryl expands an unpacked-array slice connection into one
-            // expression per child port element. The flattened child variable
-            // stores element zero in its low bits, so evaluate each expression
-            // at the element width and concatenate them in reverse order.
-            let expression_width = if input.exprs.len() == 1 {
-                width
-            } else {
-                if !width.is_multiple_of(input.exprs.len()) {
-                    return Err(ParserError::illegal_context(
-                        "input port connection",
-                        format!(
-                            "{} expressions do not evenly cover child port width {width}",
-                            input.exprs.len()
-                        ),
-                        Some(&decl.token),
-                    ));
-                }
-                width / input.exprs.len()
-            };
 
             let mut written_accesses = HashMap::default();
             let mut connection_store = parent_store.clone();
             let mut output_address_sources = HashMap::default();
-            let mut expression_nodes = Vec::with_capacity(input.exprs.len());
-            let mut expr_sources = HashSet::default();
-            for expression in &input.exprs {
-                collect_written_expression(self.module, expression, &mut written_accesses)?;
-                collect_parent_output_address_sources(
-                    self.module,
-                    &connection_store,
+            collect_written_expression(self.module, expression, &mut written_accesses)?;
+            collect_parent_output_address_sources(
+                self.module,
+                &connection_store,
+                expression,
+                &mut self.arena,
+                &mut output_address_sources,
+            )?;
+            let ((expr_node, expr_sources), _bounds) = eval_assignment_expression_effectful(
+                self.module,
+                &mut connection_store,
+                &crate::float::converted(
                     expression,
-                    &mut self.arena,
-                    &mut output_address_sources,
-                )?;
-                let ((node, sources), _bounds) = eval_assignment_expression_effectful(
-                    self.module,
-                    &mut connection_store,
-                    &crate::float::converted(
-                        expression,
-                        &child_module
-                            .variables
-                            .get(&child_port_id)
-                            .expect("resolved child input")
-                            .r#type,
-                    ),
-                    &mut self.arena,
-                    expression_width,
-                )?;
-                expression_nodes.push((node, expression_width));
-                expr_sources.extend(sources);
-            }
-            let expr_node = if expression_nodes.len() == 1 {
-                expression_nodes[0].0
-            } else {
-                expression_nodes.reverse();
-                self.arena.alloc(SLTNode::Concat(expression_nodes))?
-            };
+                    &child_module
+                        .variables
+                        .get(&child_port_id)
+                        .expect("resolved child input")
+                        .r#type,
+                ),
+                &mut self.arena,
+                width,
+            )?;
 
-            if input
-                .exprs
-                .iter()
-                .any(|expression| expression_contains_runtime_effect(self.module, expression))
-            {
+            if expression_contains_runtime_effect(self.module, expression) {
                 let arena_start = self.arena.len();
                 let mut effects = CombEffectCollector::with_capture_namespace(
                     self.comb_runtime_event_sites.len() as u32,
@@ -487,15 +450,13 @@ impl<'a> ModuleParser<'a> {
                         RangeStore::new(None, resolve_total_width(self.module, variable)?),
                     );
                 }
-                for expression in &input.exprs {
-                    let _ = collect_and_advance_expression(
-                        self.module,
-                        &mut effect_store,
-                        expression,
-                        &mut self.arena,
-                        &mut effects,
-                    )?;
-                }
+                let _ = collect_and_advance_expression(
+                    self.module,
+                    &mut effect_store,
+                    expression,
+                    &mut self.arena,
+                    &mut effects,
+                )?;
 
                 let mut process_sensitivity = std::mem::take(&mut effects.sensitivity);
                 process_sensitivity.extend(expr_sources.iter().copied());
@@ -508,7 +469,7 @@ impl<'a> ModuleParser<'a> {
                             ParserError::illegal_context(
                                 "instance input function output",
                                 error.to_string(),
-                                Some(&first_expr.token_range()),
+                                Some(&expression.token_range()),
                             )
                         })? {
                             if let Some((_, sources)) = value {
@@ -640,7 +601,7 @@ impl<'a> ModuleParser<'a> {
             for destination_index in destination_order {
                 let dst = &output.dst[destination_index];
                 check_output_destination(dst)?;
-                for address in dst.index.0.iter().chain(dst.select.0.iter()) {
+                for address in dst.index.expressions().chain(dst.select.0.iter()) {
                     let address_sources = collect_and_advance_expression(
                         self.module,
                         &mut output_effect_store,

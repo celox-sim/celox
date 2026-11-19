@@ -344,6 +344,37 @@ fn check_analyzer_errors(phase: &str, errors: Vec<veryl_analyzer::AnalyzerError>
     assert!(errors.is_empty(), "Veryl {phase} errors: {errors:?}");
 }
 
+fn clear_function_argument_values(component: &mut air::Component) {
+    let (variables, functions) = match component {
+        air::Component::Module(module) => (&mut module.variables, &module.functions),
+        air::Component::Interface(interface) => (&mut interface.variables, &interface.functions),
+        air::Component::SystemVerilog(_) => return,
+    };
+    for function in functions.values() {
+        for body in &function.functions {
+            for id in body.arg_map.values() {
+                if let Some(variable) = variables.get_mut(id)
+                    && matches!(variable.kind, air::VarKind::Input | air::VarKind::Inout)
+                {
+                    // Veryl c3bf469's function-loop lowering evaluates bounds
+                    // using values left by constant evaluation of other calls.
+                    // A formal argument has no value until this call executes.
+                    // Clearing that analysis scratch keeps runtime bounds from
+                    // being unrolled while retaining literal/parameter loops.
+                    variable.value.clear();
+                }
+            }
+        }
+    }
+    if let air::Component::Module(module) = component {
+        for declaration in &mut module.declarations {
+            if let air::Declaration::Inst(instance) = declaration {
+                clear_function_argument_values(std::sync::Arc::make_mut(&mut instance.component));
+            }
+        }
+    }
+}
+
 pub fn build_veryl_adapter(
     sources: &[(&str, &Path)],
     top: &str,
@@ -379,6 +410,10 @@ pub fn build_veryl_adapter(
     }
     check_analyzer_errors("analyze_pass2 context", context.drain_errors());
     check_analyzer_errors("analyze_post_pass2", Analyzer::analyze_post_pass2(&ir));
+
+    for component in &mut ir.components {
+        clear_function_argument_values(component);
+    }
 
     let top_id = veryl_parser::resource_table::insert_str(top);
     let config = Config {

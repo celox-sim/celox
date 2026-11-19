@@ -15,7 +15,7 @@ impl<'a> FfParser<'a> {
                 Factor::Variable(id, index, select, _) => {
                     candidates.contains(id)
                         || index
-                            .0
+                            .indices
                             .iter()
                             .any(|expr| Self::expression_references_any(expr, candidates))
                         || select
@@ -29,7 +29,7 @@ impl<'a> FfParser<'a> {
                 Factor::HierVariable(reference) => {
                     reference
                         .index
-                        .0
+                        .indices
                         .iter()
                         .any(|expr| Self::expression_references_any(expr, candidates))
                         || reference
@@ -59,7 +59,10 @@ impl<'a> FfParser<'a> {
                     | SystemFunctionKind::Unsigned(input) => input_references(input),
                     SystemFunctionKind::Readmemh(_, _) | SystemFunctionKind::Finish => false,
                 },
-                Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
+                Factor::Value(_)
+                | Factor::ResetValue(..)
+                | Factor::Anonymous(_)
+                | Factor::Unknown(_) => false,
             },
             Expression::Binary(lhs, _, rhs, _) => {
                 Self::expression_references_any(lhs, candidates)
@@ -101,7 +104,10 @@ impl<'a> FfParser<'a> {
                 match factor.as_ref() {
                     Factor::FunctionCall(_) => true,
                     Factor::Variable(_, index, select, _) => {
-                        index.0.iter().any(Self::expression_contains_function_call)
+                        index
+                            .indices
+                            .iter()
+                            .any(Self::expression_contains_function_call)
                             || select.0.iter().any(Self::expression_contains_function_call)
                             || select.1.as_ref().is_some_and(|(_, expr)| {
                                 Self::expression_contains_function_call(expr)
@@ -110,7 +116,7 @@ impl<'a> FfParser<'a> {
                     Factor::HierVariable(reference) => {
                         reference
                             .index
-                            .0
+                            .indices
                             .iter()
                             .any(Self::expression_contains_function_call)
                             || reference
@@ -136,7 +142,10 @@ impl<'a> FfParser<'a> {
                         | SystemFunctionKind::Unsigned(input) => input_contains(input),
                         SystemFunctionKind::Readmemh(_, _) | SystemFunctionKind::Finish => false,
                     },
-                    Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
+                    Factor::Value(_)
+                    | Factor::ResetValue(..)
+                    | Factor::Anonymous(_)
+                    | Factor::Unknown(_) => false,
                 }
             }
             Expression::Binary(lhs, _, rhs, _) => {
@@ -192,7 +201,7 @@ impl<'a> FfParser<'a> {
                     {
                         variables.insert(*id);
                     }
-                    for expr in &index.0 {
+                    for expr in &index.indices {
                         self.collect_expression_read_variables(expr, variables, arrays_only);
                     }
                     for expr in &select.0 {
@@ -203,7 +212,7 @@ impl<'a> FfParser<'a> {
                     }
                 }
                 Factor::HierVariable(reference) => {
-                    for expr in &reference.index.0 {
+                    for expr in &reference.index.indices {
                         self.collect_expression_read_variables(expr, variables, arrays_only);
                     }
                     for expr in &reference.select.0 {
@@ -220,7 +229,7 @@ impl<'a> FfParser<'a> {
                     for dst in call.outputs.values().flatten() {
                         // An output actual writes its base variable; only its
                         // index/select expressions contribute read dependencies.
-                        for expr in &dst.index.0 {
+                        for expr in &dst.index.indices {
                             self.collect_expression_read_variables(expr, variables, arrays_only);
                         }
                         for expr in &dst.select.0 {
@@ -250,7 +259,10 @@ impl<'a> FfParser<'a> {
                     | SystemFunctionKind::Unsigned(input) => collect_input(input, variables),
                     SystemFunctionKind::Readmemh(_, _) | SystemFunctionKind::Finish => {}
                 },
-                Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => {}
+                Factor::Value(_)
+                | Factor::ResetValue(..)
+                | Factor::Anonymous(_)
+                | Factor::Unknown(_) => {}
             },
             Expression::Binary(lhs, _, rhs, _) => {
                 self.collect_expression_read_variables(lhs, variables, arrays_only);
@@ -320,7 +332,7 @@ impl<'a> FfParser<'a> {
                         self.function_call_writes_any(call, candidates, visiting)
                     }
                     Factor::Variable(_, index, select, _) => {
-                        index.0.iter().any(|expr| {
+                        index.indices.iter().any(|expr| {
                             self.expression_writes_any_inner(expr, candidates, visiting)
                         }) || select.0.iter().any(|expr| {
                             self.expression_writes_any_inner(expr, candidates, visiting)
@@ -329,7 +341,7 @@ impl<'a> FfParser<'a> {
                         })
                     }
                     Factor::HierVariable(reference) => {
-                        reference.index.0.iter().any(|expr| {
+                        reference.index.indices.iter().any(|expr| {
                             self.expression_writes_any_inner(expr, candidates, visiting)
                         }) || reference.select.0.iter().any(|expr| {
                             self.expression_writes_any_inner(expr, candidates, visiting)
@@ -358,7 +370,10 @@ impl<'a> FfParser<'a> {
                         }
                         SystemFunctionKind::Readmemh(_, _) | SystemFunctionKind::Finish => false,
                     },
-                    Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
+                    Factor::Value(_)
+                    | Factor::ResetValue(..)
+                    | Factor::Anonymous(_)
+                    | Factor::Unknown(_) => false,
                 }
             }
             Expression::Binary(lhs, _, rhs, _) => {
@@ -525,7 +540,7 @@ impl<'a> FfParser<'a> {
         visiting: &mut HashSet<VarId>,
     ) -> bool {
         dst.index
-            .0
+            .indices
             .iter()
             .any(|expr| self.expression_writes_any_inner(expr, candidates, visiting))
             || dst

@@ -48,6 +48,21 @@ add = ["native-baseline"]
 [veryl.groups.std_ram]
 add = ["native-baseline"]
 
+[veryl.groups.tb_queue]
+omit = ["veryl"]
+
+[veryl.cases."tb_queue::aggregate_and_selected_returns"]
+ignore = ["sv"]
+
+[veryl.cases."tb_queue::four_state_values"]
+ignore = ["sv"]
+
+[veryl.cases."tb_queue::operations"]
+ignore = ["sv"]
+
+[veryl.cases."tb_queue::shared_processes"]
+ignore = ["sv"]
+
 [veryl.groups.synth_dynamic_loop]
 add = ["native-baseline"]
 
@@ -218,9 +233,6 @@ ignore = ["sv"]
 [veryl.cases."concurrent_initial::simultaneous_edges"]
 omit = ["veryl"]
 ignore = ["sv"]
-
-[veryl.cases."counter::test_phase_state_ssa_preserves_eval_before_apply_and_four_state"]
-ignore = ["veryl"]
 
 [veryl.cases."data_access::test_genvar_const_in_generate"]
 ignore = ["veryl"]
@@ -481,10 +493,6 @@ ignore = ["veryl"]
 [veryl.cases."four_state::test_four_state_internal_async_reset_edges_follow_table_9_2"]
 ignore = ["veryl"]
 
-# IEEE 1800 LogicAnd (&&) dominant-value: 0 && x = 0
-[veryl.cases."four_state::test_four_state_logic_and_dominant_zero"]
-ignore = ["veryl"]
-
 # Veryl 0.22.0's simulator keeps X/Z when storing into a 2-state type.
 [veryl.cases."four_state::test_four_state_mixing"]
 ignore = ["veryl"]
@@ -499,14 +507,6 @@ ignore = ["veryl"]
 
 # Veryl 0.22.0's simulator misses edges through x and z, such as x -> 0.
 [veryl.cases."four_state::test_four_state_register_clock_edges_follow_table_9_2"]
-ignore = ["veryl"]
-
-# P1: Wide comparison + X
-[veryl.cases."four_state::test_four_state_wide_comparison_with_x"]
-ignore = ["veryl"]
-
-# Wide NE + X (128-bit)
-[veryl.cases."four_state::test_four_state_wide_ne_with_x"]
 ignore = ["veryl"]
 
 [veryl.cases."four_state_expression_semantics::effectful_ternary_takes_known_true_branch_despite_unknown_bits"]
@@ -604,28 +604,10 @@ omit = ["veryl"]
 [veryl.cases."hierarchy::test_dynamic_step_output_port_rmw"]
 ignore = ["veryl"]
 
-# Veryl emits a call with an output argument in an input port connection, which IEEE 1800
-# 13.4 forbids outside procedural code; the SV frontend rejects it
-# ("systemverilog input port connection", #88).
-[veryl.cases."hierarchy::test_inactive_instance_input_output_call_adds_no_parent_driver"]
-ignore = ["sv"]
-
 # Neither veryl-simulator nor the Veryl frontend supports instance
 # arrays; the emitted SystemVerilog does.
 [veryl.cases."hierarchy::test_instance_array_broadcast_and_unpacked_array_connection"]
 ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp", "veryl"]
-
-# SV arm: Veryl emits a call with an output argument in an input port connection, which
-# IEEE 1800 13.4 forbids outside procedural code; the SV frontend rejects it
-# ("systemverilog input port connection", #88).
-[veryl.cases."hierarchy::test_instance_input_function_output_concat_dynamic_writeback"]
-ignore = ["sv", "veryl"]
-
-# Veryl emits a call with an output argument in an input port connection, which IEEE
-# 1800 13.4 forbids outside procedural code; the SV frontend rejects it
-# ("systemverilog input port connection", #88).
-[veryl.cases."hierarchy::test_instance_input_function_output_writeback"]
-ignore = ["sv"]
 
 # veryl-simulator 0.22.0 does not support a concatenation as an instance output
 # connection (UnsupportedDescription).
@@ -647,7 +629,7 @@ ignore = ["veryl"]
 # [tracking issue #1088]`; veryl-simulator: `build_ir failed:
 # UnsupportedDescription`. The `sv` arm binds them in the emitted SV.
 [veryl.cases."interface::test_generic_interface_port"]
-ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp", "veryl"]
+ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp"]
 
 # Celox and veryl-simulator both build from the Veryl analyzer IR, whose
 # `ir::Interface` keeps only variables, functions and modports: logic
@@ -656,6 +638,8 @@ ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm"
 # Observed on every other arm: `q` reads 0x0 instead of 0x11 (the interface `always_comb` never runs).
 [veryl.cases."interface::test_interface_always_comb_packed_array_member"]
 ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp", "veryl"]
+
+
 
 # Celox and veryl-simulator both build from the Veryl analyzer IR, whose
 # `ir::Interface` keeps only variables, functions and modports: logic

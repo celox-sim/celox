@@ -39,12 +39,14 @@ pub(super) fn case_target_can_be_recomputed(expression: &Expression) -> bool {
     match expression {
         Expression::Term(factor) => match factor.as_ref() {
             Factor::Variable(_, index, select, _) => index
-                .0
-                .iter()
+                .expressions()
                 .chain(select.0.iter())
                 .chain(select.1.iter().map(|(_, end)| end))
                 .all(case_target_can_be_recomputed),
-            Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => true,
+            Factor::Value(_)
+            | Factor::ResetValue(..)
+            | Factor::Anonymous(_)
+            | Factor::Unknown(_) => true,
             _ => false,
         },
         Expression::Binary(lhs, _, rhs, _) => {
@@ -205,7 +207,7 @@ pub(super) fn merge_short_circuit_case_condition(
     let mut rhs_store = base_store.fork();
     let ((rhs_node, rhs_sources), rhs_boundaries) = eval_rhs(&mut rhs_store, arena)?;
     let execute_rhs = short_circuit_rhs_guard(arena, lhs_node, is_and)?;
-    *store = super::super::merge_symbolic_versions(
+    *store = super::merge_symbolic_versions(
         module,
         &rhs_store,
         &base_store,

@@ -152,7 +152,7 @@ pub(super) fn apply_readmem_writes(
     };
     let (var_id, load) = crate::module::readmem_load(module, filename, destinations, 16, |dst| {
         dst.index
-            .0
+            .indices
             .iter()
             .map(|index| crate::bitaccess::eval_constexpr(index)?.to_usize())
             .collect()

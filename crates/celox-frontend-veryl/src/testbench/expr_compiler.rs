@@ -60,6 +60,7 @@ pub(super) fn lower_testbench_operator(op: VerylOp) -> Op {
 }
 
 pub(super) struct ExprCompiler<'a> {
+    pub(super) reset_type: veryl_metadata::ResetType,
     pub(super) lookup: &'a FrontendLookup,
     pub(super) id_map: &'a VerylIdMap,
     pub(super) functions: &'a HashMap<VarId, Function>,
@@ -512,6 +513,10 @@ impl ExprCompiler<'_> {
                     unreachable!("unresolved non-constant testbench variable {var_id:?}");
                 }
             }
+            Factor::ResetValue(kind, polarity, _) => {
+                let value = crate::config::reset_value(*kind, *polarity, self.reset_type);
+                ops.push(TbOpcode::ConstU64(value as u64));
+            }
             Factor::Value(comptime) => {
                 if let Ok(val) = comptime.get_value() {
                     self.emit_constant_value(val, ops);
@@ -725,7 +730,7 @@ impl ExprCompiler<'_> {
         ops: &mut Vec<UnboundTbOpcode>,
     ) {
         // No index or select → whole variable
-        if index.0.is_empty() && select.0.is_empty() && select.1.is_none() {
+        if index.indices.is_empty() && select.0.is_empty() && select.1.is_none() {
             self.emit_load_at(address, 0, info.width, ops);
             return;
         }
@@ -748,7 +753,7 @@ impl ExprCompiler<'_> {
         let mut static_bit_offset: usize = 0;
         let mut dynamic_terms = 0usize;
 
-        for (i, idx_expr) in index.0.iter().enumerate() {
+        for (i, idx_expr) in index.indices.iter().enumerate() {
             if i >= info.array_dims.len() {
                 break;
             }
@@ -767,12 +772,12 @@ impl ExprCompiler<'_> {
             }
         }
 
-        let accessed_width = if index.0.len() >= info.array_dims.len() {
+        let accessed_width = if index.indices.len() >= info.array_dims.len() {
             element_width
-        } else if index.0.is_empty() {
+        } else if index.indices.is_empty() {
             info.width
         } else {
-            strides_bits[index.0.len() - 1]
+            strides_bits[index.indices.len() - 1]
         };
 
         let (select_offset, selected_width) =
@@ -1093,7 +1098,7 @@ impl ExprCompiler<'_> {
         select: &VarSelect,
     ) -> Option<TestbenchTarget<SemanticSignal<StateAddr>, ExprBytecode<StateLocation<StateAddr>>>>
     {
-        if index.0.is_empty() && select.0.is_empty() && select.1.is_none() {
+        if index.indices.is_empty() && select.0.is_empty() && select.1.is_none() {
             return Some(TestbenchTarget {
                 signal,
                 selection: None,
@@ -1113,7 +1118,7 @@ impl ExprCompiler<'_> {
         }
 
         let mut offset_ops = vec![TbOpcode::ConstU64(0)];
-        for (i, index) in index.0.iter().enumerate() {
+        for (i, index) in index.indices.iter().enumerate() {
             let stride = *strides_bits.get(i)?;
             Self::append_offset_term(&mut offset_ops, |ops| {
                 if let Some(index) = Self::try_const_usize(index) {
@@ -1126,12 +1131,12 @@ impl ExprCompiler<'_> {
             });
         }
 
-        let accessed_width = if index.0.len() >= info.array_dims.len() {
+        let accessed_width = if index.indices.len() >= info.array_dims.len() {
             element_width
-        } else if index.0.is_empty() {
+        } else if index.indices.is_empty() {
             info.width
         } else {
-            *strides_bits.get(index.0.len() - 1)?
+            *strides_bits.get(index.indices.len() - 1)?
         };
         let (select_ops, select_width) = if select.is_empty() {
             (vec![TbOpcode::ConstU64(0)], accessed_width)
@@ -1190,7 +1195,7 @@ impl ExprCompiler<'_> {
         index: &VarIndex,
         select: &VarSelect,
     ) -> Result<(), ParserError> {
-        for (dimension, index) in index.0.iter().enumerate() {
+        for (dimension, index) in index.indices.iter().enumerate() {
             let Some(&size) = info.array_dims.get(dimension) else {
                 return Err(ParserError::illegal_context(
                     "testbench selected destination",

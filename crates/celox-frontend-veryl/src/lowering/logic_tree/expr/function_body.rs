@@ -12,7 +12,7 @@ use validate::*;
 fn is_whole_var_assign_to(assign: &AssignStatement, var_id: VarId) -> bool {
     assign.dst.len() == 1
         && assign.dst[0].id == var_id
-        && assign.dst[0].index.0.is_empty()
+        && assign.dst[0].index.indices.is_empty()
         && assign.dst[0].select.0.is_empty()
         && assign.dst[0].select.1.is_none()
 }

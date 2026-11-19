@@ -188,7 +188,7 @@ impl<'a> FfParser<'a> {
                 let Factor::Variable(bound_var_id, index, select, _) = factor.as_ref() else {
                     return Ok(None);
                 };
-                if !index.0.is_empty() || !select.0.is_empty() || select.1.is_some() {
+                if !index.indices.is_empty() || !select.0.is_empty() || select.1.is_some() {
                     return Ok(None);
                 }
                 let Some(source_frame) = (0..frame).rev().find(|&i| {

@@ -154,7 +154,9 @@ fn hierarchical_memory_load(
             Some(&reference.comptime.token),
         )
     };
-    if !reference.index.0.is_empty() || !reference.select.is_empty() || reference.select.1.is_some()
+    if !reference.index.indices.is_empty()
+        || !reference.select.is_empty()
+        || reference.select.1.is_some()
     {
         return Err(invalid(
             "hierarchical destination must be a whole unpacked array variable",

@@ -303,7 +303,7 @@ pub(super) fn compile_store(
                 }
             }
         }
-        SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
+        SIROffset::Dynamic(_) | SIROffset::Element { .. } | SIROffset::ElementRun { .. } => {
             let offset_reg_value_idx = compile_logical_bit_offset(offset, locals, instrs);
             compile_store_dynamic(
                 &s,
@@ -443,7 +443,7 @@ pub(super) fn emit_load_store_value(
                 }
             }
         }
-        SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
+        SIROffset::Dynamic(_) | SIROffset::Element { .. } | SIROffset::ElementRun { .. } => {
             let dyn_bit_offset_local = compile_logical_bit_offset(offset, locals, instrs);
             if op_width <= 64 {
                 compile_load_dynamic(dst, base_offset, dyn_bit_offset_local, op_width, instrs);

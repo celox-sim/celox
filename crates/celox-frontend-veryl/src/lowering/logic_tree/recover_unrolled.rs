@@ -140,6 +140,15 @@ fn exact_iteration_chunks(
 ) -> bool {
     let trip_count = candidate.unrolled.iterations.len();
     if trip_count < 2
+        || candidate.unrolled.iterations.iter().any(|iteration| {
+            module
+                .variables
+                .get(&iteration.loop_var)
+                .is_none_or(|variable| {
+                    variable.kind != veryl_analyzer::ir::VarKind::Const
+                        || variable.value.first().and_then(Value::to_usize) != Some(iteration.value)
+                })
+        })
         || statements.is_empty()
         || !statements.len().is_multiple_of(trip_count)
         || statements
@@ -264,7 +273,7 @@ fn collect_statement_variables(statement: &Statement, out: &mut Vec<VarId>) -> b
 
 fn collect_index_variables(index: &VarIndex, out: &mut Vec<VarId>) -> bool {
     index
-        .0
+        .indices
         .iter()
         .all(|expression| collect_expression_variables(expression, out))
 }
@@ -288,7 +297,7 @@ fn collect_expression_variables(expression: &Expression, out: &mut Vec<VarId>) -
                 collect_index_variables(index, out) && collect_select_variables(select, out)
             }
             Factor::HierVariable(_) => false,
-            Factor::Value(_) => true,
+            Factor::Value(_) | Factor::ResetValue(..) => true,
             Factor::FunctionCall(call) if call.outputs.is_empty() => call
                 .inputs
                 .values()

@@ -17,6 +17,7 @@ pub(crate) struct SLTNodeArena<A: Hash + Eq + Clone> {
     pub(crate) memory_loads: Vec<celox_design::InitialStateValue<VarId>>,
     /// The call of the last of `memory_loads`, for diagnostics.
     pub(crate) memory_load_call: Option<veryl_parser::token_range::TokenRange>,
+    pub(crate) reset_type: veryl_metadata::ResetType,
 }
 impl<A: Hash + Eq + Clone> SLTNodeArena<A> {
     pub(crate) fn alloc(
@@ -34,6 +35,7 @@ impl<A: Hash + Eq + Clone> SLTNodeArena<A> {
             loop_ranges: source.loop_ranges.clone(),
             memory_loads: Vec::new(),
             memory_load_call: None,
+            reset_type: source.reset_type,
         }
     }
     pub(crate) fn into_inner(self) -> celox_slt::SLTNodeArena<A> {
@@ -47,6 +49,7 @@ impl<A: Hash + Eq + Clone> Default for SLTNodeArena<A> {
             loop_ranges: Default::default(),
             memory_loads: Vec::new(),
             memory_load_call: None,
+            reset_type: Default::default(),
         }
     }
 }
@@ -57,6 +60,7 @@ impl<A: Hash + Eq + Clone> Clone for SLTNodeArena<A> {
             loop_ranges: self.loop_ranges.clone(),
             memory_loads: self.memory_loads.clone(),
             memory_load_call: self.memory_load_call,
+            reset_type: self.reset_type,
         }
     }
 }

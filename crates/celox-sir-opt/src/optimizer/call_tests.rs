@@ -172,6 +172,10 @@ fn offset_of(offset: &SIROffset, registers: &HashMap<RegisterId, u128>) -> usize
             bit_offset: offset, ..
         } => *offset,
         SIROffset::Dynamic(register) => registers[register] as usize,
+        SIROffset::ElementRun {
+            index,
+            element_width,
+        } => registers[index] as usize * element_width,
         SIROffset::Element {
             index,
             element_width,
