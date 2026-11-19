@@ -241,7 +241,6 @@ fn select<'a>(
                 .signed_element_depth
                 .and_then(|depth| depth.checked_sub(1))
                 .filter(|depth| *depth > 0),
-            unpacked_struct: None,
         })));
         let (kind, bindings, fill) =
             extract_type_fill(tree, session, functions, kind, bindings, &sub, dims)?;
@@ -379,7 +378,6 @@ fn select<'a>(
         is_2state: shape.is_2state,
         members: Vec::new(),
         signed_element_depth: None,
-        unpacked_struct: None,
     })));
     let items = indexed_items(
         kind,

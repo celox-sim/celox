@@ -379,7 +379,6 @@ impl BoundPattern {
                     packed: Vec::new(),
                     signed: false,
                     signed_element_depth: None,
-                    unpacked_struct: None,
                     ..shape.clone_shape()
                 });
                 width

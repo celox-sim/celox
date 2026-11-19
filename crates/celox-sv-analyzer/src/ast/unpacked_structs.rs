@@ -996,6 +996,44 @@ mod shape_struct_tests {
     }
 
     #[test]
+    fn declarations_of_other_structures_or_enumerations_are_other_declarations() {
+        // Two structure or enumeration declarations of the same members are
+        // types of their own (IEEE 1800-2023 6.22.1), so a shape that keeps
+        // the other one is another declaration, which signature publication
+        // must publish, though the shapes are alike.
+        let mut ty = Type::new(TypeKind::Bit);
+        ty.packed_ranges.push(PackedRange::new(
+            ConstExpr::Literal("0".into()),
+            ConstExpr::Literal("0".into()),
+        ));
+        let bits = procedural::dimensions_from_type(&ty).clone_shape();
+        let structure = |owner: &str| {
+            let mut shape = VariableDimensions::new(bits.clone());
+            shape.keep_structure(Some(Arc::new(UnpackedStruct {
+                owner: owner.into(),
+                ..(*one_bit(None)).clone()
+            })));
+            shape
+        };
+        assert!(structure("S").same_declaration(&structure("S")));
+        assert!(!structure("S").same_declaration(&structure("T")));
+        let enumeration = |name: &str| {
+            VariableDimensions::new(bits.clone()).with_enumeration(
+                semantic_types::EnumBinding::new(semantic_types::EnumDeclaration {
+                    name: Some(name.into()),
+                    named: true,
+                    scope: None,
+                    typename: None,
+                    domain: None,
+                    dims: 1,
+                }),
+            )
+        };
+        assert!(enumeration("e_t").same_declaration(&enumeration("e_t")));
+        assert!(!enumeration("e_t").same_declaration(&enumeration("f_t")));
+    }
+
+    #[test]
     fn shapes_of_a_structure_are_not_those_of_its_bits() {
         // A shape that keeps an unpacked structure type (IEEE 1800-2023 7.2)
         // is not of a bit vector of its width (6.22.2): the closed-shape
