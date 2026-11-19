@@ -1135,7 +1135,11 @@ fn finish_specialization(
                 // also in a typedef no use binds (IEEE 1800-2023 6.18).
                 let mut context = PackedDimensions::new(HashMap::default(), &env, &aliases);
                 context.parameter_values = parameters.literals.clone().into();
-                context.constant_types = Arc::new(parameters.constant_types.clone());
+                context.constant_types = parameters
+                    .constant_types
+                    .iter()
+                    .map(|(name, r#type)| (name.clone(), r#type.clone()))
+                    .collect();
                 context.type_declarations = Some(declarations.clone());
                 let bound =
                     match type_binding::binding::bind_in(target, native, tree, session, &context) {
@@ -2352,7 +2356,7 @@ fn extend_body_constant_types<'a>(
         dimensions.remove(name);
     }
     extend_constant_types(
-        Arc::make_mut(&mut dimensions.constant_types),
+        &mut dimensions.constant_types,
         env,
         aliases.iter().copied(),
         bindings,
@@ -2363,19 +2367,19 @@ fn extend_body_constant_types<'a>(
 /// Apply only the declarations of a class to a visible constant-type map.
 /// Hiding a parameter without a supported type must also hide an enclosing one.
 fn extend_constant_types<'a>(
-    target: &mut HashMap<String, semantic_types::ConstantType>,
+    target: &mut impl ConstantTypeTable,
     env: &HashMap<String, Option<i128>>,
     aliases: impl Iterator<Item = &'a str>,
     bindings: &HashMap<String, semantic_types::ConstantType>,
     nonconstant_members: &'a HashSet<String>,
 ) {
     for name in aliases.chain(nonconstant_members.iter().map(String::as_str)) {
-        target.remove(name);
+        target.hide_type(name);
     }
     let prefix = crate::ast::parameters::unbounded_parameter_marker("");
     for key in env.keys() {
         if let Some(name) = key.strip_prefix(&prefix) {
-            target.remove(name);
+            target.hide_type(name);
         }
     }
     target.extend(bindings.iter().map(|(name, ty)| (name.clone(), ty.clone())));

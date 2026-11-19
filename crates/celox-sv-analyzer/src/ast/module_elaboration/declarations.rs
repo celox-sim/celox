@@ -272,7 +272,7 @@ impl ScopeElaboration<'_> {
     /// The declaration types of the constants the scope sees: the enum
     /// constants and parameters of the packages it uses and its own, as far
     /// as they are known; a parameter has no binding until its type is.
-    pub(super) fn constant_types(&self) -> Arc<HashMap<String, semantic_types::ConstantType>> {
+    pub(super) fn constant_types(&self) -> ConstantTypes {
         let mut bindings = self.imported.constant_types.clone();
         bindings.extend(self.enum_constants.declarations.clone());
         for parameter in self.imported.parameters.iter().chain(&self.parameters) {
@@ -281,7 +281,7 @@ impl ScopeElaboration<'_> {
                 bindings.insert(parameter.name().into(), ty.clone());
             }
         }
-        Arc::new(bindings)
+        bindings.into_iter().collect()
     }
 
     /// The argument names, shapes and directions of the subroutines the scope may
