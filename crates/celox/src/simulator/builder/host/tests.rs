@@ -998,8 +998,11 @@ fn discarded_stale_bits_keep_settles_deferred() {
                 assign frame = frame_q;
             }
         "#;
+    // Concat folding would take the selected bits from the stored
+    // concatenation, so that nothing stale is loaded.
     let (program, _, _, _, _) = crate::Simulation::builder(source, "Top")
         .four_state(false)
+        .disable_pass(crate::SirPass::ConcatFolding)
         .into_laid_out_program(crate::MemoryLayoutMode::Packed, false, false)
         .unwrap();
     assert_eq!(program.sir.eval_comb_stateful, Some(Vec::new()));
