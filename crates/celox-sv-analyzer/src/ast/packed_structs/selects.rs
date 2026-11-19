@@ -215,7 +215,6 @@ fn member_dimensions(name: &str, r#type: &Type, dimensions: &PackedDimensions) -
             is_2state: matches!(r#type.kind, TypeKind::Bit | TypeKind::Chandle),
             members: r#type.members.clone(),
             signed_element_depth: r#type.signed_element_depth,
-            unpacked_struct: None,
         }),
     );
     result

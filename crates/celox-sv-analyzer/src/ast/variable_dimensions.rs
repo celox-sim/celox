@@ -173,16 +173,7 @@ impl VariableDimensions {
     /// The declaration of the unpacked structure type the variable is, or
     /// whose elements it has, as the variable keeps it.
     pub(super) fn structure_declaration(&self) -> Option<&Arc<unpacked_structs::UnpackedStruct>> {
-        let kept = self.structure.declaration();
-        debug_assert_eq!(
-            kept.map(|aggregate| aggregate.identity()),
-            self.shape
-                .unpacked_struct
-                .as_ref()
-                .map(|aggregate| aggregate.identity()),
-            "the structure a shape keeps is not that of its field: {self:?}"
-        );
-        kept
+        self.structure.declaration()
     }
 
     /// What declares the enumerated type the variable is, or whose
@@ -362,9 +353,11 @@ impl VariableDimensions {
     }
 
     /// Signature publication must observe a newly resolved type even when
-    /// the symbolic dimension expressions themselves did not change.
+    /// the symbolic dimension expressions themselves did not change, and
+    /// another element, enumerated or structure type of the same shape
+    /// (see the `PartialEq` of this type).
     pub(super) fn same_declaration(&self, other: &Self) -> bool {
-        if self.shape != other.shape {
+        if self != other {
             return false;
         }
         match (self.binding.as_ref(), other.binding.as_ref()) {
@@ -413,6 +406,7 @@ impl PartialEq for VariableDimensions {
                     .as_ref()
                     .and_then(|element| element.identity())
             && self.enumeration.declaration() == other.enumeration.declaration()
+            && self.structure.identity() == other.structure.identity()
     }
 }
 impl Eq for VariableDimensions {}
@@ -450,9 +444,6 @@ pub(super) struct VariableShape {
     pub(super) members: Vec<packed_structs::PackedMember>,
     /// See [`Type::signed_element_depth`].
     pub(super) signed_element_depth: Option<usize>,
-    /// A variable of unpacked structure type: the names of its members
-    /// are variables (see [`unpacked_structs`]).
-    pub(super) unpacked_struct: Option<Arc<unpacked_structs::UnpackedStruct>>,
     /// The declared type, for `$typename`.
     pub(super) declared: type_names::Declared,
     /// A `chandle` variable (see [`Type::chandle`]).
@@ -467,7 +458,6 @@ impl VariableShape {
         // class specialization shares with the other specializations.
         type_names::Declared::of_shape(self).is_none_or(|ty| ty.enumeration().is_none())
             && self.container.is_none()
-            && self.unpacked_struct.is_none()
             // The width of a dimension is computed from its bounds.
             && self
                 .packed

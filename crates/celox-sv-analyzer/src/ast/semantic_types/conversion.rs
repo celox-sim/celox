@@ -130,7 +130,7 @@ fn convert(
         bound_element: ty.element.get(table),
         bound_enumeration: ty.enumeration.declaration(),
         container: ty.container.as_deref(),
-        unpacked_struct: kept_structure(ty.structure.declaration(), ty.unpacked_struct.as_ref()),
+        unpacked_struct: ty.structure.declaration(),
         kind: ty.kind,
         members: &ty.members,
         declaration: ty.declaration_name(),
@@ -183,10 +183,7 @@ pub(in crate::ast) fn of_shape(
             .map(|element| table.without_keyword(element)),
         bound_enumeration: shape.enumeration_declaration(),
         container: shape.container.as_deref(),
-        unpacked_struct: kept_structure(
-            shape.structure_declaration(),
-            shape.unpacked_struct.as_ref(),
-        ),
+        unpacked_struct: shape.structure_declaration(),
         kind,
         members: &shape.members,
         declaration: declared.and_then(Type::declaration_name),
@@ -208,24 +205,6 @@ pub(in crate::ast) fn of_shape(
         .iter()
         .map(|dimension| (&dimension.left, &dimension.right));
     parts.intern(table, functions, env, unpacked)
-}
-
-/// The declaration of the unpacked structure type (IEEE 1800-2023 7.2) a
-/// type is, or whose elements it has: the one it keeps, which debug builds
-/// check against the field, or else the field.
-fn kept_structure<'a>(
-    kept: Option<&'a Arc<UnpackedStruct>>,
-    field: Option<&'a Arc<UnpackedStruct>>,
-) -> Option<&'a Arc<UnpackedStruct>> {
-    let Some(kept) = kept else {
-        return field;
-    };
-    debug_assert_eq!(
-        Some(kept.identity()),
-        field.map(|aggregate| aggregate.identity()),
-        "the structure a type keeps is not that of its field"
-    );
-    Some(kept)
 }
 
 /// What a type is made of, from a [`Type`] or a [`VariableDimensions`].

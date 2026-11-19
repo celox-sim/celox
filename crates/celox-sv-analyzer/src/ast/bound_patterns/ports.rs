@@ -363,7 +363,6 @@ impl VariableDimensions {
             .map(|dim| UnpackedRange::new(dim.left.clone(), dim.right.clone()))
             .collect();
         ty.members = self.members.clone();
-        ty.unpacked_struct = self.unpacked_struct.clone();
         // Rebuilding the shape must retain the declaration used by native
         // array compatibility checks for structure elements.
         if self.structure_declaration().is_some()
