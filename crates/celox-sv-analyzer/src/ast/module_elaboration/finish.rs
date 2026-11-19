@@ -24,7 +24,7 @@ impl ScopeElaboration<'_> {
             }
         }
         if self.is_package || self.export_symbols {
-            Arc::make_mut(&mut self.packed_dimensions.constant_types).extend(
+            self.packed_dimensions.constant_types.extend(
                 classes::specializations::export_constant_types(syntax_tree, session),
             );
         }
@@ -74,7 +74,12 @@ impl ScopeElaboration<'_> {
             // or export makes visible by name.
             type_declarations: types::declared_type_names(syntax_tree).unwrap_or_default(),
             enum_constants: self.enum_constants.clone(),
-            constant_types: (*self.packed_dimensions.constant_types).clone(),
+            constant_types: self
+                .packed_dimensions
+                .constant_types
+                .iter()
+                .map(|(name, r#type)| (name.clone(), r#type.clone()))
+                .collect(),
             functions: self.functions.clone(),
             function_return_types: (*self.packed_dimensions.function_return_types).clone(),
             constant_functions: syntax_tree.functions.clone(),

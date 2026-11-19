@@ -178,6 +178,7 @@ use parameters::{
 use scoped_map::{ScopedMap, Signedness};
 use selects::{add_expr, product_expr};
 pub(crate) use shared_map::{ConstEnv, TypeAliases};
+use shared_map::{ConstantTypeTable, ConstantTypes};
 use shared_map::{SharedAliases, SharedEnv, SharedMap, ToShared};
 use statements::{
     assignment_op_expr, coerce_procedural_assignment_rhs, expr_from_lvalue, lvalue_expr_type,

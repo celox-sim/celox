@@ -56,7 +56,7 @@ pub(super) struct PackedDimensions {
     pub(super) last_indices: Arc<HashMap<celox_sv_syntax::ExprId, Expr>>,
     /// The frozen declaration types of visible enumerators and scalar
     /// parameters, independent of their numeric values.
-    pub(super) constant_types: Arc<HashMap<String, semantic_types::ConstantType>>,
+    pub(super) constant_types: ConstantTypes,
     /// Inside a class specialization, the tables of the scope around the
     /// class, before the specialization's parameters were added.
     pub(super) class_base: Option<ClassBase>,
@@ -84,7 +84,7 @@ pub(super) struct ClassTables {
     pub(super) const_env: SharedEnv,
     pub(super) type_aliases: SharedAliases,
     pub(super) parameter_values: SharedMap<Expr>,
-    pub(super) constant_types: Arc<HashMap<String, semantic_types::ConstantType>>,
+    pub(super) constant_types: ConstantTypes,
 }
 
 impl PartialEq for ClassBase {
@@ -158,7 +158,7 @@ impl PackedDimensions {
             locator_iterators: Arc::default(),
             effect_values: Arc::default(),
             last_indices: Arc::default(),
-            constant_types: Arc::default(),
+            constant_types: Default::default(),
             class_base: None,
             class_static_members: Arc::default(),
             declared_values: false,

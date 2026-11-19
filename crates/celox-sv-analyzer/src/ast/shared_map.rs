@@ -16,6 +16,44 @@ pub(crate) type ConstEnv =
 pub(crate) type TypeAliases =
     imbl::GenericHashMap<String, Type, fxhash::FxBuildHasher, imbl::shared_ptr::DefaultSharedPtr>;
 
+/// The types of the constants of a scope, as scopes share and extend them:
+/// persistent as [`ConstEnv`] is, so that a scope which declares a few
+/// constants among those of a large one copies only the paths to them, not
+/// every type of the table.
+pub(in crate::ast) type ConstantTypes = imbl::GenericHashMap<
+    String,
+    semantic_types::ConstantType,
+    fxhash::FxBuildHasher,
+    imbl::shared_ptr::DefaultSharedPtr,
+>;
+
+/// A table of constant types that a scope hides names of and binds names
+/// in: a scope's own persistent [`ConstantTypes`], or a table built whole.
+pub(in crate::ast) trait ConstantTypeTable:
+    Extend<(String, semantic_types::ConstantType)>
+{
+    fn bind_type(&mut self, name: String, r#type: semantic_types::ConstantType);
+    fn hide_type(&mut self, name: &str);
+}
+
+impl ConstantTypeTable for HashMap<String, semantic_types::ConstantType> {
+    fn bind_type(&mut self, name: String, r#type: semantic_types::ConstantType) {
+        self.insert(name, r#type);
+    }
+    fn hide_type(&mut self, name: &str) {
+        self.remove(name);
+    }
+}
+
+impl ConstantTypeTable for ConstantTypes {
+    fn bind_type(&mut self, name: String, r#type: semantic_types::ConstantType) {
+        self.insert(name, r#type);
+    }
+    fn hide_type(&mut self, name: &str) {
+        self.remove(name);
+    }
+}
+
 /// The entries of a [`SharedMap`].
 pub(super) trait Entries<V>:
     Clone + Default + FromIterator<(String, V)> + IntoIterator<Item = (String, V)>

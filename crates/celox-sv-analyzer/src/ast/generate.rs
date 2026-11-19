@@ -321,13 +321,19 @@ impl Item {
         let mut local = dimensions.clone();
         local.const_env = self.env.clone();
         if !self.shadowed.is_empty() || !self.names.is_empty() || !self.constant_types.is_empty() {
-            let mut bindings = self.function_aliases((*dimensions.constant_types).clone());
+            let mut bindings = self.function_aliases(
+                dimensions
+                    .constant_types
+                    .iter()
+                    .map(|(name, r#type)| (name.clone(), r#type.clone()))
+                    .collect::<HashMap<_, _>>(),
+            );
             bindings.extend(
                 self.constant_types
                     .iter()
                     .map(|(n, t)| (n.clone(), t.clone())),
             );
-            local.constant_types = Arc::new(bindings);
+            local.constant_types = bindings.into_iter().collect();
         }
         local.parameter_values =
             if self.shadowed.is_empty() && self.names.is_empty() && self.literals.is_empty() {

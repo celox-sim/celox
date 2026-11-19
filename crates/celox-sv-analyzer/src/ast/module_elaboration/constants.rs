@@ -121,7 +121,7 @@ impl ScopeElaboration<'_> {
         // on other parameters for later specialization.
         let outer = session
             .enum_constant_types
-            .replace(Arc::new(self.enum_constant_types()));
+            .replace(self.enum_constant_types().into_iter().collect());
         let parameters = parameters_from_scope(
             syntax_tree,
             session,
@@ -283,7 +283,7 @@ impl ScopeElaboration<'_> {
                 &self.const_env,
                 self.imported,
             );
-            let constant_types = Arc::new(self.enum_constant_types());
+            let constant_types: ConstantTypes = self.enum_constant_types().into_iter().collect();
             let mut arrays: HashMap<String, Expr> = HashMap::default();
             for process in &self.imported.initial_processes {
                 for statement in &process.body {

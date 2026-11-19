@@ -227,14 +227,14 @@ pub(super) fn element_markers(
 /// constant of the same name of a package (IEEE 1800-2023 26.3); one whose
 /// type is not known has none.
 pub(super) fn hide_constant_types(
-    constant_types: &mut HashMap<String, semantic_types::ConstantType>,
+    constant_types: &mut impl ConstantTypeTable,
     parameters: &[Parameter],
 ) {
     for parameter in parameters {
         match &parameter.semantic_type {
-            Some(r#type) => constant_types.insert(parameter.name().to_string(), r#type.clone()),
-            None => constant_types.remove(parameter.name()),
-        };
+            Some(r#type) => constant_types.bind_type(parameter.name().to_string(), r#type.clone()),
+            None => constant_types.hide_type(parameter.name()),
+        }
     }
 }
 
@@ -820,11 +820,14 @@ pub(super) fn parameters_from_native_with_environment(
                 // 1800-2023 6.19.3), and an earlier parameter of the scope
                 // has its own type, also when a package it uses has a
                 // constant of its name (26.3).
-                let mut constant_types = session
-                    .enum_constant_types
-                    .clone()
-                    .unwrap_or_else(|| Arc::new(imported.constant_types.clone()));
-                hide_constant_types(Arc::make_mut(&mut constant_types), parameters);
+                let mut constant_types = session.enum_constant_types.clone().unwrap_or_else(|| {
+                    imported
+                        .constant_types
+                        .iter()
+                        .map(|(name, r#type)| (name.clone(), r#type.clone()))
+                        .collect()
+                });
+                hide_constant_types(&mut constant_types, parameters);
                 context.constant_types = constant_types;
                 if environment.arrays.is_empty() {
                     for process in &imported.initial_processes {
