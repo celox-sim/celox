@@ -75,10 +75,15 @@ split by CPU model the same way. Every chart uses a zero baseline.
 ## Run locally
 
 ```bash
-# Compile-time benchmarks with CodSpeed
+# CodSpeed benchmarks, as CI runs them. The rtlmeter benchmark runs the
+# cases laid out in CELOX_RTLMETER_LAYOUT (PyYAML; --optional adds
+# BlackParrot) and none without it.
+python3 scripts/run-rtlmeter-bench.py prepare work/rtlmeter
+python3 scripts/run-rtlmeter-bench.py codspeed-layout work/rtlmeter work/rtlmeter-layout
+export CELOX_RTLMETER_LAYOUT=$PWD/work/rtlmeter-layout
 cargo install cargo-codspeed --locked --version 5.0.1
-cargo codspeed build --locked -p celox --bench compilation
-cargo codspeed run -p celox
+cargo codspeed build --locked -p celox --features cranelift --bench compilation --bench scaling --bench rtlmeter
+cargo codspeed run -p celox --bench compilation --bench scaling --bench rtlmeter
 
 # Rust benchmarks
 cargo bench -p celox
@@ -96,16 +101,41 @@ python3 scripts/compare-vcd-verilator.py
 The [VCD benchmark methodology and results](../internals/vcd-performance.md#verilator-comparison)
 cover idle, sparse, and dense recording, with tracing disabled and enabled.
 
-The CodSpeed workflow runs daily on the default branch at 02:17 UTC (11:17 JST)
-and supports manual dispatch on any branch. Pull requests, merge groups, and
-pushes do not run it. Deterministic CPU simulation results are uploaded to
-CodSpeed for comparison with earlier measurements using the repository's CodSpeed
-regression thresholds. On `master` and `develop`, execution failures or a failed
-performance analysis open or update the issue `CodSpeed is failing on <branch>`;
-the next successful execution and analysis close it. Missing or incomplete
-analysis is reported as a failure, rather than treated as healthy. The issue
-includes the run link and, for regressions, the performance comparison and
-benchmark details. The local command only checks that the benchmark suite runs.
+The CodSpeed workflow runs on CodSpeed's ARM64 Macro Runner
+(`codspeed-macro-arm64-graviton-ubuntu-22-04`) with the walltime instrument:
+on every push to `master`, daily at 02:17 UTC (11:17 JST), on manual dispatch,
+and on pull requests labelled `bench` (`bench-blackparrot` also measures
+BlackParrot). Other pull requests and merge groups do not run it, because one
+run takes one to two hours of the runner. Results are compared with earlier
+measurements using the repository's CodSpeed regression thresholds. On
+`master` and `develop`, execution failures or a failed performance analysis
+open or update the issue `CodSpeed is failing on <branch>`; the next successful
+execution and analysis close it. Missing or incomplete analysis is reported as
+a failure, rather than treated as healthy. The issue includes the run link and,
+for regressions, the performance comparison and benchmark details. The local
+command only checks that the benchmark suite runs.
+
+| Benchmark | What it measures | Regression it guards |
+|---|---|---|
+| `compile/*`, `scaling/nested_write/*`, `compile/sorter_tree/*` (`compilation.rs`) | Build time of Veryl designs | Compile-time slowdowns and super-linear passes |
+| `scaling/clock_alias/{compile,sim}/n{16,1024}` (`scaling.rs`) | N flops, each clocked by its own `assign l1clk = clk` while the testbench senses `clk` at negedge (VeeR-EH1 has 1,451 such copies) | Per-event scheduler cost that grows with the number of clock domains |
+| `scaling/gated_clock/{compile,sim}/n{16,1024}` | N flops behind clock gates (`en_ff` captured at negedge, `gclk = clk & en_ff`) | Cost per gated or derived clock |
+| `fallback/<construct>/sim` vs `fallback/baseline/sim` | 64 combinational lanes plus ONE comb `$display`, `assert final`, DPI-C call in `always @*`, `string` array or `final` block | One construct moving the whole design to a slower path: no settle skipping or partitioned settle, one compiled run per slot, the reference walk. Each should stay close to the baseline |
+| `rtlmeter/<case>/compile` (`rtlmeter.rs`) | `celox run` analysis and code generation of VeeR-EL2, VeeR-EH1 and XuanTie-E906 CoreMark (BlackParrot 1x1 with `bench-blackparrot` or nightly) | Compile-time regressions on real designs |
+| `rtlmeter/<case>/cycle` | Execution time of a fixed `+max_cycles` window divided by its cycles (native, O2, two-state, one thread; includes the testbench start-up such as program loading) | Per-cycle regressions on real designs, including a construct that slows the whole design |
+
+Simulation benchmarks (`sim`) report the time of 1,000 clock cycles. The
+RTLMeter cases come from `benchmarks/rtlmeter/codspeed_manifest.json` (pinned
+RTLMeter revision, windows and rounds); every run must reach its window
+without a testbench failure, or the benchmark fails.
+A run whose resident memory passes `CELOX_RTLMETER_MEMORY_LIMIT_MIB` (20 GiB
+in CI; VeeR-EH1 peaks at about 7 GB) or whose time passes
+`CELOX_RTLMETER_TIMEOUT_SECS` is killed and fails its benchmark, and each run
+prints its start and peak memory. The workflow runs without CodSpeed's
+walltime profiler: it sampled every benchmarked process, the celox commands
+included, with 8 KiB stack copies for tens of minutes, and the runner (32 GB,
+16 Cortex-A72 cores) lost its connection. The build and the run print memory
+and disk use every minute (`scripts/with-resource-log.sh`).
 
 Local measurements are most useful for comparing two revisions on the same
 machine. CI history is better for long-term trends than for small one-off deltas.

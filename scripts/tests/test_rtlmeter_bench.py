@@ -185,6 +185,90 @@ configurations:
         self.assertEqual(steady_manifest['cases']['e902']['payload'], 'CoreMark 1.0')
         self.assertEqual(steady_manifest['cases']['e906']['payload'], 'CoreMark 1.0')
 
+    def test_codspeed_manifest_pins_the_revision_and_windows(self):
+        import json
+        manifest = json.loads(bench.CODSPEED_MANIFEST_PATH.read_text())
+        self.assertEqual(manifest['revision'], bench.MANIFEST['revision'])
+        self.assertEqual(manifest['repository'], bench.MANIFEST['repository'])
+        self.assertEqual(set(manifest['cases']),
+                         {'veer-el2-cmark', 'veer-eh1-cmark', 'e906-cmark', 'blackparrot-1x1-cmark'})
+        for name, case in manifest['cases'].items():
+            with self.subTest(case=name):
+                self.assertEqual(case['test'], 'cmark')
+                self.assertGreater(case['window'], 0)
+                self.assertGreaterEqual(case['rounds'], 2)
+        self.assertEqual([n for n, c in manifest['cases'].items() if c.get('optional')], ['blackparrot-1x1-cmark'])
+
+    def test_codspeed_layout_merges_configuration_and_execute_levels(self):
+        import json
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            design = root / 'designs/Core'
+            for path in ['src/tb.sv', 'src/default/defines.vh', 'src/other/defines.vh',
+                         'src/inc/pkg.vh', 'tests/cmark/prog.mem']:
+                (design / path).parent.mkdir(parents=True, exist_ok=True)
+                (design / path).write_text('test fixture')
+            (root / 'rtl').mkdir()
+            (root / 'rtl/__rtlmeter_utils.sv').write_text('test fixture')
+            (design / 'descriptor.yaml').write_text("""
+compile:
+  verilogSourceFiles: [src/tb.sv]
+  verilogIncludeFiles: [src/inc/pkg.vh]
+  verilogDefines: {A: 1}
+  topModule: tb
+  mainClock: tb.clk
+  verilatorArgs: [--autoflush, -Gdepth_p=4, -Wno-WIDTH]
+execute:
+  common:
+    args: [+init_mem=prog.mem]
+  tests:
+    hello: {}
+configurations:
+  default:
+    compile:
+      verilogIncludeFiles: [src/default/defines.vh]
+  one:
+    compile:
+      verilogIncludeFiles: [src/other/defines.vh]
+      verilogDefines: {CFG: one}
+    execute:
+      tests:
+        cmark:
+          args: [+iterations=8]
+          files: [tests/cmark/prog.mem]
+""")
+            manifest = {'revision': 'pinned', 'cases': {
+                'core': {'design': 'Core', 'configuration': 'one', 'test': 'cmark', 'window': 500, 'rounds': 2,
+                         'diagnostics': ['inferred_latch=warn']},
+                'missing': {'design': 'Core', 'test': 'dhry', 'window': 1, 'rounds': 1},
+            }}
+            output = root / 'layout'
+            with patch.object(bench, 'verify_source'):
+                bench.codspeed_layout(root, output, manifest, ['core'])
+                with self.assertRaisesRegex(ValueError, 'no test dhry'):
+                    bench.codspeed_layout(root, root / 'other', manifest, ['missing'])
+                manifest['cases']['once'] = {**manifest['cases']['core'], 'rounds': 1}
+                with self.assertRaisesRegex(ValueError, 'at least 2 rounds'):
+                    bench.codspeed_layout(root, root / 'third', manifest, ['once'])
+            case = json.loads((output / 'core/case.json').read_text())
+            self.assertEqual((case['window'], case['rounds'], case['rtlmeterRevision']), (500, 2, 'pinned'))
+            args = case['args']
+            self.assertEqual(args[:2], ['run', '-f'])
+            for flag in ['--backend', 'native', '--two-state', '--threads', '1', 'O2', '--report', '-Gdepth_p=4',
+                         '-DA=1', '-DCFG=one', '-D__RTLMETER_MAIN_CLOCK=tb.clk', 'inferred_latch=warn']:
+                self.assertIn(flag, args)
+            self.assertNotIn('-Wno-WIDTH', args)
+            self.assertEqual(args[-3:], ['+init_mem=prog.mem', '+iterations=8', '+max_cycles=500'])
+            includes = [arg for arg in args if arg.startswith('-I')]
+            self.assertEqual(includes[0], f'-I{output / "core/include"}')
+            # The configuration's header, not the default one, under its plain name.
+            self.assertEqual((output / 'core/include/defines.vh').resolve(), design / 'src/other/defines.vh')
+            self.assertTrue((output / 'core/include/pkg.vh').is_symlink())
+            self.assertEqual((output / 'core/run/prog.mem').read_text(), 'test fixture')
+            sources = [json.loads(line) for line in (output / 'core/sources.f').read_text().splitlines()]
+            self.assertEqual(sources, [str(design / 'src/tb.sv'), str(root / 'rtl/__rtlmeter_utils.sv')])
+
     def test_steady_configuration_includes_verbose_and_max_time_for_xezim(self):
         self.assertIn('--verbose', bench.STEADY_CONFIGURATION['xezim'])
         self.assertIn('--max-time 60s', bench.STEADY_CONFIGURATION['xezim'])

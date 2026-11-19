@@ -163,6 +163,16 @@ bench = false
 name = "tiered"
 harness = false
 
+[[bench]]
+name = "scaling"
+harness = false
+
+# Needs the RTLMeter layout of `scripts/run-rtlmeter-bench.py codspeed-layout`.
+[[bench]]
+name = "rtlmeter"
+harness = false
+bench = false
+
 [[example]]
 name = "sv_tests"
 path = "examples/sv_tests.rs"
