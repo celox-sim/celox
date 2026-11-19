@@ -78,7 +78,7 @@ fn comb_processes_from_item(
                 continuous_assignments(assign, syntax_tree, session, packed_dimensions)?
             {
                 process.condition = condition.clone();
-                process.drive_strength = assign.strength.is_some();
+                process.drive_strength = drive_strength(assign.strength.as_ref())?;
                 processes.push(substitute_process_constants_with_parameter_literals(
                     syntax_tree,
                     session,
@@ -92,7 +92,7 @@ fn comb_processes_from_item(
             for mut process in logic_gate_processes(gate, syntax_tree, session, packed_dimensions)?
             {
                 process.condition = condition.clone();
-                process.drive_strength = gate.strength.is_some();
+                process.drive_strength = drive_strength(gate.strength.as_ref())?;
                 processes.push(substitute_process_constants_with_parameter_literals(
                     syntax_tree,
                     session,
@@ -151,7 +151,11 @@ fn comb_processes_from_item(
                     vec![assignment],
                 );
                 process.delay = delay;
-                process.drive_strength = declaration.strength.is_some();
+                // A charge strength belongs to a `trireg`, which is rejected.
+                process.drive_strength = drive_strength(match &declaration.strength {
+                    Some(celox_sv_syntax::NetStrength::Drive(strength)) => Some(strength),
+                    _ => None,
+                })?;
                 processes.push(process);
             }
             if delay.is_some_and(|ticks| ticks != 0) {
@@ -188,6 +192,46 @@ fn comb_processes_from_item(
         _ => {}
     }
     Ok(())
+}
+
+/// The strengths a drive strength states for 0 and 1 (IEEE 1800-2023
+/// 28.11, Table 28-7). One keyword names the strength of 0 and the other
+/// that of 1, and they are not both high impedance (A.2.2.2).
+fn drive_strength(
+    syntax: Option<&celox_sv_syntax::DriveStrength>,
+) -> Converted<Option<crate::ir::DriveStrength>> {
+    let Some(syntax) = syntax else {
+        return Ok(None);
+    };
+    let level = |keyword: &str| {
+        let (name, side) = keyword.split_at(keyword.len().saturating_sub(1));
+        let level = match name {
+            "supply" => 7,
+            "strong" => 6,
+            "pull" => 5,
+            "weak" => 3,
+            "highz" => 0,
+            _ => return None,
+        };
+        Some((level, side == "1"))
+    };
+    let invalid = || {
+        AnalyzerError::Parse(format!(
+            "drive strength ({}, {}) needs one strength for 0 and one for 1, not both highz (IEEE 1800-2023 28.11)",
+            syntax.first, syntax.second
+        ))
+    };
+    let (Some(first), Some(second)) = (level(&syntax.first), level(&syntax.second)) else {
+        return Err(invalid());
+    };
+    let (zero, one) = match (first, second) {
+        ((zero, false), (one, true)) | ((one, true), (zero, false)) => (zero, one),
+        _ => return Err(invalid()),
+    };
+    if zero == 0 && one == 0 {
+        return Err(invalid());
+    }
+    Ok(Some(crate::ir::DriveStrength { zero, one }))
 }
 
 /// Scalar n-input and n-output truth tables (IEEE 1800-2023 28.4, 28.5): a

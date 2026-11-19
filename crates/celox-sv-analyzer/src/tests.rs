@@ -9364,4 +9364,31 @@ fn block_imports_bind_the_calls_of_folded_branches() {
     assert!(!sensitivity.contains("\"g\""), "{sensitivity}");
 }
 
+/// A drive strength names one strength for 0 and one for 1, not both high
+/// impedance (IEEE 1800-2023 28.11, A.2.2.2).
+#[test]
+fn drive_strengths_name_one_strength_for_each_value() {
+    for strength in [
+        "(highz0, highz1)",
+        "(highz1, highz0)",
+        "(strong0, weak0)",
+        "(pull1, supply1)",
+    ] {
+        let source =
+            format!("module Top(input logic a, output wire y); assign {strength} y = a; endmodule");
+        let error = analyze_source(&source, Path::new("strength.sv")).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("one strength for 0 and one for 1"),
+            "{strength}: {error}"
+        );
+    }
+    for strength in ["(highz0, weak1)", "(supply1, strong0)", "(pull0, highz1)"] {
+        let source =
+            format!("module Top(input logic a, output wire y); assign {strength} y = a; endmodule");
+        analyze_source(&source, Path::new("strength.sv")).unwrap();
+    }
+}
+
 mod constant_expressions;

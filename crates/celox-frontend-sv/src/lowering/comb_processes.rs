@@ -90,7 +90,7 @@ pub(super) fn lower_comb_processes(
     };
     // The nets that several continuous assignments drive on common bits get
     // one definition, the resolution of their drivers.
-    let resolved_nets = if continuous_targets_repeat(module) {
+    let resolved_nets = if continuous_targets_repeat(module) || high_impedance_drivers(module) {
         net_resolution::ResolvedNets::of(
             module,
             &ModuleDrivers::new(module, constants, parameter_types),
@@ -103,7 +103,10 @@ pub(super) fn lower_comb_processes(
         .names()
         .filter_map(|name| Some((pm.id(name)?, name)))
         .collect();
-    let mut net_drivers: HashMap<SourceVarId, Vec<LogicPath<SourceVarId>>> = HashMap::default();
+    let mut net_drivers: HashMap<
+        SourceVarId,
+        Vec<(LogicPath<SourceVarId>, sv::ir::DriveStrength)>,
+    > = HashMap::default();
     let driver_error = |process: &sv::ir::CombProcess| {
         let mut names = HashSet::default();
         procedural::written_names_with_calls(module, process.body(), &mut names);
@@ -227,7 +230,12 @@ pub(super) fn lower_comb_processes(
                 let net = target.filter(|id| resolved_ids.contains_key(id));
                 match net {
                     Some(id) if net_resolution::joinable(&path) => {
-                        net_drivers.entry(id).or_default().push(path)
+                        net_drivers.entry(id).or_default().push((
+                            path,
+                            process
+                                .drive_strength()
+                                .unwrap_or(sv::ir::DriveStrength::STRONG),
+                        ))
                     }
                     Some(_) => return Err(driver_error(process)),
                     None => comb_blocks.push(path),
@@ -424,11 +432,15 @@ pub(super) fn lower_comb_processes(
             continue;
         };
         let resolution = resolved_nets.net(name).expect("a resolved net");
+        let (drivers, strengths): (Vec<_>, Vec<_>) = drivers.into_iter().unzip();
         comb_blocks.extend(net_resolution::join(
             &mut arena,
             id,
             resolution,
             drivers,
+            resolved_nets
+                .by_strength(name)
+                .then_some(strengths.as_slice()),
             four_state,
             !pm.var(id).is_4state,
         )?);

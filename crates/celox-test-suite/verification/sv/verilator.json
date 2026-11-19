@@ -21,6 +21,7 @@
     "verilator/latch.json",
     "verilator/literals.json",
     "verilator/mailboxes.json",
+    "verilator/net_strengths.json",
     "verilator/operators.json",
     "verilator/packed_structs.json",
     "verilator/procedural.json",

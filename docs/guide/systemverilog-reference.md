@@ -58,9 +58,11 @@ constructs without a dedicated issue point to the frontend roadmap,
   drive is a net of the module rather than of the block.
 - Nets with several drivers, other than the continuous assignments of one
   module to a `wire`, `tri`, `wand`, `triand`, `wor` or `trior` net, which
-  are resolved (6.6.1 to 6.6.3). Still rejected are drivers below an
-  instance (so a tri-state bus across modules), assignments with a drive
-  strength, `tri0`, `tri1` and supply nets with several drivers, drivers
+  are resolved (6.6.1 to 6.6.3); on a `wire` or `tri` net, drivers with
+  drive strengths combine by strength (28.12). Still rejected are drivers
+  below an instance (so a tri-state bus across modules), drive strengths on
+  `wand`, `triand`, `wor` and `trior` nets (28.12.4), `tri0`, `tri1`
+  and supply nets with several drivers, drivers
   that call a function with a loop whose condition depends on values, and,
   in two-state simulation, drivers with an X or Z literal, whose high
   impedance a two-state value cannot hold. `inout` ports of the top module
