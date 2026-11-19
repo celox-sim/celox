@@ -1043,21 +1043,10 @@ pub(super) fn best_weighted_fold_family<Addr: Clone + Eq + Hash>(
     best
 }
 
-pub(super) fn jointly_lower_fold_group_families<
-    Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display,
->(
-    indices: &[usize],
-    schedule_index: &FoldGroupScheduleIndex<Addr>,
-    lowerer: &mut crate::SLTToSIRLowerer,
-    builder: &mut SIRBuilder<Addr>,
+pub(super) fn joint_fold_compatibility<Addr: Clone + Eq + Hash + Copy>(
+    candidates: &[ExactFoldGroup<Addr>],
     arena: &SLTNodeArena<Addr>,
-    lower_cache: &mut HashMap<NodeId, RegisterId>,
-    four_state: bool,
-) -> HashSet<NodeId> {
-    // `indices` is one bounded run of exact-fold roots. Direct dependencies
-    // split runs before this point, and the fixed root window bounds the
-    // pairwise compatibility matrix independently of design size.
-    let candidates = discover_exact_fold_groups(indices, schedule_index);
+) -> (Vec<Vec<bool>>, Vec<Vec<bool>>) {
     let mut compatible = vec![vec![false; candidates.len()]; candidates.len()];
     let mut shared_load = vec![vec![false; candidates.len()]; candidates.len()];
     for lhs in 0..candidates.len() {
@@ -1076,6 +1065,25 @@ pub(super) fn jointly_lower_fold_group_families<
             shared_load[rhs][lhs] = shares;
         }
     }
+    (compatible, shared_load)
+}
+
+pub(super) fn jointly_lower_fold_group_families<
+    Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display,
+>(
+    indices: &[usize],
+    schedule_index: &FoldGroupScheduleIndex<Addr>,
+    lowerer: &mut crate::SLTToSIRLowerer,
+    builder: &mut SIRBuilder<Addr>,
+    arena: &SLTNodeArena<Addr>,
+    lower_cache: &mut HashMap<NodeId, RegisterId>,
+    four_state: bool,
+) -> HashSet<NodeId> {
+    // `indices` is one bounded run of exact-fold roots. Direct dependencies
+    // split runs before this point, and the fixed root window bounds the
+    // pairwise compatibility matrix independently of design size.
+    let candidates = discover_exact_fold_groups(indices, schedule_index);
+    let (compatible, shared_load) = joint_fold_compatibility(&candidates, arena);
 
     let mut available = vec![true; candidates.len()];
     let mut rejected = HashSet::<Vec<NodeId>>::default();
@@ -1116,29 +1124,19 @@ pub(super) struct PreparedFoldProjection {
 /// the packed result is retained explicitly until every projection has been
 /// consumed.  Each narrow projection is created immediately before its Store
 /// instead of keeping all projected registers live simultaneously.
-pub(super) fn prepare_atomic_fold_group_results<
+pub(super) fn prepare_fold_group_projections<
     Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display,
 >(
     indices: &[usize],
+    jointly_lowered: &HashSet<NodeId>,
     input: &[LogicPath<Addr>],
-    fold_group_schedule_index: &FoldGroupScheduleIndex<Addr>,
     lowerer: &mut crate::SLTToSIRLowerer,
     builder: &mut SIRBuilder<Addr>,
     arena: &SLTNodeArena<Addr>,
     lower_cache: &mut HashMap<NodeId, RegisterId>,
     dep_memo: &mut HashMap<NodeId, HashSet<Addr>>,
     inverse_dep_memo: &mut HashMap<Addr, HashSet<NodeId>>,
-    four_state: bool,
 ) -> HashMap<usize, PreparedFoldProjection> {
-    let jointly_lowered = jointly_lower_fold_group_families(
-        indices,
-        fold_group_schedule_index,
-        lowerer,
-        builder,
-        arena,
-        lower_cache,
-        four_state,
-    );
     let mut counts = HashMap::default();
     for &idx in indices {
         let path = &input[idx];
@@ -1182,4 +1180,41 @@ pub(super) fn prepare_atomic_fold_group_results<
         );
     }
     prepared
+}
+
+#[cfg(test)]
+pub(super) fn prepare_atomic_fold_group_results<
+    Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display,
+>(
+    indices: &[usize],
+    input: &[LogicPath<Addr>],
+    fold_group_schedule_index: &FoldGroupScheduleIndex<Addr>,
+    lowerer: &mut crate::SLTToSIRLowerer,
+    builder: &mut SIRBuilder<Addr>,
+    arena: &SLTNodeArena<Addr>,
+    lower_cache: &mut HashMap<NodeId, RegisterId>,
+    dep_memo: &mut HashMap<NodeId, HashSet<Addr>>,
+    inverse_dep_memo: &mut HashMap<Addr, HashSet<NodeId>>,
+    four_state: bool,
+) -> HashMap<usize, PreparedFoldProjection> {
+    let jointly_lowered = jointly_lower_fold_group_families(
+        indices,
+        fold_group_schedule_index,
+        lowerer,
+        builder,
+        arena,
+        lower_cache,
+        four_state,
+    );
+    prepare_fold_group_projections(
+        indices,
+        &jointly_lowered,
+        input,
+        lowerer,
+        builder,
+        arena,
+        lower_cache,
+        dep_memo,
+        inverse_dep_memo,
+    )
 }
