@@ -699,3 +699,92 @@ fn fork_deferred_queues_follow_differential_scheduler_mirrors() {
         );
     }
 }
+
+/// Run `observers` (combinational processes that assert and display) in a
+/// design with a chain of combinational logic, with the settle partitioned
+/// at every scheduled work and with one settle pass: the reports must be
+/// those of the single pass, and some partition must sit out a settle.
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+fn check_partitioned_reports(observers: &str) {
+    let mut chain = String::new();
+    for index in 1..=32 {
+        chain.push_str(&format!(
+            "  logic [7:0] c{index};\n  assign c{index} = c{} + 8'd1;\n",
+            index - 1
+        ));
+    }
+    let source = format!(
+        "`timescale 1ns/1ns\nmodule Top;\n  bit clk; logic [7:0] c0 = 0, other = 0, q = 0;\n{chain}  \
+         always #5 clk = ~clk;\n  \
+         always #7 other = other + 8'd1;\n  \
+         always_ff @(posedge clk) begin c0 <= c0 + 8'd3; q <= q + c32; end\n\
+         {observers}\n  \
+         initial begin #200; $finish; end\nendmodule"
+    );
+    let build = |partition| {
+        let builder = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("partitioned_captures.sv"))],
+            "Top",
+        );
+        match partition {
+            Some(partition) => builder.settle_partition(partition).settle_profile(true),
+            None => builder,
+        }
+    };
+    let mut flat = build(None).build_native().unwrap();
+    flat.run_until(300).unwrap();
+    let expected = summary(flat.drain_runtime_events());
+    assert!(expected.len() > 8, "{expected:?}");
+    let mut partitioned = build(Some(celox::SettlePartition::Always))
+        .build_native()
+        .unwrap();
+    partitioned.run_until(300).unwrap();
+    assert_eq!(summary(partitioned.drain_runtime_events()), expected);
+    let profile = partitioned
+        .settle_profile()
+        .expect("built with a settle profile");
+    assert!(profile.runs.len() > 1, "{profile:?}");
+    assert!(
+        profile.runs.iter().any(|&runs| runs < profile.settles),
+        "every partition ran on every settle: {profile:?}"
+    );
+    let mut checked = build(Some(celox::SettlePartition::Always))
+        .settle_check(true)
+        .build_native()
+        .unwrap();
+    checked.run_until(300).unwrap();
+    assert!(checked.is_finished());
+}
+
+/// Combinational deferred assertions and displays do not keep the settle
+/// from being partitioned: the partition that lowers an observer's
+/// captured values also runs its report, and the reports are those of
+/// the single settle.
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+#[test]
+fn comb_assertions_keep_the_settle_partitioned() {
+    check_partitioned_reports(
+        "  always_comb f: assert final (c16[2:0] != 3'd5) else $error(\"final %0d\", c16);\n  \
+         always_comb d: assert #0 (other[1:0] != 2'd3) else $error(\"zero %0d\", other);\n  \
+         always_comb if (c32[0] & other[0]) $display(\"comb %0d %0d\", c32, other);",
+    );
+}
+
+/// A deferred assertion's formal is the value at its statement: the
+/// process writes the variable again after it, and a partition boundary
+/// between the statement and the report must not make the report see that
+/// later write.
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+#[test]
+fn comb_assertion_formals_keep_their_statement_values() {
+    check_partitioned_reports(
+        "  logic [7:0] t;\n  \
+         function automatic logic [7:0] inc(input logic [7:0] v); return v + 8'd1; endfunction\n  \
+         always_comb begin\n    \
+         t = c8 + other;\n    \
+         f: assert final (t[1:0] != 2'd3) else $error(\"final %0d %0d\", t, inc(t));\n    \
+         d: assert #0 (t[1:0] != 2'd1) else $error(\"zero %0d %0d\", t, inc(t));\n    \
+         t = c24;\n  \
+         end",
+    );
+}
