@@ -1,1 +1,6 @@
-The bench run lost its runner while linking four fat-LTO binaries; build with thin LTO, per-commit concurrency groups on master, and fix the documented command order (Codex threads).
+Revision history for #4380:
+
+rev 2 (content) 2026-11-19 05:58 UTC — The bench run lost its runner while linking four fat-LTO binaries; build with thin LTO, per-commit concurrency groups on master, and fix the documented command order (Codex threads).
+rev 1 (initial) 2026-11-19 05:58 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":4380,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"3f67affd2f69bbccdbe0912b511f7df67e3055d3","timestamp_iso":"2026-11-19T05:58:34Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"3f67affd2f69bbccdbe0912b511f7df67e3055d3","new_sha":"dbd57636bd06b912dd4c9951ed061fa0a3df748f","timestamp_iso":"2026-11-19T05:58:34Z","reason":"The bench run lost its runner while linking four fat-LTO binaries; build with thin LTO, per-commit concurrency groups on master, and fix the documented command order (Codex threads).","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/3f67affd2f69bbccdbe0912b511f7df67e3055d3...dbd57636bd06b912dd4c9951ed061fa0a3df748f"}]} -->
