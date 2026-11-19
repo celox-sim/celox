@@ -554,6 +554,38 @@ pub(super) fn makes_opaque_calls(
     }
 }
 
+/// Whether `inst` is a call of a container operation of the heap, whose
+/// code `constants` (the immediates of its unit) give: it changes no state
+/// of the design but its result, a value or the handle of a new container
+/// that the unit stores where the container lives
+/// ([`celox_heap::containers::is_container_value_op`]).
+pub(super) fn container_value_call(
+    inst: &SIRInstruction<RegionedAbsoluteAddr>,
+    constants: &HashMap<RegisterId, u64>,
+) -> bool {
+    matches!(
+        inst,
+        SIRInstruction::ExternCall { func, args, .. }
+            if *func == celox_sir::extern_abi::HEAP_HELPER_ID
+                && args
+                    .first()
+                    .and_then(|code| constants.get(code))
+                    .is_some_and(|&code| celox_heap::containers::is_container_value_op(code))
+    )
+}
+
+/// The immediates of `unit` that fit 64 bits, by register.
+pub(super) fn unit_constants(unit: &Unit) -> HashMap<RegisterId, u64> {
+    instructions(unit)
+        .filter_map(|inst| match inst {
+            SIRInstruction::Imm(register, value) => u64::try_from(&value.payload)
+                .ok()
+                .map(|value| (*register, value)),
+            _ => None,
+        })
+        .collect()
+}
+
 pub(super) fn makes_host_calls(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
     match inst {
         SIRInstruction::ExternCall { func, .. } => {
