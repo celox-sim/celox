@@ -421,21 +421,30 @@ impl Comb<'_, '_> {
                         element_count,
                         access,
                     } => {
-                        let offset_expr = expr_from_select_position(
+                        let element_index = element_index_position(
                             &offset,
+                            element_width,
+                            self.m.constants,
+                            self.m.parameter_types,
+                        );
+                        let offset_expr = expr_from_select_position(
+                            element_index.as_ref().unwrap_or(&offset),
                             self.m.constants,
                             self.m.parameter_types,
                         )
                         .ok_or_else(|| unsupported("dynamic assignment index"))?;
-                        let (bit_offset, offset_sources) =
+                        let (position, offset_sources) =
                             self.eval(store, frames, &offset_expr, None)?;
                         sources.extend(offset_sources);
-                        let bit_offset = coerce_node_width(self.arena, bit_offset, Some(64), false)
+                        let position = coerce_node_width(self.arena, position, Some(64), false)
                             .map_err(slt_error)?;
                         // The element index; an unknown or out-of-range one writes nothing.
                         let stride = self.constant(element_width as u64, 64)?;
-                        let index =
-                            self.alloc(SLTNode::Binary(bit_offset, BinaryOp::DivU, stride))?;
+                        let index = if element_index.is_some() {
+                            position
+                        } else {
+                            self.alloc(SLTNode::Binary(position, BinaryOp::DivU, stride))?
+                        };
                         let (_, valid) =
                             dynamic_array_index_guard_slt(self.arena, index, element_count)
                                 .ok_or_else(|| unsupported("dynamic assignment index"))?;
