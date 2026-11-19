@@ -604,3 +604,58 @@ endmodule
     };
     assert!(error.contains("my_seq"), "{error}");
 }
+
+/// A virtual method called on an object of a class that the scope calling
+/// it does not see, here `hdl_top`, which uses only the package of the base
+/// class, is a fatal error naming the method, rather than a call of no
+/// override (IEEE 1800-2023 8.20).
+#[test]
+fn dispatch_without_an_override_for_the_class_is_fatal() {
+    let source = r#"
+package base_pkg;
+  virtual class obj;
+    string m_name;
+    function new(string name); m_name = name; endfunction
+    virtual function string get_name(); return m_name; endfunction
+  endclass
+  obj made;
+endpackage
+package agent_pkg;
+  import base_pkg::*;
+  class my_seq extends obj;
+    function new(string name = "my_seq"); super.new(name); endfunction
+  endclass
+  function automatic void make(); my_seq q = new("q1"); made = q; endfunction
+endpackage
+module hdl_top;
+  base_pkg::obj keep;
+  initial begin #5 keep = base_pkg::made; $display("name '%s'", keep.get_name()); end
+endmodule
+module hvl_top;
+  initial begin #1 agent_pkg::make(); #50 $finish; end
+endmodule
+"#;
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("tb.sv"))], "hdl_top")
+                .tops(["hdl_top", "hvl_top"])
+                .four_state(four_state)
+                .build()
+                .unwrap_or_else(|error| panic!("{error}"));
+        let _ = sim.run_until(100_000);
+        let events = sim.drain_runtime_events();
+        assert!(
+            events.iter().any(|event| matches!(event,
+                celox::RuntimeEvent::Report(report)
+                    if report.severity == celox::Severity::Fatal
+                        && String::from_utf8_lossy(&report.message).contains("base_pkg::obj::get_name"))),
+            "four_state={four_state}: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, celox::RuntimeEvent::Display { .. })),
+            "four_state={four_state}: {events:?}"
+        );
+    }
+}
