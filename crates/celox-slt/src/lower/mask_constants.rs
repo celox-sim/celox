@@ -150,6 +150,72 @@ impl SLTToSIRLowerer {
             .clone()
     }
 
+    /// Whether projecting `access` of `node` down into its operands, as the
+    /// slice lowering does, reaches within `depth` steps an operation whose
+    /// projected bits are known without it: a computed node that projects
+    /// to a constant, or an AND with an operand projecting to zero. The
+    /// projection then skips that operation's work, which lowering `node`
+    /// whole would do.
+    pub(super) fn projection_prunes<A: Hash + Eq + Clone + std::fmt::Debug>(
+        &mut self,
+        node: NodeId,
+        access: BitAccess,
+        arena: &SLTNodeArena<A>,
+        depth: usize,
+    ) -> bool {
+        if Self::is_nontrivial_node(node, arena)
+            && self.projected_mask_constant(node, access, arena).is_some()
+        {
+            return true;
+        }
+        if let SLTNode::Binary(lhs, BinaryOp::And, rhs) = arena.get(node) {
+            let zero = |this: &mut Self, operand: NodeId| {
+                slt_const_u64(operand, arena) == Some(0)
+                    || this
+                        .projected_mask_constant(operand, access, arena)
+                        .is_some_and(|(value, mask)| value.is_zero() && mask.is_zero())
+            };
+            if zero(self, *lhs) || zero(self, *rhs) {
+                return true;
+            }
+        }
+        if depth == 0 {
+            return false;
+        }
+        let covers = |this: &Self, child: NodeId| access.msb < this.get_width(child, arena);
+        match arena.get(node) {
+            SLTNode::Mux {
+                then_expr,
+                else_expr,
+                ..
+            } if covers(self, *then_expr) && covers(self, *else_expr) => {
+                self.projection_prunes(*then_expr, access, arena, depth - 1)
+                    || self.projection_prunes(*else_expr, access, arena, depth - 1)
+            }
+            SLTNode::Binary(lhs, BinaryOp::And | BinaryOp::Or | BinaryOp::Xor, rhs)
+                if covers(self, *lhs) && covers(self, *rhs) =>
+            {
+                self.projection_prunes(*lhs, access, arena, depth - 1)
+                    || self.projection_prunes(*rhs, access, arena, depth - 1)
+            }
+            SLTNode::Unary(UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::BitNot, inner)
+                if covers(self, *inner) =>
+            {
+                self.projection_prunes(*inner, access, arena, depth - 1)
+            }
+            SLTNode::Slice {
+                expr,
+                access: inner_access,
+            } if access.msb <= inner_access.msb - inner_access.lsb => self.projection_prunes(
+                *expr,
+                BitAccess::new(inner_access.lsb + access.lsb, inner_access.lsb + access.msb),
+                arena,
+                depth - 1,
+            ),
+            _ => false,
+        }
+    }
+
     pub(super) fn projected_mask_constant<A: Hash + Eq + Clone + std::fmt::Debug>(
         &mut self,
         node: NodeId,
