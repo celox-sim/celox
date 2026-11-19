@@ -10,7 +10,7 @@ use crate::ir::{
     ExecutionUnit, LaidOutProgram, RegionedAbsoluteAddr, RegisterId, RegisterType, SIRInstruction,
     SIROffset, STABLE_REGION,
 };
-use celox_design::WORKING_REGION;
+use celox_design::{SPARSE_WORKING_REGION, WORKING_REGION};
 use celox_sir::native_memory::NativeMemoryOp;
 use celox_sir::{BinaryOp, BlockId, SIRTerminator, SIRValue};
 use celox_state_layout::{SettleLayout, SettleObject};
@@ -1002,6 +1002,82 @@ impl<'a> Marker<'a> {
         if width > MAX_COMPARED_WIDTH || self.spans_padded_elements(&address, &offset, width) {
             segment.instructions.push(instruction);
             self.mark_unconditionally(&mut segment.instructions, one, dirty_value, readers);
+            return;
+        }
+        // A commit of a copy-on-write (sparse) memory publishes only the
+        // chunks its writers touched, which its dirty summary words list:
+        // when none did, it changes nothing, and the whole memory need not
+        // be compared around it. The native backend keeps those words.
+        if let SIRInstruction::Commit(source, ..) = &instruction
+            && source.region == SPARSE_WORKING_REGION
+            && self.wide
+            && let Some(sparse) = self.layout.sparse_layouts.get(&address.absolute_addr())
+            && sparse.summary_word_count > 0
+        {
+            let mut written = None;
+            for word in 0..sparse.summary_word_count {
+                let at = alloc.register(unit, word_type());
+                segment.instructions.push(SIRInstruction::Imm(
+                    at,
+                    SIRValue::new((sparse.summary_words_offset + word * 8) as u64),
+                ));
+                let value = alloc.register(unit, word_type());
+                segment.instructions.push(SIRInstruction::ExternCall {
+                    dst: Some(value),
+                    func: NativeMemoryOp::ReadState.function(),
+                    args: vec![at],
+                });
+                written = Some(match written {
+                    None => value,
+                    Some(before) => {
+                        let both = alloc.register(unit, word_type());
+                        segment.instructions.push(SIRInstruction::Binary(
+                            both,
+                            before,
+                            BinaryOp::Or,
+                            value,
+                        ));
+                        both
+                    }
+                });
+            }
+            let written = written.expect("a summary word");
+            let zero = alloc.register(unit, word_type());
+            segment
+                .instructions
+                .push(SIRInstruction::Imm(zero, SIRValue::new(0u64)));
+            let any = alloc.register(unit, bit_type());
+            segment
+                .instructions
+                .push(SIRInstruction::Binary(any, written, BinaryOp::Ne, zero));
+            let compare = alloc.block();
+            segment.split(unit, alloc, any, compare);
+            segment.instructions.push(instruction.clone());
+            segment.end_block(unit, alloc);
+            let join = segment.current;
+            // Something was written: compare the memory around its commit.
+            let old = alloc.register(unit, RegisterType::Logic { width });
+            let new = alloc.register(unit, RegisterType::Logic { width });
+            let changed = alloc.register(unit, bit_type());
+            let mark = alloc.block();
+            insert_block(
+                unit,
+                compare,
+                vec![
+                    SIRInstruction::Load(old, address, offset.clone(), width),
+                    instruction,
+                    SIRInstruction::Load(new, address, offset, width),
+                    SIRInstruction::Binary(changed, old, BinaryOp::NeCase, new),
+                ],
+                SIRTerminator::Branch {
+                    cond: changed,
+                    true_block: (mark, Vec::new()),
+                    false_block: (join, Vec::new()),
+                },
+            );
+            let mut marks = Vec::new();
+            self.mark_unconditionally(&mut marks, one, dirty_value, readers);
+            insert_block(unit, mark, marks, SIRTerminator::Jump(join, Vec::new()));
             return;
         }
         // Set the readers' flags only when the store changes the state, both
