@@ -93,6 +93,7 @@ impl Ff<'_, '_> {
             args,
             results,
             strings,
+            scope: None,
         });
         self.request_host(HostRequestKind::FileIo, site)
     }

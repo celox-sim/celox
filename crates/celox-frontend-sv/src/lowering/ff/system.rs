@@ -37,6 +37,7 @@ impl Ff<'_, '_> {
                 float_precision: None,
             }],
             strings: Vec::new(),
+            scope: None,
         });
         self.request_host(HostRequestKind::System, site)?;
         Ok(sv::ir::Expr::Ident(name))

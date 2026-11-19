@@ -1045,6 +1045,21 @@ pub struct HostRequestSite<A> {
     pub args: Vec<HostRequestValue<A>>,
     pub results: Vec<HostRequestValue<A>>,
     pub strings: Vec<String>,
+    /// The scope that `%m` names in a `Format` request whose format is read
+    /// at run time (IEEE 1800-2023 21.2.1.5); `None` for every other
+    /// request, which names the instance that runs it.
+    #[serde(default)]
+    pub scope: Option<FormatScope>,
+}
+
+/// The scope that `%m` names in a format read at run time.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FormatScope {
+    /// A scope of a package or the compilation unit: the name itself.
+    Absolute(String),
+    /// A named block, generate block or subroutine under the instance that
+    /// runs the request: its path from the instance.
+    Relative(String),
 }
 
 impl<A: Copy> HostRequestSite<A> {
@@ -1060,6 +1075,7 @@ impl<A: Copy> HostRequestSite<A> {
                 .map(|value| value.map(&mut map))
                 .collect(),
             strings: self.strings.clone(),
+            scope: self.scope.clone(),
         }
     }
 

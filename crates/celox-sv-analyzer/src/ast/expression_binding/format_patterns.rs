@@ -784,7 +784,7 @@ impl Text {
     /// The string that `$sformatf` makes of the template and its values.
     fn format(self) -> Expr {
         strings::call(
-            StringOp::Format { ticks_per_unit: 1 },
+            StringOp::format(1, None),
             std::iter::once(bytes_literal(&self.template))
                 .chain(self.args)
                 .collect(),
@@ -1012,13 +1012,41 @@ pub(in crate::ast) enum ScopeName {
     Relative(String),
 }
 
+impl ScopeName {
+    /// The name of the scope `segment` that this one holds: a named block
+    /// or generate block in it (IEEE 1800-2023 21.2.1.5).
+    pub(in crate::ast) fn nested(outer: Option<&Self>, segment: &str) -> Self {
+        match outer {
+            None => Self::Relative(segment.to_owned()),
+            Some(Self::Relative(path)) => Self::Relative(format!("{path}.{segment}")),
+            Some(Self::Absolute(path)) => Self::Absolute(format!("{path}.{segment}")),
+        }
+    }
+}
+
 /// `template` with each `%m` naming `scope` rather than the calling
 /// instance; unchanged without a scope.
-pub(in crate::ast) fn scoped_template(template: &[u8], scope: Option<&ScopeName>) -> Vec<u8> {
+///
+/// A display task's format is still the text of its literal, whose escapes
+/// are decoded later (`source`): a `\` of an escaped name is escaped
+/// there. A format string is already decoded.
+pub(in crate::ast) fn scoped_template(
+    template: &[u8],
+    scope: Option<&ScopeName>,
+    source: bool,
+) -> Vec<u8> {
     let Some(scope) = scope else {
         return template.to_vec();
     };
-    let literal = |name: &str| name.replace('%', "%%").into_bytes();
+    // A `%` of a name stays itself, and so does a `\` of an escaped one.
+    let literal = |name: &str| {
+        let name = if source {
+            name.replace('\\', "\\\\")
+        } else {
+            name.to_owned()
+        };
+        name.replace('%', "%%").into_bytes()
+    };
     let mut out = Vec::with_capacity(template.len());
     let mut position = 0;
     while position < template.len() {
@@ -1070,12 +1098,14 @@ pub(in crate::ast) fn format(
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
+    let mut literal = false;
     if let Some((&format, values)) = ids.split_first()
         && let ExprKind::Literal(text) = &native.expression(ungroup(format, native)).kind
         && let Some(bytes) = string_literal_bytes(text)
         && let Some((first, rest)) = operands.split_first_mut()
     {
-        let mut template = scoped_template(&bytes, dimensions.scope_name.as_deref());
+        literal = true;
+        let mut template = scoped_template(&bytes, dimensions.scope_name.as_deref(), false);
         if has_pattern(&template) {
             template = rewrite_format(&template, values, rest, tree, session, native, dimensions)?;
         }
@@ -1083,5 +1113,20 @@ pub(in crate::ast) fn format(
             *first = bytes_literal(&template);
         }
     }
-    Ok(strings::call(StringOp::Format { ticks_per_unit }, operands))
+    // A format read at run time names the scope here in its `%m` there.
+    let scope = (!literal)
+        .then_some(dimensions.scope_name.as_deref())
+        .flatten()
+        .map(|scope| match scope {
+            ScopeName::Absolute(name) => {
+                crate::system_functions::FormatScope::Absolute(name.clone())
+            }
+            ScopeName::Relative(path) => {
+                crate::system_functions::FormatScope::Relative(path.clone())
+            }
+        });
+    Ok(strings::call(
+        StringOp::format(ticks_per_unit, scope),
+        operands,
+    ))
 }

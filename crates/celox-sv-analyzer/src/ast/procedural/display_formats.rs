@@ -86,6 +86,7 @@ impl BodyBuilder<'_, '_, '_> {
             let scoped = expression_binding::scoped_template(
                 text.as_bytes(),
                 self.dims.scope_name.as_deref(),
+                true,
             );
             *text = String::from_utf8(scoped).expect("names and formats are UTF-8");
         }
