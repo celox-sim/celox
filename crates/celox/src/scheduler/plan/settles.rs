@@ -46,21 +46,43 @@ impl<'a> PlanBuilder<'a> {
             .eval_comb
             .iter()
             .any(|unit| instructions(unit).any(effect));
+        // Some effects are no work of a settle whose inputs did not change.
         // The captures of combinational processes (`$display` in
         // `always_comb`, deferred assertions) record only for sites enabled
         // in the settle: by the generated observers when what a process
         // reads changed since the last settle, or by a store that changed
-        // its target. With neither, a settle whose inputs did not change
-        // records nothing either (`Generator::emit_settle`).
+        // its target (`Generator::emit_settle`). A guarded process, an
+        // `always @*`, runs only when what it reads changed (IEEE 1800-2023
+        // 9.2.2.2, 9.4.2.2), and with it its records and its calls of
+        // isolated functions: noncontext DPI-C imports, which reach nothing
+        // of the design but their arguments and results (35.5.3). Symbolic
+        // logic, which runs in every settle, records through captures and
+        // calls no DPI-C import. These effects still keep the plan from
+        // running part of a settle or moving it (`effects`): the part would
+        // leave out the records and calls its stores do not need.
         let observed = self.native_observers && !schema.comb_observers.is_empty();
-        let captures_only = observed
-            && sir.eval_comb.iter().flat_map(instructions).all(|inst| {
-                matches!(
-                    inst,
-                    SIRInstruction::CombCaptureEvent { .. }
-                        | SIRInstruction::CombCaptureEnableIfChanged { .. }
-                ) || !effect(inst)
-            });
+        let unchanged_inputs_do_nothing = |inst: &SIRInstruction<RegionedAbsoluteAddr>| match inst {
+            SIRInstruction::CombCaptureEvent { .. }
+            | SIRInstruction::CombCaptureEnableIfChanged { .. } => observed,
+            SIRInstruction::ExternCall { func, .. } => schema
+                .extern_functions
+                .get(*func as usize)
+                .is_some_and(|function| function.isolated),
+            SIRInstruction::RuntimeEvent { site_id, .. } => schema
+                .runtime_event_sites
+                .get(*site_id as usize)
+                .is_some_and(|site| match site.kind {
+                    RuntimeEventKind::Display | RuntimeEventKind::Write => true,
+                    RuntimeEventKind::Report(severity) => severity != celox_design::Severity::Fatal,
+                    RuntimeEventKind::Finish | RuntimeEventKind::Stop => false,
+                }),
+            _ => false,
+        };
+        let skippable = sir
+            .eval_comb
+            .iter()
+            .flat_map(instructions)
+            .all(|inst| unchanged_inputs_do_nothing(inst) || !effect(inst));
         // Dirty tracking compares stable homes by their representative
         // (`shared_storage`), which groups addresses only by an equal start
         // offset: no two homes may overlap from different offsets.
@@ -74,7 +96,7 @@ impl<'a> PlanBuilder<'a> {
         // and a cone settle runs only after precise writes of its sources.
         // Opaque readers only keep settles from waiting for their readers
         // (`deferred_settles`).
-        let settle_reads: Option<HashSet<AbsoluteAddr>> = (!effects || captures_only).then(|| {
+        let settle_reads: Option<HashSet<AbsoluteAddr>> = skippable.then(|| {
             sir.eval_comb
                 .iter()
                 .flat_map(instructions)

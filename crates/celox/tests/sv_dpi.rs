@@ -1565,3 +1565,63 @@ fn c_calls_in_functions_never_run_concurrently() {
         "C calls ran at once"
     );
 }
+
+static ISOLATED_CALLS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+extern "C" fn dpi_counted_twice(value: i64) -> i64 {
+    ISOLATED_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    value * 2
+}
+
+/// A noncontext DPI-C import called in an `always @*` block reaches only its
+/// arguments and its result (IEEE 1800-2023 35.5.3), so the block runs when
+/// what it reads changes (9.4.2.2) and no more often: settles for an
+/// unrelated clock do not call it again, whether the settle runs whole or
+/// by partitions.
+#[test]
+fn combinational_dpi_calls_run_only_when_their_reads_change() {
+    let source = r#"
+        module Top(input logic clk, input longint a, output longint y, output int count);
+            import "DPI-C" function longint dpi_counted_twice(input longint value);
+            always @* y = dpi_counted_twice(a);
+            initial count = 0;
+            always_ff @(posedge clk) count <= count + 1;
+        endmodule
+    "#;
+    for partitioned in [false, true] {
+        let mut sim = unsafe {
+            builder(source).dpi_function("dpi_counted_twice", dpi_counted_twice as *const ())
+        };
+        if partitioned {
+            sim = sim.enable_pass(celox::SirPass::PartitionedSettle);
+        }
+        let mut sim = sim.build_native().unwrap();
+        let (clk, a, y, count) = (
+            sim.event("clk"),
+            sim.signal("a"),
+            sim.signal("y"),
+            sim.signal("count"),
+        );
+        sim.modify(|io| io.set(a, 5u64)).unwrap();
+        sim.tick(clk).unwrap();
+        let settled = ISOLATED_CALLS.load(std::sync::atomic::Ordering::SeqCst);
+        for _ in 0..10 {
+            sim.tick(clk).unwrap();
+        }
+        assert_eq!(sim.get(count), BigUint::from(11u32));
+        assert_eq!(sim.get(y), BigUint::from(10u32));
+        assert_eq!(
+            ISOLATED_CALLS.load(std::sync::atomic::Ordering::SeqCst),
+            settled,
+            "ticks of an unrelated clock call the import again (partitioned={partitioned})"
+        );
+        sim.modify(|io| io.set(a, 6u64)).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(y), BigUint::from(12u32));
+        assert_eq!(
+            ISOLATED_CALLS.load(std::sync::atomic::Ordering::SeqCst),
+            settled + 1,
+            "partitioned={partitioned}"
+        );
+    }
+}

@@ -123,7 +123,8 @@ impl Generator<'_> {
         unit: &Unit,
         time_slots: &[AbsoluteAddr],
     ) {
-        if instructions(unit).any(makes_host_calls) {
+        let functions = &self.program.runtime.runtime_schema.extern_functions;
+        if instructions(unit).any(|inst| makes_opaque_calls(inst, functions)) {
             self.check_waits_at(waits, false);
             return;
         }

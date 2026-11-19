@@ -1032,6 +1032,10 @@ Supported subset; everything else is rejected:
   output is copied when it returns.
 - In two-state simulation, the unknown bits a function writes to a `logic`
   argument read as zero.
+- An `always @*` block that calls an import runs when what it reads changes
+  (9.4.2.2), as any other, and no more often: a C function whose result
+  changes without a change of its SystemVerilog arguments is not called
+  again until one changes.
 - A `context` import is called as any other. Its C code cannot use the scope
   API (`svGetScope`, `svSetScope`, `svGetNameFromScope`, `svGetScopeFromName`,
   user data) or call exported subroutines: Celox does not provide those C

@@ -543,7 +543,8 @@ fn lower_native_dpi(
             "DPI-C import with more than {MAX_DPI_ARGUMENTS} arguments"
         )));
     }
-    Ok(DpiImport::new(name, c_name, pure, return_type, arguments))
+    Ok(DpiImport::new(name, c_name, pure, return_type, arguments)
+        .with_context(declaration.property == Some(DpiProperty::Context)))
 }
 
 fn native_dpi_type(

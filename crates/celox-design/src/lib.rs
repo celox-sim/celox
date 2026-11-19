@@ -255,6 +255,13 @@ pub struct ExternFunction {
     /// The prototype every call of `name` must share (IEEE 1800-2023
     /// 35.5.4).
     pub signature: ExternSignature,
+    /// Whether a call reads and writes no state of the design but its
+    /// arguments and its result: every import of `name` is a noncontext
+    /// DPI-C import, whose C code may not call exported subroutines (IEEE
+    /// 1800-2023 35.5.3) nor reach the design through VPI (H.10). Its
+    /// state of its own, on the C side, is no state of the design.
+    #[serde(default)]
+    pub isolated: bool,
 }
 
 /// The prototype of an [`ExternFunction`].

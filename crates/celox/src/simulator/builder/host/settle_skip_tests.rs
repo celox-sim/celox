@@ -126,3 +126,100 @@ fn captures_keep_unchanged_settles_skipped() {
     assert!(!plan.incremental);
     agrees(OBSERVED, 200, &["count", "other", "q", "w2"]);
 }
+
+#[expect(
+    clippy::disallowed_types,
+    reason = "test-only: the DPI-C functions count their calls, which C cannot pass back"
+)]
+static GUARDED_TWICE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+#[expect(
+    clippy::disallowed_types,
+    reason = "test-only: the DPI-C functions count their calls, which C cannot pass back"
+)]
+static GUARDED_NOTES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+extern "C" fn guarded_twice(value: i64) -> i64 {
+    GUARDED_TWICE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    value * 2
+}
+
+extern "C" fn guarded_note(_value: i64) {
+    GUARDED_NOTES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// An `always @*` block that calls noncontext DPI-C imports, one whose
+/// result nothing else computes and one with no result, and displays. The
+/// block reads only state of the `posedge clk` domain, so the settles of the
+/// negative edges change none of its inputs.
+const GUARDED: &str = r#"`timescale 1ns/1ns
+module Top;
+    import "DPI-C" function longint guarded_twice(input longint value);
+    import "DPI-C" function void guarded_note(input longint value);
+    bit clk = 0;
+    always #5 clk = ~clk;
+    logic [7:0] count = 0, q = 0, held = 0;
+    longint twice;
+    always @* begin
+        twice = guarded_twice(longint'(count >> 1));
+        guarded_note(longint'(q));
+        if (count[1:0] == 2'd3) $display("count %0d %0d", count, twice);
+    end
+    always_ff @(posedge clk) begin
+        count <= count + 8'd1;
+        q <= q + twice[7:0];
+    end
+    always_ff @(negedge clk) held <= held + 8'd1;
+    initial begin #200; $finish; end
+endmodule"#;
+
+fn guarded(source: &str) -> SimulatorBuilder<'_, crate::Simulation> {
+    unsafe {
+        build(source)
+            .dpi_function("guarded_twice", guarded_twice as *const ())
+            .dpi_function("guarded_note", guarded_note as *const ())
+    }
+}
+
+/// The calls and records of a guarded process happen only when what it reads
+/// changed, so the compiled scheduler skips the settles whose inputs did not
+/// change, makes the calls the reference makes, and reports what it does.
+/// Running part of a settle would leave out the void call: the plan does not.
+#[test]
+fn guarded_dpi_calls_and_records_keep_unchanged_settles_skipped() {
+    let mut builder = guarded(GUARDED).emit_triggers();
+    builder.native_file_calls = true;
+    let (program, _, _, _, _) = builder
+        .into_laid_out_program(crate::MemoryLayoutMode::Packed, false, false)
+        .unwrap();
+    let plan = crate::scheduler::plan_for_test(&program).unwrap();
+    assert!(plan.settle_reads.is_some());
+    assert!(plan.lazy.is_none());
+    assert!(!plan.incremental);
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    {
+        use std::sync::atomic::Ordering::SeqCst;
+        let counts = || (GUARDED_TWICE.swap(0, SeqCst), GUARDED_NOTES.swap(0, SeqCst));
+        let mut reference = guarded(GUARDED).build_interpreter().unwrap();
+        reference.run_until(400).unwrap();
+        assert!(reference.is_finished());
+        let expected = counts();
+        let records = reference.drain_runtime_events();
+        let mut simulation = guarded(GUARDED).build_native().unwrap();
+        simulation.run_until(400).unwrap();
+        assert!(simulation.is_finished());
+        let stats = simulation.scheduler_stats();
+        assert!(stats.compiled_slots > 0, "{stats:?}");
+        assert!(
+            stats.kernels.iter().all(|k| *k == KernelSchedule::Compiled),
+            "{stats:?}"
+        );
+        assert_eq!(counts(), expected);
+        assert_eq!(simulation.drain_runtime_events(), records);
+        // One run of the block per change of `count` or `q`, not per settle.
+        assert!(expected.0 <= 2 * 21, "{expected:?}");
+        for name in ["count", "q", "held", "twice"] {
+            let (a, b) = (simulation.signal(name), reference.signal(name));
+            assert_eq!(simulation.get(a), reference.get(b), "{name}");
+        }
+    }
+}
