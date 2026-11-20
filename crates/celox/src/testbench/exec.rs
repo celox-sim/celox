@@ -761,7 +761,7 @@ pub(super) fn exec_one_detailed<B: SimBackend>(
             ret,
         } => {
             use celox_testbench::QueueOp as Q;
-            if let Err(e) = sim.eval_comb() {
+            if let Err(e) = settle_testbench(sim) {
                 return ExecResult::Fail(format!("eval_comb: {e}"));
             }
             let value = value.as_ref().map(|value| {

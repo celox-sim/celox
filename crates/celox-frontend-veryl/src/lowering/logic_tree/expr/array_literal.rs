@@ -9,7 +9,7 @@ pub(in crate::lowering::logic_tree) fn eval_array_literal_expression_effectful(
     expected_width: Option<usize>,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
-    let mut store = ExpressionStore::Effectful(store);
+    let mut store = ExpressionStore::effectful(store);
     eval_array_literal_expression_in_store(module, &mut store, items, expected_width, arena)
 }
 
@@ -91,7 +91,7 @@ pub(crate) fn eval_function_input_assignment_effectful(
     target_width: usize,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
-    let mut store = ExpressionStore::Effectful(store);
+    let mut store = ExpressionStore::effectful(store);
     eval_function_input_assignment_in_store(
         module,
         &mut store,

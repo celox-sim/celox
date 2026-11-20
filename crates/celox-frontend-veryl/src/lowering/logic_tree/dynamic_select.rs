@@ -752,7 +752,7 @@ pub(super) fn eval_dynamic_assign(
 ) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
     let mut all_sources = rhs_sources;
     let select_offset = {
-        let mut expression_store = expr::ExpressionStore::Effectful(&mut store);
+        let mut expression_store = expr::ExpressionStore::effectful(&mut store);
         eval_dynamic_select_offset(
             module,
             &mut expression_store,

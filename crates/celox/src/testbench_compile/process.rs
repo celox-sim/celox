@@ -361,6 +361,7 @@ impl Lower<'_> {
                 ExprOpcode::LoadU64 { location, .. }
                 | ExprOpcode::LoadWide { location, .. }
                 | ExprOpcode::LoadIndexed { location, .. }
+                | ExprOpcode::LoadArraySlice { location, .. }
                 | ExprOpcode::LoadBitSelect { location, .. }
                 | ExprOpcode::LoadString { location, .. } => self
                     .runtime

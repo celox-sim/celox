@@ -1006,7 +1006,7 @@ fn collect_case_pattern_effects(
                 collect_expression_effects(module, store, lo, arena, collector)?;
                 let mut hi_store = store.fork();
                 let ((lo_matches, lo_sources), _) = {
-                    let mut expression_store = expr::ExpressionStore::Effectful(&mut hi_store);
+                    let mut expression_store = expr::ExpressionStore::effectful(&mut hi_store);
                     expr::eval_case_comparison(
                         module,
                         &mut expression_store,

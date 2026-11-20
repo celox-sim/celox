@@ -95,30 +95,6 @@ impl SLTToSIRLowerer {
         let dest = builder.alloc_logic(width);
 
         if !index.is_empty() {
-            // Analyzer-unrolled array accesses retain their index syntax even
-            // when every index expression is a compile-time constant.  Fold
-            // those accesses back to one logical static bit offset here.  In
-            // particular, this lets the native element-strided layout choose
-            // a direct address instead of materializing a fake dynamic index
-            // for every unrolled lane.
-            let static_offset = index.iter().try_fold(access.lsb, |offset, entry| {
-                let (value, mask) = try_const_eval(entry.node, arena)?;
-                if !mask.is_zero() {
-                    return None;
-                }
-                let value = value.to_usize()?;
-                offset.checked_add(value.checked_mul(entry.stride)?)
-            });
-            if let Some(static_offset) = static_offset {
-                builder.emit(SIRInstruction::Load(
-                    dest,
-                    id.clone(),
-                    SIROffset::Static(static_offset),
-                    width,
-                ));
-                return dest;
-            }
-
             let element_width = index.iter().find_map(|entry| match entry.kind {
                 crate::SLTIndexKind::Unpacked { element_width } => Some(element_width),
                 crate::SLTIndexKind::Packed => None,
@@ -146,6 +122,36 @@ impl SLTToSIRLowerer {
                             && entry.stride % *element_width == 0
                     })
             });
+            // Analyzer-unrolled array accesses retain their index syntax even
+            // when every index expression is a compile-time constant.  Fold
+            // those accesses back to one logical static bit offset here.  In
+            // particular, this lets the native element-strided layout choose
+            // a direct address instead of materializing a fake dynamic index
+            // for every unrolled lane.
+            let static_offset = index.iter().try_fold(access.lsb, |offset, entry| {
+                let (value, mask) = try_const_eval(entry.node, arena)?;
+                if !mask.is_zero() {
+                    return None;
+                }
+                let value = value.to_usize()?;
+                offset.checked_add(value.checked_mul(entry.stride)?)
+            });
+            if let Some(static_offset) = static_offset {
+                builder.emit(SIRInstruction::Load(
+                    dest,
+                    id.clone(),
+                    match element_run {
+                        Some(element_width) => SIROffset::PackedElements {
+                            bit_offset: static_offset,
+                            element_width,
+                        },
+                        None => SIROffset::Static(static_offset),
+                    },
+                    width,
+                ));
+                return dest;
+            }
+
             let mut element_dynamic = None;
             let mut packed_dynamic = None;
             let mut logical_dynamic = None;

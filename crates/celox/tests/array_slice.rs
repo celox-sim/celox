@@ -112,6 +112,51 @@ assign col1 = {c1[1], c1[0]};
     }
     }
 
+    fn test_runtime_array_slice_evaluates_each_coordinate_once(sim) {
+        @ignore_on(sv);
+        @setup { let code = r#"
+module Top (
+    start: input logic<2>,
+    chosen: output logic<16>,
+    next_idx: output logic<2>,
+    folded: output logic<16>,
+) {
+    function advance (idx: inout logic<2>) -> logic<2> {
+        let previous: logic<2> = idx;
+        idx = idx + 1;
+        return previous;
+    }
+    var data: logic<8>[2, 4];
+    assign data[0] = '{8'h11, 8'h22, 8'h33, 8'h44};
+    assign data[1] = '{8'h55, 8'h66, 8'h77, 8'h88};
+    always_comb {
+        var idx: logic<2>;
+        var elements: logic<8>[2];
+        idx = start;
+        elements = data[advance(idx)][advance(idx)+:2];
+        chosen = {elements[1], elements[0]};
+        next_idx = idx;
+    }
+    always_comb {
+        var idx: logic<2>;
+        var elements: logic<8>[2];
+        idx = 1;
+        elements = data[0][idx+:2];
+        folded = {elements[1], elements[0]};
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top").four_state(true);
+        let start = sim.signal("start");
+        sim.modify(|io| io.set(start, 0u8)).unwrap();
+        for name in ["chosen", "folded"] {
+            let signal = sim.signal(name);
+            assert_eq!(sim.get_four_state(signal), (0x3322u32.into(), 0u8.into()), "{name}");
+        }
+        let next_idx = sim.signal("next_idx");
+        assert_eq!(sim.get_four_state(next_idx), (2u8.into(), 0u8.into()));
+    }
+
     fn test_runtime_array_slice_wider_than_a_word(sim) {
         // The SystemVerilog frontend does not accept the emitted array slices.
         @ignore_on(sv);
@@ -384,4 +429,40 @@ fn initial_array_slices_keep_the_overlap_in_each_row() {
         #[cfg(feature = "wasm-runtime")]
         check(builder().build_wasm().unwrap(), four_state);
     }
+}
+
+#[test]
+fn compiled_array_slice_read_settles_pending_input_writes() {
+    let source = r#"
+#[test(Top)] module Top {
+    var input_value: logic<8>;
+    var data: logic<8>[4];
+    assign data[0] = 8'h11;
+    assign data[1] = input_value;
+    assign data[2] = 8'h33;
+    assign data[3] = 8'h44;
+    var readback: logic<8>[2];
+    initial {
+        input_value = 8'h22;
+        readback = data[0+:2];
+        $assert(readback[0] == 8'h11);
+        $assert(readback[1] == 8'h22);
+        input_value = 8'h55;
+        readback = data[0+:2];
+        $assert(readback[1] == 8'h55);
+        $finish();
+    }
+}
+"#;
+    fn check<B: celox::SimBackend>(mut sim: Simulator<B>) {
+        let program = celox::testbench::compile_initial_testbench(&sim).unwrap();
+        assert_eq!(
+            celox::testbench::run_compiled_testbench(&mut sim, &program),
+            celox::TestResult::Pass
+        );
+    }
+    let builder = || Simulator::builder(source, "Top");
+    check(builder().build_interpreter().unwrap());
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    check(builder().build_native().unwrap());
 }

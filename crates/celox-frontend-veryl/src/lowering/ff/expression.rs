@@ -98,6 +98,70 @@ impl<'a> FfParser<'a> {
         self.stack.push_back(reg);
     }
 
+    fn parse_runtime_array_slice<A>(
+        &mut self,
+        expanded: crate::bitaccess::RuntimeArraySlice<'_>,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+        context: Option<ValueContext>,
+    ) -> Result<(), ParserError> {
+        for coordinate in expanded.coordinates {
+            self.parse_expression_in_context(
+                coordinate, targets, domain, convert, sources, ir_builder, None,
+            )?;
+            self.slice_coordinates.push(self.stack.pop_back().unwrap());
+        }
+        let Some(missing) = expanded.missing else {
+            return self.parse_expression_in_context(
+                &expanded.value,
+                targets,
+                domain,
+                convert,
+                sources,
+                ir_builder,
+                context,
+            );
+        };
+        self.parse_expression_in_context(
+            &expanded.value,
+            targets,
+            domain,
+            convert,
+            sources,
+            ir_builder,
+            None,
+        )?;
+        let value = self.stack.pop_back().unwrap();
+        self.parse_expression_in_context(
+            &missing, targets, domain, convert, sources, ir_builder, None,
+        )?;
+        let missing = self.stack.pop_back().unwrap();
+
+        // Setting both planes makes the missing bits X and preserves
+        // the exact X/Z encoding of every bit read from the array.
+        let plane_width = expanded.width.next_multiple_of(64);
+        let value = self.cast_reg_width_ext(ir_builder, value, plane_width, false);
+        let missing =
+            self.coerce_register_to_formal(ir_builder, missing, plane_width, false, false, true);
+        let planes = ir_builder.alloc_bit(plane_width * 2, false);
+        ir_builder.emit(SIRInstruction::Unary(planes, UnaryOp::ToPlanes, value));
+        let mask = ir_builder.alloc_bit(plane_width * 2, false);
+        ir_builder.emit(SIRInstruction::Concat(mask, vec![missing, missing]));
+        let filled = ir_builder.alloc_bit(plane_width * 2, false);
+        ir_builder.emit(SIRInstruction::Binary(filled, planes, BinaryOp::Or, mask));
+        let result = ir_builder.alloc_logic(plane_width);
+        ir_builder.emit(SIRInstruction::Unary(result, UnaryOp::FromPlanes, filled));
+        let result = self.cast_reg_width_ext(ir_builder, result, expanded.width, false);
+        let result = context.map_or(result, |context| {
+            self.cast_reg_width_ext(ir_builder, result, context.width, context.signed)
+        });
+        self.stack.push_back(result);
+        Ok(())
+    }
+
     pub(super) fn parse_factor<A>(
         &mut self,
         factor: &Factor,
@@ -108,59 +172,23 @@ impl<'a> FfParser<'a> {
         ir_builder: &mut SIRBuilder<A>,
         context: Option<ValueContext>,
     ) -> Result<(), ParserError> {
-        if let Some(expanded) = crate::bitaccess::expand_runtime_array_slice(self.module, factor)? {
-            let Some(missing) = expanded.missing else {
-                return self.parse_expression_in_context(
-                    &expanded.value,
-                    targets,
-                    domain,
-                    convert,
-                    sources,
-                    ir_builder,
-                    context,
-                );
-            };
-            self.parse_expression_in_context(
-                &expanded.value,
-                targets,
-                domain,
-                convert,
-                sources,
-                ir_builder,
-                None,
-            )?;
-            let value = self.stack.pop_back().unwrap();
-            self.parse_expression_in_context(
-                &missing, targets, domain, convert, sources, ir_builder, None,
-            )?;
-            let missing = self.stack.pop_back().unwrap();
-
-            // Setting both planes makes the missing bits X and preserves
-            // the exact X/Z encoding of every bit read from the array.
-            let plane_width = expanded.width.next_multiple_of(64);
-            let value = self.cast_reg_width_ext(ir_builder, value, plane_width, false);
-            let missing = self.coerce_register_to_formal(
-                ir_builder,
-                missing,
-                plane_width,
-                false,
-                false,
-                true,
-            );
-            let planes = ir_builder.alloc_bit(plane_width * 2, false);
-            ir_builder.emit(SIRInstruction::Unary(planes, UnaryOp::ToPlanes, value));
-            let mask = ir_builder.alloc_bit(plane_width * 2, false);
-            ir_builder.emit(SIRInstruction::Concat(mask, vec![missing, missing]));
-            let filled = ir_builder.alloc_bit(plane_width * 2, false);
-            ir_builder.emit(SIRInstruction::Binary(filled, planes, BinaryOp::Or, mask));
-            let result = ir_builder.alloc_logic(plane_width);
-            ir_builder.emit(SIRInstruction::Unary(result, UnaryOp::FromPlanes, filled));
-            let result = self.cast_reg_width_ext(ir_builder, result, expanded.width, false);
-            let result = context.map_or(result, |context| {
-                self.cast_reg_width_ext(ir_builder, result, context.width, context.signed)
+        if let Some(slot) = crate::bitaccess::runtime_slice_coordinate(factor) {
+            let value = self.slice_coordinates[slot];
+            let value = context.map_or(value, |context| {
+                self.cast_reg_width_ext(ir_builder, value, context.width, context.signed)
             });
-            self.stack.push_back(result);
+            self.stack.push_back(value);
             return Ok(());
+        }
+        let coordinate_base = self.slice_coordinates.len();
+        if let Some(expanded) =
+            crate::bitaccess::expand_runtime_array_slice(self.module, factor, coordinate_base)?
+        {
+            let result = self.parse_runtime_array_slice(
+                expanded, targets, domain, convert, sources, ir_builder, context,
+            );
+            self.slice_coordinates.truncate(coordinate_base);
+            return result;
         }
         let context_width = context.map(|context| context.width);
         match factor {

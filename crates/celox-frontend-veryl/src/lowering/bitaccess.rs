@@ -313,7 +313,8 @@ pub fn reject_runtime_array_slice(index: &VarIndex) -> Result<(), ParserError> {
     Ok(())
 }
 
-pub(crate) struct RuntimeArraySlice {
+pub(crate) struct RuntimeArraySlice<'a> {
+    pub coordinates: Vec<&'a Expression>,
     pub value: Expression,
     pub missing: Option<Expression>,
     pub width: usize,
@@ -326,10 +327,11 @@ pub(crate) struct RuntimeArraySlice {
 /// that run by how far the clamp moved it then leaves exactly the elements
 /// outside the array empty; those read X (0 when two-state) without shifting
 /// their in-range neighbors (IEEE 1800-2023 7.4.6).
-pub(crate) fn expand_runtime_array_slice(
+pub(crate) fn expand_runtime_array_slice<'a>(
     module: &Module,
-    factor: &Factor,
-) -> Result<Option<RuntimeArraySlice>, ParserError> {
+    factor: &'a Factor,
+    coordinate_base: usize,
+) -> Result<Option<RuntimeArraySlice<'a>>, ParserError> {
     let Factor::Variable(var_id, index, select, comptime) = factor else {
         return Ok(None);
     };
@@ -381,6 +383,40 @@ pub(crate) fn expand_runtime_array_slice(
             Some(&token),
         ));
     }
+
+    // Give each runtime coordinate a placeholder for its materialized value.
+    // The lowerers bind them in source order before evaluating any of the
+    // synthesized bounds checks or loads.
+    let mut coordinates = Vec::new();
+    let mut bind_coordinate = |expr: &'a Expression| {
+        if eval_constexpr(expr).is_some() {
+            return expr.clone();
+        }
+        let slot = coordinate_base + coordinates.len();
+        coordinates.push(expr);
+        let width = crate::context_width::get_expr_width(expr).unwrap_or(64);
+        let kind = if expr.comptime().r#type.is_2state() {
+            TypeKind::Bit
+        } else {
+            TypeKind::Logic
+        };
+        let mut r#type = Type::new(kind);
+        r#type.set_concrete_width(Shape::new(vec![Some(width)]));
+        r#type.signed = crate::context_width::expression_signed(expr);
+        Expression::Term(Box::new(Factor::Variable(
+            VarId::SYNTHETIC,
+            VarIndex::default(),
+            VarSelect::default(),
+            Comptime {
+                value: ValueVariant::Numeric(Value::new(slot as u64, 64, false)),
+                r#type,
+                token: expr.token_range(),
+                ..Default::default()
+            },
+        )))
+    };
+    let prefix: Vec<_> = prefix.iter().map(&mut bind_coordinate).collect();
+    let first = &bind_coordinate(first);
 
     let unknown = || Box::new(Comptime::create_unknown(token));
     let literal = |value: u64| Expression::create_value(Value::new(value, 64, false), token);
@@ -603,10 +639,20 @@ pub(crate) fn expand_runtime_array_slice(
     // A concatenation keeps the shifts self-determined at the slice width.
     let value = Expression::Concatenation(vec![(selected, None)], Box::new(comptime.clone()));
     Ok(Some(RuntimeArraySlice {
+        coordinates,
         value,
         missing,
         width,
     }))
+}
+
+/// Resolve a placeholder created for a materialized runtime array coordinate.
+pub(crate) fn runtime_slice_coordinate(factor: &Factor) -> Option<usize> {
+    if let Factor::Variable(VarId::SYNTHETIC, _, _, comptime) = factor {
+        comptime.get_value().ok()?.to_usize()
+    } else {
+        None
+    }
 }
 
 /// Validate and normalize a variable select before any consumer constructs IR.

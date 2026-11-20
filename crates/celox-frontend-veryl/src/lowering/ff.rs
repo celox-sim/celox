@@ -143,6 +143,7 @@ impl<A> Default for FfGroupParseResult<A> {
 pub struct FfParser<'a> {
     module: &'a Module,
     stack: VecDeque<RegisterId>,
+    slice_coordinates: Vec<RegisterId>,
     defined: Definedness,
     dynamic_write_vars: HashSet<VarId>,
     placement: WritePlacement,
@@ -179,6 +180,7 @@ impl<'a> FfParser<'a> {
         Self {
             module,
             stack: VecDeque::new(),
+            slice_coordinates: Vec::new(),
             defined: Definedness {
                 defined_ranges: HashMap::default(),
                 dynamic_defined_vars: HashSet::default(),
