@@ -432,6 +432,7 @@ impl<'p> CheckMachine<'p> {
                 };
                 base.checked_add(*bit_offset)?.checked_add(within)
             }
+            SIROffset::ElementRun { element_width, .. } => dynamic(0)?.checked_mul(*element_width),
             SIROffset::PackedElements { bit_offset, .. } => Some(*bit_offset),
         }
     }

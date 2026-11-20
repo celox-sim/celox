@@ -34,6 +34,7 @@
       (assert_eq write_enable (&& (== r 0) (!= w 0))))))
 
 (case recovered_unrolled_store_forward_selects_older_entry
+  (allow_inferred_latches)
   (source "test.veryl" #"
         module StoreShadow (
             store_idx : input  logic<5>,

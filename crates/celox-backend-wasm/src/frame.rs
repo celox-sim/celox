@@ -40,7 +40,7 @@ pub(super) fn static_bits(offset: &SIROffset) -> Option<usize> {
         | SIROffset::PackedElements {
             bit_offset: bits, ..
         } => Some(*bits),
-        SIROffset::Dynamic(_) | SIROffset::Element { .. } => None,
+        SIROffset::Dynamic(_) | SIROffset::Element { .. } | SIROffset::ElementRun { .. } => None,
     }
 }
 
@@ -360,4 +360,18 @@ pub(super) fn store_slot(
         locals,
         instrs,
     );
+}
+
+#[cfg(test)]
+mod offset_tests {
+    use super::*;
+
+    #[test]
+    fn element_run_offset_is_not_static() {
+        let offset = SIROffset::ElementRun {
+            index: RegisterId(0),
+            element_width: 32,
+        };
+        assert_eq!(static_bits(&offset), None);
+    }
 }

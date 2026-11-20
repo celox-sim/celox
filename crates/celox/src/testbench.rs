@@ -400,11 +400,8 @@ fn sim_set_target<B: SimBackend>(
         return;
     };
 
-    let offset = eval_expr(sim, &selection.offset).to_u64() as usize;
-    let width = selection
-        .width
-        .min(target.signal.width.saturating_sub(offset));
-    if width == 0 {
+    let window = selection.window(&eval_expr(sim, &selection.offset), target.signal.width);
+    if window.width == 0 {
         return;
     }
 
@@ -414,14 +411,11 @@ fn sim_set_target<B: SimBackend>(
         } else {
             sim.get_four_state(target.signal)
         };
-    let selected_mask = width_mask(width) << offset;
-    let clear_mask = width_mask(target.signal.width) ^ &selected_mask;
-    let selected_value = (value.to_biguint() & width_mask(width)) << offset;
     write_testbench_signal(sim, target.signal, |sim| {
         sim.set_four_state(
             target.signal,
-            (root & &clear_mask) | selected_value,
-            root_mask & clear_mask,
+            window.merge(root, value.to_biguint()),
+            window.merge(root_mask, BigUint::default()),
         )
     });
 }
@@ -458,6 +452,39 @@ fn collect_testbench_heap<B: SimBackend>(
         })
         .collect();
     sim.maybe_collect_heap(saved_roots);
+}
+
+fn sim_set_logic_target<B: SimBackend>(
+    sim: &mut crate::Simulator<B>,
+    target: &TestbenchTarget<SignalRef, celox_testbench::CompiledExpr>,
+    value: BigUint,
+    mask: BigUint,
+) {
+    let (value, mask) = if sim.backend.layout().four_state && target.signal.is_4state {
+        (value, mask)
+    } else {
+        // X/Z convert to zero when stored in a two-state destination.
+        (
+            value & (width_mask(target.width) ^ mask),
+            BigUint::default(),
+        )
+    };
+    let Some(selection) = &target.selection else {
+        sim.set_four_state(target.signal, value, mask);
+        return;
+    };
+    let window = selection.window(&eval_expr(sim, &selection.offset), target.signal.width);
+    if window.width == 0 {
+        return;
+    }
+    let (old_value, old_mask) = sim.get_four_state(target.signal);
+    write_testbench_signal(sim, target.signal, |sim| {
+        sim.set_four_state(
+            target.signal,
+            window.merge(old_value, value),
+            window.merge(old_mask, mask),
+        );
+    });
 }
 
 fn execution_random_seed(seed: Option<u64>) -> u64 {
@@ -678,6 +705,7 @@ fn run_testbench_limited<B: SimBackend>(
         scheduler_time: None,
         tick_limit,
         tick_limit_reached: false,
+        queues: HashMap::default(),
         random: RandomTable::new(execution_random_seed(testbench.configured_random_seed())),
         record_passes: false,
     };
@@ -827,6 +855,7 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
         scheduler_time: None,
         tick_limit: None,
         tick_limit_reached: false,
+        queues: HashMap::default(),
         random: RandomTable::new(execution_random_seed(testbench.configured_random_seed())),
         record_passes: true,
     };
@@ -863,6 +892,8 @@ struct DetailedExecContext {
     /// Whether passing assertions are recorded, as the detailed API reports
     /// them.
     record_passes: bool,
+
+    queues: HashMap<String, std::collections::VecDeque<(BigUint, BigUint)>>,
 }
 
 impl DetailedExecContext {

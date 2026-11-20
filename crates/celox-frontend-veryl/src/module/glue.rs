@@ -45,7 +45,7 @@ pub(super) fn collect_parent_output_address_sources(
                     for destination in destinations {
                         for address in destination
                             .index
-                            .0
+                            .indices
                             .iter()
                             .chain(destination.select.0.iter())
                         {
@@ -63,7 +63,7 @@ pub(super) fn collect_parent_output_address_sources(
                 Ok(())
             }
             Factor::Variable(_, index, select, _) => {
-                for address in index.0.iter().chain(select.0.iter()) {
+                for address in index.indices.iter().chain(select.0.iter()) {
                     collect_parent_output_address_sources(module, store, address, arena, out)?;
                 }
                 Ok(())
@@ -104,7 +104,10 @@ pub(super) fn collect_parent_output_address_sources(
                     | SystemFunctionKind::Finish => Ok(()),
                 }
             }
-            Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => Ok(()),
+            Factor::Value(_)
+            | Factor::ResetValue(..)
+            | Factor::Anonymous(_)
+            | Factor::Unknown(_) => Ok(()),
         },
         Expression::Unary(_, inner, _) => {
             collect_parent_output_address_sources(module, store, inner, arena, out)

@@ -39,12 +39,14 @@ pub(super) fn case_target_can_be_recomputed(expression: &Expression) -> bool {
     match expression {
         Expression::Term(factor) => match factor.as_ref() {
             Factor::Variable(_, index, select, _) => index
-                .0
-                .iter()
+                .expressions()
                 .chain(select.0.iter())
                 .chain(select.1.iter().map(|(_, end)| end))
                 .all(case_target_can_be_recomputed),
-            Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => true,
+            Factor::Value(_)
+            | Factor::ResetValue(..)
+            | Factor::Anonymous(_)
+            | Factor::Unknown(_) => true,
             _ => false,
         },
         Expression::Binary(lhs, _, rhs, _) => {
@@ -136,7 +138,7 @@ pub(in crate::lowering::logic_tree) fn eval_case_comparison(
         if context_changes && let Some(snapshot) = &target.comparison_store {
             let ((node, _), boundaries) = eval_expression_in_context(
                 module,
-                &mut ExpressionStore::ReadOnly(snapshot),
+                &mut ExpressionStore::read_only(snapshot),
                 &crate::case::unfold_context_determined_constants(target_expr),
                 arena,
                 target_context,
@@ -205,7 +207,7 @@ pub(super) fn merge_short_circuit_case_condition(
     let mut rhs_store = base_store.fork();
     let ((rhs_node, rhs_sources), rhs_boundaries) = eval_rhs(&mut rhs_store, arena)?;
     let execute_rhs = short_circuit_rhs_guard(arena, lhs_node, is_and)?;
-    *store = super::super::merge_symbolic_versions(
+    *store = super::merge_symbolic_versions(
         module,
         &rhs_store,
         &base_store,
@@ -246,7 +248,7 @@ pub(in crate::lowering::logic_tree) fn eval_case_arm_condition_effectful(
     ) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
         match pattern {
             CasePattern::Eq(value) => {
-                let mut store = ExpressionStore::Effectful(store);
+                let mut store = ExpressionStore::effectful(store);
                 eval_case_comparison(
                     module,
                     &mut store,
@@ -260,7 +262,7 @@ pub(in crate::lowering::logic_tree) fn eval_case_arm_condition_effectful(
             }
             CasePattern::Range { lo, hi, inclusive } => {
                 let lhs = {
-                    let mut expression_store = ExpressionStore::Effectful(store);
+                    let mut expression_store = ExpressionStore::effectful(store);
                     eval_case_comparison(
                         module,
                         &mut expression_store,
@@ -277,7 +279,7 @@ pub(in crate::lowering::logic_tree) fn eval_case_arm_condition_effectful(
                     store,
                     lhs,
                     |rhs_store, arena| {
-                        let mut expression_store = ExpressionStore::Effectful(rhs_store);
+                        let mut expression_store = ExpressionStore::effectful(rhs_store);
                         eval_case_comparison(
                             module,
                             &mut expression_store,

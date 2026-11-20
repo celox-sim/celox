@@ -362,6 +362,10 @@ fn execute_with_inputs(
                             bit_offset: offset, ..
                         } => *offset,
                         SIROffset::Dynamic(offset) => registers[offset] as usize,
+                        SIROffset::ElementRun {
+                            index,
+                            element_width,
+                        } => registers[index] as usize * element_width,
                         SIROffset::Element {
                             index,
                             element_width,

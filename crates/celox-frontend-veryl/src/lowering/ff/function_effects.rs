@@ -97,7 +97,7 @@ impl<'a> FfParser<'a> {
                     factor.as_ref(),
                     Factor::Variable(id, index, select, _)
                         if *id == var_id
-                            && index.0.is_empty()
+                            && index.indices.is_empty()
                             && select.0.is_empty()
                             && select.1.is_none()
                 )

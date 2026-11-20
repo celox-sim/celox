@@ -361,6 +361,7 @@ impl Lower<'_> {
                 ExprOpcode::LoadU64 { location, .. }
                 | ExprOpcode::LoadWide { location, .. }
                 | ExprOpcode::LoadIndexed { location, .. }
+                | ExprOpcode::LoadArraySlice { location, .. }
                 | ExprOpcode::LoadBitSelect { location, .. }
                 | ExprOpcode::LoadString { location, .. } => self
                     .runtime
@@ -437,6 +438,14 @@ impl Lower<'_> {
                     }
                     self.kernel.builder().switch_to_block(join);
                     self.settled = false;
+                }
+                TestbenchStatement::Assign { dst, .. }
+                    if dst
+                        .selection
+                        .as_ref()
+                        .is_some_and(|selection| selection.offset.is_array_slice_window()) =>
+                {
+                    self.request(KernelRequest::Statement(site))?;
                 }
                 TestbenchStatement::Assign { dst, expr } => {
                     let expression = self.settled_expression(expr)?;

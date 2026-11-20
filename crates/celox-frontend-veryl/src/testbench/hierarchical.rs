@@ -36,6 +36,9 @@ pub(crate) fn hierarchical_destination_reference(
         var_path: destination.var_path.clone(),
         index: destination.index.clone(),
         select: destination.select.clone(),
+        // Celox resolves the source shape from the target variable, and a
+        // destination never selects an array range, so its shape is not kept.
+        array: Default::default(),
         comptime: destination.comptime.clone(),
     }
 }
@@ -159,6 +162,10 @@ pub(crate) fn hierarchical_reference_bits(
     reference: &HierVarRef,
 ) -> Result<BitAccess, ParserError> {
     let invalid = |detail| invalid_hierarchical_reference(reference, detail);
+    if reference.index.is_range() {
+        // A slice can observe several entries, including a whole subarray.
+        return checked_reference_bits(reference, 0, info.width, info.width);
+    }
     let array_total = info
         .array_dims
         .iter()
@@ -181,7 +188,7 @@ pub(crate) fn hierarchical_reference_bits(
 
     let mut base = 0usize;
     let mut consumed = 0usize;
-    for (dimension, expression) in reference.index.0.iter().enumerate() {
+    for (dimension, expression) in reference.index.indices.iter().enumerate() {
         let Some(&dimension_stride) = strides.get(dimension) else {
             return Err(invalid("too many unpacked array indices"));
         };
@@ -346,6 +353,63 @@ pub(super) fn checked_reference_bits(
     Ok(BitAccess::new(lsb, msb))
 }
 
+pub(super) struct ArraySliceGeometry<'a> {
+    pub prefix: &'a [Expression],
+    pub anchor: &'a Expression,
+    pub count: usize,
+    pub size: usize,
+    pub subtract: usize,
+    pub step: usize,
+    pub stride: usize,
+    pub width: usize,
+}
+
+pub(super) fn array_slice_geometry<'a>(
+    info: &VariableInfo,
+    index: &'a VarIndex,
+    select: &VarSelect,
+) -> Option<ArraySliceGeometry<'a>> {
+    if !select.is_empty() {
+        return None;
+    }
+    let (op, bound) = index.range.as_deref()?;
+    let (anchor, prefix) = index.indices.split_last()?;
+    let dimensions = info.array_dims.get(..=prefix.len())?;
+    let &size = dimensions.last()?;
+    let stride = dimensions
+        .iter()
+        .try_fold(info.width, |width, &size| width.checked_div(size))?;
+    let bound = eval_constexpr(bound)?.to_usize()?;
+    let count = match op {
+        VarSelectOp::Colon => bound
+            .checked_sub(eval_constexpr(anchor)?.to_usize()?)?
+            .checked_add(1)?,
+        _ => bound,
+    };
+    if count == 0 || count > size {
+        return None;
+    }
+    let width = stride.checked_mul(count)?;
+    Some(ArraySliceGeometry {
+        prefix,
+        anchor,
+        count,
+        size,
+        subtract: if matches!(op, VarSelectOp::MinusColon) {
+            count - 1
+        } else {
+            0
+        },
+        step: if matches!(op, VarSelectOp::Step) {
+            count
+        } else {
+            1
+        },
+        stride,
+        width,
+    })
+}
+
 pub(super) fn variable_access_width(
     info: &VariableInfo,
     index: &VarIndex,
@@ -358,7 +422,10 @@ pub(super) fn variable_access_width(
     if array_total == 0 || !info.width.is_multiple_of(array_total) {
         return None;
     }
-    let consumed = index.0.len();
+    if index.is_range() {
+        return Some(array_slice_geometry(info, index, select)?.width);
+    }
+    let consumed = index.indices.len();
     if consumed > info.array_dims.len() {
         return None;
     }

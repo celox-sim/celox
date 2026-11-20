@@ -71,6 +71,309 @@ impl<A: Clone> Expressions<'_, A> {
             .emit(Inst::Unary(register, UnaryOp::ToTwoState, value.register));
         Value { register, ..value }
     }
+    fn index_offset(
+        &mut self,
+        base: Value,
+        coordinate: Value,
+        first: usize,
+        end: usize,
+        stride: usize,
+    ) -> Value {
+        let known = self.two_state(coordinate);
+        let coordinate_width = self.builder.register(&known.register).width().max(64);
+        let extended = self.unary(UnaryOp::Ident, known, coordinate_width, false);
+        let first = self.bits(coordinate_width, first as u64);
+        let end = self.bits(coordinate_width, end as u64);
+        let above_first = self.binary(BinaryOp::GeU, extended, first, 1);
+        let below_end = self.binary(BinaryOp::LtU, extended, end, 1);
+        let mut valid = self.binary(BinaryOp::And, above_first, below_end, 1);
+        if self.is_logic(&coordinate.register) {
+            let fully_known = self.builder.alloc_bit(1, false);
+            self.builder.emit(Inst::Binary(
+                fully_known,
+                coordinate.register,
+                BinaryOp::EqCase,
+                known.register,
+            ));
+            valid = self.binary(
+                BinaryOp::And,
+                valid,
+                Value {
+                    register: fully_known,
+                    string: false,
+                },
+                1,
+            );
+        }
+        let invalid = self.bits(64, u64::MAX);
+        let base_valid = self.binary(BinaryOp::Ne, base, invalid, 1);
+        let valid = self.binary(BinaryOp::And, valid, base_valid, 1);
+        let delta = self.binary(BinaryOp::Sub, extended, first, coordinate_width);
+        let delta = self.unary(UnaryOp::Ident, delta, 64, false);
+        let stride = self.bits(64, stride as u64);
+        let term = self.binary(BinaryOp::Mul, delta, stride, 64);
+        let offset = self.binary(BinaryOp::Add, base, term, 64);
+        let offset_fits = self.binary(BinaryOp::GeU, offset, base, 1);
+        let valid = self.binary(BinaryOp::And, valid, offset_fits, 1);
+        let register = self.builder.alloc_bit(64, false);
+        self.builder.emit(Inst::Mux(
+            register,
+            valid.register,
+            offset.register,
+            invalid.register,
+        ));
+        Value {
+            register,
+            string: false,
+        }
+    }
+
+    fn mux(&mut self, condition: Value, yes: Value, no: Value, width: usize) -> Value {
+        let register = self.alloc(width, false, &[yes.register, no.register]);
+        self.builder.emit(Inst::Mux(
+            register,
+            condition.register,
+            yes.register,
+            no.register,
+        ));
+        Value {
+            register,
+            string: false,
+        }
+    }
+
+    fn slice(&mut self, value: Value, offset: usize, width: usize) -> Value {
+        let register = self.alloc(width, false, &[value.register]);
+        self.builder
+            .emit(Inst::Slice(register, value.register, offset, width));
+        Value {
+            register,
+            string: false,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn array_slice_window(
+        &mut self,
+        base: Value,
+        anchor: Value,
+        size: usize,
+        count: usize,
+        stride: usize,
+        subtract: usize,
+        step: usize,
+        signed: bool,
+    ) -> Value {
+        let known = self.two_state(anchor);
+        let anchor_width = self.builder.register(&known.register).width();
+        // Keep room for end points just past the signed or unsigned anchor.
+        let wide = anchor_width.max(64) + 2;
+        let anchor_bits = self.resize(known, anchor_width, wide, signed);
+        let zero = self.bits(wide, 0u8);
+        let limit = self.bits(wide, size as u64);
+        let count = self.bits(wide, count as u64);
+
+        // Bound the step index before multiplication, including negative
+        // indices, whose entire stepped slice is outside the dimension.
+        let (start, step_valid) = if step == 1 {
+            let subtract = self.bits(wide, subtract as u64);
+            (
+                self.binary(BinaryOp::Sub, anchor_bits, subtract, wide),
+                None,
+            )
+        } else {
+            let limit = self.bits(wide, size.div_ceil(step) as u64);
+            let valid = self.binary(BinaryOp::LtU, anchor_bits, limit, 1);
+            let anchor = self.mux(valid, anchor_bits, zero, wide);
+            let step = self.bits(wide, step as u64);
+            (self.binary(BinaryOp::Mul, anchor, step, wide), Some(valid))
+        };
+        let end = self.binary(BinaryOp::Add, start, count, wide);
+        let before_end = self.binary(BinaryOp::LtS, start, limit, 1);
+        let after_start = self.binary(BinaryOp::GtS, end, zero, 1);
+        let mut valid = self.binary(BinaryOp::And, before_end, after_start, 1);
+        if let Some(step_valid) = step_valid {
+            valid = self.binary(BinaryOp::And, valid, step_valid, 1);
+        }
+        if self.is_logic(&anchor.register) {
+            let known = self.binary(BinaryOp::EqCase, anchor, known, 1);
+            let known = self.two_state(known);
+            valid = self.binary(BinaryOp::And, valid, known, 1);
+        }
+        let invalid_base = self.bits(64, u64::MAX);
+        let base_valid = self.binary(BinaryOp::Ne, base, invalid_base, 1);
+        let valid = self.binary(BinaryOp::And, valid, base_valid, 1);
+
+        let left = self.binary(BinaryOp::LtS, start, zero, 1);
+        let right = self.binary(BinaryOp::GtS, end, limit, 1);
+        let first = self.mux(left, zero, start, wide);
+        let last = self.mux(right, limit, end, wide);
+        let skipped = self.binary(BinaryOp::Sub, first, start, wide);
+        let overlap = self.binary(BinaryOp::Sub, last, first, wide);
+        let scale = self.bits(64, stride as u64);
+        let first = self.slice(first, 0, 64);
+        let first = self.binary(BinaryOp::Mul, first, scale, 64);
+        let offset = self.binary(BinaryOp::Add, base, first, 64);
+        let skipped = self.slice(skipped, 0, 64);
+        let skipped = self.binary(BinaryOp::Mul, skipped, scale, 64);
+        let overlap = self.slice(overlap, 0, 64);
+        let overlap = self.binary(BinaryOp::Mul, overlap, scale, 64);
+        let register = self.builder.alloc_bit(3 * 64, false);
+        self.builder.emit(Inst::Concat(
+            register,
+            vec![overlap.register, skipped.register, offset.register],
+        ));
+        let empty = self.bits(3 * 64, 0u8);
+        self.mux(
+            valid,
+            Value {
+                register,
+                string: false,
+            },
+            empty,
+            3 * 64,
+        )
+    }
+
+    fn load_array_slice(
+        &mut self,
+        location: &StateLocation<A>,
+        offset: Value,
+        source_width: usize,
+        element_width: usize,
+        width: usize,
+    ) -> Value {
+        let zero = self.bits(64, 0u8);
+        let width_bits = self.bits(64, width as u64);
+        let (offset, skip, overlap) = if self.builder.register(&offset.register).width() == 3 * 64 {
+            (
+                self.slice(offset, 0, 64),
+                self.slice(offset, 64, 64),
+                self.slice(offset, 128, 64),
+            )
+        } else {
+            let limit = self.bits(
+                64,
+                source_width
+                    .checked_sub(width)
+                    .map_or(0, |max| max as u64 + 1),
+            );
+            let valid = self.binary(BinaryOp::LtU, offset, limit, 1);
+            (offset, zero, self.mux(valid, width_bits, zero, 64))
+        };
+        let valid = self.binary(BinaryOp::Ne, overlap, zero, 1);
+        let present = self.builder.new_block();
+        let absent = self.builder.new_block();
+        let result = self.load(location, width);
+        let join = self.builder.new_block_with(vec![result]);
+        self.builder.seal_block(SIRTerminator::Branch {
+            cond: valid.register,
+            true_block: (present, vec![]),
+            false_block: (absent, vec![]),
+        });
+        self.builder.switch_to_block(present);
+        // Load a full run inside this row, then align its overlap with the
+        // result. A slice that crosses the right edge backs up the load.
+        let end = self.binary(BinaryOp::Add, skip, overlap, 64);
+        let backtrack = self.binary(BinaryOp::Sub, width_bits, end, 64);
+        let offset = self.binary(BinaryOp::Sub, offset, backtrack, 64);
+        let base = self.bits(64, (location.byte_offset * 8) as u64);
+        let offset = self.binary(BinaryOp::Add, offset, base, 64);
+        let stride = self.bits(64, element_width as u64);
+        let index = self.binary(BinaryOp::DivU, offset, stride, 64);
+        let loaded = self.load(location, width);
+        self.builder.emit(Inst::Load(
+            loaded,
+            location.address.clone(),
+            SIROffset::ElementRun {
+                index: index.register,
+                element_width,
+            },
+            width,
+        ));
+        let loaded = self.align_array_slice(
+            Value {
+                register: loaded,
+                string: false,
+            },
+            backtrack,
+            skip,
+            width,
+        );
+        self.builder
+            .seal_block(SIRTerminator::Jump(join, vec![loaded.register]));
+        self.builder.switch_to_block(absent);
+        let invalid = if self.is_logic(&result) {
+            let ones = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+            let invalid = self.builder.alloc_logic(width);
+            self.builder.emit(Inst::Imm(
+                invalid,
+                SIRValue::new_four_state(ones.clone(), ones),
+            ));
+            invalid
+        } else {
+            self.bits(width, 0u8).register
+        };
+        self.builder
+            .seal_block(SIRTerminator::Jump(join, vec![invalid]));
+        self.builder.switch_to_block(join);
+        Value {
+            register: result,
+            string: false,
+        }
+    }
+
+    fn align_array_slice(
+        &mut self,
+        loaded: Value,
+        right: Value,
+        left: Value,
+        width: usize,
+    ) -> Value {
+        if !self.is_logic(&loaded.register) {
+            let value = self.binary(BinaryOp::Shr, loaded, right, width);
+            return self.binary(BinaryOp::Shl, value, left, width);
+        }
+
+        // Align the planes independently so in-range Z stays Z.
+        let plane_width = width.next_multiple_of(64);
+        let wide = self.unary(UnaryOp::Ident, loaded, plane_width, false);
+        let planes = self.builder.alloc_bit(plane_width * 2, false);
+        self.builder
+            .emit(Inst::Unary(planes, UnaryOp::ToPlanes, wide.register));
+        let planes = Value {
+            register: planes,
+            string: false,
+        };
+        let ones = self.bits(plane_width, (BigUint::from(1u8) << width) - 1u8);
+        let align = |value, this: &mut Self| {
+            let value = this.binary(BinaryOp::Shr, value, right, plane_width);
+            this.binary(BinaryOp::Shl, value, left, plane_width)
+        };
+        let inside = align(ones, self);
+        let outside = self.binary(BinaryOp::Xor, ones, inside, plane_width);
+        let value = self.slice(planes, 0, plane_width);
+        let mask = self.slice(planes, plane_width, plane_width);
+        let value = align(value, self);
+        let mask = align(mask, self);
+        let value = self.binary(BinaryOp::Or, value, outside, plane_width);
+        let mask = self.binary(BinaryOp::Or, mask, outside, plane_width);
+        let planes = self.builder.alloc_bit(plane_width * 2, false);
+        self.builder
+            .emit(Inst::Concat(planes, vec![mask.register, value.register]));
+        let result = self.builder.alloc_logic(plane_width);
+        self.builder
+            .emit(Inst::Unary(result, UnaryOp::FromPlanes, planes));
+        self.slice(
+            Value {
+                register: result,
+                string: false,
+            },
+            0,
+            width,
+        )
+    }
+
     fn load(&mut self, location: &StateLocation<A>, width: usize) -> RegisterId {
         if (self.logic)(&location.address) {
             self.builder.alloc_logic(width.max(1))
@@ -150,6 +453,7 @@ impl<A: Clone> Expressions<'_, A> {
                     | ExprOpcode::ConstString(_)
                     | ExprOpcode::LoadString { .. }
                     | ExprOpcode::LoadIndexed { .. }
+                    | ExprOpcode::LoadArraySlice { .. }
             )
         })
     }
@@ -522,6 +826,34 @@ impl<A: Clone> Expressions<'_, A> {
                     *stack = merged;
                     cursor = end;
                     continue;
+                }
+                ExprOpcode::ArraySliceWindow {
+                    size,
+                    count,
+                    stride,
+                    subtract,
+                    step,
+                    signed,
+                } => {
+                    let anchor = Self::pop(stack)?;
+                    let base = Self::pop(stack)?;
+                    self.array_slice_window(
+                        base, anchor, *size, *count, *stride, *subtract, *step, *signed,
+                    )
+                }
+                ExprOpcode::IndexOffset { first, end, stride } => {
+                    let coordinate = Self::pop(stack)?;
+                    let base = Self::pop(stack)?;
+                    self.index_offset(base, coordinate, *first, *end, *stride)
+                }
+                ExprOpcode::LoadArraySlice {
+                    location,
+                    source_width,
+                    element_width,
+                    width,
+                } => {
+                    let offset = Self::pop(stack)?;
+                    self.load_array_slice(location, offset, *source_width, *element_width, *width)
                 }
                 ExprOpcode::LoadIndexed {
                     location,

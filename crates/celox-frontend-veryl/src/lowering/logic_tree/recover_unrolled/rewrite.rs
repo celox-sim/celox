@@ -50,7 +50,7 @@ pub(super) fn rewrite_index(
     mode: &RewriteMode,
 ) -> Option<bool> {
     let mut depends = false;
-    for expression in &mut index.0 {
+    for expression in &mut index.indices {
         depends |= rewrite_expression(expression, loop_var, mode)?;
     }
     Some(depends)
@@ -90,7 +90,7 @@ pub(super) fn rewrite_expression(
                 self_depends || index_depends || select_depends
             }
             Factor::HierVariable(_) => return None,
-            Factor::Value(_) => false,
+            Factor::Value(_) | Factor::ResetValue(..) => false,
             Factor::FunctionCall(call) if call.outputs.is_empty() => {
                 let mut depends = false;
                 for input in call.inputs.values_mut() {

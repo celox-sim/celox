@@ -17,12 +17,29 @@ mod expression_tests;
 mod format;
 pub mod lowering;
 mod value;
-pub use expression::CompiledExpr;
+pub use expression::{CompiledExpr, SelectionWindow};
 pub use format::{
     DisplayFormatArg, FieldSpec, MAX_FIELD_WIDTH, format_display_arg, format_sized_display_arg,
     format_sv_display_arg, format_veryl_display_arg, pad_veryl_field,
 };
 pub use value::TestbenchValue;
+
+/// Operations on a testbench-owned deque. A capacity of zero is unbounded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QueueOp {
+    PushBack,
+    PushFront,
+    PopFront,
+    PopBack,
+    DropFront,
+    DropBack,
+    Front,
+    Back,
+    Clear,
+    Size,
+    IsEmpty,
+    IsFull,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct StateLocation<A> {
@@ -238,6 +255,20 @@ pub enum TestbenchStatement<Event, Signal, Expression, Argument, Target = Signal
     WriteMemory {
         signal: Signal,
         load: celox_design::MemoryFileLoad,
+    },
+    Queue {
+        handle: String,
+        op: QueueOp,
+        value: Option<Expression>,
+        value_target: Option<Target>,
+        value_mask: BigUint,
+        value_width: usize,
+        value_signed: bool,
+        width: u32,
+        signed: bool,
+        four_state: bool,
+        capacity: u32,
+        ret: Option<Target>,
     },
 }
 
@@ -648,6 +679,29 @@ pub enum ExprOpcode<L = usize> {
     StoreString {
         location: L,
     },
+    /// Add a bounded coordinate to an accumulated bit offset. An invalid
+    /// coordinate or previous offset yields the out-of-range sentinel.
+    IndexOffset {
+        first: usize,
+        end: usize,
+        stride: usize,
+    },
+    LoadArraySlice {
+        location: L,
+        source_width: usize,
+        element_width: usize,
+        width: usize,
+    },
+    /// Compile the overlap as three 64-bit fields: source offset, slice
+    /// offset, and overlap width, from least to most significant.
+    ArraySliceWindow {
+        size: usize,
+        count: usize,
+        stride: usize,
+        subtract: usize,
+        step: usize,
+        signed: bool,
+    },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -661,6 +715,10 @@ pub struct ExprBytecode<L = usize> {
 impl<L> ExprBytecode<L> {
     pub fn new(ops: Vec<ExprOpcode<L>>) -> Self {
         Self { ops, kernel: None }
+    }
+
+    pub fn is_array_slice_window(&self) -> bool {
+        matches!(self.ops.last(), Some(ExprOpcode::ArraySliceWindow { .. }))
     }
 
     pub fn kernel(&self) -> Option<&ExpressionKernel<L>> {
@@ -1006,6 +1064,35 @@ impl<L> ExprBytecode<L> {
                 ExprOpcode::Ternary { then_len, else_len } => {
                     ExprOpcode::Ternary { then_len, else_len }
                 }
+                ExprOpcode::ArraySliceWindow {
+                    size,
+                    count,
+                    stride,
+                    subtract,
+                    step,
+                    signed,
+                } => ExprOpcode::ArraySliceWindow {
+                    size,
+                    count,
+                    stride,
+                    subtract,
+                    step,
+                    signed,
+                },
+                ExprOpcode::IndexOffset { first, end, stride } => {
+                    ExprOpcode::IndexOffset { first, end, stride }
+                }
+                ExprOpcode::LoadArraySlice {
+                    location,
+                    source_width,
+                    element_width,
+                    width,
+                } => ExprOpcode::LoadArraySlice {
+                    location: map(location)?,
+                    source_width,
+                    element_width,
+                    width,
+                },
                 ExprOpcode::LoadIndexed {
                     location,
                     stride_bits,

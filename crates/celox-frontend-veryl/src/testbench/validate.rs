@@ -10,7 +10,7 @@ pub(super) fn reject_selected_destinations_in_expression_statements(
             Statement::Assign(statement) => {
                 if statement.dst.iter().any(has_selected_testbench_destination)
                     || statement.hier_dst.as_ref().is_some_and(|destination| {
-                        !destination.index.0.is_empty()
+                        !destination.index.indices.is_empty()
                             || !destination.select.0.is_empty()
                             || destination.select.1.is_some()
                     })
@@ -110,7 +110,9 @@ pub(super) fn validate_testbench_expression(
     active_functions: &mut FxHashSet<(VarId, Option<Vec<usize>>)>,
 ) -> Result<(), ParserError> {
     if let Expression::Term(factor) = expression
-        && factor.comptime().r#type.is_string()
+        && (factor.comptime().r#type.is_string()
+            || matches!(factor.as_ref(), Factor::Variable(_, index, ..) if index.is_range())
+            || matches!(factor.as_ref(), Factor::HierVariable(reference) if reference.index.is_range()))
     {
         let access = match factor.as_ref() {
             Factor::Variable(id, index, select, _) => source
@@ -130,20 +132,30 @@ pub(super) fn validate_testbench_expression(
             )),
             _ => None,
         };
-        if let Some((info, index, select)) = access
-            && (index.0.len() > info.array_dims.len() || !select.0.is_empty() || select.1.is_some())
-        {
-            return Err(ParserError::illegal_context(
-                "string character selection",
-                "character indexing and slicing of strings are not supported in Celox testbenches",
-                Some(&factor.comptime().token),
-            ));
+        if let Some((info, index, select)) = access {
+            let token = Some(&factor.comptime().token);
+            if factor.comptime().r#type.is_string()
+                && (index.is_range()
+                    || index.indices.len() > info.array_dims.len()
+                    || !select.is_empty())
+            {
+                return Err(ParserError::illegal_context(
+                    "string character selection",
+                    "character indexing and slicing of strings are not supported in Celox testbenches",
+                    token,
+                ));
+            }
+            ExprCompiler::validate_array_slice(info, index, select, token)?;
         }
     }
     match expression {
         Expression::Term(factor) => match factor.as_ref() {
             Factor::HierVariable(reference) => {
-                for expression in reference.index.0.iter().chain(reference.select.0.iter()) {
+                for expression in reference
+                    .index
+                    .expressions()
+                    .chain(reference.select.0.iter())
+                {
                     validate_testbench_expression(expression, lookup, source, active_functions)?;
                 }
                 if let Some((_, expression)) = &reference.select.1 {
@@ -152,7 +164,7 @@ pub(super) fn validate_testbench_expression(
                 Ok(())
             }
             Factor::Variable(_, index, select, _) => {
-                for expression in index.0.iter().chain(select.0.iter()) {
+                for expression in index.expressions().chain(select.0.iter()) {
                     validate_testbench_expression(expression, lookup, source, active_functions)?;
                 }
                 if let Some((_, expression)) = &select.1 {
@@ -193,7 +205,10 @@ pub(super) fn validate_testbench_expression(
                     ))
                 }
             }
-            Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => Ok(()),
+            Factor::Value(_)
+            | Factor::ResetValue(..)
+            | Factor::Anonymous(_)
+            | Factor::Unknown(_) => Ok(()),
         },
         Expression::Unary(_, inner, _) => {
             if inner.comptime().r#type.is_string() {
@@ -445,6 +460,25 @@ pub(super) fn validate_testbench_statements(
                             )?;
                         }
                     }
+                    TbMethod::Queue { value, .. } => {
+                        if let Some(value) = value {
+                            // The expression VM is two-state. Direct queue values use
+                            // a separate mask source; reject expressions that would
+                            // silently discard X/Z before entering the queue.
+                            let direct = matches!(value, Expression::Term(factor) if matches!(factor.as_ref(), Factor::Value(_) | Factor::Variable(..) | Factor::HierVariable(_)));
+                            if !value.comptime().r#type.is_2state()
+                                && !value.comptime().is_const
+                                && !direct
+                            {
+                                return Err(ParserError::illegal_context(
+                                    "four-state queue argument expression",
+                                    "runtime four-state queue arguments require a direct variable or selection; compound four-state expressions are not supported by the testbench expression VM",
+                                    Some(&value.comptime().token),
+                                ));
+                            }
+                            validate_testbench_expression(value, lookup, source, active_functions)?;
+                        }
+                    }
                     TbMethod::RandomSeed { value } => {
                         validate_testbench_expression(value, lookup, source, active_functions)?;
                     }
@@ -511,8 +545,7 @@ pub(super) fn validate_testbench_hierarchical_destination(
 ) -> Result<(), ParserError> {
     for expression in destination
         .index
-        .0
-        .iter()
+        .expressions()
         .chain(destination.select.0.iter())
     {
         validate_testbench_expression(expression, lookup, source, active_functions)?;
@@ -525,6 +558,7 @@ pub(super) fn validate_testbench_hierarchical_destination(
         resolve_hierarchical_reference_from(lookup, source.base_instance(lookup), &reference)?;
     ExprCompiler::validate_target_bounds_parts(info, &destination.index, &destination.select)?;
     let compiler = ExprCompiler {
+        reset_type: source.reset_type,
         lookup,
         id_map: &source.id_map,
         constant_strings: &source.constant_strings,
@@ -547,7 +581,7 @@ pub(super) fn validate_testbench_destination(
     source: &VerylTestbenchSource,
     active_functions: &mut FxHashSet<(VarId, Option<Vec<usize>>)>,
 ) -> Result<(), ParserError> {
-    for expression in &destination.index.0 {
+    for expression in destination.index.expressions() {
         validate_testbench_expression(expression, lookup, source, active_functions)?;
     }
     for expression in &destination.select.0 {
@@ -557,6 +591,7 @@ pub(super) fn validate_testbench_destination(
         validate_testbench_expression(expression, lookup, source, active_functions)?;
     }
     ExprCompiler {
+        reset_type: source.reset_type,
         lookup,
         id_map: &source.id_map,
         constant_strings: &source.constant_strings,

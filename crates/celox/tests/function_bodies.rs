@@ -153,6 +153,37 @@ fn test_ff_unpacked_literal_input_is_snapshotted_before_output_index_effect() {
 }
 
 #[test]
+fn test_ff_static_slice_of_array_literal_formal_reads_all_elements() {
+    let mut sim = build(
+        r#"
+        module Top (clk: input clock, a: input logic<8>, b: input logic<8>, q: output logic<16>) {
+            function middle (values: input logic<8>[4], selected: output logic<8>[2]) {
+                selected = values[1+:2];
+            }
+            always_ff (clk) {
+                var selected: logic<8>[2];
+                middle('{8'h11, a, b, 8'h44}, selected);
+                q = {selected[1], selected[0]};
+            }
+        }
+    "#,
+    );
+    let clk = sim.event("clk");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let q = sim.signal("q");
+    for (low, high) in [(0x22u8, 0x33u8), (0x5a, 0xa5)] {
+        sim.modify(|io| {
+            io.set(a, low);
+            io.set(b, high);
+        })
+        .unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get_as::<u16>(q), u16::from_le_bytes([low, high]));
+    }
+}
+
+#[test]
 fn test_ff_function_runtime_effect_in_for_bound_runs_once() {
     let mut sim = build(
         r#"

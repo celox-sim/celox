@@ -125,7 +125,7 @@ pub(super) fn collect_statement_reads(
                     reads.push(TestbenchRead::Hierarchical(Box::new(
                         hierarchical_destination_reference(destination),
                     )));
-                    for index in &destination.index.0 {
+                    for index in &destination.index.indices {
                         collect_expression_reads(index, funcs, active_functions, reads);
                     }
                     collect_select_reads(&destination.select, funcs, active_functions, reads);
@@ -198,6 +198,11 @@ pub(super) fn collect_statement_reads(
                         }
                     }
                     TbMethod::FileClose | TbMethod::FileFlush => {}
+                    TbMethod::Queue { value, .. } => {
+                        if let Some(value) = value {
+                            collect_expression_reads(value, funcs, active_functions, reads);
+                        }
+                    }
                     TbMethod::Component { args, .. } => {
                         for arg in args {
                             collect_expression_reads(&arg.0, funcs, active_functions, reads);
@@ -224,7 +229,7 @@ pub(super) fn collect_target_reads(
     active_functions: &mut FxHashSet<VarId>,
     reads: &mut Vec<TestbenchRead>,
 ) {
-    for expr in &target.index.0 {
+    for expr in &target.index.indices {
         collect_expression_reads(expr, funcs, active_functions, reads);
     }
     collect_select_reads(&target.select, funcs, active_functions, reads);
@@ -232,7 +237,8 @@ pub(super) fn collect_target_reads(
     // The native selected-target path reads the complete root signal before
     // merging the new slice.  Model that read as a DSE root; a whole-root
     // assignment does not need this extra liveness edge.
-    if !target.index.0.is_empty() || !target.select.0.is_empty() || target.select.1.is_some() {
+    if !target.index.indices.is_empty() || !target.select.0.is_empty() || target.select.1.is_some()
+    {
         reads.push(TestbenchRead::Root(target.id));
     }
 }
@@ -265,7 +271,7 @@ pub(super) fn collect_expression_reads(
         Expression::Term(factor) => match factor.as_ref() {
             Factor::Variable(var_id, index, select, _) => {
                 reads.push(TestbenchRead::Root(*var_id));
-                for expr in &index.0 {
+                for expr in &index.indices {
                     collect_expression_reads(expr, funcs, active_functions, reads);
                 }
                 collect_select_reads(select, funcs, active_functions, reads);
@@ -278,12 +284,15 @@ pub(super) fn collect_expression_reads(
             }
             Factor::HierVariable(reference) => {
                 reads.push(TestbenchRead::Hierarchical(reference.clone()));
-                for expr in &reference.index.0 {
+                for expr in &reference.index.indices {
                     collect_expression_reads(expr, funcs, active_functions, reads);
                 }
                 collect_select_reads(&reference.select, funcs, active_functions, reads);
             }
-            Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => {}
+            Factor::Value(_)
+            | Factor::ResetValue(..)
+            | Factor::Anonymous(_)
+            | Factor::Unknown(_) => {}
         },
         Expression::Unary(_, inner, _) => {
             collect_expression_reads(inner, funcs, active_functions, reads);
@@ -390,7 +399,7 @@ pub(super) fn collect_function_call_reads(
     }
     for destinations in call.outputs.values() {
         for dst in destinations {
-            for expr in &dst.index.0 {
+            for expr in &dst.index.indices {
                 collect_expression_reads(expr, funcs, active_functions, reads);
             }
             collect_select_reads(&dst.select, funcs, active_functions, reads);

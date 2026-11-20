@@ -229,11 +229,12 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
         self
     }
 
-    /// Allow function output and non-local write effects in `always_ff`.
+    /// Allow function effects in `always_ff` and function outputs in port
+    /// connections.
     ///
     /// This opts into Celox-specific lowering for constructs rejected by
     /// Veryl's SystemVerilog compatibility checks. It is primarily useful
-    /// for testing Celox's FF lowering semantics.
+    /// for semantic regression tests.
     pub fn allow_always_ff_function_effects(mut self, enable: bool) -> Self {
         self.options.allow_always_ff_function_effects = enable;
         self

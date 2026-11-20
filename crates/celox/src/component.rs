@@ -109,22 +109,18 @@ impl ComponentWrite {
             backend.set_four_state(self.target.signal, self.value, self.mask_xz);
             return;
         };
-        let offset = eval_backend_expr(backend, &selection.offset).to_u64() as usize;
-        let width = selection
-            .width
-            .min(self.target.signal.width.saturating_sub(offset));
-        if width == 0 {
+        let window = selection.window(
+            &eval_backend_expr(backend, &selection.offset),
+            self.target.signal.width,
+        );
+        if window.width == 0 {
             return;
         }
         let (root, root_mask) = backend.get_four_state(self.target.signal);
-        let selected_mask = width_mask(width) << offset;
-        let clear_mask = width_mask(self.target.signal.width) ^ &selected_mask;
-        let value = (self.value & width_mask(width)) << offset;
-        let mask_xz = (self.mask_xz & width_mask(width)) << offset;
         backend.set_four_state(
             self.target.signal,
-            (root & &clear_mask) | value,
-            (root_mask & &clear_mask) | mask_xz,
+            window.merge(root, self.value),
+            window.merge(root_mask, self.mask_xz),
         );
     }
 }
@@ -310,9 +306,21 @@ fn stage_component_inputs<B: SimBackend>(component: &mut LiveComponent, backend:
         let mask_xz = if let Some(source) = &input.mask_source {
             let (mut raw, mut mask) = backend.get_four_state(source.signal);
             if let Some(selection) = &source.selection {
-                let offset = eval_backend_expr(backend, &selection.offset).to_u64() as usize;
-                raw = (raw >> offset) & width_mask(selection.width);
-                mask = (mask >> offset) & width_mask(selection.width);
+                let window = selection.window(
+                    &eval_backend_expr(backend, &selection.offset),
+                    source.signal.width,
+                );
+                let valid = width_mask(window.width);
+                raw = ((raw >> window.offset) & &valid) << window.skip;
+                mask = ((mask >> window.offset) & &valid) << window.skip;
+                if backend.layout().four_state
+                    && source.signal.is_4state
+                    && selection.offset.bytecode().is_array_slice_window()
+                {
+                    let invalid = width_mask(selection.width) ^ (valid << window.skip);
+                    raw |= &invalid;
+                    mask |= invalid;
+                }
             }
             if input.invert_unknown_payload {
                 raw ^= &mask;

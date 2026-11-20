@@ -42,7 +42,12 @@ fn compile(design: &Value) -> Result<Compiled, String> {
     let errors = errors
         .into_iter()
         .filter(|error| {
-            if matches!(
+            // Celox validates output destinations in its own lowerer, just
+            // as the simulator builder does. Keep that rejection and its
+            // diagnostic identity instead of stopping at Veryl's SV rule.
+            if matches!(error, AnalyzerError::NonConstantOutputSelect { .. }) {
+                false
+            } else if matches!(
                 error,
                 AnalyzerError::SideEffectFunctionCallInAlwaysFf { .. }
                     | AnalyzerError::FunctionOutputInAlwaysFf { .. }
@@ -75,6 +80,7 @@ fn compile(design: &Value) -> Result<Compiled, String> {
         return Err(format!("frontend diagnostics: {diagnostics:?}"));
     }
     celox_frontend_veryl::lower_interface_captures(&mut ir);
+    celox_frontend_veryl::lower_constant_loops(&mut ir);
     let provenance = loop_sources.match_unrolled(&ir);
     let config = BuildConfig::from(&metadata.build);
     let top = resource_table::insert_str(design["top"].as_str().ok_or("no top")?);
@@ -135,5 +141,57 @@ fn main() {
             eprintln!("{error}");
             std::process::exit(1)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compile;
+    use serde_json::json;
+
+    #[test]
+    fn static_interleaved_array_initializers_compile_without_false_cycles() {
+        let design = json!({
+            "top": "Top",
+            "four_state": false,
+            "sources": [{
+                "path": "test.veryl",
+                "text": r#"
+                    module Top (
+                        a: input logic<8>, b: input logic<8>,
+                        y: output logic<8> [4], z: output logic<8> [4],
+                    ) {
+                        always_comb {
+                            for i in 0..4 {
+                                y[i] = 0;
+                                z[i] = 0;
+                            }
+                            y[0] = a;
+                            z[0] = b;
+                        }
+                    }
+                "#,
+            }],
+        });
+        assert!(compile(&design).is_ok());
+    }
+
+    #[test]
+    fn dynamic_output_destinations_are_rejected_by_celox_lowering() {
+        let design = json!({
+            "top": "Top",
+            "four_state": false,
+            "sources": [{
+                "path": "test.veryl",
+                "text": r#"
+                    module Child (y: output logic) { assign y = 1'b1; }
+                    module Top (index: input logic, y: output logic<2>) {
+                        inst child: Child (y: y[index]);
+                    }
+                "#,
+            }],
+        });
+        let error = compile(&design).unwrap_err();
+        assert!(error.starts_with("lower: IllegalContext"), "{error}");
     }
 }

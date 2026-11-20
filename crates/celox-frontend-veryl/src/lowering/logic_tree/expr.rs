@@ -21,23 +21,49 @@ pub(in crate::lowering::logic_tree) use case_condition::*;
 pub(in crate::lowering::logic_tree) use function_body::*;
 use system_function::*;
 
-pub(super) enum ExpressionStore<'a> {
+enum ExpressionSymbolicState<'a> {
     ReadOnly(&'a SymbolicStore<VarId>),
     Effectful(&'a mut SymbolicStore<VarId>),
 }
 
-impl ExpressionStore<'_> {
+pub(super) struct ExpressionStore<'a> {
+    state: ExpressionSymbolicState<'a>,
+    slice_coordinates: Vec<NodeId>,
+}
+
+impl<'a> ExpressionStore<'a> {
+    pub(super) fn read_only(store: &'a SymbolicStore<VarId>) -> Self {
+        Self {
+            state: ExpressionSymbolicState::ReadOnly(store),
+            slice_coordinates: Vec::new(),
+        }
+    }
+
+    pub(super) fn effectful(store: &'a mut SymbolicStore<VarId>) -> Self {
+        Self {
+            state: ExpressionSymbolicState::Effectful(store),
+            slice_coordinates: Vec::new(),
+        }
+    }
+
+    fn branch<'b>(&self, store: &'b mut SymbolicStore<VarId>) -> ExpressionStore<'b> {
+        ExpressionStore {
+            state: ExpressionSymbolicState::Effectful(store),
+            slice_coordinates: self.slice_coordinates.clone(),
+        }
+    }
+
     pub(super) fn current(&self) -> &SymbolicStore<VarId> {
-        match self {
-            Self::ReadOnly(store) => store,
-            Self::Effectful(store) => store,
+        match &self.state {
+            ExpressionSymbolicState::ReadOnly(store) => store,
+            ExpressionSymbolicState::Effectful(store) => store,
         }
     }
 
     fn effectful_mut(&mut self) -> Option<&mut SymbolicStore<VarId>> {
-        match self {
-            Self::ReadOnly(_) => None,
-            Self::Effectful(store) => Some(store),
+        match &mut self.state {
+            ExpressionSymbolicState::ReadOnly(_) => None,
+            ExpressionSymbolicState::Effectful(store) => Some(store),
         }
     }
 }
@@ -164,7 +190,7 @@ pub fn eval_expression(
         width,
         signed: expression_signed(expr),
     });
-    let mut store = ExpressionStore::ReadOnly(store);
+    let mut store = ExpressionStore::read_only(store);
     eval_expression_in_context(module, &mut store, expr, arena, context)
 }
 
@@ -179,7 +205,7 @@ pub(crate) fn eval_expression_effectful(
         width,
         signed: expression_signed(expr),
     });
-    let mut store = ExpressionStore::Effectful(store);
+    let mut store = ExpressionStore::effectful(store);
     eval_expression_in_context(module, &mut store, expr, arena, context)
 }
 
@@ -420,7 +446,7 @@ fn eval_binary_expression(
     {
         let base_store = store.current().fork();
         let mut rhs_store = base_store.fork();
-        let mut rhs_state = ExpressionStore::Effectful(&mut rhs_store);
+        let mut rhs_state = store.branch(&mut rhs_store);
         let rhs_value =
             eval_expression_in_context(module, &mut rhs_state, rhs, arena, semantics.rhs_context)?;
         // Only a definite dominant value skips the RHS.  Map the
@@ -653,7 +679,7 @@ fn eval_ternary_expression(
         if store.effectful_mut().is_some() {
             let base_store = store.current().fork();
             let mut then_store = base_store.fork();
-            let mut then_state = ExpressionStore::Effectful(&mut then_store);
+            let mut then_state = store.branch(&mut then_store);
             let then_value = eval_expression_in_context(
                 module,
                 &mut then_state,
@@ -680,7 +706,7 @@ fn eval_ternary_expression(
             )?;
 
             let mut else_store = after_then.clone();
-            let mut else_state = ExpressionStore::Effectful(&mut else_store);
+            let mut else_state = store.branch(&mut else_store);
             let else_value = eval_expression_in_context(
                 module,
                 &mut else_state,
@@ -807,7 +833,7 @@ pub(crate) fn eval_assignment_expression_effectful(
         ));
     }
 
-    let mut store = ExpressionStore::Effectful(store);
+    let mut store = ExpressionStore::effectful(store);
     eval_assignment_expression_in_store(module, &mut store, expr, arena, target_width)
 }
 
@@ -849,6 +875,62 @@ fn finish_assignment_expression(
     Ok(((node, sources), boundaries))
 }
 
+fn eval_runtime_array_slice(
+    module: &Module,
+    store: &mut ExpressionStore<'_>,
+    expanded: crate::bitaccess::RuntimeArraySlice<'_>,
+    arena: &mut SLTNodeArena<VarId>,
+    context: Option<ValueContext>,
+) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    let mut sources = HashSet::default();
+    let mut boundaries = BoundaryMap::default();
+    for coordinate in expanded.coordinates {
+        let ((node, coordinate_sources), coordinate_boundaries) =
+            eval_expression_in_context(module, store, coordinate, arena, None)?;
+        store.slice_coordinates.push(node);
+        sources.extend(coordinate_sources);
+        boundaries = merge_boundaries(boundaries, coordinate_boundaries);
+    }
+    let value_context = if expanded.missing.is_some() {
+        None
+    } else {
+        context
+    };
+    let ((value, value_sources), value_boundaries) =
+        eval_expression_in_context(module, store, &expanded.value, arena, value_context)?;
+    sources.extend(value_sources);
+    boundaries = merge_boundaries(boundaries, value_boundaries);
+    let Some(missing) = expanded.missing else {
+        return Ok(((value, sources), boundaries));
+    };
+    let ((missing, missing_sources), missing_boundaries) =
+        eval_expression_in_context(module, store, &missing, arena, None)?;
+    sources.extend(missing_sources);
+
+    // Set both planes for missing bits while leaving in-range X/Z intact.
+    let plane_width = expanded.width.next_multiple_of(64);
+    let value = coerce_node_width(arena, value, Some(plane_width), false)?;
+    let missing = coerce_node_width(arena, missing, Some(plane_width), false)?;
+    let planes = arena.alloc(SLTNode::Unary(UnaryOp::ToPlanes, value))?;
+    let mask = arena.alloc(SLTNode::Concat(vec![
+        (missing, plane_width),
+        (missing, plane_width),
+    ]))?;
+    let filled = arena.alloc(SLTNode::Binary(planes, BinaryOp::Or, mask))?;
+    let result = arena.alloc(SLTNode::Unary(UnaryOp::FromPlanes, filled))?;
+    let result = coerce_node_width(arena, result, Some(expanded.width), false)?;
+    let result = coerce_node_width(
+        arena,
+        result,
+        context.map(|context| context.width),
+        context.is_some_and(|context| context.signed),
+    )?;
+    Ok((
+        (result, sources),
+        merge_boundaries(boundaries, missing_boundaries),
+    ))
+}
+
 fn eval_factor(
     module: &Module,
     store: &mut ExpressionStore<'_>,
@@ -856,11 +938,39 @@ fn eval_factor(
     arena: &mut SLTNodeArena<VarId>,
     context: Option<ValueContext>,
 ) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    if let Some(slot) = crate::bitaccess::runtime_slice_coordinate(factor) {
+        let node = coerce_node_width(
+            arena,
+            store.slice_coordinates[slot],
+            context.map(|context| context.width),
+            context.is_some_and(|context| context.signed),
+        )?;
+        return Ok(((node, HashSet::default()), BoundaryMap::default()));
+    }
+    let coordinate_base = store.slice_coordinates.len();
+    if let Some(expanded) =
+        crate::bitaccess::expand_runtime_array_slice(module, factor, coordinate_base)?
+    {
+        let result = eval_runtime_array_slice(module, store, expanded, arena, context);
+        store.slice_coordinates.truncate(coordinate_base);
+        return result;
+    }
     let context_width = context.map(|context| context.width);
     let context_signed = context
         .map(|context| context.signed)
         .unwrap_or_else(|| crate::context_width::factor_signed(factor));
     match factor {
+        Factor::ResetValue(kind, polarity, _) => {
+            let value = crate::config::reset_value(*kind, *polarity, arena.reset_type);
+            let node = arena.alloc(SLTNode::Constant(
+                BigUint::from(value as u64),
+                BigUint::from(0u8),
+                1,
+                false,
+            ))?;
+            let node = coerce_node_width(arena, node, context_width, context_signed)?;
+            Ok(((node, HashSet::default()), BoundaryMap::default()))
+        }
         Factor::Variable(var_id, index, select, comptime) => eval_variable_factor(
             module,
             store,
@@ -925,7 +1035,7 @@ fn eval_variable_factor(
     // constant node directly instead of loading from memory.
     // Also handles constant[const_index] (e.g. IDX[p] in generate loops).
     if comptime.is_const {
-        let is_bare = index.0.is_empty() && select.0.is_empty() && select.1.is_none();
+        let is_bare = index.indices.is_empty() && select.0.is_empty() && select.1.is_none();
         let is_static_sel = !is_bare && crate::bitaccess::is_static_access(index, select);
 
         let constant = if is_bare {

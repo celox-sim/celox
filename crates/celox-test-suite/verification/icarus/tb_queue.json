@@ -1,0 +1,104 @@
+{
+  "cases": [
+    {
+      "category": "ControlFlow",
+      "detail": "The Veryl emitter cannot emit native $tb::queue handles for SystemVerilog simulators. Celox executes the queue cases directly.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "emitter_panic",
+        "evidence": [
+          "verification/repros/tb_queue_verilator.json",
+          "verification/repros/tb_queue_icarus.json"
+        ],
+        "id": "veryl_native_queue_components",
+        "observed_version": "Veryl 0.22.1; Verilator 5.054 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "The Veryl emitter cannot emit native $tb::queue handles for SystemVerilog simulators. Celox executes the queue cases directly.",
+        "upstream": [
+          "https://github.com/veryl-lang/veryl/pull/3558"
+        ]
+      },
+      "name": "tb_queue::aggregate_and_selected_returns",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "The Veryl emitter cannot emit native $tb::queue handles for SystemVerilog simulators. Celox executes the queue cases directly.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "emitter_panic",
+        "evidence": [
+          "verification/repros/tb_queue_verilator.json",
+          "verification/repros/tb_queue_icarus.json"
+        ],
+        "id": "veryl_native_queue_components",
+        "observed_version": "Veryl 0.22.1; Verilator 5.054 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "The Veryl emitter cannot emit native $tb::queue handles for SystemVerilog simulators. Celox executes the queue cases directly.",
+        "upstream": [
+          "https://github.com/veryl-lang/veryl/pull/3558"
+        ]
+      },
+      "name": "tb_queue::four_state_values",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "The Veryl emitter cannot emit native $tb::queue handles for SystemVerilog simulators. Celox executes the queue cases directly.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "emitter_panic",
+        "evidence": [
+          "verification/repros/tb_queue_verilator.json",
+          "verification/repros/tb_queue_icarus.json"
+        ],
+        "id": "veryl_native_queue_components",
+        "observed_version": "Veryl 0.22.1; Verilator 5.054 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "The Veryl emitter cannot emit native $tb::queue handles for SystemVerilog simulators. Celox executes the queue cases directly.",
+        "upstream": [
+          "https://github.com/veryl-lang/veryl/pull/3558"
+        ]
+      },
+      "name": "tb_queue::operations",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "The Veryl emitter cannot emit native $tb::queue handles for SystemVerilog simulators. Celox executes the queue cases directly.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "emitter_panic",
+        "evidence": [
+          "verification/repros/tb_queue_verilator.json",
+          "verification/repros/tb_queue_icarus.json"
+        ],
+        "id": "veryl_native_queue_components",
+        "observed_version": "Veryl 0.22.1; Verilator 5.054 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "The Veryl emitter cannot emit native $tb::queue handles for SystemVerilog simulators. Celox executes the queue cases directly.",
+        "upstream": [
+          "https://github.com/veryl-lang/veryl/pull/3558"
+        ]
+      },
+      "name": "tb_queue::shared_processes",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

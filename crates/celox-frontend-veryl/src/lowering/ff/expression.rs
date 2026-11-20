@@ -21,7 +21,7 @@ pub(crate) fn expression_has_side_effect(expr: &Expression) -> bool {
     match expr {
         Expression::Term(factor) => match factor.as_ref() {
             Factor::Variable(_, index, select, _) => {
-                index.0.iter().any(expression_has_side_effect)
+                index.expressions().any(expression_has_side_effect)
                     || select.0.iter().any(expression_has_side_effect)
                     || select
                         .1
@@ -50,7 +50,10 @@ pub(crate) fn expression_has_side_effect(expr: &Expression) -> bool {
                 | SystemFunctionKind::Finish => true,
             },
             Factor::HierVariable(_) => false,
-            Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
+            Factor::Value(_)
+            | Factor::ResetValue(..)
+            | Factor::Anonymous(_)
+            | Factor::Unknown(_) => false,
         },
         Expression::Binary(lhs, _, rhs, _) => {
             expression_has_side_effect(lhs) || expression_has_side_effect(rhs)
@@ -95,6 +98,70 @@ impl<'a> FfParser<'a> {
         self.stack.push_back(reg);
     }
 
+    fn parse_runtime_array_slice<A>(
+        &mut self,
+        expanded: crate::bitaccess::RuntimeArraySlice<'_>,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+        context: Option<ValueContext>,
+    ) -> Result<(), ParserError> {
+        for coordinate in expanded.coordinates {
+            self.parse_expression_in_context(
+                coordinate, targets, domain, convert, sources, ir_builder, None,
+            )?;
+            self.slice_coordinates.push(self.stack.pop_back().unwrap());
+        }
+        let Some(missing) = expanded.missing else {
+            return self.parse_expression_in_context(
+                &expanded.value,
+                targets,
+                domain,
+                convert,
+                sources,
+                ir_builder,
+                context,
+            );
+        };
+        self.parse_expression_in_context(
+            &expanded.value,
+            targets,
+            domain,
+            convert,
+            sources,
+            ir_builder,
+            None,
+        )?;
+        let value = self.stack.pop_back().unwrap();
+        self.parse_expression_in_context(
+            &missing, targets, domain, convert, sources, ir_builder, None,
+        )?;
+        let missing = self.stack.pop_back().unwrap();
+
+        // Setting both planes makes the missing bits X and preserves
+        // the exact X/Z encoding of every bit read from the array.
+        let plane_width = expanded.width.next_multiple_of(64);
+        let value = self.cast_reg_width_ext(ir_builder, value, plane_width, false);
+        let missing =
+            self.coerce_register_to_formal(ir_builder, missing, plane_width, false, false, true);
+        let planes = ir_builder.alloc_bit(plane_width * 2, false);
+        ir_builder.emit(SIRInstruction::Unary(planes, UnaryOp::ToPlanes, value));
+        let mask = ir_builder.alloc_bit(plane_width * 2, false);
+        ir_builder.emit(SIRInstruction::Concat(mask, vec![missing, missing]));
+        let filled = ir_builder.alloc_bit(plane_width * 2, false);
+        ir_builder.emit(SIRInstruction::Binary(filled, planes, BinaryOp::Or, mask));
+        let result = ir_builder.alloc_logic(plane_width);
+        ir_builder.emit(SIRInstruction::Unary(result, UnaryOp::FromPlanes, filled));
+        let result = self.cast_reg_width_ext(ir_builder, result, expanded.width, false);
+        let result = context.map_or(result, |context| {
+            self.cast_reg_width_ext(ir_builder, result, context.width, context.signed)
+        });
+        self.stack.push_back(result);
+        Ok(())
+    }
+
     pub(super) fn parse_factor<A>(
         &mut self,
         factor: &Factor,
@@ -105,14 +172,33 @@ impl<'a> FfParser<'a> {
         ir_builder: &mut SIRBuilder<A>,
         context: Option<ValueContext>,
     ) -> Result<(), ParserError> {
+        if let Some(slot) = crate::bitaccess::runtime_slice_coordinate(factor) {
+            let value = self.slice_coordinates[slot];
+            let value = context.map_or(value, |context| {
+                self.cast_reg_width_ext(ir_builder, value, context.width, context.signed)
+            });
+            self.stack.push_back(value);
+            return Ok(());
+        }
+        let coordinate_base = self.slice_coordinates.len();
+        if let Some(expanded) =
+            crate::bitaccess::expand_runtime_array_slice(self.module, factor, coordinate_base)?
+        {
+            let result = self.parse_runtime_array_slice(
+                expanded, targets, domain, convert, sources, ir_builder, context,
+            );
+            self.slice_coordinates.truncate(coordinate_base);
+            return result;
+        }
         let context_width = context.map(|context| context.width);
         match factor {
             Factor::Variable(var_id, var_index, var_select, comptime) => {
                 // Compile-time constant parameter: emit as constant instead of loading
                 // from memory (parameters are not stored in simulation memory).
                 if comptime.is_const {
-                    let is_bare =
-                        var_index.0.is_empty() && var_select.0.is_empty() && var_select.1.is_none();
+                    let is_bare = var_index.indices.is_empty()
+                        && var_select.0.is_empty()
+                        && var_select.1.is_none();
                     if is_bare {
                         if let Some((celox_value, mask_xz, width, _)) =
                             celox_value_from_comptime_in_context(comptime, context_width)
@@ -180,7 +266,10 @@ impl<'a> FfParser<'a> {
                 }
                 if let Some(bound_reg) = self.get_bound_function_arg_value(*var_id) {
                     let bound_reg = *bound_reg;
-                    if var_index.0.is_empty() && var_select.0.is_empty() && var_select.1.is_none() {
+                    if var_index.indices.is_empty()
+                        && var_select.0.is_empty()
+                        && var_select.1.is_none()
+                    {
                         self.stack.push_back(bound_reg);
                         if let Some(context) = context {
                             let adjusted = self.cast_reg_width_ext(
@@ -253,7 +342,10 @@ impl<'a> FfParser<'a> {
 
                 if let Some(bound_expr) = self.get_bound_function_arg_expr(*var_id) {
                     let bound_expr = bound_expr.clone();
-                    if var_index.0.is_empty() && var_select.0.is_empty() && var_select.1.is_none() {
+                    if var_index.indices.is_empty()
+                        && var_select.0.is_empty()
+                        && var_select.1.is_none()
+                    {
                         let formal_width =
                             resolve_total_width(self.module, &self.module.variables[var_id])?;
                         self.materialize_bound_function_access(
@@ -457,6 +549,10 @@ impl<'a> FfParser<'a> {
                     ),
                     Some(&reference.comptime.token),
                 ));
+            }
+            Factor::ResetValue(kind, polarity, _) => {
+                let value = crate::config::reset_value(*kind, *polarity, self.config.reset_type);
+                self.op_constant(SIRValue::new(value as u8), 1, ir_builder);
             }
             Factor::Value(comptime) => {
                 let (celox_value, mask_xz, width, _) =

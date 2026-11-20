@@ -143,18 +143,22 @@ pub(super) fn parameterize_index(
 ) -> Option<bool> {
     if variants
         .iter()
-        .any(|variant| variant.0.len() != template.0.len())
+        .any(|variant| variant.indices.len() != template.indices.len())
     {
         return None;
     }
     let mut depends = false;
-    for position in 0..template.0.len() {
+    for position in 0..template.indices.len() {
         let expressions = variants
             .iter()
-            .map(|variant| &variant.0[position])
+            .map(|variant| &variant.indices[position])
             .collect::<Vec<_>>();
-        depends |=
-            parameterize_expression(module, &mut template.0[position], &expressions, candidate)?;
+        depends |= parameterize_expression(
+            module,
+            &mut template.indices[position],
+            &expressions,
+            candidate,
+        )?;
     }
     Some(depends)
 }
@@ -521,7 +525,7 @@ pub(super) fn guard_loop_dependent_accesses(
     match expression {
         Expression::Term(factor) => match factor.as_mut() {
             Factor::Variable(_, index, select, _) => {
-                for expression in &mut index.0 {
+                for expression in &mut index.indices {
                     guard_access(expression, loop_var, exceptional_condition);
                 }
                 for expression in &mut select.0 {
@@ -593,7 +597,7 @@ pub(super) fn remap_expression_variable(expression: &mut Expression, from: VarId
                 if *variable == from {
                     *variable = to;
                 }
-                for expression in &mut index.0 {
+                for expression in &mut index.indices {
                     remap_expression_variable(expression, from, to);
                 }
                 for expression in &mut select.0 {
@@ -734,6 +738,16 @@ pub(super) fn parameterize_factor(
                 comptime,
             );
             Some(true)
+        }
+        Factor::ResetValue(kind, polarity, _) => {
+            // A reset literal is the same in every iteration.
+            if variants.iter().all(|factor| {
+                matches!(factor, Factor::ResetValue(k, p, _) if k == kind && p == polarity)
+            }) {
+                Some(false)
+            } else {
+                None
+            }
         }
         Factor::FunctionCall(template_call) if template_call.outputs.is_empty() => {
             let calls = variants
