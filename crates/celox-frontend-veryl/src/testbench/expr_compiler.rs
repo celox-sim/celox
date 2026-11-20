@@ -729,6 +729,20 @@ impl ExprCompiler<'_> {
         select: &veryl_analyzer::ir::VarSelect,
         ops: &mut Vec<UnboundTbOpcode>,
     ) {
+        if index.is_range() {
+            let (offset, width) = self
+                .array_slice_offset(info, index, select)
+                .expect("validated unpacked-array slice");
+            ops.extend(offset);
+            ops.push(TbOpcode::LoadArraySlice {
+                location: Self::state_location_at(address, 0),
+                source_width: info.width,
+                element_width: info.width / info.array_dims.iter().product::<usize>(),
+                width,
+            });
+            return;
+        }
+
         // No index or select → whole variable
         if index.indices.is_empty() && select.0.is_empty() && select.1.is_none() {
             self.emit_load_at(address, 0, info.width, ops);
@@ -922,12 +936,47 @@ impl ExprCompiler<'_> {
         (static_offset, elements * scale)
     }
 
-    pub(super) fn append_offset_term(
+    fn emit_index_offset(
+        &self,
         ops: &mut Vec<UnboundTbOpcode>,
-        term: impl FnOnce(&mut Vec<UnboundTbOpcode>),
+        coordinate: &Expression,
+        first: usize,
+        end: usize,
+        stride: usize,
     ) {
-        term(ops);
-        ops.push(TbOpcode::BinOp(Op::Add));
+        let context = self.root_context(coordinate);
+        self.emit_in_context(coordinate, ops, Some(context));
+        if context.signed && context.width < 64 {
+            ops.push(TbOpcode::Resize {
+                source_width: context.width,
+                target_width: 64,
+                signed: true,
+            });
+        }
+        ops.push(TbOpcode::IndexOffset { first, end, stride });
+    }
+
+    fn array_slice_offset(
+        &self,
+        info: &VariableInfo,
+        index: &VarIndex,
+        select: &VarSelect,
+    ) -> Option<(Vec<UnboundTbOpcode>, usize)> {
+        let geometry = array_slice_geometry(info, index, select)?;
+        let mut stride = info.width;
+        let mut ops = vec![TbOpcode::ConstU64(0)];
+        for (expr, &size) in geometry.prefix.iter().zip(&info.array_dims) {
+            stride /= size;
+            self.emit_index_offset(&mut ops, expr, 0, size, stride);
+        }
+        self.emit_index_offset(
+            &mut ops,
+            geometry.anchor,
+            geometry.first,
+            geometry.end,
+            geometry.stride,
+        );
+        Some((ops, geometry.width))
     }
 
     pub(super) fn selection_offset(
@@ -947,30 +996,18 @@ impl ExprCompiler<'_> {
         }
 
         let mut ops = vec![TbOpcode::ConstU64(0)];
-        let append_index =
-            |ops: &mut Vec<UnboundTbOpcode>, expr: &Expression, scale: usize| -> Option<()> {
-                if let Some(index) = Self::try_const_usize(expr) {
-                    let offset = index.checked_mul(scale)?;
-                    Self::append_offset_term(ops, |ops| {
-                        ops.push(TbOpcode::ConstU64(offset as u64));
-                    });
-                } else {
-                    Self::append_offset_term(ops, |ops| {
-                        self.emit(expr, ops);
-                        if scale != 1 {
-                            ops.push(TbOpcode::ConstU64(scale as u64));
-                            ops.push(TbOpcode::BinOp(Op::Mul));
-                        }
-                    });
-                }
-                Some(())
-            };
 
         if let Some((op, range_expr)) = &select.1 {
             let dimension = select.0.len() - 1;
             let scale = *strides.get(dimension)?;
             for (index, expr) in select.0[..dimension].iter().enumerate() {
-                append_index(&mut ops, expr, *strides.get(index)?)?;
+                self.emit_index_offset(
+                    &mut ops,
+                    expr,
+                    0,
+                    *packed_dims.get(index)?,
+                    *strides.get(index)?,
+                );
             }
 
             let anchor = select.0.last()?;
@@ -1044,14 +1081,25 @@ impl ExprCompiler<'_> {
                 }
             };
             let selected_width = elements.checked_mul(scale)?;
-            Self::append_offset_term(&mut ops, |ops| ops.extend(part_ops));
+            ops.extend(part_ops);
+            ops.push(TbOpcode::IndexOffset {
+                first: 0,
+                end: usize::MAX,
+                stride: 1,
+            });
             Some((ops, selected_width))
         } else {
             if select.0.len() > packed_dims.len() {
                 return None;
             }
             for (index, expr) in select.0.iter().enumerate() {
-                append_index(&mut ops, expr, *strides.get(index)?)?;
+                self.emit_index_offset(
+                    &mut ops,
+                    expr,
+                    0,
+                    *packed_dims.get(index)?,
+                    *strides.get(index)?,
+                );
             }
             let selected_width = if select.0.is_empty() {
                 stride
@@ -1098,6 +1146,17 @@ impl ExprCompiler<'_> {
         select: &VarSelect,
     ) -> Option<TestbenchTarget<SemanticSignal<StateAddr>, ExprBytecode<StateLocation<StateAddr>>>>
     {
+        if index.is_range() {
+            let (offset, width) = self.array_slice_offset(info, index, select)?;
+            return Some(TestbenchTarget {
+                signal,
+                selection: Some(TestbenchSelection {
+                    offset: ExprBytecode::new(offset),
+                    width,
+                }),
+                width,
+            });
+        }
         if index.indices.is_empty() && select.0.is_empty() && select.1.is_none() {
             return Some(TestbenchTarget {
                 signal,
@@ -1106,44 +1165,27 @@ impl ExprCompiler<'_> {
             });
         }
 
-        let array_total: usize = info.array_dims.iter().product::<usize>().max(1);
-        let element_width = info.width / array_total;
-        let mut strides_bits = vec![element_width; info.array_dims.len()];
-        if !info.array_dims.is_empty() {
-            let mut stride = element_width;
-            for i in (0..info.array_dims.len()).rev() {
-                strides_bits[i] = stride;
-                stride *= info.array_dims[i];
-            }
+        if index.indices.len() > info.array_dims.len() {
+            return None;
         }
-
+        let mut accessed_width = info.width;
         let mut offset_ops = vec![TbOpcode::ConstU64(0)];
-        for (i, index) in index.indices.iter().enumerate() {
-            let stride = *strides_bits.get(i)?;
-            Self::append_offset_term(&mut offset_ops, |ops| {
-                if let Some(index) = Self::try_const_usize(index) {
-                    ops.push(TbOpcode::ConstU64((index * stride) as u64));
-                } else {
-                    self.emit(index, ops);
-                    ops.push(TbOpcode::ConstU64(stride as u64));
-                    ops.push(TbOpcode::BinOp(Op::Mul));
-                }
-            });
+        for (index, &size) in index.indices.iter().zip(&info.array_dims) {
+            accessed_width /= size;
+            self.emit_index_offset(&mut offset_ops, index, 0, size, accessed_width);
         }
-
-        let accessed_width = if index.indices.len() >= info.array_dims.len() {
-            element_width
-        } else if index.indices.is_empty() {
-            info.width
+        let select_width = if select.is_empty() {
+            accessed_width
         } else {
-            *strides_bits.get(index.indices.len() - 1)?
+            let (select_ops, width) = self.selection_offset(select, &info.packed_dims)?;
+            offset_ops.extend(select_ops);
+            offset_ops.push(TbOpcode::IndexOffset {
+                first: 0,
+                end: usize::MAX,
+                stride: 1,
+            });
+            width
         };
-        let (select_ops, select_width) = if select.is_empty() {
-            (vec![TbOpcode::ConstU64(0)], accessed_width)
-        } else {
-            self.selection_offset(select, &info.packed_dims)?
-        };
-        Self::append_offset_term(&mut offset_ops, |ops| ops.extend(select_ops));
 
         Some(TestbenchTarget {
             signal,
@@ -1190,11 +1232,28 @@ impl ExprCompiler<'_> {
         Self::validate_target_bounds_parts(info, &destination.index, &destination.select)
     }
 
+    pub(super) fn validate_array_slice(
+        info: &VariableInfo,
+        index: &VarIndex,
+        select: &VarSelect,
+        token: Option<&veryl_parser::token_range::TokenRange>,
+    ) -> Result<(), ParserError> {
+        if index.is_range() && array_slice_geometry(info, index, select).is_none() {
+            return Err(ParserError::illegal_context(
+                "testbench array slice",
+                "expected a fixed-width slice of one unpacked dimension",
+                token,
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn validate_target_bounds_parts(
         info: &VariableInfo,
         index: &VarIndex,
         select: &VarSelect,
     ) -> Result<(), ParserError> {
+        Self::validate_array_slice(info, index, select, None)?;
         for (dimension, index) in index.indices.iter().enumerate() {
             let Some(&size) = info.array_dims.get(dimension) else {
                 return Err(ParserError::illegal_context(

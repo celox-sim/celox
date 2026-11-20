@@ -504,14 +504,27 @@ impl<'a> FfParser<'a> {
             add_offset_constant(&mut dynamic_bit_offset, static_logical_offset, ir_builder);
         }
 
-        Ok(match dynamic_bit_offset {
-            Some(offset) => SIROffset::Dynamic(offset),
-            None => SIROffset::Static(
-                (static_element_index as usize)
-                    .saturating_mul(element_width)
-                    .saturating_add(static_bit_offset as usize),
-            ),
-        })
+        if let Some(offset) = dynamic_bit_offset {
+            return Ok(SIROffset::Dynamic(offset));
+        }
+
+        let bit_offset = (static_element_index as usize)
+            .saturating_mul(element_width)
+            .saturating_add(static_bit_offset as usize);
+        Ok(
+            if array_dimension_count != 0
+                && selected_width > element_width
+                && selected_width.is_multiple_of(element_width)
+                && bit_offset.is_multiple_of(element_width)
+            {
+                SIROffset::PackedElements {
+                    bit_offset,
+                    element_width,
+                }
+            } else {
+                SIROffset::Static(bit_offset)
+            },
+        )
     }
 
     /// Helper: evaluates a runtime index expression.
@@ -644,7 +657,7 @@ impl<'a> FfParser<'a> {
         };
 
         let mut guard = AccessGuard::default();
-        let mut offset = self.emit_guarded_offset_calc(
+        let offset = self.emit_guarded_offset_calc(
             var_id,
             index,
             select,
@@ -654,27 +667,6 @@ impl<'a> FfParser<'a> {
             Some(&mut guard),
             ir_builder,
         )?;
-        if !source_type.array.is_empty()
-            && index.indices.is_empty()
-            && select.0.is_empty()
-            && select.1.is_none()
-        {
-            // A whole unpacked array is a multi-element transfer, like the
-            // corresponding whole-array store in `op_store`.
-            let element_count = source_type.total_array().ok_or_else(|| {
-                ParserError::unresolved_width(
-                    self.module,
-                    &self.module.variables[&var_id],
-                    source_type.to_string(),
-                )
-            })?;
-            if element_count > 0 && width.is_multiple_of(element_count) {
-                offset = SIROffset::PackedElements {
-                    bit_offset: 0,
-                    element_width: width / element_count,
-                };
-            }
-        }
         let is_internal = self.local_working_vars.contains(&var_id)
             || self.inline_function_locals.contains(&var_id);
         let load_region = if is_internal {
@@ -727,6 +719,7 @@ impl<'a> FfParser<'a> {
             variable.affiliation == Affiliation::AlwaysFf
                 && variable.kind == VarKind::Let
                 && dst.index.indices.is_empty()
+                && !dst.index.is_range()
                 && dst.select.0.is_empty()
                 && dst.select.1.is_none()
         };
@@ -753,7 +746,7 @@ impl<'a> FfParser<'a> {
         }
 
         let mut guard = AccessGuard::default();
-        let mut offset = self.emit_guarded_offset_calc(
+        let offset = self.emit_guarded_offset_calc(
             dst.id,
             &dst.index,
             &dst.select,
@@ -763,29 +756,6 @@ impl<'a> FfParser<'a> {
             Some(&mut guard),
             ir_builder,
         )?;
-        if !target_type.array.is_empty()
-            && dst.index.indices.is_empty()
-            && dst.select.0.is_empty()
-            && dst.select.1.is_none()
-        {
-            let Some(element_count) = target_type
-                .array
-                .iter()
-                .copied()
-                .try_fold(1usize, |total, dim| {
-                    dim.and_then(|dim| total.checked_mul(dim))
-                })
-            else {
-                unreachable!("whole-array store dimensions are resolved without overflow");
-            };
-            if element_count == 0 || !target_width.is_multiple_of(element_count) {
-                unreachable!("whole-array store width is divisible by its nonzero element count");
-            }
-            offset = SIROffset::PackedElements {
-                bit_offset: 0,
-                element_width: target_width / element_count,
-            };
-        }
         let is_static = is_static_access(&dst.index, &dst.select);
         if self.inline_function_locals.contains(&dst.id) {
             // Inline function storage is blocking and call-private, so it

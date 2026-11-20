@@ -162,6 +162,10 @@ pub(crate) fn hierarchical_reference_bits(
     reference: &HierVarRef,
 ) -> Result<BitAccess, ParserError> {
     let invalid = |detail| invalid_hierarchical_reference(reference, detail);
+    if reference.index.is_range() {
+        // A slice can observe several entries, including a whole subarray.
+        return checked_reference_bits(reference, 0, info.width, info.width);
+    }
     let array_total = info
         .array_dims
         .iter()
@@ -349,6 +353,56 @@ pub(super) fn checked_reference_bits(
     Ok(BitAccess::new(lsb, msb))
 }
 
+pub(super) struct ArraySliceGeometry<'a> {
+    pub prefix: &'a [Expression],
+    pub anchor: &'a Expression,
+    pub first: usize,
+    pub end: usize,
+    pub stride: usize,
+    pub width: usize,
+}
+
+pub(super) fn array_slice_geometry<'a>(
+    info: &VariableInfo,
+    index: &'a VarIndex,
+    select: &VarSelect,
+) -> Option<ArraySliceGeometry<'a>> {
+    if !select.is_empty() {
+        return None;
+    }
+    let (op, bound) = index.range.as_deref()?;
+    let (anchor, prefix) = index.indices.split_last()?;
+    let dimensions = info.array_dims.get(..=prefix.len())?;
+    let &size = dimensions.last()?;
+    let stride = dimensions
+        .iter()
+        .try_fold(info.width, |width, &size| width.checked_div(size))?;
+    let bound = eval_constexpr(bound)?.to_usize()?;
+    let count = match op {
+        VarSelectOp::Colon => bound
+            .checked_sub(eval_constexpr(anchor)?.to_usize()?)?
+            .checked_add(1)?,
+        _ => bound,
+    };
+    if count == 0 || count > size {
+        return None;
+    }
+    let width = stride.checked_mul(count)?;
+    let (first, end, stride) = match op {
+        VarSelectOp::Colon | VarSelectOp::PlusColon => (0, size - count + 1, stride),
+        VarSelectOp::MinusColon => (count - 1, size, stride),
+        VarSelectOp::Step => (0, size / count, width),
+    };
+    Some(ArraySliceGeometry {
+        prefix,
+        anchor,
+        first,
+        end,
+        stride,
+        width,
+    })
+}
+
 pub(super) fn variable_access_width(
     info: &VariableInfo,
     index: &VarIndex,
@@ -360,6 +414,9 @@ pub(super) fn variable_access_width(
         .try_fold(1usize, |total, dimension| total.checked_mul(*dimension))?;
     if array_total == 0 || !info.width.is_multiple_of(array_total) {
         return None;
+    }
+    if index.is_range() {
+        return Some(array_slice_geometry(info, index, select)?.width);
     }
     let consumed = index.indices.len();
     if consumed > info.array_dims.len() {

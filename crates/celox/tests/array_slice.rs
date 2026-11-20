@@ -237,3 +237,63 @@ o_data: inst_o,
     }
     }
 }
+
+all_backends! {
+    fn static_ff_array_slice_reads_multiple_elements(sim) {
+        @ignore_on(sv, veryl);
+        @setup { let code = r#"
+module Top (
+    clk: input clock,
+    data: input logic<8>[4],
+    q: output logic<8>[2],
+) {
+    always_ff (clk) {
+        q = data[1+:2];
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+        let data = sim.signal("data");
+        let q = sim.signal("q");
+        let clk = sim.event("clk");
+        sim.modify(|io| io.set(data, 0x44332211u32)).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(q), 0x3322u32.into());
+    }
+}
+
+#[test]
+fn initial_array_slices_read_and_write_multiple_elements() {
+    let result = Simulator::builder(
+        r#"
+#[test(Top)] module Top {
+    var a: logic<8>[4];
+    var b: logic<8>[2];
+    var row: logic<8>[2, 4];
+    var start: u8;
+    initial {
+        a[0] = 8'h11;
+        a[1] = 8'h22;
+        a[2] = 8'h33;
+        a[3] = 8'h44;
+        start = 1;
+        b = a[1+:2];
+        $assert(b[0] == 8'h22);
+        $assert(b[1] == 8'h33);
+        row[1][1+:2] = '{b[0], b[1]};
+        b = row[1][start+:2];
+        $assert(b[0] == 8'h22);
+        $assert(b[1] == 8'h33);
+        a[1+:2] = '{b[0], b[1]};
+        $assert(a[0] == 8'h11);
+        $assert(a[3] == 8'h44);
+        $finish();
+    }
+}
+"#,
+        "Top",
+    )
+    .run_test()
+    .unwrap();
+    assert_eq!(result, celox::TestResult::Pass);
+}

@@ -25,6 +25,7 @@ impl CompiledExpr {
             Opcode::LoadU64 { location, .. }
             | Opcode::LoadWide { location, .. }
             | Opcode::LoadIndexed { location, .. }
+            | Opcode::LoadArraySlice { location, .. }
             | Opcode::LoadBitSelect { location, .. }
             | Opcode::LoadString { location, .. }
             | Opcode::StoreString { location, .. }

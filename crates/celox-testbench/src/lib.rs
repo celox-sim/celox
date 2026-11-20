@@ -679,6 +679,19 @@ pub enum ExprOpcode<L = usize> {
     StoreString {
         location: L,
     },
+    /// Add a bounded coordinate to an accumulated bit offset. An invalid
+    /// coordinate or previous offset yields the out-of-range sentinel.
+    IndexOffset {
+        first: usize,
+        end: usize,
+        stride: usize,
+    },
+    LoadArraySlice {
+        location: L,
+        source_width: usize,
+        element_width: usize,
+        width: usize,
+    },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1037,6 +1050,20 @@ impl<L> ExprBytecode<L> {
                 ExprOpcode::Ternary { then_len, else_len } => {
                     ExprOpcode::Ternary { then_len, else_len }
                 }
+                ExprOpcode::IndexOffset { first, end, stride } => {
+                    ExprOpcode::IndexOffset { first, end, stride }
+                }
+                ExprOpcode::LoadArraySlice {
+                    location,
+                    source_width,
+                    element_width,
+                    width,
+                } => ExprOpcode::LoadArraySlice {
+                    location: map(location)?,
+                    source_width,
+                    element_width,
+                    width,
+                },
                 ExprOpcode::LoadIndexed {
                     location,
                     stride_bits,

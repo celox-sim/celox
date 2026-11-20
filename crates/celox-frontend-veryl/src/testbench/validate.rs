@@ -110,7 +110,9 @@ pub(super) fn validate_testbench_expression(
     active_functions: &mut FxHashSet<(VarId, Option<Vec<usize>>)>,
 ) -> Result<(), ParserError> {
     if let Expression::Term(factor) = expression
-        && factor.comptime().r#type.is_string()
+        && (factor.comptime().r#type.is_string()
+            || matches!(factor.as_ref(), Factor::Variable(_, index, ..) if index.is_range())
+            || matches!(factor.as_ref(), Factor::HierVariable(reference) if reference.index.is_range()))
     {
         let access = match factor.as_ref() {
             Factor::Variable(id, index, select, _) => source
@@ -130,16 +132,20 @@ pub(super) fn validate_testbench_expression(
             )),
             _ => None,
         };
-        if let Some((info, index, select)) = access
-            && (index.indices.len() > info.array_dims.len()
-                || !select.0.is_empty()
-                || select.1.is_some())
-        {
-            return Err(ParserError::illegal_context(
-                "string character selection",
-                "character indexing and slicing of strings are not supported in Celox testbenches",
-                Some(&factor.comptime().token),
-            ));
+        if let Some((info, index, select)) = access {
+            let token = Some(&factor.comptime().token);
+            if factor.comptime().r#type.is_string()
+                && (index.is_range()
+                    || index.indices.len() > info.array_dims.len()
+                    || !select.is_empty())
+            {
+                return Err(ParserError::illegal_context(
+                    "string character selection",
+                    "character indexing and slicing of strings are not supported in Celox testbenches",
+                    token,
+                ));
+            }
+            ExprCompiler::validate_array_slice(info, index, select, token)?;
         }
     }
     match expression {
@@ -147,8 +153,7 @@ pub(super) fn validate_testbench_expression(
             Factor::HierVariable(reference) => {
                 for expression in reference
                     .index
-                    .indices
-                    .iter()
+                    .expressions()
                     .chain(reference.select.0.iter())
                 {
                     validate_testbench_expression(expression, lookup, source, active_functions)?;
@@ -159,7 +164,7 @@ pub(super) fn validate_testbench_expression(
                 Ok(())
             }
             Factor::Variable(_, index, select, _) => {
-                for expression in index.indices.iter().chain(select.0.iter()) {
+                for expression in index.expressions().chain(select.0.iter()) {
                     validate_testbench_expression(expression, lookup, source, active_functions)?;
                 }
                 if let Some((_, expression)) = &select.1 {
@@ -540,8 +545,7 @@ pub(super) fn validate_testbench_hierarchical_destination(
 ) -> Result<(), ParserError> {
     for expression in destination
         .index
-        .indices
-        .iter()
+        .expressions()
         .chain(destination.select.0.iter())
     {
         validate_testbench_expression(expression, lookup, source, active_functions)?;
@@ -577,7 +581,7 @@ pub(super) fn validate_testbench_destination(
     source: &VerylTestbenchSource,
     active_functions: &mut FxHashSet<(VarId, Option<Vec<usize>>)>,
 ) -> Result<(), ParserError> {
-    for expression in &destination.index.indices {
+    for expression in destination.index.expressions() {
         validate_testbench_expression(expression, lookup, source, active_functions)?;
     }
     for expression in &destination.select.0 {

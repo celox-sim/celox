@@ -71,6 +71,125 @@ impl<A: Clone> Expressions<'_, A> {
             .emit(Inst::Unary(register, UnaryOp::ToTwoState, value.register));
         Value { register, ..value }
     }
+    fn index_offset(
+        &mut self,
+        base: Value,
+        coordinate: Value,
+        first: usize,
+        end: usize,
+        stride: usize,
+    ) -> Value {
+        let known = self.two_state(coordinate);
+        let coordinate_width = self.builder.register(&known.register).width().max(64);
+        let extended = self.unary(UnaryOp::Ident, known, coordinate_width, false);
+        let first = self.bits(coordinate_width, first as u64);
+        let end = self.bits(coordinate_width, end as u64);
+        let above_first = self.binary(BinaryOp::GeU, extended, first, 1);
+        let below_end = self.binary(BinaryOp::LtU, extended, end, 1);
+        let mut valid = self.binary(BinaryOp::And, above_first, below_end, 1);
+        if self.is_logic(&coordinate.register) {
+            let fully_known = self.builder.alloc_bit(1, false);
+            self.builder.emit(Inst::Binary(
+                fully_known,
+                coordinate.register,
+                BinaryOp::EqCase,
+                known.register,
+            ));
+            valid = self.binary(
+                BinaryOp::And,
+                valid,
+                Value {
+                    register: fully_known,
+                    string: false,
+                },
+                1,
+            );
+        }
+        let invalid = self.bits(64, u64::MAX);
+        let base_valid = self.binary(BinaryOp::Ne, base, invalid, 1);
+        let valid = self.binary(BinaryOp::And, valid, base_valid, 1);
+        let delta = self.binary(BinaryOp::Sub, extended, first, coordinate_width);
+        let delta = self.unary(UnaryOp::Ident, delta, 64, false);
+        let stride = self.bits(64, stride as u64);
+        let term = self.binary(BinaryOp::Mul, delta, stride, 64);
+        let offset = self.binary(BinaryOp::Add, base, term, 64);
+        let offset_fits = self.binary(BinaryOp::GeU, offset, base, 1);
+        let valid = self.binary(BinaryOp::And, valid, offset_fits, 1);
+        let register = self.builder.alloc_bit(64, false);
+        self.builder.emit(Inst::Mux(
+            register,
+            valid.register,
+            offset.register,
+            invalid.register,
+        ));
+        Value {
+            register,
+            string: false,
+        }
+    }
+
+    fn load_array_slice(
+        &mut self,
+        location: &StateLocation<A>,
+        offset: Value,
+        source_width: usize,
+        element_width: usize,
+        width: usize,
+    ) -> Value {
+        let limit = self.bits(
+            64,
+            source_width
+                .checked_sub(width)
+                .map_or(0, |max| max as u64 + 1),
+        );
+        let valid = self.binary(BinaryOp::LtU, offset, limit, 1);
+        let present = self.builder.new_block();
+        let absent = self.builder.new_block();
+        let result = self.load(location, width);
+        let join = self.builder.new_block_with(vec![result]);
+        self.builder.seal_block(SIRTerminator::Branch {
+            cond: valid.register,
+            true_block: (present, vec![]),
+            false_block: (absent, vec![]),
+        });
+        self.builder.switch_to_block(present);
+        let base = self.bits(64, (location.byte_offset * 8) as u64);
+        let offset = self.binary(BinaryOp::Add, offset, base, 64);
+        let stride = self.bits(64, element_width as u64);
+        let index = self.binary(BinaryOp::DivU, offset, stride, 64);
+        let loaded = self.load(location, width);
+        self.builder.emit(Inst::Load(
+            loaded,
+            location.address.clone(),
+            SIROffset::ElementRun {
+                index: index.register,
+                element_width,
+            },
+            width,
+        ));
+        self.builder
+            .seal_block(SIRTerminator::Jump(join, vec![loaded]));
+        self.builder.switch_to_block(absent);
+        let invalid = if self.is_logic(&result) {
+            let ones = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+            let invalid = self.builder.alloc_logic(width);
+            self.builder.emit(Inst::Imm(
+                invalid,
+                SIRValue::new_four_state(ones.clone(), ones),
+            ));
+            invalid
+        } else {
+            self.bits(width, 0u8).register
+        };
+        self.builder
+            .seal_block(SIRTerminator::Jump(join, vec![invalid]));
+        self.builder.switch_to_block(join);
+        Value {
+            register: result,
+            string: false,
+        }
+    }
+
     fn load(&mut self, location: &StateLocation<A>, width: usize) -> RegisterId {
         if (self.logic)(&location.address) {
             self.builder.alloc_logic(width.max(1))
@@ -150,6 +269,7 @@ impl<A: Clone> Expressions<'_, A> {
                     | ExprOpcode::ConstString(_)
                     | ExprOpcode::LoadString { .. }
                     | ExprOpcode::LoadIndexed { .. }
+                    | ExprOpcode::LoadArraySlice { .. }
             )
         })
     }
@@ -522,6 +642,20 @@ impl<A: Clone> Expressions<'_, A> {
                     *stack = merged;
                     cursor = end;
                     continue;
+                }
+                ExprOpcode::IndexOffset { first, end, stride } => {
+                    let coordinate = Self::pop(stack)?;
+                    let base = Self::pop(stack)?;
+                    self.index_offset(base, coordinate, *first, *end, *stride)
+                }
+                ExprOpcode::LoadArraySlice {
+                    location,
+                    source_width,
+                    element_width,
+                    width,
+                } => {
+                    let offset = Self::pop(stack)?;
+                    self.load_array_slice(location, offset, *source_width, *element_width, *width)
                 }
                 ExprOpcode::LoadIndexed {
                     location,

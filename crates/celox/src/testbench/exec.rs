@@ -753,12 +753,26 @@ pub(super) fn exec_one_detailed<B: SimBackend>(
             }
             let value = value.as_ref().map(|value| {
                 let (bits, mask) = if let Some(target) = value_target {
-                    let (bits, mask) = sim.get_four_state(target.signal);
                     let offset = target
                         .selection
                         .as_ref()
                         .map_or(0, |s| eval_expr(sim, &s.offset).to_u64() as usize);
-                    (bits >> offset, mask >> offset)
+                    let available = target.signal.width.saturating_sub(offset).min(target.width);
+                    let invalid = if sim.backend.layout().four_state && target.signal.is_4state {
+                        width_mask(target.width) ^ width_mask(available)
+                    } else {
+                        BigUint::default()
+                    };
+                    if available == 0 {
+                        (invalid.clone(), invalid)
+                    } else {
+                        let (bits, mask) = sim.get_four_state(target.signal);
+                        let in_bounds = width_mask(available);
+                        (
+                            ((bits >> offset) & &in_bounds) | &invalid,
+                            ((mask >> offset) & in_bounds) | invalid,
+                        )
+                    }
                 } else {
                     (eval_expr(sim, value).to_biguint(), value_mask.clone())
                 };
