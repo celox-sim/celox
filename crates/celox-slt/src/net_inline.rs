@@ -548,37 +548,35 @@ pub fn inline_nets<A: Copy + Eq + Hash + Ord + Debug + Display>(
         .iter()
         .flat_map(|(var, candidate)| candidate.pieces.iter().map(|piece| (piece.path, *var)))
         .collect();
-    let mut evaluations: HashMap<A, usize> = HashMap::default();
+    // A diamond can reach the same surviving path through several nets.
+    // Its shared SLT node is evaluated once in that path.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Readers {
+        One(usize),
+        Several,
+    }
+    let mut evaluations: HashMap<A, Readers> = HashMap::default();
     let mut inlined: HashSet<A> = HashSet::default();
     for var in order.iter().rev() {
-        let mut reading_paths = 0;
-        let mut reading_nets: HashMap<A, usize> = HashMap::default();
-        for reader in &readers[var] {
-            if dead_paths.contains(reader) {
-                continue;
-            }
-            match piece_of.get(reader) {
-                Some(net) => *reading_nets.entry(*net).or_default() += 1,
-                None => reading_paths += 1,
-            }
-        }
-        let count = reading_paths
-            + reading_nets
-                .iter()
-                .map(|(net, pieces)| {
-                    if inlined.contains(net) {
-                        evaluations[net]
-                    } else {
-                        *pieces
-                    }
-                })
-                .sum::<usize>();
-        evaluations.insert(*var, count);
-        if count <= 1 || copy_cost[var] <= DUPLICATED_NET_OPERATORS {
+        let destinations = readers[var]
+            .iter()
+            .filter(|p| !dead_paths.contains(p))
+            .map(|p| match piece_of.get(p) {
+                Some(net) if inlined.contains(net) => evaluations[net],
+                _ => Readers::One(*p),
+            });
+        let destination = destinations
+            .reduce(|a, b| if a == b { a } else { Readers::Several })
+            .expect("a live candidate has a live reader");
+        evaluations.insert(*var, destination);
+        if destination != Readers::Several || copy_cost[var] <= DUPLICATED_NET_OPERATORS {
             inlined.insert(*var);
         }
     }
-    report.inlined = inlined.iter().filter(|var| evaluations[*var] <= 1).count();
+    report.inlined = inlined
+        .iter()
+        .filter(|var| evaluations[*var] != Readers::Several)
+        .count();
     report.duplicated = inlined.len() - report.inlined;
     report.removed = inlined.iter().chain(&dead).copied().collect();
     report.removed.sort_unstable();
@@ -947,6 +945,37 @@ mod tests {
             assert_eq!(reader.expr, expected);
             assert_eq!(sources(reader), vec![1, 2, 31]);
         }
+    }
+
+    #[test]
+    fn reconverging_readers_share_a_large_expression() {
+        let mut arena = SLTNodeArena::new();
+        let operands: Vec<_> = (1..=5).map(|id| input(&mut arena, id, 0, 7)).collect();
+        let large = operands
+            .iter()
+            .copied()
+            .reduce(|a, b| and(&mut arena, a, b))
+            .unwrap();
+        assert!(operators_of([large].into_iter(), &arena) > DUPLICATED_NET_OPERATORS);
+        let shared = input(&mut arena, 10, 0, 7);
+        let left = and(&mut arena, shared, operands[0]);
+        let right = and(&mut arena, shared, operands[1]);
+        let l = input(&mut arena, 11, 0, 7);
+        let r = input(&mut arena, 12, 0, 7);
+        let output = and(&mut arena, l, r);
+        let mut paths = vec![
+            path(10, 0, 7, large, &[1, 2, 3, 4, 5]),
+            path(11, 0, 7, left, &[10, 1]),
+            path(12, 0, 7, right, &[10, 2]),
+            path(20, 0, 7, output, &[11, 12]),
+        ];
+        let report = inline_nets(&mut paths, &mut arena, &pinned(&[20])).unwrap();
+        assert_eq!((report.inlined, report.duplicated), (3, 0));
+        assert_eq!(targets(&paths), vec![20]);
+        let left = and(&mut arena, large, operands[0]);
+        let right = and(&mut arena, large, operands[1]);
+        assert_eq!(paths[0].expr, and(&mut arena, left, right));
+        assert_eq!(sources(&paths[0]), vec![1, 2, 3, 4, 5]);
     }
 
     /// A read of part of a net takes that part of its expression, by the
