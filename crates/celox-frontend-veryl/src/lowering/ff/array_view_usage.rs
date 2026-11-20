@@ -21,7 +21,7 @@ impl<'a> FfParser<'a> {
         if formal.r#type.array.is_empty() {
             return false;
         }
-        if select.1.is_some() {
+        if index.is_range() || select.1.is_some() {
             return true;
         }
         let Some(array_dims) = formal
