@@ -511,7 +511,10 @@ struct File<'a> {
 
 impl<'a> File<'a> {
     fn new(code: &'a str, path: &Path) -> Result<Self, AnalyzerError> {
-        Self::of_tree(code, path, crate::source_tree::parse_source(code, path)?)
+        Ok(Self::of_tree(
+            code,
+            crate::source_tree::parse_source(code, path)?,
+        ))
     }
 
     /// The file without the later declarations of a module that `declared`
@@ -523,14 +526,11 @@ impl<'a> File<'a> {
         declared: &mut fxhash::FxHashSet<String>,
     ) -> Result<Self, AnalyzerError> {
         let (tree, _) = crate::source_tree::parse_source_with_first_modules(code, path, declared)?;
-        Self::of_tree(code, path, tree)
+        Ok(Self::of_tree(code, tree))
     }
 
-    fn of_tree(
-        code: &'a str,
-        path: &Path,
-        syntax_tree: crate::source_tree::SourceTree,
-    ) -> Result<Self, AnalyzerError> {
+    fn of_tree(code: &'a str, syntax_tree: SyntaxTree) -> Self {
+        let path = syntax_tree.compilation_path();
         let native = syntax_tree.declarations();
         let mut tokens = Vec::new();
         let mut identifiers = HashSet::default();
@@ -600,13 +600,13 @@ impl<'a> File<'a> {
         }
         tokens.sort_unstable();
         tokens.dedup();
-        Ok(Self {
+        Self {
             code,
             syntax_tree,
             tokens,
             identifiers,
             type_names,
-        })
+        }
     }
     fn range_span(&self, range: native::TokenRange) -> Option<Span> {
         let native = self.syntax_tree.declarations();
@@ -3604,16 +3604,28 @@ pub fn plan_interfaces_of_first_modules(
     first_modules: bool,
 ) -> Converted<(NativeInterfacePlan, InterfaceMemberPaths)> {
     let mut declared = fxhash::FxHashSet::default();
-    let files = sources
+    let trees = sources
         .iter()
         .map(|(code, path)| {
-            if first_modules {
-                File::with_first_modules(code, path, &mut declared)
+            let tree = if first_modules {
+                crate::source_tree::parse_source_with_first_modules(code, path, &mut declared)?.0
             } else {
-                File::new(code, path)
-            }
+                crate::source_tree::parse_source(code, path)?
+            };
+            Ok((*code, tree))
         })
         .collect::<Converted<Vec<_>>>()?;
+    let sources = trees
+        .iter()
+        .map(|(code, tree)| (*code, tree))
+        .collect::<Vec<_>>();
+    plan_interfaces_from_trees(&sources, bindings)
+}
+
+pub(crate) fn plan_interfaces_from_trees(
+    sources: &[(&str, &SyntaxTree)],
+    bindings: &[(String, String, Vec<(String, String)>)],
+) -> Converted<(NativeInterfacePlan, InterfaceMemberPaths)> {
     // Local interface instances are bound from their original declarations by
     // interface_binding. A structural plan is needed only for module interface
     // ports; collecting full contracts here rejects ordinary interface ports.
@@ -3622,9 +3634,9 @@ pub fn plan_interfaces_of_first_modules(
     let mut module_names = HashSet::default();
     // The modules with generic interface ports.
     let mut generic_modules = Vec::new();
-    for (index, file) in files.iter().enumerate() {
-        let native = file.syntax_tree.declarations();
-        for (handle, unit) in roots(&file.syntax_tree)? {
+    for (index, (_, tree)) in sources.iter().enumerate() {
+        let native = tree.declarations();
+        for (handle, unit) in roots(tree)? {
             let name = native_name(&unit.name);
             match unit.kind {
                 native::UnitKind::Interface => {
@@ -3666,6 +3678,15 @@ pub fn plan_interfaces_of_first_modules(
             }
         }
     }
+    // Without interface declarations or generic ports there is no plan to
+    // build. Avoid indexing every token and identifier in ordinary RTL.
+    if interface_names.is_empty() && generic_modules.is_empty() {
+        return Ok((NativeInterfacePlan::default(), HashMap::default()));
+    }
+    let files = sources
+        .iter()
+        .map(|(code, tree)| File::of_tree(code, (*tree).clone()))
+        .collect::<Vec<_>>();
     for (_, _, supplied) in bindings {
         contract_names.extend(supplied.iter().map(|(_, interface)| interface.clone()));
     }
