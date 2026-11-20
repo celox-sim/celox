@@ -60,6 +60,10 @@ pub(super) const GROUPS: &[Group] = &[
         text: include_str!("tagged_unions.vtest"),
     },
     Group {
+        file: "src/sv/cases/pattern_matching.vtest",
+        text: include_str!("pattern_matching.vtest"),
+    },
+    Group {
         file: "src/sv/cases/container_formals.vtest",
         text: include_str!("container_formals.vtest"),
     },

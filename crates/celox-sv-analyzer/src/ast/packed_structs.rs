@@ -69,6 +69,17 @@ impl PackedMember {
     pub(in crate::ast) fn is_tagged(&self) -> bool {
         self.tag.is_some()
     }
+
+    pub(in crate::ast) fn is_void(&self) -> bool {
+        self.is_void
+    }
+
+    /// The member's tag index, tag width and payload width in its union.
+    pub(in crate::ast) fn tag_info(&self) -> Option<(usize, usize, usize)> {
+        self.tag
+            .as_ref()
+            .map(|tag| (tag.index, tag.tag_width, tag.payload_width))
+    }
     /// The member belongs to a packed union, tagged or not.
     pub(in crate::ast) fn in_union(&self) -> bool {
         self.in_union

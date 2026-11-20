@@ -5051,5 +5051,59 @@
         "interconnect::interconnect_merges_to_wand_from_connected_ports_four_state"
       ]
     }
+  },
+  {
+    "id": "sv_icarus_pattern_matching",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 rejects the typedef of a tagged union with unpacked structure members (\"Syntax error in typedef clause\") and does not parse pattern matching, which IEEE 1800-2023 7.3.2 and 12.6 require. Celox executes the unchanged cases on every backend.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_pattern_matching_icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "pattern_matching::ambiguous_predicate_merges_arms",
+        "pattern_matching::case_matches_nested_and_named",
+        "pattern_matching::case_matches_tagged_union",
+        "pattern_matching::clauses_short_circuit",
+        "pattern_matching::conditional_matches",
+        "pattern_matching::constant_patterns_and_filters",
+        "pattern_matching::if_matches_clauses",
+        "pattern_matching::packed_and_integral_patterns",
+        "pattern_matching::pattern_more_contexts",
+        "pattern_matching::pattern_repeated_evaluation",
+        "pattern_matching::pattern_value_contexts"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_pattern_matching",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.054",
+    "reason": "Verilator 5.054 reports tagged unions, void tagged members, pattern variables and &&& expressions as unsupported, which IEEE 1800-2023 7.3.2 and 12.6 require. Celox executes the unchanged cases on every backend.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_pattern_matching_verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "pattern_matching::ambiguous_predicate_merges_arms",
+        "pattern_matching::case_matches_nested_and_named",
+        "pattern_matching::case_matches_tagged_union",
+        "pattern_matching::clauses_short_circuit",
+        "pattern_matching::conditional_matches",
+        "pattern_matching::constant_patterns_and_filters",
+        "pattern_matching::if_matches_clauses",
+        "pattern_matching::packed_and_integral_patterns",
+        "pattern_matching::pattern_more_contexts",
+        "pattern_matching::pattern_repeated_evaluation",
+        "pattern_matching::pattern_value_contexts"
+      ]
+    }
   }
 ]

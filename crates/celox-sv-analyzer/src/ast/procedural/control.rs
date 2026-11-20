@@ -31,6 +31,33 @@ struct RandcaseState {
     width: usize,
     items: Vec<Vec<Stmt>>,
 }
+
+/// One arm of a pattern-matching construct, lowered (12.6): statements
+/// that run when the arm is reached, before its condition (saving the
+/// scrutinee, and the bindings a later clause reads), its condition, the
+/// bindings that run when it holds, an optional filter condition that
+/// runs after them, and its body.
+struct PatternArm {
+    setup: Vec<Stmt>,
+    condition: Option<Expr>,
+    bindings: Vec<Stmt>,
+    filter_setup: Vec<Stmt>,
+    filter: Option<Expr>,
+    body: Vec<Stmt>,
+}
+
+struct PatternState {
+    id: StatementId,
+    index: usize,
+    kind: CaseKind,
+    arms: Vec<PatternArm>,
+    default: Option<Vec<Stmt>>,
+    default_done: bool,
+    /// The saved scrutinee value and its layout (`case ... matches`), or
+    /// none for an if statement, whose clauses save their own scrutinees.
+    scrutinee: Option<(Expr, pattern_match::MatchLayout)>,
+}
+
 enum Job {
     Enter(StatementId),
     EndScope,
@@ -75,6 +102,20 @@ enum Job {
     CaseBranch {
         state: CaseState,
         labels: Option<Vec<CaseLabel<Expr>>>,
+        start: usize,
+    },
+    PatternNext(PatternState),
+    PatternBranch {
+        state: PatternState,
+        setup: Vec<Stmt>,
+        condition: Option<Expr>,
+        bindings: Vec<Stmt>,
+        filter_setup: Vec<Stmt>,
+        filter: Option<Expr>,
+        start: usize,
+    },
+    PatternDefault {
+        state: PatternState,
         start: usize,
     },
     RandcaseNext(RandcaseState),
@@ -144,6 +185,59 @@ struct ExpectAttempt {
 }
 
 impl BodyBuilder<'_, '_, '_> {
+    /// Fold arms around a single continuation. A filtered arm stores
+    /// whether both the pattern and filter succeeded before branching.
+    fn fold_pattern_arms(&mut self, arms: Vec<PatternArm>, mut rest: Vec<Stmt>) -> Vec<Stmt> {
+        let mut enabled = None;
+        for arm in arms.into_iter().rev() {
+            let mut setup = arm.setup;
+            let mut bindings = arm.bindings;
+            bindings.extend(arm.filter_setup);
+            let (condition, body) = match (arm.condition, arm.filter) {
+                (Some(pattern), Some(filter)) => {
+                    let enabled = enabled
+                        .get_or_insert_with(|| self.hidden(Type::new(TypeKind::Bit)).1)
+                        .clone();
+                    let assign = |rhs| Stmt::Assign {
+                        lhs: LValue::Ident(enabled.clone()),
+                        rhs,
+                        nonblocking: false,
+                    };
+                    setup.push(assign(Expr::Literal("1'b0".into())));
+                    bindings.push(Stmt::If {
+                        condition: filter,
+                        then_body: vec![assign(Expr::Literal("1'b1".into()))],
+                        else_body: Vec::new(),
+                    });
+                    setup.push(Stmt::If {
+                        condition: pattern,
+                        then_body: bindings,
+                        else_body: Vec::new(),
+                    });
+                    (Expr::Ident(enabled), arm.body)
+                }
+                (None, Some(filter)) => {
+                    setup.extend(bindings);
+                    (filter, arm.body)
+                }
+                (condition, None) => {
+                    bindings.extend(arm.body);
+                    (
+                        condition.unwrap_or_else(|| Expr::Literal("1'b1".into())),
+                        bindings,
+                    )
+                }
+            };
+            setup.push(Stmt::If {
+                condition,
+                then_body: body,
+                else_body: rest,
+            });
+            rest = setup;
+        }
+        rest
+    }
+
     pub(in crate::ast) fn native_body(
         &mut self,
         ids: &[StatementId],
@@ -411,11 +505,33 @@ impl BodyBuilder<'_, '_, '_> {
                         jobs.push(Job::EndScope);
                         jobs.extend(items.iter().rev().map(|id| Job::Enter(*id)));
                     }
-                    StatementKind::Conditional { .. } => jobs.push(Job::IfNext(IfState {
-                        id,
-                        index: 0,
-                        branches: Vec::new(),
-                    })),
+                    StatementKind::Conditional { branches, .. } => {
+                        // A predicate with pattern clauses lowers as
+                        // pattern matching instead (IEEE 1800-2023 12.6.2).
+                        let patterned = branches.iter().any(|branch| {
+                            branch.predicate.items.iter().any(|item| {
+                                item.pattern.is_some()
+                                    || self.predicate_is_patterned(item.expression)
+                            })
+                        });
+                        if patterned {
+                            jobs.push(Job::PatternNext(PatternState {
+                                id,
+                                index: 0,
+                                kind: CaseKind::Exact,
+                                arms: Vec::new(),
+                                default: None,
+                                default_done: false,
+                                scrutinee: None,
+                            }));
+                        } else {
+                            jobs.push(Job::IfNext(IfState {
+                                id,
+                                index: 0,
+                                branches: Vec::new(),
+                            }));
+                        }
+                    }
                     StatementKind::Loop { kind, body } => {
                         let mut prologue = Vec::new();
                         let (kind, condition, scope) = match kind {
@@ -434,6 +550,9 @@ impl BodyBuilder<'_, '_, '_> {
                                 // The count is evaluated once (12.7.2).
                                 output.extend(self.effects(&[*value])?);
                                 let mut count = self.native_value(*value)?;
+                                // A pattern predicate in the count runs
+                                // now, before the loop reads it (12.6.3).
+                                output.append(&mut self.pattern_prelude);
                                 // The count is evaluated once (IEEE 1800-2023
                                 // 12.7.2): one that calls a subroutine or has
                                 // an effect is saved before the loop, which may
@@ -548,6 +667,32 @@ impl BodyBuilder<'_, '_, '_> {
                             jobs.push(Job::Enter(body));
                         }
                     }
+                    // A pattern-matching case statement (12.6.1): the
+                    // selector is saved once, and each item is compiled
+                    // against it by the pattern jobs.
+                    StatementKind::Case {
+                        keyword,
+                        mode,
+                        expression: Some(value),
+                        ..
+                    } if keyword != "randcase" && mode.as_deref() == Some("matches") => {
+                        let (setup, saved, layout) = self.pattern_scrutinee(*value)?;
+                        output.extend(setup);
+                        let kind = match keyword.as_str() {
+                            "casez" => CaseKind::Z,
+                            "casex" => CaseKind::X,
+                            _ => CaseKind::Exact,
+                        };
+                        jobs.push(Job::PatternNext(PatternState {
+                            id,
+                            index: 0,
+                            kind,
+                            arms: Vec::new(),
+                            default: None,
+                            default_done: false,
+                            scrutinee: Some((saved, layout)),
+                        }));
+                    }
                     StatementKind::Case {
                         keyword,
                         mode,
@@ -555,9 +700,6 @@ impl BodyBuilder<'_, '_, '_> {
                         arms,
                         ..
                     } if keyword != "randcase" => {
-                        if mode.as_deref() == Some("matches") {
-                            return Err(unsupported("pattern-matching case statement"));
-                        }
                         let labels = arms
                             .iter()
                             .flat_map(|arm| &arm.matches)
@@ -617,14 +759,79 @@ impl BodyBuilder<'_, '_, '_> {
                                     vec![event],
                                 )));
                             }
+                        } else if let Some(statements) = self.pattern_wait(*condition)? {
+                            output.extend(statements);
                         } else {
-                            let condition = self.native_value(*condition)?;
-                            if events::reads_triggered(&condition) {
+                            let (setup, condition) = if self.predicate_is_patterned(*condition) {
+                                if super::effects::has_updates(native, &[*condition]) {
+                                    return Err(unsupported(
+                                        "increment or decrement expression in this context",
+                                    ));
+                                }
+                                let mut clauses = Vec::new();
+                                self.predicate_clauses(*condition, &mut clauses);
+                                let (setup, verdict) = self.eval_predicate_clauses(&clauses)?;
+                                (
+                                    setup,
+                                    verdict.unwrap_or_else(|| Expr::Literal("1'b1".into())),
+                                )
+                            } else {
+                                let value = self.native_value(*condition)?;
+                                (std::mem::take(&mut self.pattern_prelude), value)
+                            };
+                            let mut reads_triggered = events::reads_triggered(&condition);
+                            for stmt in &setup {
+                                stmt.walk(&mut |stmt| match stmt {
+                                    Stmt::Assign { rhs, .. } => {
+                                        reads_triggered |= events::reads_triggered(rhs);
+                                    }
+                                    Stmt::If { condition, .. } => {
+                                        reads_triggered |= events::reads_triggered(condition);
+                                    }
+                                    _ => {}
+                                });
+                            }
+                            if reads_triggered {
                                 return Err(unsupported(
                                     "`triggered` in a wait condition with other operands",
                                 ));
                             }
-                            output.extend(self.wait_statements(condition)?);
+                            if setup.is_empty() {
+                                output.extend(self.wait_statements(condition)?);
+                            } else {
+                                // A pattern predicate in a wait
+                                // condition is recomputed whenever what
+                                // it reads changes, until it holds
+                                // (9.4.3, 12.6.3).
+                                let reads = pattern_match::pattern_read_names(&setup, &condition);
+                                output.extend(setup.clone());
+                                if reads.is_empty() {
+                                    // Nothing can change the result:
+                                    // the wait stands as it is.
+                                    output.extend(self.wait_statements(condition)?);
+                                } else {
+                                    let items = reads
+                                        .into_iter()
+                                        .map(|name| EventItemBase {
+                                            edge: EventEdge::Any,
+                                            expr: Expr::Ident(name),
+                                            iff: None,
+                                        })
+                                        .collect();
+                                    let mut body = vec![Stmt::WaitEvent(items)];
+                                    body.extend(setup);
+                                    output.push(Stmt::Loop {
+                                        kind: LoopKind::While,
+                                        init: Vec::new(),
+                                        condition: Some(Expr::Unary {
+                                            op: UnaryOp::LogicNot,
+                                            expr: Box::new(procedural_truth_condition(condition)),
+                                        }),
+                                        step: Vec::new(),
+                                        body,
+                                    });
+                                }
+                            }
                         }
                         jobs.push(Job::Enter(*body));
                     }
@@ -873,6 +1080,10 @@ impl BodyBuilder<'_, '_, '_> {
                     StatementKind::Return(value) => {
                         if let Some(id) = value {
                             output.extend(self.effects(&[*id])?);
+                            // A pattern predicate in the value runs
+                            // before the return reads it (12.6.3).
+                            self.prepare_pattern_values(*id)?;
+                            output.append(&mut self.pattern_prelude);
                             // A result of an unpacked array type is assigned
                             // like any array (IEEE 1800-2023 7.6, 13.4.1).
                             if let Some(target) = self
@@ -1226,10 +1437,12 @@ impl BodyBuilder<'_, '_, '_> {
                         }
                     } else {
                         let branch = &branches[state.index];
-                        let effects = match branch.predicate.items.as_slice() {
+                        let mut effects = match branch.predicate.items.as_slice() {
                             [item] if item.pattern.is_none() => self.effects(&[item.expression])?,
                             _ => Vec::new(),
                         };
+                        let condition = self.cond_predicate(&branch.predicate)?;
+                        effects.append(&mut self.pattern_prelude);
                         // The condition of an `else if` is evaluated only
                         // when the previous ones fail: the rest of the chain
                         // becomes the else branch.
@@ -1247,7 +1460,6 @@ impl BodyBuilder<'_, '_, '_> {
                             }
                         };
                         output.extend(effects);
-                        let condition = self.cond_predicate(&branch.predicate)?;
                         jobs.push(Job::IfBranch {
                             state,
                             condition,
@@ -1313,6 +1525,196 @@ impl BodyBuilder<'_, '_, '_> {
                     }
                     state.index += 1;
                     jobs.push(Job::CaseNext(state));
+                }
+                Job::PatternNext(state) => {
+                    if let Some((saved, layout)) = &state.scrutinee {
+                        let (saved, layout) = (saved.clone(), layout.clone());
+                        let StatementKind::Case { arms, .. } = &native.statement(state.id).kind
+                        else {
+                            return Err(disagreement());
+                        };
+                        if state.index == arms.len() {
+                            output.extend(
+                                self.fold_pattern_arms(
+                                    state.arms,
+                                    state.default.unwrap_or_default(),
+                                ),
+                            );
+                        } else {
+                            let arm = &arms[state.index];
+                            if arm.default {
+                                let mut state = state;
+                                state.index += 1;
+                                state.default_done = true;
+                                let body = arm.body;
+                                jobs.push(Job::PatternDefault {
+                                    state,
+                                    start: output.len(),
+                                });
+                                jobs.push(Job::Enter(body));
+                            } else {
+                                // An item may hold several patterns: it
+                                // is selected when any of them matches,
+                                // with that pattern's bindings (12.6.1).
+                                let mut patterns = Vec::new();
+                                for case_match in &arm.matches {
+                                    let celox_sv_syntax::CaseMatch::Pattern(pattern) = case_match
+                                    else {
+                                        return Err(unsupported("pattern-matching case item"));
+                                    };
+                                    patterns.push(pattern.clone());
+                                }
+                                if patterns.is_empty() {
+                                    return Err(unsupported("pattern-matching case item"));
+                                }
+                                let filter_id = arm.filter;
+                                let body = arm.body;
+                                self.push_scope();
+                                let mut condition = None;
+                                let mut unconditional = false;
+                                let mut bindings = Vec::new();
+                                for pattern in &patterns {
+                                    let compiled =
+                                        self.compile_pattern(pattern, &layout, &saved, state.kind)?;
+                                    let arm_bindings =
+                                        self.declare_pattern_bindings(&compiled.bindings)?;
+                                    if patterns.len() > 1 && !arm_bindings.is_empty() {
+                                        // Only the matching alternative
+                                        // binds its variables.
+                                        bindings.push(Stmt::If {
+                                            condition: compiled
+                                                .condition
+                                                .clone()
+                                                .unwrap_or_else(|| Expr::Literal("1'b1".into())),
+                                            then_body: arm_bindings,
+                                            else_body: Vec::new(),
+                                        });
+                                    } else {
+                                        bindings.extend(arm_bindings);
+                                    }
+                                    // An alternative that always matches
+                                    // selects the item.
+                                    match compiled.condition {
+                                        None => unconditional = true,
+                                        Some(right) => {
+                                            condition = Some(match condition {
+                                                None => right,
+                                                Some(left) => Expr::Binary {
+                                                    left: Box::new(left),
+                                                    op: BinaryOp::LogicOr,
+                                                    right: Box::new(right),
+                                                },
+                                            });
+                                        }
+                                    }
+                                }
+                                if unconditional {
+                                    condition = None;
+                                }
+                                let mut filter_setup = Vec::new();
+                                let filter = match filter_id {
+                                    Some(filter_id) => {
+                                        filter_setup.extend(self.effects(&[filter_id])?);
+                                        let filter = self.native_value(filter_id)?;
+                                        // A pattern predicate in the
+                                        // filter runs under this arm, not
+                                        // before the case.
+                                        filter_setup.append(&mut self.pattern_prelude);
+                                        Some(filter)
+                                    }
+                                    None => None,
+                                };
+                                jobs.push(Job::PatternBranch {
+                                    state,
+                                    setup: Vec::new(),
+                                    condition,
+                                    bindings,
+                                    filter_setup,
+                                    filter,
+                                    start: output.len(),
+                                });
+                                jobs.push(Job::Enter(body));
+                            }
+                        }
+                    } else {
+                        let StatementKind::Conditional {
+                            branches,
+                            otherwise,
+                        } = &native.statement(state.id).kind
+                        else {
+                            return Err(disagreement());
+                        };
+                        if state.index == branches.len() {
+                            if let Some(otherwise) = otherwise
+                                && !state.default_done
+                            {
+                                let mut state = state;
+                                state.default_done = true;
+                                jobs.push(Job::PatternDefault {
+                                    state,
+                                    start: output.len(),
+                                });
+                                jobs.push(Job::Enter(*otherwise));
+                            } else {
+                                output.extend(self.fold_pattern_arms(
+                                    state.arms,
+                                    state.default.unwrap_or_default(),
+                                ));
+                            }
+                        } else {
+                            let branch = &branches[state.index];
+                            let mut clauses = Vec::new();
+                            for item in &branch.predicate.items {
+                                if let Some(pattern) = &item.pattern {
+                                    clauses.push(pattern_match::PredicateClause::Match(
+                                        item.expression,
+                                        pattern.clone(),
+                                    ));
+                                } else {
+                                    self.predicate_clauses(item.expression, &mut clauses);
+                                }
+                            }
+                            let body = branch.body;
+                            self.push_scope();
+                            let (setup, condition) = self.eval_predicate_clauses(&clauses)?;
+                            jobs.push(Job::PatternBranch {
+                                state,
+                                setup,
+                                condition,
+                                bindings: Vec::new(),
+                                filter_setup: Vec::new(),
+                                filter: None,
+                                start: output.len(),
+                            });
+                            jobs.push(Job::Enter(body));
+                        }
+                    }
+                }
+                Job::PatternBranch {
+                    mut state,
+                    setup,
+                    condition,
+                    bindings,
+                    filter_setup,
+                    filter,
+                    start,
+                } => {
+                    let body = output.split_off(start);
+                    self.pop_scope();
+                    state.arms.push(PatternArm {
+                        setup,
+                        condition,
+                        bindings,
+                        filter_setup,
+                        filter,
+                        body,
+                    });
+                    state.index += 1;
+                    jobs.push(Job::PatternNext(state));
+                }
+                Job::PatternDefault { mut state, start } => {
+                    state.default = Some(output.split_off(start));
+                    jobs.push(Job::PatternNext(state));
                 }
                 Job::RandcaseNext(state) => {
                     let StatementKind::Case { arms, .. } = &native.statement(state.id).kind else {
@@ -1406,6 +1808,12 @@ impl BodyBuilder<'_, '_, '_> {
                     self.pop_scope();
                     output.extend(Self::fold_foreach(loops, body, stop));
                 }
+            }
+            // A pattern predicate in a value context of the statement
+            // just lowered generated statements that run before it
+            // (12.6.3); leaf statements already placed their own.
+            if !self.pattern_prelude.is_empty() {
+                output.append(&mut self.pattern_prelude);
             }
         }
         Ok(output)

@@ -312,14 +312,18 @@ impl Parser<'_> {
         self.timing_operand_start = outer;
         value
     }
-    /// Resume an ordinary expression after an event group proved to contain
-    /// only an expression. This resolves parentheses without token rescanning.
-    pub(super) fn event_group_expression(&mut self, start: usize, inner: ExprId) -> Result<ExprId> {
+    /// Resume an expression after its parenthesized prefix has been parsed.
+    pub(super) fn grouped_expression_tail(
+        &mut self,
+        start: usize,
+        inner: ExprId,
+        minimum: u8,
+    ) -> Result<ExprId> {
         let left = self.node(start, ExprKind::Group(inner))?;
         Ok(self
             .expression_machine(Job::Tail {
                 start,
-                minimum: 0,
+                minimum,
                 left,
             })?
             .expression())
@@ -363,6 +367,15 @@ impl Parser<'_> {
                     then_expression,
                     else_expression,
                 } => pending.extend([*condition, *then_expression, *else_expression]),
+                ExprKind::PatternMatch {
+                    expression,
+                    pattern,
+                } => {
+                    pending.push(*expression);
+                    let mut constants = Vec::new();
+                    pattern.constants(&mut constants);
+                    pending.extend(constants);
+                }
                 ExprKind::MinTypMax {
                     minimum,
                     typical,
@@ -994,6 +1007,33 @@ impl Parser<'_> {
                                 postfix: true,
                             },
                         )?;
+                    }
+                    // A conditional predicate clause (12.6.2, 12.6.3):
+                    // its clauses join with `&&&`, tighter than `?:`.
+                    // `matches` also binds on the right of `&&&`, which
+                    // reads its clause at precedence 3.
+                    "matches" if minimum <= 3 => {
+                        self.at += 1;
+                        let pattern = self.pattern(true)?;
+                        self.tail(
+                            &mut jobs,
+                            start,
+                            minimum,
+                            ExprKind::PatternMatch {
+                                expression: left,
+                                pattern,
+                            },
+                        )?;
+                    }
+                    "&&&" if minimum <= 2 && !self.in_pattern_constant => {
+                        self.at += 1;
+                        jobs.push(Job::Binary {
+                            start,
+                            minimum,
+                            left,
+                            operator: "&&&".to_owned(),
+                        });
+                        jobs.push(Job::Expression(3));
                     }
                     "?" if minimum <= 2 => {
                         self.at += 1;

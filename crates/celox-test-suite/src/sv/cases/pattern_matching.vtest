@@ -1,0 +1,568 @@
+(group pattern_matching (category control_flow))
+
+; IEEE 1800-2023 12.6.1: the selector is matched against each item in
+; order; a constant field must match, and pattern variables take the
+; fields of the matched member.
+(case case_matches_tagged_union
+  (source "case_matches.sv" #"
+module Top(output bit done);
+    typedef union tagged {
+        struct { bit [3:0] val1, val2; } a;
+        struct { bit [7:0] val1, val2; } b;
+        void c;
+    } u;
+    u tmp;
+    initial begin
+        tmp = tagged a '{4'd3, 4'd5};
+        case (tmp) matches
+            tagged a '{.v, 0} : $display("arm1 v=%0d", v);
+            tagged a '{.v1, .v2} : $display("arm2 v1=%0d v2=%0d", v1, v2);
+            tagged b '{.v1, .v2} : $display("armB");
+            default : $display("armD");
+        endcase
+        tmp = tagged a '{4'd7, 4'd0};
+        case (tmp) matches
+            tagged a '{.v, 0} : $display("arm1 v=%0d", v);
+            tagged a '{.v1, .v2} : $display("arm2");
+            default : $display("armD");
+        endcase
+        tmp = tagged c;
+        case (tmp) matches
+            tagged a '{.v, .w} : $display("bad a");
+            tagged c : $display("void-ok");
+            default : $display("bad d");
+        endcase
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "arm2 v1=3 v2=5\narm1 v=7\nvoid-ok\n"))
+
+; IEEE 1800-2023 12.6.1: a pattern after `tagged member` may itself be a
+; tagged pattern, and members may be named in any order.
+(case case_matches_nested_and_named
+  (source "case_matches_nested.sv" #"
+module Top(output bit done);
+    typedef union tagged packed {
+        struct packed { logic [4:0] reg1, reg2, regd; } Add;
+        union tagged packed {
+            logic [9:0] JmpU;
+            struct packed { logic [1:0] cc; logic [9:0] addr; } JmpC;
+        } Jmp;
+    } Instr;
+    Instr instr;
+    initial begin
+        instr = tagged Jmp (tagged JmpC '{2'd1, 10'd42});
+        case (instr) matches
+            tagged Add '{.r1, .r2, .rd} : $display("add");
+            tagged Jmp (tagged JmpU .a) : $display("jmpu %0d", a);
+            tagged Jmp (tagged JmpC '{addr:.a, cc:.c}) : $display("jmpc c=%0d a=%0d", c, a);
+        endcase
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "jmpc c=1 a=42\n"))
+
+; IEEE 1800-2023 12.6.2: clauses are a sequential conjunction; variables
+; bound by one clause are read by the next, and the true arm.
+(case if_matches_clauses
+  (source "if_matches.sv" #"
+module Top(output bit done);
+    typedef union tagged {
+        struct { bit [3:0] val1, val2; } a;
+        struct { bit [7:0] val1, val2; } b;
+        void c;
+    } u;
+    u tmp;
+    initial begin
+        tmp = tagged b '{8'd9, 8'd10};
+        if (tmp matches tagged b '{.x, 8'd10} &&& (x == 8'd9))
+            $display("if-ok x=%0d", x);
+        else
+            $display("if-ng");
+        if (tmp matches tagged a '{.*, .*})
+            $display("if-bad");
+        else
+            $display("else-ok");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "if-ok x=9\nelse-ok\n"))
+
+; IEEE 1800-2023 12.6.3: a conditional expression may hold the clauses;
+; its pattern variables are in scope in the consequent.
+(case conditional_matches
+  (source "conditional_matches.sv" #"
+module Top(output bit done);
+    typedef union tagged {
+        struct { bit [3:0] val1, val2; } a;
+        struct { bit [7:0] val1, val2; } b;
+        void c;
+    } u;
+    u tmp;
+    bit [7:0] r;
+    initial begin
+        tmp = tagged b '{8'd9, 8'd10};
+        r = (tmp matches tagged b '{8'd9, .y}) ? y : 8'd99;
+        $display("cond r=%0d", r);
+        r = (tmp matches tagged a '{.*, .*}) ? 8'd1 : 8'd99;
+        $display("cond r=%0d", r);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "cond r=10\ncond r=99\n"))
+
+; IEEE 1800-2023 12.6.1: a constant pattern is one pattern, not the
+; start of the `&&&` filter; an ordinary construct compares constants
+; with case equality, `casez` with wildcard equality.
+(case constant_patterns_and_filters
+  (source "constant_patterns.sv" #"
+module Top(output bit done);
+    logic [3:0] n;
+    real filter_zero;
+    initial begin
+        n = 4'd3;
+        case (n) matches
+            4'd3 &&& (n > 4'd2) : $display("filter-ok");
+            4'd3 : $display("filter-ng");
+            default : $display("filter-def");
+        endcase
+        case (n) matches
+            4'd3 &&& (n > 4'd9) : $display("filter-bad");
+            default : $display("filter-fallthrough");
+        endcase
+        case (4'b1000) matches
+            4'bx000 : $display("exact-bad");
+            default : $display("exact-ok");
+        endcase
+        casez (4'b10z0) matches
+            4'b10?? : $display("casez-ok");
+            default : $display("casez-ng");
+        endcase
+        n = 4'd9;
+        filter_zero = -0.0;
+        case (n) matches
+            (1 + 2) * 3 &&& filter_zero : $display("grouped constant bad");
+            (1 + 2) * 3 &&& 1'b1 : $display("grouped constant ok");
+            default : $display("grouped constant default");
+        endcase
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "filter-ok\nfilter-fallthrough\nexact-ok\ncasez-ok\ngrouped constant ok\n"))
+
+; IEEE 1800-2023 12.6.2: clauses after a failed one are not evaluated,
+; and a scrutinee is evaluated once, updates included.
+(case clauses_short_circuit
+  (source "clause_short_circuit.sv" #"
+module Top(output bit done);
+    typedef union tagged packed { void Invalid; logic [7:0] Valid; } v_t;
+    v_t v;
+    int count;
+    logic [7:0] r, x;
+    initial begin
+        v = tagged Invalid;
+        count = 0;
+        if (v matches tagged Valid .val &&& (count++ > 0))
+            $display("sc-bad");
+        $display("count-after-fail=%0d", count);
+        v = tagged Valid 8'd5;
+        if (v matches tagged Valid .val &&& (count++ >= 0))
+            $display("sc-ok");
+        $display("count-after-match=%0d", count);
+        x = 8'd1;
+        r = (x++ matches 8'd1) ? 8'd1 : 8'd0;
+        $display("plusplus r=%0d x=%0d", r, x);
+        $display("arg=%0d", (v matches tagged Valid .val) ? val : 8'd0);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "count-after-fail=0\nsc-ok\ncount-after-match=1\nplusplus r=1 x=2\narg=5\n"))
+
+; IEEE 1800-2023 12.6.3 with 11.4.11: an ambiguous predicate of a
+; conditional expression merges its arms instead of choosing one.
+(case ambiguous_predicate_merges_arms
+  (four_state)
+  (source "ambiguous_predicate.sv" #"
+module Top(output bit done);
+    typedef union tagged packed { void Invalid; logic [7:0] Valid; } v_t;
+    v_t v;
+    logic [7:0] r;
+    logic unknown_bit;
+    logic [3:0] n;
+    logic gate;
+    int count;
+    string out;
+    real measured;
+    function automatic bit [7:0] next();
+        count = count + 1;
+        return 8'd1;
+    endfunction
+    initial begin
+        v = tagged Valid 8'd9;
+        unknown_bit = 1'bx;
+        r = (v matches tagged Valid .val &&& unknown_bit) ? 8'b0000_0000 : 8'b0000_1111;
+        $display("merged=%b", r);
+        r = (v matches tagged Valid .val &&& unknown_bit) ? val : 8'd0;
+        $display("merged2=%b", r);
+        // An ambiguous ordinary conditional also merges: both arms'
+        // pattern setups run.
+        count = 0;
+        gate = 1'bx;
+        $display("amb=%0d count=%0d", gate ? ((next() matches 8'd1) ? 8'd1 : 8'd0) : 8'd2, count);
+        // A pattern conditional may select a non-integral result.
+        n = 4'd1;
+        measured = (n matches 4'd1) ? 1.5 : 8'd2;
+        $display("real result=%0.1f", measured);
+        out = (n matches 4'd1) ? "yes" : "no";
+        $display("str=%s", out);
+        n = 4'd2;
+        out = (n matches 4'd1) ? "yes" : "no";
+        $display("str=%s", out);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "merged=0000xxxx\nmerged2=0000x00x\namb=X count=1\nreal result=1.5\nstr=yes\nstr=no\n"))
+
+; IEEE 1800-2023 12.6.2/12.6.3: a pattern on the right of `&&&`, the
+; common width of a conditional's arms, lazy evaluation of a pattern
+; nested in another conditional's arm, and a pattern conditional as a
+; repeat count.
+(case pattern_value_contexts
+  (source "pattern_value_contexts.sv" #"
+module Top(output bit done);
+    typedef union tagged packed { void Invalid; logic [7:0] Valid; } v_t;
+    v_t v;
+    logic [15:0] r16;
+    logic [7:0] r;
+    logic gate;
+    int count;
+    function automatic bit [7:0] next();
+        count = count + 1;
+        return 8'd1;
+    endfunction
+    initial begin
+        v = tagged Valid 8'd1;
+        r16 = (v matches tagged Valid .x) ? 16'h1234 : 8'hff;
+        $display("width=%h", r16);
+        v = tagged Invalid;
+        r16 = (v matches tagged Valid .x) ? 16'h1234 : 8'hff;
+        $display("width=%h", r16);
+        r = v matches tagged Invalid ? 8'd3 : 8'd4;
+        $display("void pattern=%0d", r);
+        r = 4'd1 matches 4'd1 ? 8'd7 : 8'd9;
+        $display("constant pattern=%0d", r);
+        r16 = (4'd1 matches (1'b0 ? 4'd2 : 4'd1)) ? (8'h1 << 8) : 8'h0;
+        $display("context width=%h", r16);
+        r16 = ((4'd1 matches 4'd1) ? (8'h1 << 8) : 8'h0) | 16'h0000;
+        $display("nested context width=%h", r16);
+
+        count = 0;
+        $display("query width=%0d count=%0d", $bits((next() matches 8'd1) ? 8'd0 : 8'd1), count);
+        $display("binding width=%0d", $bits(v matches tagged Valid .x ? x : 8'd0));
+        $display("nested query width=%0d count=%0d",
+                 1'b1 ? $bits(next() matches 8'd1 ? 8'd0 : 8'd1) : 12, count);
+
+
+        gate = 1'b0;
+        r = gate ? ((next() matches 8'd1) ? 8'd1 : 8'd0) : 8'd7;
+        $display("lazy r=%0d count=%0d", r, count);
+        gate = 1'b1;
+        r = gate ? ((next() matches 8'd1) ? 8'd1 : 8'd0) : 8'd7;
+        $display("lazy r=%0d count=%0d", r, count);
+        if (1'b1 &&& 8'd1 matches 8'd1) $display("rhs-ok"); else $display("rhs-ng");
+        if (1'b1 &&& 8'd2 matches 8'd1) $display("rhs-bad"); else $display("rhs-ok2");
+        v = tagged Valid 8'd1;
+        count = 0;
+        repeat ((v matches tagged Valid .x) ? 2 : 0) count = count + 1;
+        $display("repeat count=%0d", count);
+        count = 0;
+        r = (8'd0 matches 8'd1 &&& count++) ? 1 : 7;
+        $display("skipped clause r=%0d count=%0d", r, count);
+        count = 1;
+        r = (8'd1 matches 8'd0) && count++;
+        $display("skipped logical operand r=%0d count=%0d", r, count);
+        r = (8'd1 matches 8'd1) && count++;
+        $display("evaluated logical operand r=%0d count=%0d", r, count);
+
+
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "width=1234\nwidth=00ff\nvoid pattern=3\nconstant pattern=7\ncontext width=0100\nnested context width=0100\nquery width=8 count=0\nbinding width=8\nnested query width=8 count=0\nlazy r=7 count=0\nlazy r=1 count=1\nrhs-ok\nrhs-ok2\nrepeat count=2\nskipped clause r=7 count=0\nskipped logical operand r=0 count=1\nevaluated logical operand r=1 count=2\n"))
+
+; IEEE 1800-2023 12.6: constants compare at their common width, the
+; selector's unknown bits are wildcards under casez/casex, signed arms
+; extend by sign, and pattern predicates are re-evaluated by while and
+; wait conditions.
+(case pattern_repeated_evaluation
+  (four_state)
+  (source "pattern_repeated.sv" #"
+module Top(output bit done);
+    typedef union tagged packed { void Invalid; logic [7:0] Valid; } v_t;
+    v_t v;
+    logic [3:0] n;
+    logic signed [15:0] rs;
+    int count;
+    initial begin
+        n = 4'b0000;
+        case (n) matches
+            8'h10 : $display("width-bad");
+            4'h0 : $display("width-ok");
+            default : $display("width-def");
+        endcase
+        casez (4'b10z0) matches
+            4'b1000 : $display("casez-sel-ok");
+            default : $display("casez-sel-ng");
+        endcase
+        casex (4'b10x0) matches
+            4'b1000 : $display("casex-sel-ok");
+            default : $display("casex-sel-ng");
+        endcase
+        // Only z bits are wildcards under casez: an x in the constant
+        // or in the selector still compares exactly.
+        casez (4'b1000) matches
+            4'b1x00 : $display("casez-x-bad");
+            default : $display("casez-x-ok");
+        endcase
+        casez (4'b10x0) matches
+            4'b1000 : $display("casez-xsel-bad");
+            default : $display("casez-xsel-ok");
+        endcase
+        casez (4'b1000) matches
+            (4'b1x00 | 4'b0) : $display("casez-expression-bad");
+            default : $display("casez-expression-ok");
+        endcase
+        casez (4'b10z0) matches
+            (4'b1000 | 4'b0) : $display("casez-expression-z-ok");
+            default : $display("casez-expression-z-bad");
+        endcase
+        // Two signed operands extend by sign to the common width.
+        begin : signed_test
+            logic signed [3:0] s;
+            s = -1;
+            case (s) matches
+                8'shff : $display("signed-ok");
+                default : $display("signed-ng");
+            endcase
+        end
+        v = tagged Valid 8'hff;
+        rs = (v matches tagged Valid .x) ? 8'shff : 16'sh0000;
+        $display("signed=%h", rs);
+        n = 4'd1;
+        while (n matches 4'd1) n = 4'd0;
+        $display("while-done n=%0d", n);
+        // An update in a do-while pattern scrutinee runs once per test.
+        n = 4'd0;
+        count = 0;
+        do begin
+            count = count + 1;
+            if (count == 1) continue;
+        end while (n++ matches 4'd0);
+        $display("dowhile count=%0d n=%0d", count, n);
+        v = tagged Invalid;
+        fork
+            begin
+                wait (v matches tagged Valid .x);
+                $display("wait-ok x=%0d", x);
+            end
+            begin
+                #10 v = tagged Valid 8'd42;
+            end
+        join
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 100) (assert_eq done 1)
+  (expect_output "width-ok\ncasez-sel-ok\ncasex-sel-ok\ncasez-x-ok\ncasez-xsel-ok\ncasez-expression-ok\ncasez-expression-z-ok\nsigned-ok\nsigned=ffff\nwhile-done n=0\ndowhile count=2 n=2\nwait-ok x=42\n"))
+
+; IEEE 1800-2023 12.6: a pattern nested under a short-circuit
+; operator, a wait clause that reads an earlier binding, several
+; patterns in one case item, a pattern in a case filter, and pattern
+; conditions of for and do-while loops.
+(case pattern_more_contexts
+  (source "pattern_more_contexts.sv" #"
+module Top(output bit done);
+    typedef union tagged packed { void Invalid; logic [7:0] Valid; } v_t;
+    v_t v;
+    logic [3:0] n;
+    bit pulse;
+    bit flag;
+    int count;
+    function automatic bit [7:0] next();
+        count = count + 1;
+        return 8'd1;
+    endfunction
+    function automatic bit [3:0] decide();
+        count = count + 1;
+        return 4'd8;
+    endfunction
+    function automatic bit accept(input bit value);
+        return value;
+    endfunction
+    initial begin
+        count = 0;
+        if (1'b0 && ((next() matches 8'd1) ? 1'b1 : 1'b0)) $display("and-bad");
+        $display("and count=%0d", count);
+        if (1'b1 || ((next() matches 8'd1) ? 1'b1 : 1'b0)) $display("or-ok");
+        $display("or count=%0d", count);
+        if (1'b1 && ((next() matches 8'd1) ? 1'b1 : 1'b0)) $display("and-ok");
+        $display("and2 count=%0d", count);
+        count = 0;
+        if (decide() || (next() matches 8'd1)) $display("wide-or count=%0d", count);
+        if (4'd8 &&& 1'b1 matches 1'b1) $display("wide-clause-ok");
+
+        v = tagged Invalid;
+        n = 4'd1;
+        fork
+            begin
+                wait (v matches tagged Valid .x &&& ((n matches 4'd2) ? x == 8'd42 : 1'b0));
+                $display("wait2-ok x=%0d", x);
+            end
+            begin
+                #10 v = tagged Valid 8'd41;
+                #10 v = tagged Valid 8'd42;
+                #10 n = 4'd2;
+            end
+        join
+        flag = 1'b1;
+        wait (flag matches .flag &&& accept(flag));
+        $display("fallback binding=%b", flag);
+        n = 4'd2;
+        fork
+            begin
+                wait (((n matches 4'd2) ? 1'b1 : 1'b0) & (count == 7));
+                $display("nested-wait-ok");
+            end
+            begin
+                #10 count = 7;
+            end
+        join
+        case (n) matches
+            4'd1, 4'd2 : $display("multi-ok");
+            default : $display("multi-ng");
+        endcase
+        count = 0;
+        n = 4'd9;
+        case (n) matches
+            8'd0 &&& ((next() matches 8'd1) ? 1'b1 : 1'b0) : $display("filter-bad");
+            default : $display("filter-default count=%0d", count);
+        endcase
+        n = 4'd1;
+        for (count = 0; n matches 4'd1; count = count + 1) n = 4'd0;
+        $display("for count=%0d", count);
+        n = 4'd0;
+        count = 0;
+        do begin
+            count = count + 1;
+            if (count >= 2) n = 4'd1;
+        end while (n matches 4'd0);
+        $display("dowhile count=%0d", count);
+        n = 4'd1;
+        for (count = 4'd1 matches 4'd1 ? 0 : 3; count < 1;
+             count = n matches 4'd0 ? 1 : 3) begin
+            n = 4'd0;
+        end
+        $display("step count=%0d", count);
+        count = 0;
+        for (int i = n matches 4'd0 ? 0 : 2; i < 1; i++) count++;
+        $display("declared loop count=%0d", count);
+        begin
+            automatic int local_result = n matches 4'd0 ? 11 : 13;
+            $display("automatic initializer=%0d", local_result);
+        end
+        n = 4'd1;
+        count <= #1 (n matches 4'd1 ? 7 : 9);
+        n = 4'd0;
+        #2 $display("delayed value=%0d", count);
+        n = 4'd1;
+        fork
+            begin
+                #1 $display("before edge=%0d", count);
+                pulse = 1'b1;
+            end
+            count = repeat (n matches 4'd1 ? 1 : 0) @(posedge pulse) 9;
+        join
+        $display("repeated event value=%0d", count);
+        fork
+            #2 $display("pattern delay value=%0d", count);
+            count = #(n matches 4'd1 ? 1 : 5) 6;
+        join
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 100) (assert_eq done 1)
+  (expect_output "and count=0\nor-ok\nor count=0\nand-ok\nand2 count=1\nwide-or count=1\nwide-clause-ok\nwait2-ok x=42\nfallback binding=1\nnested-wait-ok\nmulti-ok\nfilter-default count=0\nfor count=1\ndowhile count=2\nstep count=1\ndeclared loop count=1\nautomatic initializer=11\ndelayed value=7\nbefore edge=7\nrepeated event value=9\npattern delay value=6\n"))
+
+; IEEE 1800-2023 12.6: a packed tagged union in a function, a packed
+; structure pattern, and an integral selector with a wildcard item.
+(case packed_and_integral_patterns
+  (source "packed_patterns.sv" #"
+module Top(output bit done);
+    typedef union tagged packed { void Invalid; logic [7:0] Valid; } v_t;
+    typedef struct packed { logic [3:0] hi, lo; } pair_t;
+    v_t v;
+    pair_t p;
+    pair_t [1:0] pairs;
+    logic [3:0] n;
+    function automatic bit [7:0] get(input v_t x);
+        case (x) matches
+            tagged Invalid : return 8'd0;
+            tagged Valid .val : return val + 8'd1;
+        endcase
+    endfunction
+    function automatic v_t make();
+        return v;
+    endfunction
+    initial begin
+        v = tagged Valid 8'd41;
+        case ((make())) matches
+            tagged Valid .x : $display("returned x=%0d", x);
+            default : $display("returned-bad");
+        endcase
+        case (done ? v : make()) matches
+            tagged Valid .x : $display("conditional x=%0d", x);
+            default : $display("conditional-bad");
+        endcase
+        $display("get=%0d", get(v));
+        v = tagged Invalid;
+        $display("get=%0d", get(v));
+        p = 8'h3a;
+        case (p) matches
+            '{hi: .h, lo: 4'ha} : $display("named h=%0d", h);
+            '{.h2, .l2} : $display("pos");
+        endcase
+        pairs = 16'h1234;
+        case (pairs) matches
+            16'h1234 : $display("packed array ok");
+            default : $display("packed array bad");
+        endcase
+        n = 4'd5;
+        case (n) matches
+            4'd3 : $display("three");
+            4'd5 : $display("five");
+            .* : $display("other");
+        endcase
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "returned x=41\nconditional x=41\nget=42\nget=0\nnamed h=3\npacked array ok\nfive\n"))

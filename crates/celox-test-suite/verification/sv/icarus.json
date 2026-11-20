@@ -23,6 +23,7 @@
     "icarus/mailboxes.json",
     "icarus/operators.json",
     "icarus/packed_structs.json",
+    "icarus/pattern_matching.json",
     "icarus/procedural.json",
     "icarus/program.json",
     "icarus/property_selects.json",

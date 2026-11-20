@@ -1,0 +1,134 @@
+{
+ "schema_version": 3,
+ "suite": "sv",
+ "note": "Pattern matching (IEEE 1800-2023 12.6) over tagged unions (7.3.2): the tool rejects the constructs at compile time, so the shared assertions cannot run. Celox executes the unchanged cases on every backend.",
+ "observations": [
+  {
+   "tool": "verilator",
+   "version": "Verilator 5.054 2026-11-01 rev v5.054",
+   "cases": [
+    {
+     "category": "ControlFlow",
+     "detail": "Verilator 5.054 reports tagged unions, void tagged members, pattern variables and &&& expressions as unsupported, which IEEE 1800-2023 7.3.2 and 12.6 require. Celox executes the unchanged cases on every backend.",
+     "expectation": "Simulation",
+     "name": "pattern_matching::ambiguous_predicate_merges_arms",
+     "phase": "compile",
+     "status": "ignored",
+     "stronger_than_sv": false,
+     "tag_reasons": {},
+     "tags": []
+    },
+    {
+     "category": "ControlFlow",
+     "detail": "Verilator 5.054 reports tagged unions, void tagged members, pattern variables and &&& expressions as unsupported, which IEEE 1800-2023 7.3.2 and 12.6 require. Celox executes the unchanged cases on every backend.",
+     "expectation": "Simulation",
+     "name": "pattern_matching::case_matches_nested_and_named",
+     "phase": "compile",
+     "status": "ignored",
+     "stronger_than_sv": false,
+     "tag_reasons": {},
+     "tags": []
+    },
+    {
+     "category": "ControlFlow",
+     "detail": "Verilator 5.054 reports tagged unions, void tagged members, pattern variables and &&& expressions as unsupported, which IEEE 1800-2023 7.3.2 and 12.6 require. Celox executes the unchanged cases on every backend.",
+     "expectation": "Simulation",
+     "name": "pattern_matching::case_matches_tagged_union",
+     "phase": "compile",
+     "status": "ignored",
+     "stronger_than_sv": false,
+     "tag_reasons": {},
+     "tags": []
+    },
+    {
+     "category": "ControlFlow",
+     "detail": "Verilator 5.054 reports tagged unions, void tagged members, pattern variables and &&& expressions as unsupported, which IEEE 1800-2023 7.3.2 and 12.6 require. Celox executes the unchanged cases on every backend.",
+     "expectation": "Simulation",
+     "name": "pattern_matching::clauses_short_circuit",
+     "phase": "compile",
+     "status": "ignored",
+     "stronger_than_sv": false,
+     "tag_reasons": {},
+     "tags": []
+    },
+    {
+     "category": "ControlFlow",
+     "detail": "Verilator 5.054 reports tagged unions, void tagged members, pattern variables and &&& expressions as unsupported, which IEEE 1800-2023 7.3.2 and 12.6 require. Celox executes the unchanged cases on every backend.",
+     "expectation": "Simulation",
+     "name": "pattern_matching::conditional_matches",
+     "phase": "compile",
+     "status": "ignored",
+     "stronger_than_sv": false,
+     "tag_reasons": {},
+     "tags": []
+    },
+    {
+     "category": "ControlFlow",
+     "detail": "Verilator 5.054 reports tagged unions, void tagged members, pattern variables and &&& expressions as unsupported, which IEEE 1800-2023 7.3.2 and 12.6 require. Celox executes the unchanged cases on every backend.",
+     "expectation": "Simulation",
+     "name": "pattern_matching::constant_patterns_and_filters",
+     "phase": "compile",
+     "status": "ignored",
+     "stronger_than_sv": false,
+     "tag_reasons": {},
+     "tags": []
+    },
+    {
+     "category": "ControlFlow",
+     "detail": "Verilator 5.054 reports tagged unions, void tagged members, pattern variables and &&& expressions as unsupported, which IEEE 1800-2023 7.3.2 and 12.6 require. Celox executes the unchanged cases on every backend.",
+     "expectation": "Simulation",
+     "name": "pattern_matching::if_matches_clauses",
+     "phase": "compile",
+     "status": "ignored",
+     "stronger_than_sv": false,
+     "tag_reasons": {},
+     "tags": []
+    },
+    {
+     "category": "ControlFlow",
+     "detail": "Verilator 5.054 reports tagged unions, void tagged members, pattern variables and &&& expressions as unsupported, which IEEE 1800-2023 7.3.2 and 12.6 require. Celox executes the unchanged cases on every backend.",
+     "expectation": "Simulation",
+     "name": "pattern_matching::packed_and_integral_patterns",
+     "phase": "compile",
+     "status": "ignored",
+     "stronger_than_sv": false,
+     "tag_reasons": {},
+     "tags": []
+    },
+    {
+     "category": "ControlFlow",
+     "detail": "Verilator 5.054 reports tagged unions, void tagged members, pattern variables and &&& expressions as unsupported, which IEEE 1800-2023 7.3.2 and 12.6 require. Celox executes the unchanged cases on every backend.",
+     "expectation": "Simulation",
+     "name": "pattern_matching::pattern_more_contexts",
+     "phase": "compile",
+     "status": "ignored",
+     "stronger_than_sv": false,
+     "tag_reasons": {},
+     "tags": []
+    },
+    {
+     "category": "ControlFlow",
+     "detail": "Verilator 5.054 reports tagged unions, void tagged members, pattern variables and &&& expressions as unsupported, which IEEE 1800-2023 7.3.2 and 12.6 require. Celox executes the unchanged cases on every backend.",
+     "expectation": "Simulation",
+     "name": "pattern_matching::pattern_repeated_evaluation",
+     "phase": "compile",
+     "status": "ignored",
+     "stronger_than_sv": false,
+     "tag_reasons": {},
+     "tags": []
+    },
+    {
+     "category": "ControlFlow",
+     "detail": "Verilator 5.054 reports tagged unions, void tagged members, pattern variables and &&& expressions as unsupported, which IEEE 1800-2023 7.3.2 and 12.6 require. Celox executes the unchanged cases on every backend.",
+     "expectation": "Simulation",
+     "name": "pattern_matching::pattern_value_contexts",
+     "phase": "compile",
+     "status": "ignored",
+     "stronger_than_sv": false,
+     "tag_reasons": {},
+     "tags": []
+    }
+   ]
+  }
+ ]
+}

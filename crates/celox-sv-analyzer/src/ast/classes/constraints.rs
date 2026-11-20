@@ -2504,6 +2504,7 @@ pub(in crate::ast) fn bind_inputs(
             | ExprKind::Concatenation(_)
             | ExprKind::Replication { .. }
             | ExprKind::Pattern { .. }
+            | ExprKind::PatternMatch { .. }
             | ExprKind::Set(_)
             | ExprKind::Streaming { .. }
             | ExprKind::StreamSelect { .. } => {
