@@ -58,3 +58,75 @@ module Top (
     sim.modify(|io| io.set(sel, 0u8)).unwrap();
     assert_eq!(sim.get(o), (shared ^ b_value.wrapping_add(116)).into());
 }
+
+#[test]
+fn scalar_case_with_a_data_bit_lowers_to_one_word() {
+    use celox::{OptLevel, Simulator};
+    use celox_design::BinaryOp;
+    use celox_sir::SIRInstruction;
+    use std::path::Path;
+
+    // The E906 rounding decision has 16 entries and a zero default. Also
+    // exercise the top bit of a full u64 table with a data-dependent default.
+    for (width, default_arm) in [(3, "1'b0"), (5, "sign")] {
+        let source = format!(
+            r#"
+            module Top(input bit [{msb}:0] mode, input bit sign, output bit y);
+                always @(mode or sign) begin
+                    case (mode)
+                        {width}'d0: y = 1'b0;
+                        {width}'d1: y = 1'b1;
+                        {width}'d2: y = !sign;
+                        {width}'d3: y = sign;
+                        default: y = {default_arm};
+                    endcase
+                end
+            endmodule
+        "#,
+            msb = width - 1
+        );
+        let result =
+            Simulator::from_sv_sources(vec![(source.as_str(), Path::new("round.sv"))], "Top")
+                .four_state(false)
+                .opt_level(OptLevel::O2)
+                .trace_post_optimized_sir()
+                .build_with_trace();
+        let mut sim = result.res.unwrap();
+        let sir = result.trace.post_optimized_sir.unwrap();
+        let blocks: Vec<_> = sir
+            .sir
+            .eval_comb
+            .iter()
+            .flat_map(|eu| eu.blocks.values())
+            .collect();
+        assert_eq!(blocks.len(), 1);
+        assert!(
+            blocks[0]
+                .instructions
+                .iter()
+                .any(|op| matches!(op, SIRInstruction::Binary(_, _, BinaryOp::Shr, _)))
+        );
+
+        let mode = sim.signal("mode");
+        let sign = sim.signal("sign");
+        let y = sim.signal("y");
+        for m in 0..(1u8 << width) {
+            for s in 0..2u8 {
+                sim.modify(|io| {
+                    io.set(mode, m);
+                    io.set(sign, s);
+                })
+                .unwrap();
+                let expected = match m {
+                    0 => 0,
+                    1 => 1,
+                    2 => s ^ 1,
+                    3 => s,
+                    _ if width == 5 => s,
+                    _ => 0,
+                };
+                assert_eq!(sim.get(y), expected.into(), "mode={m}, sign={s}");
+            }
+        }
+    }
+}
