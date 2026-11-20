@@ -155,6 +155,26 @@ fn offset_plus_bits<A>(offset: &SIROffset, bits: usize, builder: &mut SIRBuilder
             bit_offset: bit_offset + bits,
             dynamic_bit_offset: *dynamic_bit_offset,
         },
+        // A run split at an element boundary stays a run from a later
+        // first element; a split inside an element is a dynamic bit
+        // offset from the run's first element.
+        SIROffset::ElementRun {
+            index,
+            element_width,
+        } => {
+            if bits.is_multiple_of(*element_width) {
+                let mut first = Some(*index);
+                add_offset_constant(&mut first, (bits / element_width) as u64, builder);
+                SIROffset::ElementRun {
+                    index: first.expect("element index register is present"),
+                    element_width: *element_width,
+                }
+            } else {
+                let mut offset = Some(scale_offset(*index, *element_width, builder));
+                add_offset_constant(&mut offset, bits as u64, builder);
+                SIROffset::Dynamic(offset.expect("element index register is present"))
+            }
+        }
     }
 }
 
@@ -186,6 +206,13 @@ fn clamp_offset<A>(
             element_width: *element_width,
             bit_offset: *bit_offset,
             dynamic_bit_offset: dynamic_bit_offset.map(|register| clamp(builder, register)),
+        },
+        SIROffset::ElementRun {
+            index,
+            element_width,
+        } => SIROffset::ElementRun {
+            index: clamp(builder, *index),
+            element_width: *element_width,
         },
     }
 }

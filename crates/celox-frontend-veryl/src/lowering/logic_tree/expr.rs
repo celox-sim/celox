@@ -856,11 +856,25 @@ fn eval_factor(
     arena: &mut SLTNodeArena<VarId>,
     context: Option<ValueContext>,
 ) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    if let Some(expanded) = crate::bitaccess::expand_runtime_array_slice(module, factor)? {
+        return eval_expression_in_context(module, store, &expanded, arena, context);
+    }
     let context_width = context.map(|context| context.width);
     let context_signed = context
         .map(|context| context.signed)
         .unwrap_or_else(|| crate::context_width::factor_signed(factor));
     match factor {
+        Factor::ResetValue(kind, polarity, _) => {
+            let value = crate::config::reset_value(*kind, *polarity, arena.reset_type);
+            let node = arena.alloc(SLTNode::Constant(
+                BigUint::from(value as u64),
+                BigUint::from(0u8),
+                1,
+                false,
+            ))?;
+            let node = coerce_node_width(arena, node, context_width, context_signed)?;
+            Ok(((node, HashSet::default()), BoundaryMap::default()))
+        }
         Factor::Variable(var_id, index, select, comptime) => eval_variable_factor(
             module,
             store,
@@ -925,7 +939,7 @@ fn eval_variable_factor(
     // constant node directly instead of loading from memory.
     // Also handles constant[const_index] (e.g. IDX[p] in generate loops).
     if comptime.is_const {
-        let is_bare = index.0.is_empty() && select.0.is_empty() && select.1.is_none();
+        let is_bare = index.indices.is_empty() && select.0.is_empty() && select.1.is_none();
         let is_static_sel = !is_bare && crate::bitaccess::is_static_access(index, select);
 
         let constant = if is_bare {

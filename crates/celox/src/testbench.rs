@@ -460,6 +460,42 @@ fn collect_testbench_heap<B: SimBackend>(
     sim.maybe_collect_heap(saved_roots);
 }
 
+fn sim_set_queue_target<B: SimBackend>(
+    sim: &mut crate::Simulator<B>,
+    target: &TestbenchTarget<SignalRef, celox_testbench::CompiledExpr>,
+    value: BigUint,
+    mask: BigUint,
+) {
+    let (value, mask) = if sim.backend.layout().four_state && target.signal.is_4state {
+        (value, mask)
+    } else {
+        // X/Z convert to zero when stored in a two-state destination.
+        (
+            value & (width_mask(target.width) ^ mask),
+            BigUint::default(),
+        )
+    };
+    let Some(selection) = &target.selection else {
+        sim.set_four_state(target.signal, value, mask);
+        return;
+    };
+    let offset = eval_expr(sim, &selection.offset).to_u64() as usize;
+    let width = selection
+        .width
+        .min(target.signal.width.saturating_sub(offset));
+    if width == 0 {
+        return;
+    }
+    let (old_value, old_mask) = sim.get_four_state(target.signal);
+    let field = width_mask(width);
+    let keep = width_mask(target.signal.width) ^ (&field << offset);
+    sim.set_four_state(
+        target.signal,
+        (old_value & &keep) | ((value & &field) << offset),
+        (old_mask & keep) | ((mask & field) << offset),
+    );
+}
+
 fn execution_random_seed(seed: Option<u64>) -> u64 {
     seed.unwrap_or_else(rand::random)
 }
@@ -678,6 +714,7 @@ fn run_testbench_limited<B: SimBackend>(
         scheduler_time: None,
         tick_limit,
         tick_limit_reached: false,
+        queues: HashMap::default(),
         random: RandomTable::new(execution_random_seed(testbench.configured_random_seed())),
         record_passes: false,
     };
@@ -827,6 +864,7 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
         scheduler_time: None,
         tick_limit: None,
         tick_limit_reached: false,
+        queues: HashMap::default(),
         random: RandomTable::new(execution_random_seed(testbench.configured_random_seed())),
         record_passes: true,
     };
@@ -863,6 +901,8 @@ struct DetailedExecContext {
     /// Whether passing assertions are recorded, as the detailed API reports
     /// them.
     record_passes: bool,
+
+    queues: HashMap<String, std::collections::VecDeque<(BigUint, BigUint)>>,
 }
 
 impl DetailedExecContext {

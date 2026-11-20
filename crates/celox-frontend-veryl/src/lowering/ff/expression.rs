@@ -21,7 +21,7 @@ pub(crate) fn expression_has_side_effect(expr: &Expression) -> bool {
     match expr {
         Expression::Term(factor) => match factor.as_ref() {
             Factor::Variable(_, index, select, _) => {
-                index.0.iter().any(expression_has_side_effect)
+                index.expressions().any(expression_has_side_effect)
                     || select.0.iter().any(expression_has_side_effect)
                     || select
                         .1
@@ -50,7 +50,10 @@ pub(crate) fn expression_has_side_effect(expr: &Expression) -> bool {
                 | SystemFunctionKind::Finish => true,
             },
             Factor::HierVariable(_) => false,
-            Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
+            Factor::Value(_)
+            | Factor::ResetValue(..)
+            | Factor::Anonymous(_)
+            | Factor::Unknown(_) => false,
         },
         Expression::Binary(lhs, _, rhs, _) => {
             expression_has_side_effect(lhs) || expression_has_side_effect(rhs)
@@ -105,14 +108,20 @@ impl<'a> FfParser<'a> {
         ir_builder: &mut SIRBuilder<A>,
         context: Option<ValueContext>,
     ) -> Result<(), ParserError> {
+        if let Some(expanded) = crate::bitaccess::expand_runtime_array_slice(self.module, factor)? {
+            return self.parse_expression_in_context(
+                &expanded, targets, domain, convert, sources, ir_builder, context,
+            );
+        }
         let context_width = context.map(|context| context.width);
         match factor {
             Factor::Variable(var_id, var_index, var_select, comptime) => {
                 // Compile-time constant parameter: emit as constant instead of loading
                 // from memory (parameters are not stored in simulation memory).
                 if comptime.is_const {
-                    let is_bare =
-                        var_index.0.is_empty() && var_select.0.is_empty() && var_select.1.is_none();
+                    let is_bare = var_index.indices.is_empty()
+                        && var_select.0.is_empty()
+                        && var_select.1.is_none();
                     if is_bare {
                         if let Some((celox_value, mask_xz, width, _)) =
                             celox_value_from_comptime_in_context(comptime, context_width)
@@ -180,7 +189,10 @@ impl<'a> FfParser<'a> {
                 }
                 if let Some(bound_reg) = self.get_bound_function_arg_value(*var_id) {
                     let bound_reg = *bound_reg;
-                    if var_index.0.is_empty() && var_select.0.is_empty() && var_select.1.is_none() {
+                    if var_index.indices.is_empty()
+                        && var_select.0.is_empty()
+                        && var_select.1.is_none()
+                    {
                         self.stack.push_back(bound_reg);
                         if let Some(context) = context {
                             let adjusted = self.cast_reg_width_ext(
@@ -253,7 +265,10 @@ impl<'a> FfParser<'a> {
 
                 if let Some(bound_expr) = self.get_bound_function_arg_expr(*var_id) {
                     let bound_expr = bound_expr.clone();
-                    if var_index.0.is_empty() && var_select.0.is_empty() && var_select.1.is_none() {
+                    if var_index.indices.is_empty()
+                        && var_select.0.is_empty()
+                        && var_select.1.is_none()
+                    {
                         let formal_width =
                             resolve_total_width(self.module, &self.module.variables[var_id])?;
                         self.materialize_bound_function_access(
@@ -457,6 +472,10 @@ impl<'a> FfParser<'a> {
                     ),
                     Some(&reference.comptime.token),
                 ));
+            }
+            Factor::ResetValue(kind, polarity, _) => {
+                let value = crate::config::reset_value(*kind, *polarity, self.config.reset_type);
+                self.op_constant(SIRValue::new(value as u8), 1, ir_builder);
             }
             Factor::Value(comptime) => {
                 let (celox_value, mask_xz, width, _) =

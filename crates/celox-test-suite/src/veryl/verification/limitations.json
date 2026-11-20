@@ -854,5 +854,32 @@
         "concurrent_initial::simultaneous_edges"
       ]
     }
+  },
+  {
+    "id": "veryl_native_queue_components",
+    "category": "emitter_panic",
+    "phase": "emission",
+    "observed_version": "Veryl 0.22.1; Verilator 5.054 / Icarus 13.0",
+    "reason": "The Veryl emitter cannot emit native $tb::queue handles for SystemVerilog simulators. Celox executes the queue cases directly.",
+    "upstream": [
+      "https://github.com/veryl-lang/veryl/pull/3558"
+    ],
+    "evidence": [
+      "verification/repros/tb_queue_verilator.json",
+      "verification/repros/tb_queue_icarus.json"
+    ],
+    "cases": {
+      "verilator": [
+        "tb_queue::aggregate_and_selected_returns",
+        "tb_queue::operations",
+        "tb_queue::shared_processes"
+      ],
+      "icarus": [
+        "tb_queue::aggregate_and_selected_returns",
+        "tb_queue::four_state_values",
+        "tb_queue::operations",
+        "tb_queue::shared_processes"
+      ]
+    }
   }
 ]

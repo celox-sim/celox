@@ -66,7 +66,7 @@ pub(super) fn lower_load(
 
             lower_static_narrow_load(ctx, block, vreg, addr, bit_off, width_bits, intra_byte);
         }
-        SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
+        SIROffset::Dynamic(_) | SIROffset::Element { .. } | SIROffset::ElementRun { .. } => {
             let full_element_size = ctx.full_element_access_size(addr, offset, *width_bits);
             let direct_byte_off = (*width_bits <= 64)
                 .then(|| {
@@ -499,7 +499,7 @@ fn lower_narrow_load_mask(
                     ctx.set_mask(*dst, mvreg);
                 }
             }
-            SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
+            SIROffset::Dynamic(_) | SIROffset::Element { .. } | SIROffset::ElementRun { .. } => {
                 // Dynamic: load mask similarly with indexed addressing
                 let full_element_size = ctx.full_element_access_size(addr, offset, *width_bits);
                 let offset_vreg = memory_offset_vreg(ctx, block, addr, offset);

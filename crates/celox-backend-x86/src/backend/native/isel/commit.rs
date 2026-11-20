@@ -69,7 +69,7 @@ pub(super) fn lower_commit(
                     );
                 }
             }
-            SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
+            SIROffset::Dynamic(_) | SIROffset::Element { .. } | SIROffset::ElementRun { .. } => {
                 // Dynamic offset commit: copy from src to dst region.
                 // Both use the same dynamic offset.
                 let offset_vreg = memory_offset_vreg(ctx, block, src_addr, offset);
@@ -180,7 +180,9 @@ pub(super) fn lower_commit(
                         );
                     }
                 }
-                SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
+                SIROffset::Dynamic(_)
+                | SIROffset::Element { .. }
+                | SIROffset::ElementRun { .. } => {
                     let offset_vreg = memory_offset_vreg(ctx, block, src_addr, offset);
                     let src_mask_base = ctx.mask_byte_offset(src_addr, 0);
                     let dst_mask_base = ctx.mask_byte_offset(dst_addr, 0);

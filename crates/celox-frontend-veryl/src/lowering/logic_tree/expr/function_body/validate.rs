@@ -15,6 +15,7 @@ fn validate_function_body_expression(
             | Factor::HierVariable(_)
             | Factor::FunctionCall(_)
             | Factor::Value(_)
+            | Factor::ResetValue(..)
             | Factor::Anonymous(_)
             | Factor::Unknown(_) => Ok(()),
         },
@@ -103,7 +104,7 @@ pub(super) fn validate_function_body_statement(
         Statement::Assign(assign) => {
             validate_function_body_expression(module, &assign.expr)?;
             for dst in &assign.dst {
-                for index_expr in &dst.index.0 {
+                for index_expr in dst.index.expressions() {
                     validate_function_body_expression(module, index_expr)?;
                 }
                 for select_expr in &dst.select.0 {
@@ -178,7 +179,7 @@ pub(super) fn validate_function_body_statement(
             }
             for dsts in call.outputs.values() {
                 for dst in dsts {
-                    for index_expr in &dst.index.0 {
+                    for index_expr in dst.index.expressions() {
                         validate_function_body_expression(module, index_expr)?;
                     }
                     for select_expr in &dst.select.0 {

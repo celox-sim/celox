@@ -384,7 +384,7 @@ impl<'a> FfParser<'a> {
         let (var_id, load) =
             crate::module::readmem_load(self.module, filename, destinations, 16, |dst| {
                 dst.index
-                    .0
+                    .indices
                     .iter()
                     .map(|index| eval_constexpr(index)?.to_usize())
                     .collect()

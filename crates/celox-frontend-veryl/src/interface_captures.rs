@@ -89,19 +89,19 @@ fn lower_instance(
             r#type
                 .array
                 .iter()
-                .skip(binding.index.0.len())
+                .skip(binding.index.indices.len())
                 .copied()
                 .collect(),
         );
         let comptime = Comptime::from_type(r#type, ClockDomain::None, parent.token);
         inst.inputs.push(InstInput {
             id: binding.child,
-            exprs: vec![Expression::Term(Box::new(Factor::Variable(
+            expr: Expression::Term(Box::new(Factor::Variable(
                 binding.parent,
                 binding.index,
                 binding.select,
                 comptime,
-            )))],
+            ))),
         });
     }
 }

@@ -33,7 +33,7 @@ impl<'a> FfParser<'a> {
             Expression::Term(factor) => match factor.as_ref() {
                 Factor::Variable(id, index, select, _) => {
                     self.module.variables[id].affiliation != Affiliation::Function
-                        || !index.0.is_empty()
+                        || !index.indices.is_empty()
                         || !select.0.is_empty()
                         || select.1.is_some()
                 }
@@ -58,7 +58,10 @@ impl<'a> FfParser<'a> {
                     | SystemFunctionKind::Unsigned(input) => input_needs_snapshot(input),
                     SystemFunctionKind::Readmemh(_, _) | SystemFunctionKind::Finish => false,
                 },
-                Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
+                Factor::Value(_)
+                | Factor::ResetValue(..)
+                | Factor::Anonymous(_)
+                | Factor::Unknown(_) => false,
             },
             Expression::Binary(lhs, _, rhs, _) => {
                 self.expression_needs_assignment_snapshot_inner(lhs, visiting)
@@ -101,7 +104,7 @@ impl<'a> FfParser<'a> {
         visiting: &mut HashSet<VarId>,
     ) -> bool {
         dst.index
-            .0
+            .indices
             .iter()
             .any(|expr| self.expression_needs_assignment_snapshot_inner(expr, visiting))
             || dst
@@ -235,7 +238,7 @@ impl<'a> FfParser<'a> {
                 match factor.as_ref() {
                     Factor::Variable(_, index, select, _) => {
                         index
-                            .0
+                            .indices
                             .iter()
                             .any(|expr| self.expression_has_runtime_effect_inner(expr, visiting))
                             || select.0.iter().any(|expr| {
@@ -248,7 +251,7 @@ impl<'a> FfParser<'a> {
                     Factor::HierVariable(reference) => {
                         reference
                             .index
-                            .0
+                            .indices
                             .iter()
                             .any(|expr| self.expression_has_runtime_effect_inner(expr, visiting))
                             || reference.select.0.iter().any(|expr| {
@@ -279,7 +282,10 @@ impl<'a> FfParser<'a> {
                         }
                         _ => true,
                     },
-                    Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
+                    Factor::Value(_)
+                    | Factor::ResetValue(..)
+                    | Factor::Anonymous(_)
+                    | Factor::Unknown(_) => false,
                 }
             }
             Expression::Binary(lhs, _, rhs, _) => {
@@ -347,7 +353,7 @@ impl<'a> FfParser<'a> {
         visiting: &mut HashSet<VarId>,
     ) -> bool {
         dst.index
-            .0
+            .indices
             .iter()
             .any(|expr| self.expression_has_runtime_effect_inner(expr, visiting))
             || dst
@@ -367,7 +373,7 @@ impl<'a> FfParser<'a> {
         dst: &AssignDestination,
     ) -> bool {
         dst.index
-            .0
+            .indices
             .iter()
             .any(|expr| self.expression_needs_eager_evaluation(expr))
             || dst

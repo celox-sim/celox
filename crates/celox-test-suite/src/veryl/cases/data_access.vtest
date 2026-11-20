@@ -38,6 +38,7 @@ assign o = a[2];
   (assert_eq o 0x55))
 
 (case test_multidimensional_access
+  (allow_inferred_latches)
   (source "test.veryl" #"
 module Top (i: input logic<8>, o: output logic<8>) {
 var a: logic<8> [4, 2];
@@ -201,6 +202,7 @@ assign o[j] = local_data[idx];
   ; o[3] = local_data[0]
 
 (case test_dynamic_index_with_bitslice
+  (allow_inferred_latches)
   (source "test.veryl" #"
 module Top (
 idx: input logic<4>,
@@ -236,6 +238,7 @@ assign o_hi = regs[idx][63:32];
   ; hi 32 bits
 
 (case test_let_index_with_bitslice_write
+  (allow_inferred_latches)
   (source "test.veryl" #"
 module Top (
 o_lo: output logic<32>,

@@ -490,6 +490,7 @@ fn analyze(code: &str) -> (Module, LoopProvenance) {
         Analyzer::analyze_post_pass2(&ir).is_empty(),
         "post-pass2 must succeed"
     );
+    crate::lower_constant_loops(&mut ir);
     let provenance = loop_sources.match_unrolled(&ir);
     let top = resource_table::insert_str("Top");
     let module = ir

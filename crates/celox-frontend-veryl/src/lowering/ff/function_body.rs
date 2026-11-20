@@ -23,7 +23,7 @@ impl<'a> FfParser<'a> {
         };
         assign.dst.len() == 1
             && assign.dst[0].id == ret_id
-            && assign.dst[0].index.0.is_empty()
+            && assign.dst[0].index.indices.is_empty()
             && assign.dst[0].select.0.is_empty()
             && assign.dst[0].select.1.is_none()
     }
@@ -86,7 +86,7 @@ impl<'a> FfParser<'a> {
                 // declared width, signedness, and state kind.
                 Factor::Variable(id, index, select, comptime) => {
                     let mut index = index.clone();
-                    for expr in &mut index.0 {
+                    for expr in &mut index.indices {
                         *expr = self.capture_nested_function_outputs_inner(
                             expr,
                             state,
@@ -161,7 +161,7 @@ impl<'a> FfParser<'a> {
                 }
                 Factor::HierVariable(reference) => {
                     let mut reference = reference.as_ref().clone();
-                    for expr in &mut reference.index.0 {
+                    for expr in &mut reference.index.indices {
                         *expr = self.capture_nested_function_outputs_inner(
                             expr,
                             state,
@@ -184,7 +184,10 @@ impl<'a> FfParser<'a> {
                     }
                     Expression::Term(Box::new(Factor::HierVariable(Box::new(reference))))
                 }
-                Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => expr.clone(),
+                Factor::Value(_)
+                | Factor::ResetValue(..)
+                | Factor::Anonymous(_)
+                | Factor::Unknown(_) => expr.clone(),
             },
             Expression::Binary(lhs, op, rhs, comptime) => {
                 let lhs =

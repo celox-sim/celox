@@ -352,6 +352,11 @@ pub(super) fn analyze(
     errors.append(&mut Analyzer::analyze_post_pass2(&ir));
     phase("veryl_analyze_pass2", pass2_start);
 
+    // Veryl's emitted continuous assignments require constant output selects.
+    // Celox models these connections as ordered read/modify/write glue and
+    // validates their effects itself, including observer alias restrictions.
+    errors.retain(|error| !matches!(error, AnalyzerError::NonConstantOutputSelect { .. }));
+
     // Veryl reports combinational loops before Celox can apply its path-level
     // false-loop and true-loop authorizations. When the caller supplied such
     // an authorization, defer loop validation to the Celox scheduler: it will
@@ -360,16 +365,16 @@ pub(super) fn analyze(
         errors.retain(|error| !matches!(error, AnalyzerError::CombinationalLoop { .. }));
     }
 
-    // Celox's FF lowerer can model function copy-out and non-local writes that
-    // Veryl rejects for SystemVerilog always_ff compatibility. Keep the
-    // language diagnostics by default, but let semantic regression tests opt
-    // into lowering the analyzer IR for those constructs.
+    // Celox can model function copy-out in port connections and function
+    // effects in always_ff. Keep Veryl's diagnostics enabled by default and
+    // let semantic regression tests opt into Celox's lowering.
     if allow_always_ff_function_effects {
         errors.retain(|error| {
             !matches!(
                 error,
                 AnalyzerError::SideEffectFunctionCallInAlwaysFf { .. }
                     | AnalyzerError::FunctionOutputInAlwaysFf { .. }
+                    | AnalyzerError::FunctionOutputInPortConnection { .. }
             )
         });
     }
@@ -387,6 +392,9 @@ pub(super) fn analyze(
         diagnostics
     };
     celox_frontend_veryl::lower_interface_captures(&mut ir);
+    if !errors.iter().any(AnalyzerError::is_error) {
+        celox_frontend_veryl::lower_constant_loops(&mut ir);
+    }
     // Force-capable native images reapply an override after each static store.
     // Keep analyzer-unrolled loops expanded for that mode so one compiled
     // entry cannot execute the same store across multiple iterations.

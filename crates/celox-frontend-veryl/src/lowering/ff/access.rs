@@ -57,10 +57,10 @@ impl<'a> FfParser<'a> {
         let mut base_offset = 0usize;
         let mut processed_count = 0usize;
         let index_count =
-            (index.0.len() + select.0.len()).saturating_sub(usize::from(select.1.is_some()));
+            (index.indices.len() + select.0.len()).saturating_sub(usize::from(select.1.is_some()));
 
         for (i, index_val) in index
-            .0
+            .indices
             .iter()
             .chain(&select.0)
             .take(index_count)
@@ -215,6 +215,9 @@ impl<'a> FfParser<'a> {
         mut guard: Option<&mut AccessGuard>,
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<SIROffset, ParserError> {
+        crate::bitaccess::reject_runtime_array_slice(index)?;
+        let folded = crate::bitaccess::fold_array_range(index, select)?;
+        let (index, select) = folded.as_ref().map_or((index, select), |(i, s)| (i, s));
         // Keep unpacked-array indexing separate from packed bit selection.
         // Backends may give array elements a physical stride different from
         // their logical packed width, so combining both here loses essential
@@ -234,7 +237,7 @@ impl<'a> FfParser<'a> {
         let mut dynamic_bit_offset = None;
         let mut dummy_targets: Vec<VarAtomBase<A>> = Vec::new();
 
-        for (i, expr) in index.0.iter().enumerate() {
+        for (i, expr) in index.indices.iter().enumerate() {
             let stride = strides[i];
             let is_unpacked = i < array_dimension_count;
             let scale = if is_unpacked {
@@ -281,7 +284,7 @@ impl<'a> FfParser<'a> {
             }
         }
 
-        let stride_offset = index.0.len();
+        let stride_offset = index.indices.len();
         let is_colon_select = matches!(&select.1, Some((VarSelectOp::Colon, _)));
         let select_dim_limit = if is_colon_select {
             select.0.len().saturating_sub(1)
@@ -382,7 +385,7 @@ impl<'a> FfParser<'a> {
                     let signed = selected_expr.comptime().r#type.signed
                         && !matches!(select.1, Some((VarSelectOp::MinusColon, _)));
                     match part_elements {
-                        Some(elements) if elements > 1 => {
+                        Some(elements) if elements > 1 && !is_unpacked => {
                             guard.part = Some(PartGuard {
                                 lsb: index_reg,
                                 signed,
@@ -397,11 +400,17 @@ impl<'a> FfParser<'a> {
                                     ir_builder.register(&index_reg).width(),
                                     dimension_width,
                                 );
+                            let first_elements = match part_elements {
+                                Some(elements) if is_unpacked => {
+                                    dimension_width.saturating_sub(elements - 1)
+                                }
+                                _ => dimension_width,
+                            };
                             and_index_guard(
                                 &mut guard.indices,
                                 index_reg,
                                 signed,
-                                Some(dimension_width),
+                                Some(first_elements),
                                 ir_builder,
                             )
                         }
@@ -464,6 +473,21 @@ impl<'a> FfParser<'a> {
             });
         }
 
+        // A run of whole elements from a runtime first element, such as the
+        // clamped read behind a runtime array slice.
+        if let Some(element_index) = dynamic_element_index
+            && array_dimension_count != 0
+            && dynamic_bit_offset.is_none()
+            && static_bit_offset == 0
+            && selected_width > element_width
+            && selected_width.is_multiple_of(element_width)
+        {
+            return Ok(SIROffset::ElementRun {
+                index: element_index,
+                element_width,
+            });
+        }
+
         if let Some(element_index) = dynamic_element_index {
             let logical_element_offset = scale_offset(element_index, element_width, ir_builder);
             add_offset_term(&mut dynamic_bit_offset, logical_element_offset, ir_builder);
@@ -518,7 +542,7 @@ impl<'a> FfParser<'a> {
         sources: &mut Vec<VarAtomBase<A>>,
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<RegisterId, ParserError> {
-        if index.0.is_empty() && select.0.is_empty() && select.1.is_none() {
+        if index.indices.is_empty() && select.0.is_empty() && select.1.is_none() {
             return Ok(value);
         }
         let width = get_access_width(self.module, var_id, index, select)?;
@@ -558,6 +582,13 @@ impl<'a> FfParser<'a> {
                     width,
                     ir_builder,
                 )
+            }
+            SIROffset::ElementRun {
+                index,
+                element_width,
+            } => {
+                let logical = scale_offset(index, element_width, ir_builder);
+                self.emit_register_dynamic_slice(value, logical, width, ir_builder)
             }
         };
         // Slicing a register never leaves it, but an invalid index reads X
@@ -624,7 +655,7 @@ impl<'a> FfParser<'a> {
             ir_builder,
         )?;
         if !source_type.array.is_empty()
-            && index.0.is_empty()
+            && index.indices.is_empty()
             && select.0.is_empty()
             && select.1.is_none()
         {
@@ -695,7 +726,7 @@ impl<'a> FfParser<'a> {
             let variable = &self.module.variables[&dst.id];
             variable.affiliation == Affiliation::AlwaysFf
                 && variable.kind == VarKind::Let
-                && dst.index.0.is_empty()
+                && dst.index.indices.is_empty()
                 && dst.select.0.is_empty()
                 && dst.select.1.is_none()
         };
@@ -733,7 +764,7 @@ impl<'a> FfParser<'a> {
             ir_builder,
         )?;
         if !target_type.array.is_empty()
-            && dst.index.0.is_empty()
+            && dst.index.indices.is_empty()
             && dst.select.0.is_empty()
             && dst.select.1.is_none()
         {

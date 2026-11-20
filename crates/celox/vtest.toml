@@ -48,6 +48,21 @@ add = ["native-baseline"]
 [veryl.groups.std_ram]
 add = ["native-baseline"]
 
+[veryl.groups.tb_queue]
+omit = ["veryl"]
+
+[veryl.cases."tb_queue::aggregate_and_selected_returns"]
+ignore = ["sv"]
+
+[veryl.cases."tb_queue::four_state_values"]
+ignore = ["sv"]
+
+[veryl.cases."tb_queue::operations"]
+ignore = ["sv"]
+
+[veryl.cases."tb_queue::shared_processes"]
+ignore = ["sv"]
+
 [veryl.groups.synth_dynamic_loop]
 add = ["native-baseline"]
 
@@ -604,11 +619,10 @@ omit = ["veryl"]
 [veryl.cases."hierarchy::test_dynamic_step_output_port_rmw"]
 ignore = ["veryl"]
 
-# Veryl emits a call with an output argument in an input port connection, which IEEE 1800
-# 13.4 forbids outside procedural code; the SV frontend rejects it
-# ("systemverilog input port connection", #88).
+# Veryl 0.22.1 rejects function output arguments in port connections.
+# Celox exercises copy-out with an explicit opt-in, and its SV frontend rejects it (#88).
 [veryl.cases."hierarchy::test_inactive_instance_input_output_call_adds_no_parent_driver"]
-ignore = ["sv"]
+ignore = ["sv", "veryl"]
 
 # Neither veryl-simulator nor the Veryl frontend supports instance
 # arrays; the emitted SystemVerilog does.
@@ -621,11 +635,10 @@ ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm"
 [veryl.cases."hierarchy::test_instance_input_function_output_concat_dynamic_writeback"]
 ignore = ["sv", "veryl"]
 
-# Veryl emits a call with an output argument in an input port connection, which IEEE
-# 1800 13.4 forbids outside procedural code; the SV frontend rejects it
-# ("systemverilog input port connection", #88).
+# Veryl 0.22.1 rejects function output arguments in port connections.
+# Celox exercises copy-out with an explicit opt-in, and its SV frontend rejects it (#88).
 [veryl.cases."hierarchy::test_instance_input_function_output_writeback"]
-ignore = ["sv"]
+ignore = ["sv", "veryl"]
 
 # veryl-simulator 0.22.0 does not support a concatenation as an instance output
 # connection (UnsupportedDescription).

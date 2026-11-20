@@ -313,6 +313,7 @@ inst t: TestConst::<IntElement> (out);
   (assert_eq out 0xffffffff "E:max_value should be ~0 = 0xFFFFFFFF"))
 
 (case test_compare_matrix_stage1cm
+  (allow_inferred_latches)
   (source "test.veryl" #"
 proto package Element {
     type data;
@@ -524,6 +525,7 @@ inst cm: CompareMatrixStage1CM::<IntElement> #(P: 4) (in_data, out_score);
   (assert_eq (slice (get out_score) 7 6) 2)) ; 30 -> score 2
 
 (case test_compare_matrix_selector
+  (allow_inferred_latches)
   (source "test.veryl" #"
 proto package Element {
     type data;
@@ -739,6 +741,7 @@ inst sel: CompareMatrixSelectorInt32 #(P: P) (in_data, in_scores, out_data);
     (assert_eq (slice (get out_data) (+ (* slot 32) 31) (* slot 32)) value)))
 
 (case test_compare_matrix_stage1_sort
+  (allow_inferred_latches)
   (source "test.veryl" #"
 proto package Element {
     type data;
@@ -950,6 +953,7 @@ inst sorter: CompareMatrixStage1Int32 #(P: P) (in_data, out_data);
     (assert_eq (slice (get out_data) (+ (* slot 32) 31) (* slot 32)) value)))
 
 (case test_compare_matrix_merger
+  (allow_inferred_latches)
   (source "test.veryl" #"
 proto package Element {
     type data;

@@ -78,9 +78,15 @@ pub fn emit_verification_sources(sources: &[(&str, &Path)], top: &str) -> Emitte
 
 /// Whether an analyzer error blocks emission. Celox's Veryl tests may
 /// authorize combinational loops per path, and the emitted SystemVerilog
-/// expresses such a loop directly; every other error blocks emission.
+/// expresses such a loop directly. Dynamic output selects also reach the
+/// external tool: negative cases verify its rejection, while Celox can lower
+/// the connection as ordered glue. Native testbenches retain loop diagnostics.
 fn blocks_emission(error: &veryl_analyzer::AnalyzerError, testbench: Option<&str>) -> bool {
     error.is_error()
+        && !matches!(
+            error,
+            veryl_analyzer::AnalyzerError::NonConstantOutputSelect { .. }
+        )
         && (testbench.is_some()
             || !matches!(
                 error,
