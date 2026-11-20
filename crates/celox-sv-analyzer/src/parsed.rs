@@ -77,6 +77,20 @@ impl ParsedSource {
         })
     }
 
+    /// Plan interface port bindings and reflection paths from the same
+    /// declarations used for module analysis. Parse the sources in compilation
+    /// order with the design's duplicate-module policy before calling this.
+    pub fn plan_interfaces_with_member_paths(
+        sources: &[&Self],
+        bindings: &[(String, String, Vec<(String, String)>)],
+    ) -> Result<(crate::NativeInterfacePlan, crate::InterfaceMemberPaths), AnalyzerError> {
+        let sources = sources
+            .iter()
+            .map(|source| (source.code.as_ref(), source.tree.as_ref()))
+            .collect::<Vec<_>>();
+        ast::interfaces::plan_interfaces_from_trees(&sources, bindings)
+    }
+
     pub fn module_names(&self) -> &[String] {
         self.index.names()
     }
