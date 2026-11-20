@@ -3285,7 +3285,6 @@ fn the_scheduler_calls_the_settle_unless_it_instruments_it() {
 /// each target alone: the watches of edge and change waits, the gated
 /// (`iff`) waits and the occurrence probes of part event controls, also of
 /// targets that share their storage with an alias.
-#[cfg(all(test, target_arch = "x86_64", not(feature = "arm64-codegen")))]
 #[test]
 fn nba_observations_of_all_targets_match_those_of_each() {
     let source = r#"`timescale 1ns/1ns

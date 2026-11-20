@@ -575,6 +575,38 @@ impl ProcModule<'_> {
         (least(found, reason), state)
     }
 
+    /// The positions of input formals whose default expressions a function
+    /// unit evaluates in its own prologue when omitted (see
+    /// [`Function::omitted`]). A default that names what the scope does not
+    /// declare, such as another formal, is left to the calls, which report it
+    /// if they use it (IEEE 1800-2023 13.5.3).
+    pub(in crate::lowering) fn unit_defaulted_params(
+        &self,
+        subroutine: &sv::ir::Subroutine,
+    ) -> Vec<usize> {
+        let declared = |default: &sv::ir::Expr| {
+            let mut names = HashSet::default();
+            expr_idents(default, &mut names);
+            names
+                .iter()
+                .all(|name| self.id(name).is_some() || self.constants.contains_key(name))
+        };
+        subroutine
+            .params
+            .iter()
+            .enumerate()
+            .filter(|(position, param)| {
+                *position < 64
+                    && param.default.as_ref().is_some_and(declared)
+                    && param.direction.is_read()
+                    && !param.direction.is_written()
+                    && !param.direction.is_reference()
+                    && param.leaves.is_empty()
+            })
+            .map(|(position, _)| position)
+            .collect()
+    }
+
     /// What the body of subroutine `name` does itself, as a unit of it or of
     /// a subroutine that calls it would: the first reason it gives to stay
     /// inlined, the process state it uses, and the subroutines it calls,
@@ -594,6 +626,11 @@ impl ProcModule<'_> {
                 break 'body;
             };
             let mut calls = Vec::new();
+            for position in self.unit_defaulted_params(subroutine) {
+                if let Some(default) = &subroutine.params[position].default {
+                    collect_calls(default, &mut calls);
+                }
+            }
             for stmt in &subroutine.body {
                 stmt.walk(&mut |stmt| {
                     match stmt {

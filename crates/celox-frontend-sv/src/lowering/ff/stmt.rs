@@ -152,7 +152,7 @@ impl Ff<'_, '_> {
                 lhs,
                 rhs,
                 nonblocking: true,
-            } if self.kernel.is_some() || self.can_suspend_unit() => {
+            } if self.kernel.is_some() || self.frame.is_some() => {
                 self.nonblocking(std::slice::from_ref(lhs), rhs)?;
                 Ok(true)
             }
@@ -160,7 +160,7 @@ impl Ff<'_, '_> {
                 parts,
                 rhs,
                 nonblocking: true,
-            } if self.kernel.is_some() || self.can_suspend_unit() => {
+            } if self.kernel.is_some() || self.frame.is_some() => {
                 self.nonblocking(parts, rhs)?;
                 Ok(true)
             }
