@@ -1,6 +1,7 @@
 (group nba_dynamic_array (category arrays))
 
 (case test_subbyte_arithmetic_padding_does_not_corrupt_concat
+  (allow_inferred_latches)
   (source "test.veryl" #"
 module Top (
     bound: input  logic<4>,
@@ -248,6 +249,7 @@ module Top (
   (assert_eq q 0x82))
 
 (case test_packed_rat_checkpoint_round_trip
+  (allow_inferred_latches)
   (source "test.veryl" #"
 module Top (
     clk    : input  clock,
@@ -301,6 +303,7 @@ module Top (
   (assert_eq q31 31))
 
 (case test_line_write_loop_updates_large_sparse_ff_array
+  (allow_inferred_latches)
   (source "test.veryl" #"
 module Top (
     clk  : input  clock,
@@ -824,6 +827,7 @@ module Top (
 ; part select reads and writes only its in-range bits (IEEE 1800-2023 7.4.6,
 ; 11.5.1).
 (case test_out_of_range_dynamic_comb_access
+  (allow_inferred_latches)
   (four_state)
   (source "test.veryl" #"
 module Top (

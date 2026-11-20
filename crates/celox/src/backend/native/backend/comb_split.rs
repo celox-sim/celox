@@ -13,6 +13,7 @@ pub(super) fn offset_registers(offset: &SIROffset, registers: &mut Vec<RegisterI
             registers.push(*index);
             registers.extend(dynamic_bit_offset);
         }
+        SIROffset::ElementRun { index, .. } => registers.push(*index),
         SIROffset::Static(_) | SIROffset::PackedElements { .. } => {}
     }
 }

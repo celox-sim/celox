@@ -1,0 +1,162 @@
+(group tb_queue (category control_flow))
+
+(case operations
+  (source "test.veryl" #"#[test(Top)]
+module Top {
+    gen wide: type = bit<129>;
+    var q: $tb::queue::<u8, 2>;
+    var s: $tb::queue::<i8>;
+    var w: $tb::queue::<wide>;
+    var widened: $tb::queue::<u16>;
+    var x: u8;
+    var signed_result: i32;
+    initial {
+        $assert(q.is_empty() == 1);
+        $assert(q.pop_back() == 0);
+        q.drop_back();
+        q.drop_front();
+        q.push_back(11);
+        q.push_front(22);
+        $assert(q.is_full() == 1);
+        q.push_front(33);
+        q.push_back(44);
+        $assert(q.size() == 2);
+        $assert(q.front() == 22);
+        $assert(q.back() == 11);
+        $assert(q.pop_front() == 22);
+        $assert(q.pop_back() == 11);
+        $assert(q.is_full() == 0);
+        q.push_back(55);
+        q.push_back(66);
+        q.drop_front();
+        $assert(q.front() == 66);
+        q.push_front(77);
+        q.drop_back();
+        $assert(q.back() == 77);
+        q.clear();
+        $assert(q.size() == 0);
+        $assert(q.front() == 0);
+        $assert(q.back() == 0);
+        x = 250;
+        q.push_back(x + 9);
+        x = 0;
+        $assert(q.pop_front() == 3);
+        x = 200;
+        widened.push_back(x + x);
+        $assert(widened.pop_front() == 400);
+        s.push_back(-7);
+        signed_result = s.pop_back() as i32;
+        $assert(signed_result == -7);
+        w.push_back(129'h1_00000000_00000000_00000000_00000023);
+        $assert(w.pop_front() == 129'h1_00000000_00000000_00000000_00000023);
+        for i in 0..5 {
+            s.push_back(i as i8);
+        }
+        $assert(s.size() == 5);
+        $assert(s.is_full() == 0);
+        for i in 0..5 {
+            $assert(s.pop_front() == i as i8);
+        }
+        $finish();
+    }
+}
+"#)
+  (top Top)
+  (run_testbench))
+
+(case shared_processes
+  (source "test.veryl" #"#[test(Top)]
+module Top {
+    inst clk: $tb::clock_gen;
+    var q: $tb::queue::<u32>;
+    initial {
+        q.push_back(123);
+        clk.next(2);
+        $assert(q.pop_front() == 456);
+        $assert(q.is_empty() == 1);
+        $finish();
+    }
+    initial {
+        clk.next();
+        $assert(q.pop_front() == 123);
+        q.push_back(456);
+    }
+}
+"#)
+  (top Top)
+  (run_testbench))
+
+(case four_state_values
+  (four_state)
+  (source "test.veryl" #"#[test(Top)]
+module Top {
+    gen element: type = logic<4>;
+    var q: $tb::queue::<element>;
+    var empty_value: element;
+    var peeked: element;
+    var popped: element;
+    var copied: element;
+    initial {
+        empty_value = q.pop_front();
+        q.push_back(4'b10xz);
+        peeked = q.front();
+        popped = q.pop_back();
+        q.push_front(peeked);
+        copied = q.pop_front();
+        $finish();
+    }
+}
+"#)
+  (top Top)
+  (run_testbench)
+  (assert (== (payload (get empty_value)) 15))
+  (assert (== (xmask (get empty_value)) 15))
+  (assert (== (payload (get peeked)) 10))
+  (assert (== (xmask (get peeked)) 3))
+  (assert (== (payload (get popped)) 10))
+  (assert (== (xmask (get popped)) 3))
+  (assert (== (payload (get copied)) 10))
+  (assert (== (xmask (get copied)) 3)))
+
+(case aggregate_and_selected_returns
+  (source "test.veryl" #"package Types {
+    struct Pair {
+        low: bit<8>,
+        high: bit<8>,
+    }
+}
+#[test(Top)] module Top {
+    var pairs: $tb::queue::<Types::Pair>;
+    var bytes: $tb::queue::<u8>;
+    var pair: Types::Pair;
+    var buffer: u8 [3];
+    var index: u32;
+    var packed_value: bit<24>;
+    initial {
+        pair.low = 8'h12;
+        pair.high = 8'h34;
+        pairs.push_back(pair);
+        pair.low = 0;
+        pair.high = 0;
+        pair = pairs.pop_front();
+        $assert(pair.low == 8'h12);
+        $assert(pair.high == 8'h34);
+        bytes.push_back(8'hab);
+        index = 1;
+        buffer[index] = bytes.pop_front();
+        $assert(buffer[1] == 8'hab);
+        packed_value = 24'h123456;
+        bytes.push_back(8'hcd);
+        packed_value[8+:8] = bytes.pop_back();
+        $assert(packed_value == 24'h12cd56);
+        bytes.push_back(1);
+        bytes.push_back(2);
+        // An unused return must still consume the element.
+        bytes.pop_front();
+        $assert(bytes.pop_front() == 2);
+        $finish();
+    }
+}
+"#)
+  (top Top)
+  (run_testbench))

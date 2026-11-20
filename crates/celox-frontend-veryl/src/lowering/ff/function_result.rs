@@ -171,7 +171,7 @@ impl<'a> FfParser<'a> {
                 Statement::Assign(assign) => {
                     if let [dst] = assign.dst.as_slice()
                         && dst.id == ret_id
-                        && dst.index.0.is_empty()
+                        && dst.index.indices.is_empty()
                         && dst.select.0.is_empty()
                         && dst.select.1.is_none()
                     {

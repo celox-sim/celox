@@ -221,7 +221,7 @@ impl<'a> FfParser<'a> {
                 let Factor::Variable(bound_var_id, index, select, _) = factor.as_ref() else {
                     return None;
                 };
-                if !index.0.is_empty() || !select.0.is_empty() || select.1.is_some() {
+                if !index.indices.is_empty() || !select.0.is_empty() || select.1.is_some() {
                     return None;
                 }
                 let source_frame = (0..frame).rev().find(|&source_frame| {
@@ -425,7 +425,7 @@ impl<'a> FfParser<'a> {
             .copied()
             .flatten()
             .collect::<Vec<_>>();
-        let all_indices = index.0.iter().chain(&select.0).collect::<Vec<_>>();
+        let all_indices = index.indices.iter().chain(&select.0).collect::<Vec<_>>();
         let resolved_indices = all_indices
             .iter()
             .map(|expr| self.get_constant_value(expr).unwrap() as usize)
@@ -823,7 +823,7 @@ impl<'a> FfParser<'a> {
             Some(&mut guard),
             ir_builder,
         )?;
-        if index.0.is_empty() && select.0.is_empty() && select.1.is_none() {
+        if index.indices.is_empty() && select.0.is_empty() && select.1.is_none() {
             let element_count = formal
                 .r#type
                 .array

@@ -197,7 +197,7 @@ fn readmem_destination(
         .r#type
         .total_array()
         .ok_or_else(|| ParserError::unresolved_width(module, var, var.r#type.to_string()))?;
-    let start_addr = if dst.index.0.is_empty() {
+    let start_addr = if dst.index.indices.is_empty() {
         0
     } else {
         let Some(indices) = index_values(dst) else {

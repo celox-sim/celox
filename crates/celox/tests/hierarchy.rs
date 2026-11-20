@@ -502,3 +502,32 @@ assign mem_o = mem;
 "#;
     assert_nonconstant_output_rejected(code);
 }
+
+#[test]
+fn test_instance_input_function_output_call_is_rejected() {
+    // A function call with an output argument in a port connection is not
+    // procedural code (IEEE 1800-2023 13.4.1); Veryl rejects it.
+    let code = r#"
+        module Child (i: input logic, o: output logic) { assign o = i; }
+        module Top (a: input logic, child_o: output logic, seen_o: output logic) {
+            function write_seen (x: input logic, seen: output logic) -> logic {
+                seen = x;
+                return x;
+            }
+            var seen: logic;
+            inst child: Child (i: write_seen(a, seen), o: child_o);
+            assign seen_o = seen;
+        }
+    "#;
+    let error = Simulator::builder(code, "Top").build().unwrap_err();
+    let celox::SimulatorErrorKind::Analyzer(errors) = error.kind() else {
+        panic!("expected analyzer rejection, got: {error:?}");
+    };
+    assert!(
+        errors.iter().any(|error| matches!(
+            error,
+            veryl_analyzer::AnalyzerError::FunctionOutputInPortConnection { .. }
+        )),
+        "{errors:?}"
+    );
+}

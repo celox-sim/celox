@@ -1,0 +1,55 @@
+{
+  "cases": [
+    {
+      "category": "ControlFlow",
+      "detail": "compile tb_queue::aggregate_and_selected_returns: internal error: entered unreachable code",
+      "expectation": "Simulation",
+      "name": "tb_queue::aggregate_and_selected_returns",
+      "phase": "emission",
+      "status": "emission_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "tb_queue::four_state_values",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "compile tb_queue::operations: internal error: entered unreachable code",
+      "expectation": "Simulation",
+      "name": "tb_queue::operations",
+      "phase": "emission",
+      "status": "emission_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "compile tb_queue::shared_processes: internal error: entered unreachable code",
+      "expectation": "Simulation",
+      "name": "tb_queue::shared_processes",
+      "phase": "emission",
+      "status": "emission_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "exclude_stronger_than_sv": false,
+  "include_ignored": false,
+  "schema_version": 3,
+  "suite": "veryl",
+  "suite_version": "0.14.0",
+  "tool": "verilator",
+  "version": "Verilator 5.054 2026-11-01 rev v5.054"
+}

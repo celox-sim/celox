@@ -639,6 +639,34 @@
   (eval)
   (assert_eq out 0))
 
+(case test_static_nested_loop_local_bindings_are_distinct
+  (source "test.veryl" #"
+module Top (
+    inputs: input logic<16>,
+    result: output logic<8>,
+) {
+    var total: logic<8>;
+    always_comb {
+        total = 0;
+        for i in 0..2 {
+            let outer: logic<8> = inputs[i * 8+:8];
+            for j in 0..2 {
+                let lane: logic<8> = outer + (j as 8);
+                total += lane;
+            }
+        }
+        result = total;
+    }
+}
+"#)
+  (top Top)
+  (modify (set inputs 0x0401))
+  (assert_eq result 12)
+  (modify (set inputs 0x0409))
+  (assert_eq result 28)
+  (modify (set inputs 0xffff))
+  (assert_eq result 254))
+
 (case test_runtime_bounds_forward_overshoot_exits_without_wraparound
   (source "test.veryl" #"
         module Top (

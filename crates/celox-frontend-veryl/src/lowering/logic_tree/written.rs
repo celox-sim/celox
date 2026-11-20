@@ -172,7 +172,7 @@ pub(crate) fn collect_written_expression(
                 Ok(())
             }
             Factor::Variable(_, index, select, _) => {
-                for expression in index.0.iter().chain(select.0.iter()) {
+                for expression in index.expressions().chain(select.0.iter()) {
                     collect_written_expression(module, expression, out)?;
                 }
                 Ok(())
@@ -188,7 +188,10 @@ pub(crate) fn collect_written_expression(
             Factor::SystemFunctionCall(call) => {
                 collect_written_system_function_call(module, call, out)
             }
-            Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => Ok(()),
+            Factor::Value(_)
+            | Factor::ResetValue(..)
+            | Factor::Anonymous(_)
+            | Factor::Unknown(_) => Ok(()),
         },
         Expression::Unary(_, inner, _) => collect_written_expression(module, inner, out),
         Expression::Binary(lhs, op, rhs, _) => {
@@ -297,7 +300,7 @@ pub(super) fn collect_written_destination(
     out: &mut HashMap<VarId, Vec<BitAccess>>,
     dst: &veryl_analyzer::ir::AssignDestination,
 ) -> Result<(), ParserError> {
-    for expression in dst.index.0.iter().chain(dst.select.0.iter()) {
+    for expression in dst.index.expressions().chain(dst.select.0.iter()) {
         collect_written_expression(module, expression, out)?;
     }
     let access = eval_var_select(module, dst.id, &dst.index, &dst.select)?;

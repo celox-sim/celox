@@ -95,6 +95,33 @@ impl SLTToSIRLowerer {
         let dest = builder.alloc_logic(width);
 
         if !index.is_empty() {
+            let element_width = index.iter().find_map(|entry| match entry.kind {
+                crate::SLTIndexKind::Unpacked { element_width } => Some(element_width),
+                crate::SLTIndexKind::Packed => None,
+            });
+            let element_access = element_width.filter(|element_width| {
+                access.msb < *element_width
+                    && index.iter().all(|entry| match entry.kind {
+                        crate::SLTIndexKind::Unpacked {
+                            element_width: width,
+                        } => width == *element_width && entry.stride % *element_width == 0,
+                        crate::SLTIndexKind::Packed => entry.stride < *element_width,
+                    })
+            });
+            // A run of whole elements from a runtime first element.
+            let element_run = element_width.filter(|element_width| {
+                element_access.is_none()
+                    && access.lsb == 0
+                    && width > *element_width
+                    && width.is_multiple_of(*element_width)
+                    && index.iter().all(|entry| {
+                        entry.kind
+                            == crate::SLTIndexKind::Unpacked {
+                                element_width: *element_width,
+                            }
+                            && entry.stride % *element_width == 0
+                    })
+            });
             // Analyzer-unrolled array accesses retain their index syntax even
             // when every index expression is a compile-time constant.  Fold
             // those accesses back to one logical static bit offset here.  In
@@ -113,25 +140,18 @@ impl SLTToSIRLowerer {
                 builder.emit(SIRInstruction::Load(
                     dest,
                     id.clone(),
-                    SIROffset::Static(static_offset),
+                    match element_run {
+                        Some(element_width) => SIROffset::PackedElements {
+                            bit_offset: static_offset,
+                            element_width,
+                        },
+                        None => SIROffset::Static(static_offset),
+                    },
                     width,
                 ));
                 return dest;
             }
 
-            let element_width = index.iter().find_map(|entry| match entry.kind {
-                crate::SLTIndexKind::Unpacked { element_width } => Some(element_width),
-                crate::SLTIndexKind::Packed => None,
-            });
-            let element_access = element_width.filter(|element_width| {
-                access.msb < *element_width
-                    && index.iter().all(|entry| match entry.kind {
-                        crate::SLTIndexKind::Unpacked {
-                            element_width: width,
-                        } => width == *element_width && entry.stride % *element_width == 0,
-                        crate::SLTIndexKind::Packed => entry.stride < *element_width,
-                    })
-            });
             let mut element_dynamic = None;
             let mut packed_dynamic = None;
             let mut logical_dynamic = None;
@@ -139,7 +159,9 @@ impl SLTToSIRLowerer {
                 let mut idx_val =
                     self.lower_inner(builder, idx_entry.node, arena, cache, env, env.is_none());
 
-                let (stride, accumulator) = if let Some(element_width) = element_access {
+                let (stride, accumulator) = if let Some(element_width) = element_run {
+                    (idx_entry.stride / element_width, &mut element_dynamic)
+                } else if let Some(element_width) = element_access {
                     match idx_entry.kind {
                         crate::SLTIndexKind::Unpacked { .. } => {
                             (idx_entry.stride / element_width, &mut element_dynamic)
@@ -174,7 +196,12 @@ impl SLTToSIRLowerer {
                 }
             }
 
-            let offset = if let Some(element_width) = element_access {
+            let offset = if let Some(element_width) = element_run {
+                SIROffset::ElementRun {
+                    index: element_dynamic.expect("an element run has an unpacked index"),
+                    element_width,
+                }
+            } else if let Some(element_width) = element_access {
                 if let Some(element_index) = element_dynamic {
                     SIROffset::Element {
                         index: element_index,

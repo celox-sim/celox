@@ -76,7 +76,7 @@ impl<'a> FfParser<'a> {
     ) -> Result<Expression, ParserError> {
         let variable = &self.module.variables[&dst.id];
         let is_whole_var =
-            dst.index.0.is_empty() && dst.select.0.is_empty() && dst.select.1.is_none();
+            dst.index.indices.is_empty() && dst.select.0.is_empty() && dst.select.1.is_none();
         // Unpacked arrays are shape-checked and lowered element-wise elsewhere;
         // a scalar `as` cast cannot represent their assignment conversion.
         if !variable.r#type.array.is_empty() && is_whole_var {
@@ -291,7 +291,7 @@ impl<'a> FfParser<'a> {
         state: &mut HashMap<VarId, Expression>,
     ) -> Result<(), ParserError> {
         let is_whole_var =
-            dst.index.0.is_empty() && dst.select.0.is_empty() && dst.select.1.is_none();
+            dst.index.indices.is_empty() && dst.select.0.is_empty() && dst.select.1.is_none();
         let value = if is_whole_var {
             rhs
         } else {
@@ -342,7 +342,7 @@ impl<'a> FfParser<'a> {
         let token = TokenRange::default();
         let mut condition: Option<Expression> = None;
         for (dimension, index) in index
-            .0
+            .indices
             .iter()
             .chain(select.0.iter())
             .take(geometry.dimension_count)
@@ -442,7 +442,7 @@ impl<'a> FfParser<'a> {
         defs: &HashMap<VarId, Expression>,
     ) -> AssignDestination {
         let mut dst = dst.clone();
-        for expr in &mut dst.index.0 {
+        for expr in &mut dst.index.indices {
             *expr = self.substitute_function_expr(expr, defs);
         }
         for expr in &mut dst.select.0 {
@@ -480,7 +480,8 @@ impl<'a> FfParser<'a> {
                     if Self::is_function_state_base(comptime) {
                         return expr.clone();
                     }
-                    let is_whole = index.0.is_empty() && select.0.is_empty() && select.1.is_none();
+                    let is_whole =
+                        index.indices.is_empty() && select.0.is_empty() && select.1.is_none();
                     if let Some(bound) = defs.get(var_id)
                         && expanding.insert(*var_id)
                     {
@@ -495,7 +496,7 @@ impl<'a> FfParser<'a> {
                         // A partial read of a variable with symbolic state
                         // selects from that state; its storage is stale.
                         let mut index = index.clone();
-                        for expr in &mut index.0 {
+                        for expr in &mut index.indices {
                             *expr = self.substitute_function_expr_inner(expr, defs, expanding);
                         }
                         let mut select = select.clone();

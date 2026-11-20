@@ -644,6 +644,7 @@ module Top (
   (assert_eq q_output 7))
 
 (case test_comb_function_call_with_output_argument_in_loop_condition
+  (allow_inferred_latches)
   (source "test.veryl" #"
 module Top (
     d: input logic<8>,

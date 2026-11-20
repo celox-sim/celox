@@ -12,7 +12,7 @@
 [package]
 edition = "2024"
 name = "veryl-metadata"
-version = "0.22.0"
+version = "0.22.1"
 authors = ["dalance@gmail.com"]
 build = "build.rs"
 autolib = false
@@ -94,13 +94,13 @@ default-features = false
 version = "0.1.2"
 
 [dependencies.veryl-parser]
-version = "0.22.0"
+version = "0.22.1"
 
 [dependencies.veryl-path]
-version = "0.22.0"
+version = "0.22.1"
 
 [dependencies.veryl-std]
-version = "0.22.0"
+version = "0.22.1"
 
 [dependencies.walkdir]
 version = "2.5.0"
@@ -111,8 +111,16 @@ version = "1.0"
 [dev-dependencies.tempfile]
 version = "3.26"
 
+[target.'cfg(all(not(target_family = "wasm"), not(kani)))'.dependencies.miette]
+version = "7.6"
+features = ["fancy"]
+
+[target.'cfg(any(target_family = "wasm", kani))'.dependencies.miette]
+version = "7.6"
+features = ["fancy-no-syscall"]
+
 [target.'cfg(not(target_family = "wasm"))'.dependencies.gix]
-version = "0.88.0"
+version = "0.90.0"
 features = [
     "blocking-network-client",
     "blocking-http-transport-reqwest-rust-tls",
@@ -123,13 +131,5 @@ features = [
 ]
 optional = true
 
-[target.'cfg(not(target_family = "wasm"))'.dependencies.miette]
-version = "7.6"
-features = ["fancy"]
-
 [target.'cfg(not(target_family = "wasm"))'.dependencies.which]
 version = "8.0"
-
-[target.'cfg(target_family = "wasm")'.dependencies.miette]
-version = "7.6"
-features = ["fancy-no-syscall"]

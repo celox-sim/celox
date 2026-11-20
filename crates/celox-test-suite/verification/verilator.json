@@ -60,6 +60,7 @@
     "verilator/struct_constructor.json",
     "verilator/synth_dynamic_loop.json",
     "verilator/system_function.json",
+    "verilator/tb_queue.json",
     "verilator/test_unimplemented_paths.json",
     "verilator/veryl_context_regressions.json",
     "verilator/veryl_language.json",

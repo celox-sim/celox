@@ -255,7 +255,7 @@ fn extract_source_location(
 }
 
 fn has_selected_testbench_destination(destination: &veryl_analyzer::ir::AssignDestination) -> bool {
-    !destination.index.0.is_empty()
+    !destination.index.indices.is_empty()
         || !destination.select.0.is_empty()
         || destination.select.1.is_some()
 }
@@ -343,6 +343,7 @@ mod tests {
             var_path,
             index: VarIndex::default(),
             select: VarSelect::default(),
+            array: Default::default(),
             comptime: Comptime::default(),
         }
     }
@@ -449,6 +450,7 @@ mod tests {
         let lookup = lookup_with_child(dut, q);
         let source = VerylTestbenchSource::default();
         let compiler = ExprCompiler {
+            reset_type: source.reset_type,
             lookup: &lookup,
             id_map: &source.id_map,
             constant_strings: &source.constant_strings,
@@ -469,6 +471,7 @@ mod tests {
         let lookup = lookup_with_child(dut, q);
         let source = VerylTestbenchSource::default();
         let compiler = ExprCompiler {
+            reset_type: source.reset_type,
             lookup: &lookup,
             id_map: &source.id_map,
             constant_strings: &source.constant_strings,

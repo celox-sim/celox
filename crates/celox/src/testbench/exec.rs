@@ -659,6 +659,19 @@ pub(super) fn exec_one_detailed<B: SimBackend>(
             forward_display(&rendered, *newline);
             ExecResult::Continue
         }
+        GenericTestbenchStatement::Assign { dst, expr }
+            if dst
+                .selection
+                .as_ref()
+                .is_some_and(|sel| sel.offset.bytecode().is_array_slice_window()) =>
+        {
+            if let Err(e) = settle_testbench(sim) {
+                return ExecResult::Fail(format!("eval_comb: {e}"));
+            }
+            let (value, mask) = eval_expr_four_state(sim, expr);
+            sim_set_logic_target(sim, dst, value.to_biguint(), mask);
+            ExecResult::Continue
+        }
         GenericTestbenchStatement::If { .. }
         | GenericTestbenchStatement::For { .. }
         | GenericTestbenchStatement::Assign { .. }
@@ -730,6 +743,123 @@ pub(super) fn exec_one_detailed<B: SimBackend>(
                     return ExecResult::Fail(format!("eval_comb: {e}"));
                 }
                 sim_set_target(sim, ret, TbValue::U64(seed));
+            }
+            ExecResult::Continue
+        }
+        GenericTestbenchStatement::Queue {
+            handle,
+            op,
+            value,
+            value_target,
+            value_mask,
+            value_width,
+            value_signed,
+            width,
+            signed,
+            four_state,
+            capacity,
+            ret,
+        } => {
+            use celox_testbench::QueueOp as Q;
+            if let Err(e) = settle_testbench(sim) {
+                return ExecResult::Fail(format!("eval_comb: {e}"));
+            }
+            let value = value.as_ref().map(|value| {
+                let (bits, mask) = if let Some(target) = value_target {
+                    let window = target.selection.as_ref().map_or(
+                        celox_testbench::SelectionWindow {
+                            offset: 0,
+                            skip: 0,
+                            width: target.width,
+                        },
+                        |sel| sel.window(&eval_expr(sim, &sel.offset), target.signal.width),
+                    );
+                    let in_bounds = width_mask(window.width);
+                    let invalid = if sim.backend.layout().four_state && target.signal.is_4state {
+                        width_mask(target.width) ^ (&in_bounds << window.skip)
+                    } else {
+                        BigUint::default()
+                    };
+                    if window.width == 0 {
+                        (invalid.clone(), invalid)
+                    } else {
+                        let (bits, mask) = sim.get_four_state(target.signal);
+                        (
+                            ((((bits >> window.offset) & &in_bounds) << window.skip) | &invalid),
+                            ((((mask >> window.offset) & in_bounds) << window.skip) | invalid),
+                        )
+                    }
+                } else {
+                    (eval_expr(sim, value).to_biguint(), value_mask.clone())
+                };
+                let bits =
+                    resize_component_return(bits, *value_width, *value_signed, *width as usize);
+                let mask =
+                    resize_component_return(mask, *value_width, *value_signed, *width as usize);
+                if *four_state {
+                    (bits, mask)
+                } else {
+                    (
+                        bits & (width_mask(*width as usize) ^ mask),
+                        BigUint::default(),
+                    )
+                }
+            });
+            let empty = || {
+                let unknown = if *four_state {
+                    width_mask(*width as usize)
+                } else {
+                    BigUint::default()
+                };
+                (unknown.clone(), unknown)
+            };
+            let queue = ctx.queues.entry(handle.clone()).or_default();
+            let full = *capacity != 0 && queue.len() >= *capacity as usize;
+            let result = match op {
+                Q::PushBack | Q::PushFront => {
+                    if !full && let Some(value) = value {
+                        if *op == Q::PushBack {
+                            queue.push_back(value);
+                        } else {
+                            queue.push_front(value);
+                        }
+                    }
+                    None
+                }
+                Q::PopFront => Some(queue.pop_front().unwrap_or_else(empty)),
+                Q::PopBack => Some(queue.pop_back().unwrap_or_else(empty)),
+                Q::DropFront => {
+                    queue.pop_front();
+                    None
+                }
+                Q::DropBack => {
+                    queue.pop_back();
+                    None
+                }
+                Q::Front => Some(queue.front().cloned().unwrap_or_else(empty)),
+                Q::Back => Some(queue.back().cloned().unwrap_or_else(empty)),
+                Q::Clear => {
+                    queue.clear();
+                    None
+                }
+                Q::Size => Some((BigUint::from(queue.len()), BigUint::default())),
+                Q::IsEmpty => Some((
+                    BigUint::from(u8::from(queue.is_empty())),
+                    BigUint::default(),
+                )),
+                Q::IsFull => Some((BigUint::from(u8::from(full)), BigUint::default())),
+            };
+            if let (Some(ret), Some((value, mask))) = (ret, result) {
+                let (source_width, signed) = match op {
+                    Q::Size => (32, false),
+                    Q::IsEmpty | Q::IsFull => (1, false),
+                    _ => (*width as usize, *signed),
+                };
+                let destination_width =
+                    ret.selection.as_ref().map_or(ret.signal.width, |s| s.width);
+                let value = resize_component_return(value, source_width, signed, destination_width);
+                let mask = resize_component_return(mask, source_width, signed, destination_width);
+                sim_set_logic_target(sim, ret, value, mask);
             }
             ExecResult::Continue
         }

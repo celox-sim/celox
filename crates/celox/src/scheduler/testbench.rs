@@ -321,6 +321,7 @@ fn dut_reads(program: &LaidOutProgram, expr: &Expr) -> Vec<AbsoluteAddr> {
             ExprOpcode::LoadU64 { location, .. }
             | ExprOpcode::LoadWide { location, .. }
             | ExprOpcode::LoadIndexed { location, .. }
+            | ExprOpcode::LoadArraySlice { location, .. }
             | ExprOpcode::LoadBitSelect { location, .. }
             | ExprOpcode::LoadString { location, .. } => program
                 .runtime
