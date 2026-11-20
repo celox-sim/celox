@@ -33,7 +33,7 @@ impl OptLevel {
             OptLevel::O0 => matches!(pass, SirPass::TailCallSplit | SirPass::SchedulerCallees),
             OptLevel::O1 => !matches!(pass, SirPass::PartitionedSettle | SirPass::NextStateDag),
             // The frontend keeps small and lane-parallel schedules whole.
-            OptLevel::O2 => !matches!(pass, SirPass::NextStateDag),
+            OptLevel::O2 => true,
         }
     }
 
@@ -144,10 +144,8 @@ define_sir_passes! {
     /// compilation time and memory grow faster than its size. Not a SIR
     /// transform: the builder consumes it. Enabled at every level.
     SchedulerCallees => "scheduler_callees",
-    /// Lower the `always_ff` processes that can be into next-state forms
-    /// and build the next-state DAG of each clock domain from them. Not a
-    /// SIR transform: the frontends consume it. Off at every level while
-    /// the DAG only measures.
+    /// Schedule eligible two-state SystemVerilog register updates from the
+    /// combinational dataflow graph. The frontend consumes this O2 selector.
     NextStateDag => "next_state_dag",
 }
 /// Diagnostics and additional verification for the SIR optimizer.

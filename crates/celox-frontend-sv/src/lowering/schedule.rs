@@ -1106,6 +1106,11 @@ fn schedule_sources_collecting(
                 four_state,
                 allow_inferred_latches,
                 false,
+                matches!(
+                    parallel.unobserved_nets,
+                    celox_design::DeadStorePolicy::PreserveTopPorts
+                        | celox_design::DeadStorePolicy::PreserveAllPorts
+                ),
                 hierarchical_targets.get(&module_id).unwrap_or(&no_targets),
                 warnings,
                 calls.as_mut(),

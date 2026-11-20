@@ -41,11 +41,13 @@ mod case_equality;
 mod comb;
 mod comb_processes;
 mod comb_retention;
+mod dataflow;
 mod driver_validation;
 mod drivers;
 mod expr;
 mod external_hierarchy;
 mod ff;
+mod ff_graph;
 mod ff_next_state;
 mod ff_processes;
 mod floating;
@@ -237,6 +239,7 @@ impl SvVariable {
 
 #[derive(Clone)]
 pub(crate) struct LoweredSvModule {
+    edge_schedule: ff_graph::EdgeSchedule,
     source: sv::ir::Module,
     implicit_nets_allowed: bool,
     pub sim_module: SimModule,
@@ -473,12 +476,6 @@ struct NextStateOptions<'a> {
     /// Whether the forms go into the lowered module
     /// (`AnalysisOptions::ff_next_state`).
     forms: bool,
-}
-
-impl NextStateOptions<'_> {
-    fn enabled(&self) -> bool {
-        self.report.is_some() || self.forms
-    }
 }
 
 /// What a lowering knows of the instances of the design.

@@ -653,6 +653,8 @@ fn lower_module_with_overrides(
             event_vars,
             delayed_sites,
             next_state_forms,
+            arena,
+            edge_schedule,
         ),
         mut runtime_event_sites,
         mut runtime_errors,
@@ -679,6 +681,7 @@ fn lower_module_with_overrides(
             module,
             &mut pm,
             ff_parts,
+            &drivers,
             next_state,
             &ff_event_roles,
             &shared_memories,
@@ -740,6 +743,7 @@ fn lower_module_with_overrides(
     let instances = lower_instances(module, &constants, &parameter_types)?;
 
     Ok(LoweredSvModule {
+        edge_schedule,
         source: module.clone(),
         implicit_nets_allowed,
         sim_module: SimModule {
@@ -766,7 +770,7 @@ fn lower_module_with_overrides(
             declaration_initial_memory_values,
             folded_initial_memory_values,
             comb_boundaries: HashMap::default(),
-            arena: SLTNodeArena::new(),
+            arena,
             reset_clock_map,
             processes,
             functions: Vec::new(),
