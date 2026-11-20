@@ -221,3 +221,41 @@ fn rip_relative_constant_tables_execute_for_multiple_indexes() {
         );
     }
 }
+
+/// An absolute state access the assembler first selects as a `moffs` move is
+/// rewritten to the ModRM form with a 32-bit displacement and keeps 64-bit
+/// addressing: no `0x67` address-size prefix, so it is as short as the form
+/// of any other register.
+#[test]
+fn absolute_state_moves_have_no_address_size_prefix() {
+    use iced_x86::code_asm::{al, byte_ptr, eax, qword_ptr, rax};
+    let address = 0x005c_e490u64;
+    let mut asm = EmitAssembler::new(64).unwrap();
+    asm.mov(al, byte_ptr(address).gs()).unwrap();
+    asm.mov(eax, iced_x86::code_asm::dword_ptr(address).gs())
+        .unwrap();
+    asm.mov(qword_ptr(address).gs(), rax).unwrap();
+    shorten_absolute_moves(&mut asm).unwrap();
+    let code = asm.assemble(0).unwrap();
+    let mut decoder = Decoder::new(64, &code, DecoderOptions::NONE);
+    let mut offset = 0;
+    let mut moves = 0;
+    while decoder.can_decode() {
+        let instruction = decoder.decode();
+        let bytes = &code[offset..offset + instruction.len()];
+        offset += instruction.len();
+        assert_eq!(instruction.mnemonic(), Mnemonic::Mov);
+        assert_eq!(instruction.memory_segment(), Register::GS);
+        assert_eq!(instruction.memory_displacement64(), address);
+        assert_eq!(instruction.memory_base(), Register::None);
+        assert!(
+            !bytes
+                .iter()
+                .take_while(|&&byte| byte != 0x8a && byte != 0x8b && byte != 0x89)
+                .any(|&byte| byte == 0x67),
+            "address-size prefix in {bytes:02x?}"
+        );
+        moves += 1;
+    }
+    assert_eq!(moves, 3);
+}

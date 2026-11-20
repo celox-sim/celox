@@ -212,6 +212,19 @@ impl SLTToSIRLowerer {
                             .get(expr.0)
                             .is_some_and(|fanout| *fanout > 1)
                         && Self::is_nontrivial_node(expr, arena);
+                    // A shared node of at most one word costs as much whole
+                    // as any part of it: compute it once and slice it, rather
+                    // than computing each part another projection selects.
+                    // Unless a part of it below is known for these bits:
+                    // projecting into it then skips that part's work.
+                    if cache_projection
+                        && self.get_width(expr, arena) <= 64
+                        && !self.projection_prunes(expr, access, arena, 3)
+                    {
+                        work.push(Frame::SliceRegister(access));
+                        work.push(Frame::Visit(expr));
+                        continue;
+                    }
                     if cache_projection {
                         if let Some(&reg) = self.region_slice_cache.get(&(expr, access)) {
                             value = Some(reg);

@@ -19,9 +19,9 @@ pub(super) use scope_views::ScopeViews;
 // qualified, and never reach the public analyzer IR.
 const OUTER_BINDING: &str = "\0generate_outer:";
 
-// Whitespace terminates an escaped identifier (IEEE 1800-2023 5.6.1).
-// Preserve that terminator before appending hierarchy delimiters or loop indices.
-fn scope_component(name: &str) -> String {
+/// Component `name` of a hierarchical name as one spells it: an escaped
+/// identifier keeps the white space that ends it (IEEE 1800-2023 5.6.1).
+pub(super) fn scope_component(name: &str) -> String {
     if name.starts_with('\\') {
         format!("{name} ")
     } else {
@@ -320,6 +320,14 @@ impl Item {
     pub fn dimensions(&self, dimensions: &PackedDimensions) -> PackedDimensions {
         let mut local = dimensions.clone();
         local.const_env = self.env.clone();
+        // `%m` in the item names its generate blocks (IEEE 1800-2023
+        // 21.2.1.5).
+        if !self.scope.is_empty() {
+            local.scope_name = Some(Arc::new(expression_binding::ScopeName::nested(
+                dimensions.scope_name.as_deref(),
+                &self.scope,
+            )));
+        }
         if !self.shadowed.is_empty() || !self.names.is_empty() || !self.constant_types.is_empty() {
             let mut bindings = self.function_aliases(
                 dimensions

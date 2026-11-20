@@ -151,6 +151,7 @@ impl Comb<'_, '_> {
             self.m.constants,
             self.m.parameter_types,
             self.m.four_state,
+            true,
         ) {
             Some(rewritten) => Cow::Owned(rewritten),
             None => expr,
@@ -356,13 +357,7 @@ impl Comb<'_, '_> {
                                 self.alloc(SLTNode::Binary(index_node, BinaryOp::Mul, stride))?;
                             offset = self.alloc(SLTNode::Binary(offset, BinaryOp::Add, scaled))?;
                         }
-                        let offset = coerce_node_width(
-                            self.arena,
-                            offset,
-                            Some(var_width.max(offset_width)),
-                            false,
-                        )
-                        .map_err(slt_error)?;
+                        // The shift amount keeps its own width.
                         let whole = coerce_node_width(
                             self.arena,
                             whole,

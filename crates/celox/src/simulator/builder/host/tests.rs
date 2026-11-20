@@ -998,8 +998,11 @@ fn discarded_stale_bits_keep_settles_deferred() {
                 assign frame = frame_q;
             }
         "#;
+    // Concat folding would take the selected bits from the stored
+    // concatenation, so that nothing stale is loaded.
     let (program, _, _, _, _) = crate::Simulation::builder(source, "Top")
         .four_state(false)
+        .disable_pass(crate::SirPass::ConcatFolding)
         .into_laid_out_program(crate::MemoryLayoutMode::Packed, false, false)
         .unwrap();
     assert_eq!(program.sir.eval_comb_stateful, Some(Vec::new()));
@@ -1941,6 +1944,157 @@ fn native_services_keep_file_and_plusargs_testbenches_compiled() {
         let h = if four_state { "1x" } else { "10" };
         let line = |count| format!("{count} 1 0 1 7 {h}\n");
         assert_eq!(contents[1], (0..4).map(line).collect::<String>());
+    }
+}
+
+/// A testbench process that reads integral variables from a binary file with
+/// `$fread`, as RTLMeter's Vortex testbench reads its DCR writes, and then
+/// waits on every clock: the native service reads them as the reference
+/// loop does (a 12-bit variable takes two bytes, a partial read at the end of
+/// the file changes only the bits it read), so no slot falls back to it.
+#[cfg(any(
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+))]
+#[test]
+fn native_services_keep_fread_testbenches_compiled() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("words.bin");
+    std::fs::write(
+        &path,
+        [0x12, 0x34, 0x56, 0x78, 0xab, 0xcd, 0x9e, 0xf0, 0x01],
+    )
+    .unwrap();
+    let source = format!(
+        r#"`timescale 1ns/1ns
+        module Top;
+            bit clk = 0;
+            int fd, count = 0, first, second, third;
+            logic [11:0] narrow;
+            int codes;
+            always #1 clk = ~clk;
+            initial begin
+                fd = $fopen("{}", "r");
+                @(posedge clk);
+                codes = $fread(first, fd);
+                codes = codes * 10 + $fread(narrow, fd);
+                second = 32'h11111111;
+                codes = codes * 10 + $fread(second, fd);
+                third = 7;
+                codes = codes * 10 + $fread(third, fd);
+                $fclose(fd);
+                forever @(posedge clk) count = count + 1;
+            end
+        endmodule"#,
+        path.display()
+    );
+    for four_state in [false, true] {
+        let mut values = Vec::new();
+        for mode in [
+            crate::SchedulerMode::Reference,
+            crate::SchedulerMode::Compiled,
+        ] {
+            let mut simulation = crate::Simulation::from_sv_sources(
+                vec![(source.as_str(), std::path::Path::new("fread.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+            .scheduler_mode(mode)
+            .build_native()
+            .unwrap();
+            simulation.run_until(20).unwrap();
+            if mode == crate::SchedulerMode::Compiled {
+                let stats = simulation.scheduler_stats();
+                assert!(
+                    stats.compiled_slots > 0 && stats.reference_steps < stats.compiled_slots,
+                    "{stats:?}"
+                );
+                assert!(
+                    stats
+                        .kernels
+                        .iter()
+                        .all(|kernel| matches!(kernel, crate::KernelSchedule::Compiled)),
+                    "{stats:?}"
+                );
+            }
+            values.push(
+                ["count", "first", "narrow", "second", "third", "codes"]
+                    .map(|name| simulation.get(simulation.signal(name))),
+            );
+        }
+        assert_eq!(values[0], values[1], "four_state={four_state}");
+        let expected = [9u32, 0x1234_5678, 0xbcd, 0x9ef0_0111, 7, 4230];
+        assert_eq!(
+            values[0],
+            expected.map(num_bigint::BigUint::from),
+            "four_state={four_state}"
+        );
+    }
+}
+
+/// A testbench process that formats strings with `$sformatf`, of a constant
+/// and of a run-time format, with `%m` and a string argument, as OpenTitan's
+/// `sw_test_status_if` reports its transitions: the native service formats
+/// them, so its waits keep the scheduler compiled, and the strings are the
+/// reference loop's.
+#[cfg(any(
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+))]
+#[test]
+fn native_services_keep_formatting_testbenches_compiled() {
+    let source = r#"`timescale 1ns/1ns
+        module Top;
+            bit clk = 0;
+            int count = 0;
+            string name, line, scope, both, dynamic, format;
+            always #1 clk = ~clk;
+            always @(posedge clk) begin
+                name = "ready";
+                format = "%0d at %m";
+                count = count + 1;
+                line = $sformatf("step %0d of %s: %h", count, name, count * 3);
+                scope = $sformatf("%m");
+                dynamic = $sformatf(format, count);
+                both = {line, " ", scope, " ", dynamic};
+            end
+        endmodule"#;
+    for four_state in [false, true] {
+        let mut lines = Vec::new();
+        for mode in [
+            crate::SchedulerMode::Reference,
+            crate::SchedulerMode::Compiled,
+        ] {
+            let mut simulation = crate::Simulation::from_sv_sources(
+                vec![(source, std::path::Path::new("format.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+            .scheduler_mode(mode)
+            .build_native()
+            .unwrap();
+            simulation.run_until(20).unwrap();
+            if mode == crate::SchedulerMode::Compiled {
+                let stats = simulation.scheduler_stats();
+                assert!(
+                    stats.compiled_slots > 0 && stats.reference_steps < stats.compiled_slots,
+                    "{stats:?}"
+                );
+                assert!(
+                    stats
+                        .kernels
+                        .iter()
+                        .all(|kernel| matches!(kernel, crate::KernelSchedule::Compiled)),
+                    "{stats:?}"
+                );
+            }
+            let both = simulation.signal("both");
+            let mut text = Vec::new();
+            simulation.modify(|io| text = io.get_string(both)).unwrap();
+            lines.push(String::from_utf8(text).unwrap());
+        }
+        assert_eq!(lines[0], lines[1], "four_state={four_state}");
+        assert_eq!(lines[0], "step 10 of ready: 0000001e Top 10 at Top");
     }
 }
 
@@ -3043,4 +3197,130 @@ fn native_scheduler_calls_its_larger_bodies() {
         scheduler(&outlined),
         scheduler(&inlined)
     );
+}
+
+/// The port copies of a clock that units sense at the opposite edge of the
+/// top's share one domain, not one each.
+#[test]
+fn opposite_edge_clock_copies_share_one_domain() {
+    let mut source = String::from(
+        "`timescale 1ns/1ns\nmodule Unit(input logic clk, output logic [7:0] q); always_ff @(posedge clk) q <= q + 1; endmodule\nmodule Top; logic clk = 0; always #1 clk = ~clk; logic [7:0] falls = 0; always @(negedge clk) falls <= falls + 1;\n",
+    );
+    for index in 0..24 {
+        source += &format!("logic [7:0] q{index}; Unit u{index}(.clk(clk), .q(q{index}));\n");
+    }
+    source += "initial begin #20 $display(\"%0d %0d\", q0, falls); $finish; end\nendmodule\n";
+    let program = crate::Simulation::from_sv_sources(
+        vec![(source.as_str(), std::path::Path::new("copies.sv"))],
+        "Top",
+    )
+    .emit_triggers()
+    .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, true, false)
+    .unwrap()
+    .0;
+    let domains = program
+        .sir
+        .eval_apply_ffs
+        .values()
+        .filter(|units| !units.is_empty())
+        .count();
+    assert!(domains <= 3, "{domains} FF domains for 24 copies");
+}
+
+/// The compiled scheduler calls the settle's own code for a settle unit it
+/// does not instrument, and keeps an instrumented copy of one whose
+/// combinational events it captures, so that the runtime's own settles
+/// report them as before.
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+#[test]
+fn the_scheduler_calls_the_settle_unless_it_instruments_it() {
+    for (record, bound) in [
+        ("", true),
+        (
+            "always_comb if (w3 == 32'hffff_ffff) $display(\"all ones\");\n",
+            false,
+        ),
+    ] {
+        let mut source =
+            String::from("`timescale 1ns/1ns\nmodule Top; bit clk = 0; always #1 clk = ~clk;\n");
+        for index in 0..72 {
+            source += &format!("logic [31:0] r{index} = {index}; logic [31:0] w{index};\n");
+        }
+        for index in 0..72 {
+            source += &format!(
+                "assign w{index} = (r{index} ^ (r{} << 3)) + (r{} >> 2);\n",
+                (index + 1) % 72,
+                (index + 7) % 72
+            );
+        }
+        source += record;
+        source += "always_ff @(posedge clk) begin\n";
+        for index in 0..72 {
+            source += &format!("  r{index} <= w{index};\n");
+        }
+        source += "end\ninitial begin #20 $display(\"%h\", w0); $finish; end\nendmodule\n";
+        let mut builder = crate::Simulation::from_sv_sources(
+            vec![(source.as_str(), std::path::Path::new("settle-callee.sv"))],
+            "Top",
+        )
+        .emit_triggers();
+        builder.native_file_calls = true;
+        let program = builder
+            .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, true, false)
+            .unwrap()
+            .0;
+        assert!(!program.scheduler_callees.is_empty(), "{record}");
+        let is_settle = program.scheduler_callees.iter().any(|callee| {
+            program
+                .sir
+                .eval_comb
+                .iter()
+                .any(|unit| *crate::settle::without_shadow_commits(unit) == *callee)
+        });
+        assert_eq!(is_settle, bound, "{record}");
+    }
+}
+
+/// The NBA observations built for all targets at once are those built for
+/// each target alone: the watches of edge and change waits, the gated
+/// (`iff`) waits and the occurrence probes of part event controls, also of
+/// targets that share their storage with an alias.
+#[cfg(all(test, target_arch = "x86_64", not(feature = "arm64-codegen")))]
+#[test]
+fn nba_observations_of_all_targets_match_those_of_each() {
+    let source = r#"`timescale 1ns/1ns
+module Top;
+    bit clk = 0;
+    bit en = 0;
+    logic [7:0] q = 0;
+    logic [7:0] p = 0;
+    logic [7:0] alias_q;
+    logic [15:0] wide = 0;
+    int edges = 0, changes = 0, gated = 0, parts = 0;
+    assign alias_q = q;
+    always #1 clk = !clk;
+    initial forever begin @(posedge clk); q <= q + 1; p <= p ^ q; wide <= {wide[14:0], q[0]}; end
+    initial forever begin @(negedge clk); en <= !en; end
+    initial forever begin @(posedge q[0]); edges++; end
+    initial forever begin @(alias_q); changes++; end
+    initial forever begin @(posedge p[1] iff en); gated++; end
+    initial forever begin @(wide[3:0]); parts++; end
+    initial begin #40 $display("%0d %0d %0d %0d", edges, changes, gated, parts); $finish; end
+endmodule"#;
+    for four_state in [false, true] {
+        let builder = crate::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("nba-observations.sv"))],
+            "Top",
+        )
+        .four_state(four_state);
+        let program = builder
+            .into_laid_out_program(crate::MemoryLayoutMode::Packed, false, false)
+            .unwrap()
+            .0;
+        let (targets, observed) = crate::scheduler::observations_match_for_test(&program);
+        assert!(
+            targets >= 3 && observed >= 3,
+            "targets={targets} observed={observed}"
+        );
+    }
 }

@@ -473,7 +473,7 @@ pub(in crate::ast) fn pattern_text(domain: &EnumDomain, value: Expr) -> Expr {
             vec![name_bytes(domain, value.clone())],
         )),
         else_expr: Box::new(strings::call(
-            StringOp::Format { ticks_per_unit: 1 },
+            StringOp::format(1, None),
             vec![super::format_patterns::bytes_literal(b"%0d"), value],
         )),
     }

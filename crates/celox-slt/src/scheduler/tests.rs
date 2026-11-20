@@ -127,7 +127,11 @@ fn id_indexed_overlap_probes_match_a_naive_scan() {
     }
 }
 
-fn simple_path(arena: &mut SLTNodeArena<u32>, target: u32, source: Option<u32>) -> LogicPath<u32> {
+pub(super) fn simple_path(
+    arena: &mut SLTNodeArena<u32>,
+    target: u32,
+    source: Option<u32>,
+) -> LogicPath<u32> {
     let expr = if let Some(source) = source {
         arena
             .alloc(SLTNode::Input {

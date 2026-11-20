@@ -529,6 +529,11 @@ pub(super) struct ParameterEnvironment<'a> {
     /// The shapes of the variables that hold the array parameters declared
     /// so far.
     array_shapes: HashMap<String, VariableDimensions>,
+    /// The packed dimensions of the parameters a scope imports, with the
+    /// imported symbols they were built from: built once,
+    /// not again for each declaration of the scope (see
+    /// [`Self::packed_dimensions`]).
+    imported_dimensions: Option<(Arc<scope::ScopeSymbols>, ScopedMap<VariableDimensions>)>,
 }
 
 impl<'a> ParameterEnvironment<'a> {
@@ -601,7 +606,36 @@ impl<'a> ParameterEnvironment<'a> {
             literals,
             arrays: HashMap::default(),
             array_shapes: HashMap::default(),
+            imported_dimensions: None,
         }
+    }
+
+    /// The packed dimensions of the parameters that `tree` imports and of
+    /// `parameters`, which shadow imported ones of their names, as
+    /// [`module_elaboration::parameter_packed_dimensions_with_imported`]
+    /// gives them; those of the imported parameters are built once.
+    pub(super) fn packed_dimensions(
+        &mut self,
+        tree: &AnalysisContext<'_>,
+        parameters: &[Parameter],
+    ) -> ScopedMap<VariableDimensions> {
+        let imported = scope::imported(tree);
+        let mut dimensions = match &self.imported_dimensions {
+            Some((cached, base)) if Arc::ptr_eq(cached, &imported) => base.shared(),
+            _ => {
+                let base: ScopedMap<VariableDimensions> =
+                    dimensions::parameter_packed_dimensions(&imported.parameters).into();
+                self.imported_dimensions = Some((imported.clone(), base.shared()));
+                base
+            }
+        };
+        // A local scalar or implicitly typed parameter also shadows an
+        // imported packed parameter.
+        for parameter in parameters {
+            dimensions.remove(parameter.name());
+        }
+        dimensions.extend(dimensions::parameter_packed_dimensions(parameters));
+        dimensions
     }
 
     fn append(&mut self, tree: &AnalysisContext<'_>, session: &mut Session, parameter: &Parameter) {
@@ -784,7 +818,7 @@ pub(super) fn parameters_from_native_with_environment(
             // is a constant variable instead.
             let imported = scope::imported(syntax_tree);
             let mut context = PackedDimensions::new(
-                parameter_packed_dimensions_with_imported(parameters, &imported),
+                environment.packed_dimensions(syntax_tree, parameters),
                 &environment.constants,
                 type_aliases,
             );
@@ -881,6 +915,7 @@ pub(super) fn parameters_from_native_with_environment(
             environment.constants.remove(&key);
         }
         environment.literals.remove(&name);
+        let scope_dimensions = environment.packed_dimensions(syntax_tree, parameters);
         let const_env = &environment.constants;
         let replaced_pattern = !is_local
             && parameter_overrides.contains_key(&name)
@@ -891,11 +926,8 @@ pub(super) fn parameters_from_native_with_environment(
             parameter_overrides.get(&name).cloned()
         } else if ownership::default(native).is_some() {
             let imported = scope::imported(syntax_tree);
-            let mut proof_context = PackedDimensions::new(
-                parameter_packed_dimensions_with_imported(parameters, &imported),
-                const_env,
-                type_aliases,
-            );
+            let mut proof_context =
+                PackedDimensions::new(scope_dimensions.clone(), const_env, type_aliases);
             // Preliminary collection must not expand unresolved initializer
             // chains merely to validate a shape. Only resolved prefix values
             // are available here; imported bindings remain shadowed by locals.
@@ -942,11 +974,8 @@ pub(super) fn parameters_from_native_with_environment(
                     syntax_tree.declarations(),
                 )
             {
-                let mut dimensions = PackedDimensions::new(
-                    parameter_packed_dimensions_with_imported(parameters, &imported),
-                    const_env,
-                    type_aliases,
-                );
+                let mut dimensions =
+                    PackedDimensions::new(scope_dimensions.clone(), const_env, type_aliases);
                 dimensions.parameter_values = parameter_value_env_with_imported(
                     syntax_tree,
                     session,

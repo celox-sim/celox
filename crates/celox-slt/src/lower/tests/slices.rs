@@ -144,7 +144,7 @@ fn static_input_slice_preserves_a_cached_snapshot() {
     )));
     assert!(instructions.iter().any(|instruction| matches!(
         instruction,
-        SIRInstruction::Binary(_, source, BinaryOp::Shr, _) if *source == snapshot
+        SIRInstruction::Slice(_, source, 133, 1) if *source == snapshot
     )));
 }
 
@@ -470,7 +470,7 @@ fn static_input_slice_uses_an_exact_override_range() {
     );
     assert!(instructions.iter().any(|instruction| matches!(
         instruction,
-        SIRInstruction::Binary(_, source, BinaryOp::Shr, _) if *source == materialized
+        SIRInstruction::Slice(_, source, 4, 4) if *source == materialized
     )));
 }
 
@@ -500,4 +500,62 @@ fn slice_uses_slice_aware_cfg_cost_and_verifies() {
     let eu = finish_lowering(builder);
 
     assert_eq!(branch_count(&eu), 1);
+}
+
+/// Two parts of a shared one-word select whose arm is known zero for those
+/// bits: the parts still project into the arms, so the division the zero
+/// mask discards is never computed, in either state mode.
+#[test]
+fn shared_select_parts_keep_pruning_a_known_zero_arm() {
+    for four_state in [false, true] {
+        let mut arena = SLTNodeArena::new();
+        let dividend = input(&mut arena, 0, 8);
+        let divisor = input(&mut arena, 1, 8);
+        let select = input(&mut arena, 2, 1);
+        let other = input(&mut arena, 3, 8);
+        let quotient = arena
+            .alloc(SLTNode::Binary(dividend, BinaryOp::DivU, divisor))
+            .unwrap();
+        let zero = constant(&mut arena, 0, 8);
+        let discarded = arena
+            .alloc(SLTNode::Binary(quotient, BinaryOp::And, zero))
+            .unwrap();
+        let shared = arena
+            .alloc(SLTNode::Mux {
+                cond: select,
+                then_expr: discarded,
+                else_expr: other,
+            })
+            .unwrap();
+        let parts: Vec<_> = [BitAccess::new(4, 7), BitAccess::new(0, 3)]
+            .into_iter()
+            .map(|access| {
+                let part = arena
+                    .alloc(SLTNode::Slice {
+                        expr: shared,
+                        access,
+                    })
+                    .unwrap();
+                (part, 4)
+            })
+            .collect();
+        let root = arena.alloc(SLTNode::Concat(parts)).unwrap();
+
+        let mut builder = SIRBuilder::new();
+        SLTToSIRLowerer::new(four_state).lower(
+            &mut builder,
+            root,
+            &arena,
+            &mut crate::HashMap::default(),
+        );
+        let eu = finish_lowering(builder);
+        assert_eq!(
+            instruction_count(&eu, |instruction| matches!(
+                instruction,
+                SIRInstruction::Binary(_, _, BinaryOp::DivU, _)
+            )),
+            0,
+            "four_state={four_state}"
+        );
+    }
 }

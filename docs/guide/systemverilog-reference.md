@@ -2,7 +2,7 @@
 outline: [2, 3]
 ---
 
-# SystemVerilog Deviations
+# SystemVerilog Conformance and Deviations
 
 For setup and a first simulation, start with [SystemVerilog Support](./systemverilog).
 
@@ -10,705 +10,330 @@ For setup and a first simulation, start with [SystemVerilog Support](./systemver
 
 Celox implements SystemVerilog as specified by IEEE Std 1800™-2023.
 This page does not restate the standard.
-It lists only where Celox differs:
+It organizes every difference into five categories:
 
-1. **Unsupported** constructs, which are rejected at compile time.
-2. **Intentional deviations**, where accepted code behaves differently.
-3. **Implementation-defined choices**, where the standard leaves the
-   behavior to the implementation or unspecified.
-4. The **Celox execution model**, which has no counterpart in the standard
-   (the Rust `Simulator` / `Simulation` split, checkpoints, mixed-language
-   designs, DPI-C registration).
+1. **Unsupported features** — entire constructs or clauses not implemented and rejected at compile time.
+2. **Partially supported features** — features where Celox implements a specific subset; each table states **Supported** and **Not supported** side by side.
+3. **Narrow limitations** — specific edge-case restrictions in features that otherwise follow the standard.
+4. **Intentional deviations** — split into [deviations affecting standard-conforming code](#deviations-standard-code) and [permissive acceptance of non-standard code](#deviations-nonstandard-code).
+5. **Implementation-defined choices and the Celox execution model** — tool choices where the standard leaves behavior unspecified, plus Celox's Rust `Simulator` / `Simulation` split, host clocks, multiple top modules, checkpoints, memory files, mixed-language designs, and DPI-C registration.
 
-Anything not listed here follows the standard.
-If you observe a difference that is not listed, please
-[file an issue](https://github.com/celox-sim/celox/issues): treat it as a bug,
-not as undocumented intended behavior.
+### Conformance scope: standard vs. non-standard code
+
+- **Standard-conforming code:** Valid IEEE 1800-2023 code that does not rely on any construct, limit, or deviation listed on this page executes as the standard specifies — or, if a feature is unimplemented, fails at compile time with an `Unsupported` diagnostic naming the construct and its tracking issue (or the frontend roadmap [#88](https://github.com/celox-sim/celox/issues/88)) rather than silently mis-simulating. Any unlisted difference on valid standard code is a bug; please [file an issue](https://github.com/celox-sim/celox/issues).
+- **Non-standard code (default mode vs. strict mode):** Accepting non-standard code is less severe than mis-simulating valid standard code, so **default mode** intentionally accepts several common compatibility relaxations with warnings (see [Permissive acceptance of non-standard code](#deviations-nonstandard-code) and [`[diagnostics]`](./celox-toml.md#diagnostics)). In **strict mode** (`strict = true` / `--strict` / `.strict(true)`), those compatibility diagnostics become errors; **accepting any non-IEEE 1800-2023 code in strict mode (outside the explicit extensions documented below) is a bug** — please [file an issue](https://github.com/celox-sim/celox/issues).
+
 Measured conformance is published on the [verification page](/verification/).
 
-An unsupported construct reports an `Unsupported` error naming the construct
-instead of being silently ignored.
-The error carries the number of the issue that tracks the construct;
-constructs without a dedicated issue point to the frontend roadmap,
-[#88](https://github.com/celox-sim/celox/issues/88).
+## Unsupported features {#what-is-not-supported}
 
-## Unsupported constructs {#what-is-not-supported}
+These constructs and clauses are not implemented and are always rejected at compile time (except the one declaration-only `covergroup` case noted below):
 
-### Design structure
+- **Verification and design-level blocks:** `bind`, `checker`, `config`, `covergroup` (a class may declare a `covergroup` that nothing constructs; constructing one or calling its methods is rejected), clocking blocks and clocking drives, user-defined primitives (UDP), and `specify` blocks.
+- **Port forms:** `ref` ports ([#427](https://github.com/celox-sim/celox/issues/427)).
+- **Unions and mixed array/container types:** `tagged` unions, unpacked unions, packed union assignment patterns, fixed-size unpacked arrays of `chandle` (`chandle a[4]`, including via `typedef`), fixed-size unpacked arrays of dynamic containers (`int a[2][$]`, including via `typedef`), and dynamic containers of fixed-size unpacked arrays (`int a[][2]`).
+- **Control flow:** `disable` statements other than `disable fork`; `fork` inside declaration initializers, `final`, `always_comb`, and `always_ff` (no process scheduler in those contexts).
+- **Timing and system tasks:** `wait_order`, and any unimplemented IEEE 1800-2023 or Annex D system task/function. Celox knows every standard name and reports unsupported ones by name wherever written, including in unused parameters and function bodies (e.g., `$get_coverage`).
 
-- `bind`, `checker`, `config`, `covergroup`, clocking blocks and clocking
-  drives, user-defined primitives (UDP), and `specify` blocks. A class may
-  declare a covergroup that nothing constructs; constructing one or calling
-  its methods is rejected.
-- `defparam` assignments other than to a parameter of a module instance of
-  the module that has the statement, which may be in a generate block:
-  names through a child instance, names that start at `$root`, elements of
-  instance arrays, interface instances, and parameters of the statement's
-  own scope.
-- Ports and instances: non-ANSI port expressions such as
-  `module m({a, b}, c[3:0], .p(d))`
-  ([#1953](https://github.com/celox-sim/celox/issues/1953)) (plain non-ANSI
-  ports — a header of port names with body declarations — are supported),
-  `ref` ports ([#427](https://github.com/celox-sim/celox/issues/427)),
-  wildcard `.*` connections to a module defined outside the SystemVerilog
-  sources ([#442](https://github.com/celox-sim/celox/issues/442)), ANSI
-  port default values, and the implicit nets that the port connections of an
-  instance inside a generate block declare (6.10): an input connection of
-  such an instance that reads one is rejected, and one that only outputs
-  drive is a net of the module rather than of the block.
-- Nets with several drivers, other than the continuous assignments of one
-  module to a `wire`, `tri`, `wand`, `triand`, `wor` or `trior` net, which
-  are resolved (6.6.1 to 6.6.3). Still rejected are drivers below an
-  instance (so a tri-state bus across modules), assignments with a drive
-  strength, `tri0`, `tri1` and supply nets with several drivers, drivers
-  that call a function with a loop whose condition depends on values, and,
-  in two-state simulation, drivers with an X or Z literal, whose high
-  impedance a two-state value cannot hold. `inout` ports of the top module
-  are rejected. An `inout` below the top is supported only with one
-  continuous driver on either side, such as `assign io = oe ? d : 'z;`.
-  Internal nets without a driver are rejected
-  ([#460](https://github.com/celox-sim/celox/issues/460)), except undriven
-  bits of a net with an independent delay, which read as `z`.
-- Gate and switch primitives other than `and`, `nand`, `or`, `nor`, `xor`,
-  `xnor`, `buf`, `not` without delays or strengths, single or in
-  one-dimensional instance arrays (Clause 28); gate delays and strengths are
-  also unsupported ([#457](https://github.com/celox-sim/celox/issues/457)).
-- Instance arrays with a negative bound.
-- Hierarchical references <a id="hierarchical-references"></a> that drive a net
-  through a continuous assignment, or a variable that its own module also
-  drives continuously or from `always_comb`, appear in port connections, or
-  name named blocks, structure members of another scope other
-  than members of a packed structure variable or of an element of an array
-  of packed structures, or `real`, `string` (except
-  through the host API name, see below), or class-typed signals; names that
-  start inside a generate block relative to it are also rejected. A task or
-  function of another instance called by a hierarchical name (23.8) must be
-  declared in the scope of a module, of one specialization for every
-  instance of the calling module, and its formals, result and the variables
-  it names must not be `real`, `shortreal`, class or event typed; two
-  modules cannot call each other's subroutines.
-  A parameter or local parameter of another instance named by a
-  hierarchical name (23.6), such as `u.N`, is read as its value in that
-  instance; it must be integral, of no packed dimensions other than one
-  `[N-1:0]`, and a value wider than 128 bits must have no unknown or
-  high-impedance bits.
-  It is not a
-  constant expression (A.8.4 `constant_primary` names parameters only by
-  package, class or generate scope), so a declaration's range, a parameter
-  value or a generate condition cannot use one.
-  A static variable of a subroutine is named as `f.v` (23.6) only from a
-  scope that `f` is visible in by its simple name: a method of the class or
-  a base, or a subroutine of the design element; not through an instance,
-  package or named block, and not when the variable is of unpacked structure
-  type.
-  A name that the body of an interface instance does not declare is
-  searched for from the scope that instantiates the instance (23.8), also in
-  a task or function called through a virtual interface, from the instance
-  the handle denotes; such a name must denote objects of one type in every
-  instance of the interface. It is rejected where the body is reached
-  through an interface port, and in an interface instance that another
-  interface's body declares.
-- Packages: package nets
-  ([#1146](https://github.com/celox-sim/celox/issues/1146)); a package
-  variable cannot be a clock or reset.
-- Compilation units: only one source file may declare `$unit` variables.
-- `let` declarations (11.12) only among the items of a module, interface or
-  program, where each call is expanded; one in a package, a generate block
-  or a procedural block is rejected, and so is a call in a scope that
-  declares a name of the body again.
+## Partially supported features {#partial-support}
+
+For features with partial support, each table states both the **Supported** subset and what is **Not supported**.
+
+### Ports, nets, `defparam`, and gate primitives {#ports-and-gates}
+
+| Feature | Supported | Not supported |
+| --- | --- | --- |
+| **Wildcard `.*` port connections** ([#442](https://github.com/celox-sim/celox/issues/442)) | Wildcard `.*` connections to modules defined in the SystemVerilog sources (including modules with interface ports) | Wildcard `.*` connections to a module defined outside the SystemVerilog sources (such as Veryl) |
+| **Nets with multiple drivers (6.6.1–6.6.3)** | Continuous assignments within one module to `wire`, `tri`, `wand`, `triand`, `wor`, or `trior` nets (resolved per 6.6.1–6.6.3; in 2-state simulation, without X/Z literals) | Multiple drivers across module instances (such as a tri-state bus across modules); assignments with drive strengths; `tri0`, `tri1`, and supply nets with several drivers; drivers calling a function with a data-dependent loop; in 2-state simulation, drivers with X or Z literals |
+| **Undriven nets and `inout` ports** | Sub-module `inout` ports with one continuous driver on either side (e.g., `assign io = oe ? d : 'z;`); undriven bits of a net with an independent delay read `z` | Top-module `inout` ports; internal nets without a driver ([#460](https://github.com/celox-sim/celox/issues/460)) except undriven bits of a net with an independent delay |
+| **Gate and switch primitives (Clause 28)** | `and`, `nand`, `or`, `nor`, `xor`, `xnor`, `buf`, and `not` without delays or drive strengths, single or in 1D instance arrays | All other gate and switch primitives (tri-state buffers, switches, pull sources); gate delays, drive strengths, and multidimensional gate instance arrays ([#457](https://github.com/celox-sim/celox/issues/457)) |
+| **`defparam` assignments** | Overriding a parameter of a direct child module instance of the module containing the `defparam` (including inside a generate block) | Paths through a child instance (`a.b.P`), paths starting at `$root`, elements of instance arrays, interface instances, and parameters of the statement's own scope |
+| **`let` declarations (11.12)** | Declarations among items of a module, interface, or program, expanded at each call | `let` in a package, generate block, or procedural block; calls in a scope that redeclares a name used in the `let` body |
+
+### Hierarchical references {#hierarchical-references}
+
+| Aspect | Supported | Not supported |
+| --- | --- | --- |
+| **Variables, nets, and continuous assignments** | Reads of nets and variables, procedural writes (including unpacked array elements and `string` variables/methods), members of a packed-struct variable or of an element of an array of packed structs, and continuous assignments driving another instance's variable (when its own module does not also drive it continuously or from `always_comb`) | Continuous assignments driving a net through a hierarchical name, or driving a variable that its own module also drives continuously or from `always_comb`; hierarchical references in port connections; named blocks; structure members of another scope other than packed structs or arrays of packed structs; `real` or class-typed signals; names starting inside a generate block relative to it |
+| **Subroutine calls (23.8)** | Calling a task or function declared in another module's scope when it resolves to one specialization for every instance of the calling module | Subroutines whose formals, result, or named variables are `real`, `shortreal`, class, or `event` typed; two modules calling each other's subroutines |
+| **Parameters (23.6)** | Reading an integral parameter or localparam of another instance (`u.N`) with at most one `[N-1:0]` packed dimension (values > 128 bits must have no X/Z bits) as a run-time value | Non-integral or multi-packed-dimension hierarchical parameters; values > 128 bits with X/Z bits; using a hierarchical parameter as an elaboration-time constant expression (A.8.4 `constant_primary`) |
+| **Static subroutine variables (`f.v`, 23.6)** | Accessing a subroutine's static variable from a scope where `f` is visible by simple name (a method of the class or a base, or a subroutine of the design element) | Access through an instance, package, or named block; static variables of unpacked structure type |
+| **Upward names from interface bodies (23.8)** | Resolving undeclared names in an interface instance body (including in tasks/functions called via a virtual interface) from the instantiating scope, when the name denotes objects of one type in every instance of the interface | Upward lookup when reached through an interface port, or inside an interface instance declared within another interface's body |
 
 ### Interfaces {#interface-restrictions}
 
-- **Declarations:** implicit nets, enums, module instances, macros,
-  and compiler directives inside an interface. Recursive interface
-  specializations and nesting beyond 64 levels are rejected.
-- **Modports and connections:** `inout`, `ref`, expression ports, `export`,
-  and clocking modports. A connection cannot name a modport if the receiving
-  port declares none. Writes through a port without a modport, and member
-  connections from such a port to a non-ANSI module, are unsupported.
-- **Static storage of subroutines:** a static function or task called
-  through interface ports of several modules keeps its static variables, and
-  the static formals of a task that suspends, once per calling module
-  instead of once per interface instance (13.3.2, 13.4.2;
-  [#3739](https://github.com/celox-sim/celox/issues/3739)). Calls through
-  the instance itself and through the port of a single module share one.
-- **Declaration dependencies:** member references in parameter, constant,
-  type, or member declarations of an interface used through a port;
-  compilation-unit items used by an interface when a module in another file,
-  or before the interface, uses it.
-- **Names and hierarchy:** references to implicit generate names (`genblk1`)
-  and paths through generate blocks (`g.h.x`); declarations that reuse an
-  interface instance or port name; package names brought in by interfaces
-  that collide with another imported package's item or a module declaration.
-- **Identifiers:** designs with interfaces cannot use `$` in their own
-  names, or escaped identifiers that are not simple identifiers; expansion
-  reserves `$` for generated names.
-- Variable declaration initializers of members of an interface array.
-- Virtual interfaces <a id="virtual-interfaces"></a>: a `wait` statement
-  through a virtual interface held by an automatic variable or an argument,
-  or by a class property of an object one holds (a property of `this` or of
-  an object a static variable holds is watched); virtual interfaces of
-  interfaces with type parameters, or with parameter values that are not
-  integral constants;
-  clocking blocks and nested interface instances reached through a virtual
-  interface; an event control that mixes a named event reached through a
-  virtual interface with other kinds of events (`@(v.e or v.d)`; `@(v.e)`
-  and `@(v.e or other_event)` wait for a trigger of the event the handle
-  denotes when the wait begins); writes to nets through a virtual
-  interface; `$bits` of a call
-  of an interface function through a virtual interface in a package or
-  class, whose analysis precedes the interface's subroutines (in a module
-  it is the function's width;
-  [#4056](https://github.com/celox-sim/celox/issues/4056)).
-- An interface whose default lifetime (`interface automatic`) differs from
-  that of the module it is used in.
+| Aspect | Supported | Not supported |
+| --- | --- | --- |
+| **Declarations** | Value and type parameters, header package imports, `localparam`, `typedef`, variables, nets, `assign`/`always_comb`/`always_ff`/generate logic, functions, tasks, and nested interface instances up to 64 levels | Implicit nets, `enum`, module instances, macros, and compiler directives inside an interface; recursive specializations or nesting beyond 64 levels; variable declaration initializers on members of an interface array; default lifetime (`interface automatic`) differing from the using module |
+| **Modports and connections** | `input` and `output` modport members, `import` functions/tasks, generic `interface` and `interface.mp` ports, explicit/implicit named connections (`.bus(bus)`, `.bus`), and read-only access through a port without a modport | `inout`, `ref`, expression ports, `export`, and clocking modports; naming a modport in a connection when the receiving port declares none; writes through a port without a modport; member connections from a modport-less port to a non-ANSI module |
+| **Dependencies, names, and identifiers** | Standard scoping within one compilation order and plain identifiers without `$` | Member references in parameter, constant, type, or member declarations of an interface used through a port; `$unit` items used by an interface when a module in another file or earlier in the file uses it; references to implicit generate names (`genblk1`) and paths through generate blocks (`g.h.x`); declarations reusing an interface instance or port name; package names imported via an interface colliding with another imported package item or module declaration; user identifiers containing `$` or non-simple escaped identifiers in designs with interfaces (`$` is reserved for interface expansion) |
+
+For static-variable storage of interface tasks and functions called across modules ([#3739](https://github.com/celox-sim/celox/issues/3739)), see [Deviations affecting standard-conforming code](#deviations-standard-code).
+
+### Virtual interfaces {#virtual-interfaces}
+
+| Aspect | Supported | Not supported |
+| --- | --- | --- |
+| **Declarations, parameters, and access** | `virtual ifc`, `virtual ifc.mp`, and `virtual ifc#(P)` for interfaces with integral constant value parameters; variables, class properties, subroutine arguments/results, array/container elements, class type parameter values; reads/writes to variables; calling interface tasks and functions *(see storage note under [Deviations affecting standard-conforming code](#deviations-standard-code))* | Virtual interfaces of interfaces with type parameters or non-integral-constant parameter values; clocking blocks and nested interface instances reached through a virtual interface; writes to nets through a virtual interface; `$bits` of an interface function call through a virtual interface in a package or class (works in a module; [#4056](https://github.com/celox-sim/celox/issues/4056)) |
+| **Event controls and `wait`** | `@(...)` and `wait` through a virtual interface held in a static variable, a property of `this`, or a property of a statically held object; named-event waits `@(v.e)` and `@(v.e or other_event)` (waiting on the event denoted when the wait begins) and triggers | `wait` through a virtual interface held by an automatic variable, subroutine argument, or class property of an automatically held object; event controls mixing a virtual-interface named event with other kinds of events (`@(v.e or v.d)`) |
 
 ### Programs {#programs}
 
-`program` blocks (Clause 24) run their `initial` procedures in the reactive
-region set. Not supported: programs nested in modules and anonymous
-programs; an uninstantiated program as an implicit top level; clocking
-blocks in programs. Two region deviations are listed under
-[intentional deviations](#intentional-deviations).
+| Aspect | Supported | Not supported |
+| --- | --- | --- |
+| **Program declarations (Clause 24)** | Instantiated `program` blocks with ports and parameters; their `initial` procedures run in the reactive region set | Programs nested in modules; anonymous programs; uninstantiated programs as implicit top levels; clocking blocks inside programs |
 
-### Types and expressions
-
-- Tagged unions, unpacked unions, and packed union assignment patterns.
-- Fixed-size unpacked arrays of `chandle` (`chandle a[4]`, also through a
-  typedef).
-- Enum methods (`first`, `next`, …) on an element of a packed array of enums
-  ([#2417](https://github.com/celox-sim/celox/issues/2417)).
-- Reading a constant part-select that lies outside the vector, and writing
-  a part-select of an array element or of an inner packed dimension that
-  leaves its declared range
-  ([#88](https://github.com/celox-sim/celox/issues/88)). Run-time selects
-  follow the standard.
-- Run-time part-selects and element selects of a member of an element of a
-  packed array of structures that is itself a member of a packed structure,
-  such as `s.regs[i].q[j +: 4]`.
-- Reduction operators in parameter expressions
-  ([#456](https://github.com/celox-sim/celox/issues/456)).
-- Type operator (6.23): a type reference compared with a value, range items
-  in a `case` on a type, and a type operator applied to an expression that
-  reads a port, or to any expression in a generate block.
-- Type names <a id="type-names"></a>: `$typename` (20.6.1) rejects types without one
-  exact spelling instead of inventing system-generated names: anonymous
-  enumerations, structs and unions, soft and tagged unions, unpacked
-  structures with unpacked array members, packed arrays of enumerations or
-  of signed typedefs, classes with non-integral value parameters, and
-  operands other than names and data types, such as `$typename(a + b)`.
-  A virtual interface type, which 20.6.1 has no rule for, is written as
-  it is declared: `virtual bus_if` or `virtual bus_if.mp`, and one of a
-  parameterized interface with the values of its parameters in
-  declaration order, `virtual bus_if#(8, 4)`.
-- Parameters of unpacked array type hold their value from the start of the
-  simulation. An element of a one-dimensional array parameter is an
-  elaboration-time constant when the elements are packed integral values
-  of at most 127 bits without X or Z bits and the array has at most 4096
-  of them, and so is a select of such an element's packed dimensions
-  unless the element type is a packed array of a signed named type; the
-  whole array, and an element of any other array parameter, cannot be used
-  where such a constant is required. A member of a packed-structure
-  parameter is such a constant
-  unless it is wider than 127 bits or has X or Z bits: then it cannot size
-  a declaration, select a generate construct or override a parameter.
+Program region and `$exit` differences are listed under [Deviations affecting standard-conforming code](#deviations-standard-code).
 
 ### Unpacked structures {#unpacked-structures}
 
-- Unpacked structs as ports, nets, or parameters, or as `static`, `rand`,
-  or `const` class properties.
-- Fixed-size array members of enum, packed aggregate, `string`, handle, or
-  unpacked structure type, or with declared initial values. Structures with
-  fixed-size array members cannot be ports, class properties, subroutine
-  interfaces, or dynamic container elements.
-- Dynamic array, queue, and associative array members (7.2.1) with
-  declared initial values or with a fixed-size dimension before or after
-  the dynamic one (`int a[2][$]`, `int a[][2]`, as for any container of
-  fixed-size arrays); `%p` of a structure with such a member; fixed-size
-  arrays of such structures. Such a member is a container of its own,
-  copied with the structure; a structure with one, at any depth, cannot be
-  a port. Of a structure element of a container, it can
-  only be read: method updates, element writes and assignments
-  (`q[i].m.push_back(x)`, `q[i].m[j] = x`, `q[i].m = x`) are unsupported.
-- Fixed-size arrays of structures whose members are `string` or handle
-  typed, mix 2-state and 4-state leaves, or declare initial values; such
-  arrays as ports, class properties, or subroutine interfaces.
-- Member initial values on enum or non-integral members, whole
-  nested-structure member initializers, and defaulted structure types in
-  module ports, subroutine interfaces, or dynamic containers.
-- Members that are `real` or arrays outside the cases above.
+| Aspect | Supported | Not supported |
+| --- | --- | --- |
+| **Storage and contexts** | Module variables, procedural locals, non-`static`/non-`rand`/non-`const` class properties, dynamic container elements, and subroutine arguments (including `ref`) and return values | Module ports, nets, and parameters; `static`, `rand`, or `const` class properties |
+| **Scalar and nested members** | Integral types, enums, `string`, class handles, packed structs, and nested unpacked structs (each keeping its own 2-state/4-state type) | `real` / `shortreal` members |
+| **Fixed-size array members** | Fixed-size unpacked arrays (including multidimensional and typedef'd) of plain integral or packed-vector types, in module variables and procedural locals only | Fixed-size array members of enum, packed aggregate, `string`, handle, or unpacked struct type; declared initial values on fixed-size array members; structs with fixed-size array members as ports, class properties, subroutine interfaces, or dynamic container elements |
+| **Dynamic container members (7.2.1)** | Dynamic array, queue, and associative array members (copied with the structure) | Declared initial values on container members; mixing fixed-size and dynamic dimensions (`int a[2][$]`, `int a[][2]`); `%p` of a struct with a container member; fixed-size arrays of such structs; mutating a container member of a struct stored inside another container (`q[i].m.push_back(x)`, `q[i].m[j] = x`, `q[i].m = x` — read-only there) |
+| **Fixed-size arrays of structs** | Module variables and procedural locals where every leaf member is integral, all leaves are 2-state or all are 4-state, and no member declares an initial value | Structs with `string`, handle, or dynamic-container members, mixed 2-state/4-state leaves, or member initial values; arrays of structs as ports, class properties, or subroutine interfaces |
+| **Member initial values (7.2.2)** | Constant integral initializers on module variables, procedural locals, and class properties (resolved in the declaration scope) | Initializers on enum, non-integral, or array/container members; whole nested-struct member initializers; defaulted struct types in module ports, subroutine interfaces, or dynamic containers |
 
-### Processes, timing, and control flow {#timing-controls}
+### Procedural `force`/`release` and `assign`/`deassign` {#procedural-force-and-assign}
 
-- The `disable` statement, except `disable fork`.
-- Procedural `force` / `release` (IEEE 1800-2023 10.6.2) outside `initial`
-  and `always` procedures and tasks: in a function, a `final` procedure, or
-  an `always_comb`, `always_latch` or `always_ff` procedure. An `always`
-  procedure with one runs as a process, and a force in a task executes in
-  the process that calls it. The target is a packed integral
-  variable or net of the module or, through a hierarchical name, of another
-  instance, or a constant bit-select, part-select or member of one: as an
-  extension, a constant select or a member of a variable is a target too,
-  which the standard allows only of a vector net. As a further extension,
-  an element of a fixed-size unpacked array of a packed integral type at
-  constant indices, or a constant select or member of one, is a target: the
-  array then has force controls of its own shape, which the warning
-  `forced_array` reports with their size, and a write of an element at a
-  run-time index keeps the forced bits of that element. A force of an input port
-  of an instance forces that port, not the net connected to it. Every
-  instance of a module whose variable or net a hierarchical name forces
-  carries the force controls, which the warning `forced_specialization`
-  reports when several instances share them. A write of a forced target
-  through a hierarchical name from a module that does not force it is not
-  overridden. A member of an interface instance can be forced through a
-  hierarchical name, also of an element of an interface instance array
-  (`u.bus[2].ready`), except one that a procedure of another instance
-  writes through an interface port, which is rejected. A concatenation, a select
-  with nonconstant bounds, a slice of an unpacked array, a `real`, `string`,
-  handle or unpacked structure target (singular ones the standard allows),
-  an unpacked array that several edge-triggered processes write, and a
-  variable that a nonblocking assignment with
-  an intra-assignment delay writes are rejected, as are a target that the
-  `always_comb`, `always_latch` or `always @*` procedure assigning it also
-  reads, a target that an `always_comb` running as a process (calling a
-  task, for example) assigns whole, and overlapping parts
-  of one target when a force of one of them has an expression that reads a
-  variable. So are an expression with side effects or with a call of a
-  subroutine or a system function other than `$urandom` and
-  `$urandom_range` with constant arguments, which draw a value when the
-  force executes and again when a variable of the expression changes, and
-  one that reads a variable of a procedural block or of an automatic task.
-  A static variable of a task, such as its argument, is read when the force
-  executes. A target that the host also forces
-  (`Simulator::force`) is rejected, as is an input port of the top module,
-  which the host writes.
-- Procedural continuous assignments (`assign` / `deassign`, IEEE 1800-2023
-  10.6.1) outside `initial` and `always` procedures: in a subroutine, a
-  `final` procedure, or an `always_comb`, `always_latch` or `always_ff`
-  procedure. An `always` procedure with one runs as a process. The target is
-  a whole packed integral variable of the module: a concatenation, a `real`,
-  `string`, handle or unpacked variable, and a variable of a procedural
-  block are rejected, as are an expression with side effects or with a call
-  of a subroutine or a system function, an expression that reads a variable
-  of a procedural block, and a target that an `always @*` procedure also
-  assigns.
-- While an `assign` is active, a write to its variable other than by a
-  plain assignment statement (an output argument, a concatenation target, a
-  delayed nonblocking assignment, a hierarchical name in another module) is
-  overridden in the time step it happens, not suppressed: a process that
-  waits on the variable can see the written value.
-- Nonblocking assignments inside `always_comb`
-  ([#453](https://github.com/celox-sim/celox/issues/453)) and inside
-  `always_latch` ([#431](https://github.com/celox-sim/celox/issues/431));
-  use blocking assignments there.
-- `iff` qualifiers in `always_ff` event lists
-  ([#452](https://github.com/celox-sim/celox/issues/452)), multi-bit edge
-  signals in `always_ff`, and several `always_ff` edges without an
-  asynchronous reset. The same shapes in a plain `always` run as timed
-  processes instead, as does an `always_ff` whose event is not `posedge` or
-  `negedge` of a variable (a member or a bit of one, an expression, `edge`);
-  see the [execution model](#celox-execution-model).
-- Intra-assignment timing: nonblocking intra-assignment event controls and
-  nonconstant delays. Delayed nonblocking assignments
-  (`lhs <= #constant rhs`, 10.4.2) accept only integral constant delays and
-  time literals, in `initial` and ordinary `always` processes.
-- Continuous assignment delays <a id="continuous-assignment-delays"></a> beyond one
-  nonnegative integral constant or time literal
-  ([#444](https://github.com/celox-sim/celox/issues/444)): rise/fall/turn-off
-  delay lists, variable or negative amounts, unitless fractional real
-  amounts, concatenated or aggregate destinations, dynamic destination
-  selects, destinations that are not scalar or packed integral, and a
-  right-hand side with subroutine calls. Independent net delays
-  (`wire #5 w;`) do not support delayed nets in instance port connections,
-  delayed input/`inout` ports, unpacked or non-integral delayed nets, or
-  drivers with dynamic destination selects.
-- Timing controls in processes: impure function calls in event expressions;
-  `wait` or event expressions reading a static task argument; event
-  expressions reading a class property inside a larger expression, through a
-  function, or in a container held in one (an item that is a property, such
-  as `@(posedge h.p)`, is supported); an `iff` on such a property item that
-  reads anything other than constants and what the waiting process alone
-  writes, and an expression item, or an `iff` other than a one-bit variable,
-  in the same event list as a property item; `wait` conditions reading
-  `rand_mode()` or `constraint_mode()`; `wait` conditions over class
-  properties that call a task or an effectful function, or read the time, a
-  random number, a mailbox, or a process.
-- Package and `$unit` timed tasks with static arguments.
-- `fork` in declaration initializers, `final`, `always_comb`, and
-  `always_ff` (these contexts provide no process kernel for scheduling
-  calls). Compound event expressions over fork-shared automatic locals
-  reject mixed global/static dependencies, foreign calls, functions that
-  retain scratch state, and implicit writes to a watched operand from a
-  function, a seed/plusargs result, or a system task such as `$readmemh`.
-- Named events <a id="named-events"></a> beyond the basics: arrays of events, event
-  ports, event members of unpacked structures, functions returning an
-  event, triggers in `always_comb` / `always_latch`, `->>` with a delay or
-  event control, event controls mixing an event with signal changes or
-  edges (`@(e or posedge clk)`), `triggered` in a `wait` condition with
-  other operands or read by a function the condition calls, and
-  `wait_order`.
-- Typeless mailboxes (`mailbox` without a type parameter); mailbox element
-  types beyond integral types up to 64 bits, `string`, and class,
-  `mailbox`, `semaphore`, `process`, or `event` handles.
-- Constructing or extending the built-in `process` class; suspending its
-  own thread or calling `await()` from a function.
-- Loops: a procedural loop unrolls at most 10,000 iterations; a
-  combinational loop with a run-time trip count must be a counted `for`
-  loop; the loop-generate constructs of one module are rejected past
-  1,000,000 iterations in all, which stops a loop whose condition never
-  becomes false; genvar updates
-  with bitwise compound operators are rejected
-  ([#455](https://github.com/celox-sim/celox/issues/455)); recursive
-  constant-function expansion in generate constructs is rejected.
-- Final procedures <a id="final-procedures"></a>: timing controls and calls to user
-  tasks in a `final` procedure, including through functions; functions that
-  schedule events after returning (13.4.4). Detached `fork … join_none`
-  children declared in a `final` procedure are initialized but never start.
-  See also the [execution model](#celox-execution-model).
+| Construct | Supported | Not supported |
+| --- | --- | --- |
+| **Procedural `force` / `release` (10.6.2) — placement and targets** | Inside `initial`, `always` (runs as a process), and tasks; targets are packed integral module variables/nets (including via hierarchical names and interface instance/array members `u.bus[2].ready`), constant bit/part-selects or members, and constant-indexed elements (or constant selects/members) of fixed-size unpacked arrays of packed integrals *(variable selects and unpacked array elements are non-standard extensions — see [Permissive acceptance of non-standard code](#deviations-nonstandard-code); emits `forced_array` / `forced_specialization` warnings where applicable)* | In functions, `final`, `always_comb`, `always_latch`, or `always_ff`; concatenations; selects with non-constant bounds; unpacked array slices; `real`, `string`, handle, or unpacked-struct targets; top-module input ports; targets also forced by host `Simulator::force`; interface members written by another instance through an interface port; unpacked arrays written by several edge-triggered processes; variables written by delayed NBAs; targets read and written by the same `always_comb`/`always_latch`/`always @*` block or assigned whole by an `always_comb` running as a process; overlapping forced parts when one force RHS reads a variable |
+| **Procedural `force` / `release` — RHS expressions** | Constants, module/instance signals, static task variables/arguments (read when `force` executes), and `$urandom`/`$urandom_range` with constant arguments (drawn on execute and when a RHS variable changes) | Expressions with side effects, subroutine calls, or system functions other than `$urandom`/`$urandom_range` with constant arguments; expressions reading procedural block locals or automatic task variables |
+| **Procedural `assign` / `deassign` (10.6.1)** | Inside `initial` and `always` (runs as a process), targeting a whole packed integral module variable with a side-effect-free, call-free expression over module signals *(see [Deviations affecting standard-conforming code](#deviations-standard-code) for override timing on indirect writes)* | In subroutines, `final`, `always_comb`, `always_latch`, or `always_ff`; concatenations, `real`, `string`, handle, unpacked, or procedural-block-local targets; targets also assigned by `always @*`; RHS with side effects, subroutine/system-function calls, or reads of procedural block locals |
+
+Forcing an instance's input port forces that port rather than the connected net; a write to a forced target through a hierarchical name from a module that does not force it is not overridden; and a run-time-indexed write to a forced unpacked array preserves the forced bits of that element.
+
+### Delays {#continuous-assignment-delays}
+
+| Form | Supported | Not supported |
+| --- | --- | --- |
+| **Intra-assignment timing (10.4.2)** | Delayed nonblocking assignments (`lhs <= #constant rhs`) with integral constant delays or time literals in `initial` and ordinary `always` processes | Nonblocking intra-assignment event controls (`lhs <= @(e) rhs`); non-constant delays; delayed NBAs outside `initial` and ordinary `always` |
+| **Continuous assignment delays (`assign #d`, `wire #d w = expr`)** ([#444](https://github.com/celox-sim/celox/issues/444)) | One nonnegative integral constant or time literal on a scalar or packed integral target (including constant bit/part-select) with an integral RHS containing no subroutine calls | Rise/fall/turn-off delay lists; variable, negative, or unitless fractional real amounts; concatenated or aggregate destinations; dynamic destination selects; non-integral destinations; RHS containing subroutine calls |
+| **Independent net delays (`wire #d w;`)** | One nonnegative integral constant or time literal on a scalar or packed integral net driven by static continuous assignments or supported logic gates (undriven bits read `z`) | Delayed nets in instance port connections; delayed `input` or `inout` ports; unpacked or non-integral delayed nets; drivers with dynamic destination selects |
+
+### Event controls and waits {#timing-controls}
+
+| Construct | Supported | Not supported |
+| --- | --- | --- |
+| **General `@(...)` event expressions** | Signals, `posedge`/`negedge`/`edge`, bit/part/dynamic selects, general expressions with pure functions, `iff` (in ordinary `always`/processes), and static virtual interfaces | Impure function calls in event expressions; reading a static task argument |
+| **Class properties in `@(...)`** | A bare property item such as `@(posedge h.p)`, optionally with an `iff` reading only constants and variables written solely by the waiting process | Class properties inside a larger expression, through a function, or in a container held by a property; an `iff` on a property item reading anything written outside the waiting process; an expression item, or an `iff` other than a 1-bit variable, in the same event list as a property item |
+| **`wait (condition)`** | General expressions, static virtual interfaces, and class properties (re-checked on matching property stores; see [Event scheduling](#timing-semantics)) | Conditions reading a static task argument, `rand_mode()`, or `constraint_mode()`; conditions over class properties that call a task or effectful function, or read time, a random number, a mailbox, or a process |
+| **Fork-shared automatic locals** | Event expressions watching fork-shared automatic locals | Compound event expressions with mixed global/static dependencies, foreign calls, functions retaining scratch state, or implicit writes to a watched operand from a function, seed/plusargs result, or system task such as `$readmemh` |
+| **`always_ff` event lists** | Single plain 1-bit signal edge (`@(posedge clk)`), clock plus asynchronous reset edge(s) tested in the body, and expression/member/bit/`edge` events (run as a timed process; see [Execution model](#celox-execution-model)) | `iff` qualifiers ([#452](https://github.com/celox-sim/celox/issues/452)); multi-bit edge signals; multiple edges without an asynchronous reset *(ordinary `always` supports these shapes as a timed process)* |
+
+### Named events and mailboxes {#named-events}
+
+| Feature | Supported | Not supported |
+| --- | --- | --- |
+| **Named `event` (15.5)** | Scalar event variables, class properties, and subroutine arguments; `-> e`, `->> e`, `@e` / `@(e1 or e2)` (including expressions such as `obj.e` and virtual-interface events `v.e`), `wait (e.triggered)`, `e1 = e2`, `null`, and equality comparisons | Arrays of events; event ports; event members of unpacked structures; functions returning an `event`; triggers in `always_comb`/`always_latch`; `->>` with a delay or event control; event controls mixing an event with signal changes or edges (`@(e or posedge clk)`); `triggered` combined with other operands or read via a function in `wait`; `wait_order` |
+| **Mailboxes (15.4)** | Parameterized `mailbox #(T)` / `std::mailbox #(T)` where `T` is an integral type up to 64 bits, `string`, or a class, `mailbox`, `semaphore`, `process`, or `event` handle | Typeless `mailbox` (without a type parameter); element types wider than 64 bits or outside the types listed |
 
 ### Classes {#classes}
 
-- `$cast` to a variable that is not a class handle.
-- Anonymous enumeration, struct, and union types, and named four-state or
-  string constants of a module or package, as class parameter values (a
-  class passes its own such parameters on by name).
-- Module-local classes as type arguments to package-class specializations,
-  and anonymous enumeration, struct, or union types as type arguments.
-- In an override, by a class of a module, of a virtual method of a class
-  declared outside the module (which other scopes call through handles of
-  that class): reading a module variable or port of a type other than an
-  integral type without unpacked dimensions or a class handle, static
-  variables, and calls of the module's own subroutines that read its
-  variables.
-- Properties that are `real`; fixed-size array properties that are
-  `static` or `randc`, have more than one unpacked dimension or a
-  negative bound or one outside `int`, are assigned or compared with an
-  array other than another such property or an array variable named by
-  itself (or, for elements of unpacked structures, such a variable at all),
-  are assigned a keyed assignment pattern or an unpacked array
-  concatenation with an array among its items, are sliced, or are passed to a `ref`, `output` or `inout` formal; a constraint `foreach`
-  over a fixed-size array property whose range is not `[0:N-1]`; array
-  locator methods on a fixed-size array property of unpacked structures
-  whose range is not `[0:N-1]`; packed structure members of a property;
-  selects of a member of a property of unpacked structure type; reads of
-  bit and part selects of a property not declared `[N-1:0]` outside
-  constraints, which take selects of any declared range (see Randomization
-  and constraints); nonblocking
-  assignments to a property; properties as `output` or `inout` arguments;
-  `const` dynamic container properties.
-- An unqualified static-property name in an inline `randomize() with`
-  constraint does not fall back to a caller variable of the same name; it
-  is rejected.
+| Aspect | Supported | Not supported |
+| --- | --- | --- |
+| **Parameters and specializations (8.25)** | Value and type parameters (including typedef'd enums/structs/unions, package and `$unit` classes, and forwarding a class's own 4-state/`string` parameters by name); interface classes (`implements` / `extends`) | Anonymous enum, struct, or union types as value or type parameters; named 4-state or `string` constants of a module or package as class parameter values; module-local classes as type arguments to package-class specializations |
+| **Properties and member access** | 2-state/4-state packed integrals, enums, `string`, class handles, `chandle`, virtual interfaces, named events, non-`const` dynamic containers, non-`static`/non-`rand`/non-`const` unpacked structs (without fixed-size array members), and 1D fixed-size array properties (see row below); bit/part-select reads on `[N-1:0]` properties (any declared range inside constraints) | `real` properties; `const` dynamic container properties; packed-struct members of a property; selects of a member of an unpacked-struct property; bit/part-select reads outside constraints on properties not declared `[N-1:0]` |
+| **Fixed-size array properties** | Non-`static`, non-`randc` 1D fixed-size array properties with nonnegative `int` bounds; element access, assignment/comparison with another such property or a directly named array variable (for non-struct elements), and `[0:N-1]` constraint `foreach` / unpacked-struct locator methods | `static` or `randc` fixed-size array properties; > 1 unpacked dimension, negative bounds, or bounds outside `int`; assigning/comparing with arrays other than another such property or a directly named array variable (or any array variable for unpacked-struct elements); keyed assignment patterns; unpacked array concatenations containing an array item; slices; passing to `ref`/`output`/`inout` formals; constraint `foreach` or unpacked-struct locator methods when the range is not `[0:N-1]` |
+| **Assignments, arguments, and overrides** | Blocking assignments to properties; passing whole properties as `input` or `ref` arguments (see [Reference arguments](#reference-arguments)); module classes overriding virtual methods of external classes when reading non-array integral module variables/ports or class handles | Nonblocking assignments to properties; properties as `output` or `inout` arguments; virtual method overrides of classes declared outside the module that read module variables/ports of other types (such as unpacked arrays), static variables, or call module subroutines reading module variables |
+| **`$cast` (6.24.2)** | Dynamic `$cast` between class handles | `$cast` to a variable that is not a class handle |
 
-### Randomization and constraints
+### Randomization, constraints, and `randsequence` {#randomization}
 
-- Scope `randomize()` / `std::randomize()` (18.12): `with` constraints on
-  other than integral variables of at most 64 bits, such as enums, enums
-  with unsupported or unresolved domains, unpacked arrays, nets,
-  constants, selects, and concatenation arguments.
-- `randsequence` (18.17): recursive productions, code blocks after a
-  weight, and production formals and values of unpacked, dynamically sized
-  or event types or formals that are not inputs.
-  A production of several rules picks one by their weights, 1 unless given,
-  from the thread's random number generator (18.14.2). `rand join`
-  interleaves its productions' items at random from the same generator.
-  18.17.5 gives the bias no formula. Celox evaluates it once and, at each
-  step, with probability |2 × bias − 1| advances a production with the
-  fewest items left (bias below 0.5) or the most (above 0.5), and
-  otherwise any production with items left, each as likely. So 0.5 (the
-  default) prefers no length, and 0.0 and 1.0 always prefer the shortest
-  and the longest.
-- Class `randomize()`: aggregate properties, static or not, 4-state static
-  properties a constraint reads as state, 4-state members of other objects
-  and 4-state array elements in constraints, `randc` static properties,
-  constraints that name static properties in an object that a rand handle
-  reaches (its randomization fails), random arrays of elements other than
-  2-state integral ones of at most 64 bits, `randc` arrays, random object
-  and string properties, constrained enums and `randc`, `sum() with`, `soft`
-  constraints in a `foreach`, `dist` with `default :/`,
-  weights other than constant expressions or ranges weighted per value with
-  bounds other than constant expressions, typed parameters in constraints,
-  array sets, X/Z wildcard items and `$` bounds in `inside` sets, and
-  `randc` domains beyond 1–16-bit integers and scalar enums with up to
-  65536 members. Named constraint blocks cover only 1–64-bit scalar integer
-  properties with comparisons, logical and bitwise operations, addition,
-  subtraction, and multiplication, bit-selects and part-selects of a
-  property at constant positions, class handle properties compared with each
-  other or `null` by `==` and `!=`, and calls of functions of the class with
-  input arguments (18.5.11); a call in a constraint loop, in inline
-  constraints, in the constraints of an object a rand handle reaches, or in
-  an argument of another is unsupported. The elements of a random array,
-  fixed-size or dynamic, that a `foreach`, a `sum()` or an element at a
-  constant position of a constraint names are solver variables (18.5.8); the
-  others are drawn at random. An array whose size a constraint names too has
-  its size solved first, without the constraints on its elements, which then
-  take it as state (18.5.7.1), so they can leave the call no solution; those
-  sizes are solved before the arguments of the functions the constraints
-  call (18.5.11); an element past the end reads as 0. A `dist` allows the
-  values of its items of nonzero total weight, a range bound `$` being the
-  lowest or highest value of the type of its expression; the solver first
-  tries one item of each `dist`, picked by its weight (one under `if` or
-  `->` where its condition holds, one in a `foreach` for each element), and
-  then any allowed value, so the weights bias the values without sampling
-  them exactly. A `unique` constraint takes singular properties of the class
-  of equivalent types; other variables, arrays and slices in it are
-  unsupported. A constraint may name a member of the object a handle
-  property refers to (`h.m`, 18.5.9), the handle named as any property is,
-  as `this.h.m`, `super.h.m` or the receiver's `item.h.m`, a static handle
-  too: a variable solved with the object through a rand handle, a state
-  value through another;
-  longer chains (`h.g.m`) are unsupported. A select of such a member or of
-  a member of a loop element, as `h.m[3:0]` or `hs[i].m[0]`, takes its bits
-  in every constraint position, `solve ... before` and `disable soft`
-  included, the latter naming the member. A guard of state values, as of `if` or `->`, is
-  evaluated before solving, so a constraint it leaves out reads no member of
-  a null handle (18.5.13).
-- Inline `with` constraints: aggregate caller-scope inputs, typed parameter
-  inputs, a `local::` name of a property of the caller's class, and a value
-  the caller computes from a random variable (18.7). An integral value the
-  caller computes from its variables and from properties of the object that
-  are neither `rand` nor `randc` is an input the call reads as it starts,
-  after `pre_randomize()`: an element at a position a caller-scope name or a
-  literal gives (as `buffer[i]`), a member of a caller-scope variable (as
-  `req.rw`), an element at a position such a value gives (as
-  `memory[rsp.addr]`), and a method call on an object (as
-  `m.get_size()`). `memory[h.addr]` with a `rand addr` stays unsupported.
-  The variable that holds the object being randomized, as `h` of
-  `h.randomize() with { h.x > 0; }`, names that object, also in
-  `foreach (h.a[i])`, `h.a[i]` and guards. That variable is read once as
-  the call starts: a `pre_randomize()` that assigns it does not change the
-  object its names refer to.
-- Enums with unresolved or X/Z values for randomization.
+| Feature | Supported | Not supported |
+| --- | --- | --- |
+| **Scope `randomize()` / `std::randomize()` (18.12)** | Unconstrained whole packed variables (any width, signed/unsigned, packed structs) and scalar enums up to 64 bits (known declared values); `with` constraints on integral variables ≤ 64 bits | `with` constraints on non-integral or > 64-bit variables (such as enums); enums with unresolved/X/Z values; unpacked arrays, nets, constants, selects, and concatenation arguments |
+| **Class `randomize()` and `randc` (18.3–18.4, 18.8, 18.11)** | 2-state and 4-state integral `rand` properties (any width unconstrained; 4-state `rand` takes 2-state values), scalar enums (declared values), fixed-size and dynamic random arrays of ≤ 64-bit 2-state integrals, inherited properties, `pre_randomize`/`post_randomize`, `rand_mode()`, `srandom()`, `get_randstate()`/`set_randstate()`, explicit member lists, `randomize(null)`; unconstrained `randc` on 1–16-bit 2-state integers and scalar enums up to 65,536 members | Aggregate properties (static or non-static); `randc` static properties or `randc` arrays; random arrays of elements other than ≤ 64-bit 2-state integrals; random object or `string` properties; `randc` domains > 16 bits or > 65,536 enum members; enums with unresolved/X/Z values |
+| **Constraint blocks and expressions (18.5)** | 1–64-bit scalar integer properties (constant bit/part-selects of any declared range), comparisons, logical/bitwise ops, `+`, `-`, `*`; `if`/`else` and `->` (state guards evaluated before solving); `inside` (scalar values and inclusive ranges); `foreach`, `sum()`, and constant-index elements on random arrays (array sizes solved before elements/function calls; past-the-end reads 0); `dist` (constant weights/range bounds, `$` type bounds); `unique` on singular class properties of equivalent types; `soft` constraints and `disable soft`; `solve ... before`; `constraint_mode()`, inheritance, overrides; `==`/`!=` on class handles; single-hop handle members (`h.m`, `this.h.m`, `super.h.m`, `item.h.m`, static handles, selects `h.m[3:0]`/`hs[i].m[0]`); class functions with input arguments (18.5.11) | Constrained enums or `randc`; 4-state static properties read as state, 4-state members of other objects, or 4-state array elements in constraints; constraints naming static properties in a `rand`-handle-reached object; `sum() with`; `soft` inside `foreach`; `dist` with `default :/`, non-constant weights, or `:/` ranges with non-constant bounds; `unique` on other variables, arrays, or slices; deeper handle chains (`h.g.m`); function calls in constraint loops, inline constraints, `rand`-handle-reached objects, or arguments of another constraint call; typed parameters in constraints; array sets, X/Z wildcard items, or `$` bounds in `inside` sets |
+| **Inline `randomize() with { ... }` (18.7)** | Same constraint subset; unqualified receiver properties, receiver handle variable (`h.randomize() with { h.x > 0; }`, read once at call start), caller-scope scalar inputs and expressions computed from caller variables and non-random receiver properties (`buffer[i]`, `req.rw`, `memory[rsp.addr]`, `m.get_size()`), and `local::` for non-property caller locals/arguments | Aggregate caller-scope inputs; typed parameter inputs; `local::` naming a property of the caller's class; caller expressions computed from a random variable (`memory[h.addr]` with `rand addr`); unqualified receiver `static` properties (rejected rather than falling back to a caller variable of the same name) |
+| **`randsequence` (18.17)** | Non-recursive productions with weights, `rand join` (with bias; see [Random numbers](#random-numbers)), and `input` formals/return values of packed/scalar types | Recursive productions; code blocks after a weight; non-`input` formals; formals or values of unpacked, dynamically sized, or `event` types |
 
-### Dynamic containers, strings, and reference arguments
+See [Random numbers](#random-numbers) for the solver policy, `soft`, `dist`, `solve before`, 4-state constraint semantics, constraint function calls, and the `rand join` bias formula.
 
-- Containers: multidimensional dynamic containers in some operations,
-  `real` elements, wildcard or class keys beyond the supported key types,
-  slices, keyed patterns, associative arrays within concatenations,
-  nonblocking element assignments, compound element assignments whose
-  container or index has a side effect or whose element is a `string`,
-  handle, or container, container ports, and `const` containers.
-  A `new[]` initializer is another compatible dynamic array or queue, or an
-  assignment pattern, whose `default:` alone gives every new element its
-  value; fixed-size arrays, and `default:` with other keys or for elements
-  that are containers or unpacked structures, are unsupported. Explicit index entries, and mixtures
-  of index entries with `default:`, in associative array literals are
-  unsupported (a default-only literal is supported, 7.8.6).
-- Container methods: locator methods returning indices for integral keys
-  wider than 64 bits; sorting elements wider than 64 bits without a `with`
-  expression; ordering a fixed-size array variable of more than one
-  dimension, of unpacked structures or of elements wider than 64 bits, or
-  with a `with` expression; comparing containers of elements
-  wider than 64 bits with `==`, reducing them, or printing them with `%p`;
-  type queries (`$bits`, …) on string- or class-valued queue pop results;
-  queries of element dimensions and associative bounds; locator methods in
-  continuous assignments, on multidimensional fixed arrays, or as discarded
-  statements; reduction and locator `with` expressions and iterator
-  arguments outside the locator subset above.
-- Container formals: function results of container type, class properties
-  and container elements as `output` / `inout` actuals, and actuals whose
-  element types differ from the formal's.
-- Strings <a id="strings"></a>: `atoreal` / `realtoa`; a string variable as
-  the format of `$value$plusargs`; string arguments of file I/O;
-  string values in VPI, VCD output,
-  and the TypeScript API; nonblocking character writes to fixed string
-  arrays; method calls on whole string arrays or subarrays; array-valued
-  string arguments or return values; value range items (`["a":"z"]`) of an
-  `inside` set or a `case inside` statement on strings.
-- Reference arguments <a id="reference-arguments"></a> (13.5.2): `ref static`;
-  elements of dynamic arrays, queues, and associative arrays as actuals;
-  elements of class properties; writes to part of a formal bound to a class
-  property or to a member of one; selects of a formal bound to an array
-  element at a position only known at run time.
-- Named subroutine arguments in calls whose selection indices have
-  procedural effects; a method default that uses the receiver in an
-  `always_comb` or `assign` call when the receiver, or an earlier argument
-  that reads the object, has effects.
+### Dynamic containers {#dynamic-containers}
 
-### Assertions
+| Aspect | Supported | Not supported |
+| --- | --- | --- |
+| **Container and nesting shapes** | Dynamic arrays (`T a[]`), queues (`T q[$]`, bounded `T q[$:N]`), associative arrays (`T m[K]`), and nested dynamic containers (`int m[string][$]`, `T m[C][C][E]`) as module variables, locals, and class properties | Fixed-size unpacked arrays of dynamic containers (`int a[2][$]`, including via `typedef`); dynamic containers of fixed-size unpacked arrays (`int a[][2]`); container ports; `const` containers |
+| **Element types** | Packed integrals of any width, `string`, class handles, `chandle`, supported unpacked structs (no fixed-size array or defaulted members), and nested dynamic containers | `real` / `shortreal` elements; named `event` elements |
+| **Associative array keys** | Integral types of any width (including packed structs and enums), `string`, class handles, and `process` handles | Wildcard `[*]`; `real`, unpacked types, or other non-integral/non-handle key types |
+| **Literals, `new[]`, and assignments** | Positional patterns, `{}` / element concatenations, `new[n]` with another compatible dynamic array/queue or an assignment pattern (including `'{default: v}` for scalar/non-container/non-struct elements), default-only associative literals (`'{default: v}`, 7.8.6), and blocking element or bit/part-select writes (integral ≤ 64 bits, side-effect-free container/index) | `new[n](fixed_array)`; `new[]` assignment pattern mixing `default:` with other keys or for container/unpacked-struct elements; explicit index entries or mixed index/`default:` associative literals; slices; keyed patterns; associative arrays inside concatenations; nonblocking element assignments; compound element assignments whose container or index has side effects or whose element is a `string`, handle, or container; writing a member of an unpacked-struct element directly (assign the whole element) |
+| **Ordering and comparison (7.12.2)** | `reverse` and `shuffle` (dynamic arrays, queues, and 1D fixed-size arrays of ≤ 64-bit non-struct elements); `sort` and `rsort` (integral ≤ 64 bits and `string` without `with`; unpacked structs, class handles, and elements > 64 bits with a `with` expression on dynamic arrays/queues); `==`/`!=`/`===`/`!==` on containers with elements ≤ 64 bits (excluding structs with `string`/handle members) | `sort`/`rsort` without `with` on elements > 64 bits, unpacked structs, or class handles; ordering fixed-size arrays that are multidimensional, of unpacked structures, of elements > 64 bits, or with a `with` expression; `==` comparison on elements > 64 bits or structs with `string`/handle members |
+| **Reduction methods (7.12.3)** | `sum`, `product`, `and`, `or`, `xor` on 1D array variables or dynamic-container class properties (fixed arrays may be > 64 bits; dynamic containers ≤ 64 bits) | `with` expressions and iterator arguments; multidimensional arrays; dynamic containers with elements > 64 bits |
+| **Locator methods (7.12.1)** | `find`, `find_index`, `find_first`, `find_first_index`, `find_last`, `find_last_index` (with `with`), and `min`, `max`, `unique`, `unique_index` (with or without `with`, integral ≤ 64 bits or `string`) on dynamic arrays, queues, associative arrays, and 1D fixed arrays; `item` / named iterator and `.index` | Index-returning locators on associative arrays with integral keys > 64 bits; locator methods in continuous assignments, on multidimensional fixed arrays, on `real` elements, or as discarded statements; `with` / iterator clauses outside this locator subset |
+| **Queries and subroutine formals** | Outer `$size`, sequence `$left`/`$right`/`$low`/`$high`/`$increment`, `$dimensions`; `$bits(q.pop_front)` on integral queues; `input`/`output`/`inout` container formals with compatible container variable actuals of matching element type and queue bound | Type queries (`$bits`, …) on `string`- or class-valued queue pop results; element-dimension queries and associative bound queries; function return values of container type; class properties or container elements as `output`/`inout` actuals; actuals whose element type differs from the formal's |
 
-- Deferred immediate assertions (`assert #0`, `assert final`, …): an action
-  must be one display or severity task call; a user subroutine, or more
-  than one statement, is rejected.
-- Assertion control tasks (IEEE 1800-2023 20.11) other than `$asserton` and
-  `$assertoff` without arguments, which stop and restart the checking of
-  every assertion of the design: `$assertkill`, `$assertcontrol`, the
-  action control tasks (`$assertpasson`, …), and a level or a list of
-  scopes or assertions as arguments. `$asserton` and `$assertoff` are
-  rejected in a package or at compilation-unit scope; assertions in the
-  subroutines of a package and in classes declared there are not
-  controlled. An `always_comb` or `always_latch` that calls them is
-  rejected when any procedure other than an `initial` or edge-controlled
-  one calls them too. In a design that calls them, a concurrent sequence
-  with more than one way to match (a cycle-delay range or `or`) is
-  rejected.
-- Sampled values <a id="sampled-values"></a>: `$past`, `$rose`, `$fell`, `$stable`,
-  and `$changed` with an explicit clocking event argument, without a clock
-  to infer, nested (`$past($past(a))`), or with operands that read an
-  unpacked array.
+### Strings {#strings}
+
+| Aspect | Supported | Not supported |
+| --- | --- | --- |
+| **Scalar `string` variables and methods** | Standard `string` operations and methods (except `atoreal`/`realtoa`), hierarchical names (including generate blocks), `inside` / `case inside` equality matching on strings, `$display`/`$sformatf`, DPI-C `string` arguments/results, `$value$plusargs` `%s` into a `string` destination, and file I/O (`$fopen`, `$fdisplay`/`$fwrite`, `$writememh`/`$writememb`, `$fgets`, `$ferror`, `$sscanf`/`$fscanf` source/format) | `atoreal` / `realtoa`; value range items (`["a":"z"]`) in `inside` / `case inside` on strings; `string` variable as the format argument of `$value$plusargs` (or non-`%s` conversion into a `string` destination); `string` values in VPI, VCD/FST output, and the TypeScript API |
+| **Fixed unpacked arrays of `string`** | Assignment patterns, whole-array and subarray copies, indexed reads/writes, non-mutating element methods, and blocking character writes plus `putc`/`itoa`/`hextoa`/`octtoa`/`bintoa` on complete elements | Nonblocking character writes; method calls on whole arrays or subarrays; array-valued `string` subroutine arguments or return values |
+
+### Reference arguments {#reference-arguments}
+
+| Aspect | Supported | Not supported |
+| --- | --- | --- |
+| **Qualifiers (13.5.2)** | `ref` and `const ref` on automatic subroutines and class methods (including virtual methods) | `ref static` |
+| **Actual arguments** | Variables (scalars, vectors, `string`, class handles, dynamic containers, unpacked arrays, unpacked structs), class properties, fixed-size unpacked array elements, and unpacked struct members | Elements of dynamic arrays, queues, or associative arrays; elements of class properties |
+| **Operations on `ref` formals** | Whole reads/writes, forwarding a property-bound `ref` to an `output`/`inout` argument, and selects on array-element `ref`s at compile-time or unrolled-loop indices | Partial (bit/part-select) writes to a formal bound to a class property or its member; selects on a formal bound to an array element at a run-time-only position |
+
+### Deferred assertions, assertion controls, and sampled values {#sampled-values}
+
+| Feature | Supported | Not supported |
+| --- | --- | --- |
+| **Deferred immediate assertions (`assert #0`, `assert final`, …)** | Module items and procedural deferred assertions whose action is a single display or severity task call | User subroutines or more than one statement in the action block |
+| **Assertion control tasks (20.11)** | Zero-argument `$asserton` and `$assertoff` (stopping and restarting all assertions in module/design scopes) | `$assertkill`, `$assertcontrol`, action control tasks (`$assertpasson`, …), and level/scope/assertion arguments; calling `$asserton`/`$assertoff` in a package or `$unit` (assertions in package subroutines/classes are not controlled); calling them from `always_comb`/`always_latch` when any procedure other than `initial` or an edge-controlled one also calls them; combining them with multi-path concurrent sequences (`##[m:n]` or `or`) |
+| **Sampled value functions (16.9.3)** | `$sampled` in processes, combinational logic, multiclocked sequences, and callees; `$past`, `$rose`, `$fell`, `$stable`, and `$changed` in edge-triggered processes (and callees) with an inferred clock | Explicit clocking event argument; use without a clock to infer; nested calls (`$past($past(a))`); operands reading an unpacked array; `$past`/`$rose`/`$fell`/`$stable`/`$changed` inside multiclocked sequences or with function-call operands in concurrent assertions |
 
 ### Concurrent assertions {#concurrent-assertions}
 
-Only the following subset is supported; everything else in Clause 16
-concurrent assertions is unsupported:
+| Aspect | Supported | Not supported |
+| --- | --- | --- |
+| **Directives and placement** | Module and generate `assert property`, `assume property`, and `cover property` with an explicit clock; procedural `expect (property_spec) action_block` (16.17) in processes and tasks with an explicit clock | Procedural concurrent assertions (`assert`/`assume`/`cover property` inside procedures); implicit or default clocking |
+| **Single-clock sequences and properties** | Boolean properties; `p iff q` of two Boolean expressions (also as consequent of `\|->`, where `a \|-> b iff c` is `a \|-> (b iff c)`); fixed-delay sequences (`a ##1 b`, up to 1024 ticks) joined by `\|->` or `\|=>`; bounded cycle-delay ranges (`a ##[1:3] b`, including leading), `or`, `and`, `intersect`, and `b throughout s` (up to 1024 ways to match, as whole property or consequent of a single-path antecedent, without match items); `disable iff` on single- or multi-cycle sequences (16.12); local variables of built-in integral types and match items (in fixed-delay module/generate assertions) | Unbounded cycle-delay ranges (`##[1:$]`); repetition; sequence operator `within`; `intersect` of sequences that never match on one tick; multi-path sequences in an implication antecedent, in `expect`, or with local variables/match items; `disable iff` in `expect` or multiclocked sequences; `iff` with multi-cycle or named operands or chained `a iff b iff c` |
+| **Multiclocked sequences (16.13)** | Whole-property sequences joining single-path singly clocked subsequences via `##1` or `##0` across clock changes (value event controls incl. 4-state edges, `iff`, static virtual interface members; parenthesized clocking groups up to 64 nested groups, 16.13.3); `$sampled` inside subsequences | Multiclocked sequences inside implications, with `disable iff`, or with local variables/match items; named events as clocks; operators other than `##1`/`##0` across clock changes; `$past`/`$rose`/`$fell`/`$stable`/`$changed` in any subsequence; nesting beyond 64 groups |
+| **Named properties and sequences** | Parameterless declarations in the same module outside generate blocks, whose body stays within this subset; a named sequence without local variables may be an operand of another sequence (same clock or leading) | Formal arguments; declarations in other scopes or generate blocks; instances of named sequences clocked differently or with local variables inside a multi-cycle sequence |
+| **Function calls in assertions (16.6)** | Pure (side-effect-free) function calls in operands, `disable iff` conditions, and match-item values (arguments receive sampled values; body reads current values, 16.5.1) | Impure function calls (functions with `output`/`inout`/`ref`/`const ref` formals, non-local writes, retained static state, side-effecting system calls, or string/class method calls directly or transitively); DPI import calls; function calls in operands of `$past`/`$rose`/`$fell`/`$stable`/`$changed` |
+| **Action blocks** | Untimed blocking statements, report/severity tasks, and subroutine calls that do not suspend, perform nonblocking assignments, start or control processes, or trigger events | Timed or nonblocking action statements; suspending, event-triggering, or process-controlling calls |
 
-- Module and generate items with Boolean `assert property`,
-  `assume property`, and `cover property` with an explicit clock, and
-  sequences of steps a fixed number of clock ticks apart (`a ##1 b`),
-  spanning at most 1024 ticks, joined by `|->` or `|=>`.
-- Cycle-delay ranges with an upper bound (`a ##[1:3] b`, also leading),
-  `or`, `and` and `intersect` of sequences, and `b throughout s`, without
-  match items in their operands: an attempt passes at the first tick one of
-  its ways to
-  match matches, and fails at the first tick none can match any more. At
-  most 1024 ways to match, in a sequence that is the whole property or the
-  consequent of an implication whose antecedent has one way to match (an
-  attempt whose antecedent misses succeeds vacuously at that tick): not in
-  the antecedent of an implication, an `expect` statement, or one with
-  local variables or match items.
-- `disable iff` of a sequence over cycles: an attempt is disabled, and
-  neither passes nor fails, when the condition is true at any time from
-  its start to its end, also between the ticks of the clock, over the
-  current values of its variables (16.12).
-- Multiclocked sequences (16.13.1) that are the whole property: singly
-  clocked subsequences, each with one way to match, joined by `##1` or `##0`
-  at a change of clock (`@(posedge c0) a ##1 @(posedge c1) b`), each clock an
-  event control over values, which ticks as it would wake a process (4-state
-  edges, `iff` judged when the event occurs, a member selected through a
-  virtual interface that a variable of the design holds), not a named
-  event. After `##1` the next subsequence starts at the nearest tick
-  of its clock strictly after the end of the one before, after `##0` also at
-  it. A clocking event in parentheses clocks the rest of its group, and the
-  clock around the group resumes after it (16.13.3), as in
-  `@(posedge c0) a ##1 (@(posedge c1) b) ##1 c`. Not with `disable iff`, in an implication, or with local variables or
-  match items; other operators across a clock change are rejected, and so
-  are `$past`, `$rose`, `$fell`, `$stable` and `$changed` in any
-  subsequence (`$sampled` is accepted). A sequence nests at most 64 groups
-  and clocked subsequences.
-- `p iff q` of two Boolean expressions, also as the consequent of `|->`
-  (`a |-> b iff c` is `a |-> (b iff c)`).
-- `expect (property_spec) action_block` (16.17) in a process or task, with an
-  explicit clock: the process makes one attempt from the next clocking
-  event, deciding each step on sampled values, then runs the pass or fail
-  statement (by default `$error`) in the Reactive region and goes on. The
-  property is a Boolean one, an implication or a sequence of fixed delays,
-  also a named one, without `disable iff`, local variables or match items.
-- A named property or sequence without formal arguments, in the same module
-  outside generate blocks, whose body stays within this subset; local
-  variables of built-in integral types and match items. A named sequence
-  without local variables may be an operand of another sequence, clocked as
-  it or leading it.
-- Untimed blocking actions, report/severity tasks, and subroutine calls
-  that do not suspend, perform a nonblocking assignment, start or control a
-  process, or trigger an event.
-- Calls of functions without side effects (16.6) in operands, `disable iff`
-  conditions and match-item values. A function gets the sampled values of
-  its arguments, and its body reads current values (16.5.1).
+For `expect (property_spec) action_block` (16.17), the executing process makes one attempt starting from the next clocking event, decides each step on sampled values, runs the pass or fail statement (by default `$error`) in the Reactive region, and continues. Multi-path sequences pass at the first tick any path matches and fail at the first tick no path can still match; a missed antecedent succeeds vacuously at that tick.
 
-Unsupported in particular: procedural concurrent assertions,
-implicit/default clocking, named properties and sequences with formal
-arguments or in other scopes, unbounded cycle-delay ranges (`##[1:$]`),
-repetition, the sequence operator `within`, `intersect` of sequences that
-never match at one tick, instances of named sequences clocked differently
-or with local variables inside a
-multi-cycle sequence, `iff`
-with an operand over cycles or a named operand, calls of functions that
-are not pure (an output, inout, ref or const ref formal of the called
-function; writes to non-local variables, kept static state,
-side-effecting system calls, or string or class method calls, directly
-or through the functions it calls), DPI import calls, function calls in
-the operand of `$past`/`$rose`/`$fell`/`$stable`/`$changed`, and timed
-or nonblocking action statements.
+### I/O, formatting, and system tasks {#formatted-output-to-strings}
 
-### System tasks, functions, and I/O
+Runtime I/O (`$fopen`, file `$display`/`$write`, `$system`, plusargs, `$sformatf` family, etc.) requires a timed `Simulation` process — calls from combinational processes and continuous assignments are rejected. `$system` is unsupported on WebAssembly hosts. For `$readmemh` and `$readmemb`, see [Memory files](#memory-files).
 
-- Celox knows every system task and function name IEEE 1800-2023 defines,
-  including Annex D. One it does not support where it is called, such as
-  `$get_coverage`, is reported by name wherever it is written, including in
-  an unused parameter and in a function body.
-- `%t` of a `string` value; time queries
-  (`$timeunit`, `$timeprecision`, `$printtimescale`) of selected instance
-  array elements and generate paths.
-- Runtime I/O calls (`$fopen`, `$display` to files, `$system`, plusargs, …)
-  from combinational processes and continuous assignments; `$sformatf`
-  family calls from combinational processes and continuous assignments;
-  `$system` on WebAssembly hosts.
-- File I/O subsets: `$strobe` / `$fstrobe` and `$monitor` / `$fmonitor`
-  accept only module/static expressions in scheduled processes (calls in
-  subroutines, procedural locals, unrolled loop variables, updates, and
-  effectful calls in arguments are rejected); `$monitor` observes only
-  whole static scalar variables, console `string` variables, constants,
-  and direct time queries. `$fgets` into packed buffers, class properties,
-  or dynamic containers; `$ferror` to class properties or dynamic
-  containers; `$sscanf` / `$fscanf` `%s` outputs and `%t` scaling;
-  `$sformat` / `$swrite` to an unpacked array of `byte`; dynamic `string`
-  and non-UTF-8 file names and modes; `$writememh` / `$writememb` of
-  dynamic and associative arrays.
-- Formatted output <a id="formatted-output-to-strings"></a>: `%p` of an enum value
-  returned by a function call or popped from a queue, packed unions, a packed
-  structure returned by a function call or computed by another call with
-  side effects, packed arrays of enums, fixed-size unpacked arrays, structures with
-  `real` members, other aggregate function results, and containers of other
-  aggregates. `%p` with a run-time format prints a string in quotes and any
-  other value as `%0d`.
-- Plusargs: `real` conversions and a string variable as the format of
-  `$value$plusargs`. A `string` destination takes the `%s` conversion only.
+| Feature | Supported | Not supported |
+| --- | --- | --- |
+| **`$strobe` / `$fstrobe` (21.2.2, 21.3.2)** | Module/static expressions in scheduled processes (including `b`/`o`/`h` forms) | Calls in subroutines; procedural locals, unrolled loop variables, updates, or effectful calls in arguments |
+| **`$monitor` / `$fmonitor` (21.2.3, 21.3.2)** | Whole static scalar variables, console `string` variables (`$monitor`), constants, and direct time queries in scheduled processes | Array elements, slices, general expressions, `string` variables in `$fmonitor`, and the `$strobe` call-context restrictions above |
+| **`$fopen`, `$fdisplay`/`$fwrite`, `$writememh`/`$writememb`** | UTF-8 string literals, packed integral strings, and `string` variables for paths, modes, and formatted arguments; `$writememh`/`$writememb` on static unpacked arrays | Non-UTF-8 file names or modes; `$writememh`/`$writememb` on dynamic or associative arrays |
+| **`$fgets` (21.3.4.2)** | Writable `string` variable or selected fixed string-array element destinations | Packed integral buffers, class properties, or dynamic containers as destinations |
+| **`$ferror` (21.3.7)** | `string` variable, selected fixed string-array element, or packed buffer ≥ 640 bits | Class properties or dynamic containers as destinations |
+| **`$sscanf` / `$fscanf` (21.3.4.3)** | Integral (`%d`, `%h`/`%x`, `%o`, `%b`, `%c`) and real (`%e`/`%f`/`%g`) conversions; string literals, packed integrals, and `string` variables as source and format | `%s` string outputs; `%t` time scaling |
+| **`$sformat` / `$swrite` (21.3.3)** | `string` and packed integral destinations (`$sformatf` returning `string`) | Unpacked arrays of `byte` as destinations |
+| **`%p` formatted output (21.2.1.6)** | Integrals, reals, strings, class handles, packed structs (without side-effecting calls), unpacked struct variables/members/class properties (without dynamic container members), enums, and containers (dynamic array, queue, associative) of those scalars/unpacked structs/enums in procedural bodies (integral elements ≤ 64 bits; integral, `string`, or scalar-enum associative keys) | Enum values returned by function calls (or calls with effects) or popped from queues; packed unions; packed structs returned by a function call or computed by a side-effecting call; packed arrays of enums; fixed-size unpacked arrays; structs with `real` or dynamic-container members; aggregate function results; containers with elements > 64 bits, `real` elements, other aggregates, or packed-enum/class-handle keys *(for run-time format `%p`, see [Deviations affecting standard-conforming code](#deviations-standard-code))* |
+| **`$test$plusargs` / `$value$plusargs`** | Packed integral or string-literal queries; integer conversions into packed integrals, and `%s` into packed integrals or `string` variables | `real` conversions; `string` variable as the format/query argument; non-`%s` conversion into a `string` destination |
+| **Time queries, `$timeformat`, and `%t`** | `$time`, `$stime`, `$realtime`, `$timeformat` (20.4.3; up to 4096 decimal places/width; see [Time and precision](#time-and-precision)), `%t` on numeric values; `$timeunit`, `$timeprecision`, `$printtimescale` on modules/instances | `%t` of a `string` value; `$timeunit`/`$timeprecision`/`$printtimescale` on selected instance array elements or generate paths; a scope time unit finer than the design's global precision |
+
+## Narrow limitations in otherwise supported features {#narrow-limitations}
+
+- **Design structure:**
+  - Non-ANSI port expressions such as `module m({a, b}, c[3:0], .p(d))` ([#1953](https://github.com/celox-sim/celox/issues/1953)); plain non-ANSI ports (a header of port names with body declarations) are supported.
+  - Non-constant ANSI `input` port defaults (23.2.2.4), defaults on non-`input` ports, and unpacked-structure port defaults; constant singular `input` port defaults are supported (constant unpacked-array `input` port defaults warn via `unpacked_port_default`, rejected in strict mode).
+  - Implicit nets declared by port connections of an instance inside a generate block (6.10): an input connection reading one is rejected, and one driven only by outputs becomes a net of the module rather than of the block.
+  - Instance arrays that are multidimensional, have a negative bound, or exceed 4,095 elements.
+  - Package nets ([#1146](https://github.com/celox-sim/celox/issues/1146)); a package variable cannot be a clock or reset.
+  - Wildcard imports (26.3): a module, interface, program, or package scope, a generate block, and a procedural block each bind a name once for their whole body (`export p::x;` binds it in the package), not per reference. References covered by one binding that denote different declarations at their positions are rejected; a block-local initializer reading a package variable through the block's own wildcard import is also rejected ([#4350](https://github.com/celox-sim/celox/issues/4350)).
+  - Only one source file may declare `$unit` variables.
+- **Types and expressions:**
+  - Enum methods (`first`, `next`, …) on an element of a packed array of enums ([#2417](https://github.com/celox-sim/celox/issues/2417)).
+  - Constant out-of-range part-select reads, and constant out-of-range part-select writes to an array element or an inner packed dimension ([#88](https://github.com/celox-sim/celox/issues/88)). Partial out-of-range constant writes to plain packed vectors (e.g., `q[9:6] = v` on `logic [7:0] q`, writing only `q[7:6]`) and all run-time selects follow the standard.
+  - Run-time part-selects and element selects of a member of an element of a packed array of structures that is itself a member of a packed structure, such as `s.regs[i].q[j +: 4]`.
+  - Reduction operators in parameter expressions ([#456](https://github.com/celox-sim/celox/issues/456)).
+  - Type operator (6.23): comparing a type reference with a value, range items in a `case` on a type, and applying `type(...)` to an expression that reads a port or to any expression in a generate block.
+  - `$typename` <a id="type-names"></a> (20.6.1): rejects types without one exact spelling instead of inventing system-generated names — anonymous enumerations, structs, and unions, soft and tagged unions, unpacked structures with unpacked array members, packed arrays of enumerations or of signed typedefs, classes with non-integral value parameters, and operands other than names and data types (such as `$typename(a + b)`). Virtual interface types (unspecified in 20.6.1) are written as declared (`virtual bus_if`, `virtual bus_if.mp`, `virtual bus_if#(8, 4)`).
+  - Aggregate parameters as elaboration-time constants: unpacked array parameters hold their value from simulation start; an element of a 1D array parameter (and a select of its packed dimensions unless the element type is a packed array of a signed named type) is an elaboration-time constant only when elements are packed integrals ≤ 127 bits without X/Z bits and the array has ≤ 4,096 elements; a member of a packed-struct parameter is an elaboration-time constant unless wider than 127 bits or containing X/Z bits; whole unpacked arrays and other elements/members cannot be used where an elaboration-time constant is required.
+- **Processes and subroutines:**
+  - Nonblocking assignments inside `always_comb` ([#453](https://github.com/celox-sim/celox/issues/453)) and `always_latch` ([#431](https://github.com/celox-sim/celox/issues/431)); use blocking assignments there.
+  - Package and `$unit` timed tasks with `static` arguments.
+  - Constructing or extending the built-in `process` class; suspending a process's own thread or calling `await()` from a function.
+  - Loops: procedural loops unroll at most 10,000 iterations; combinational loops with a run-time trip count must be counted `for` loops; loop-generate constructs within one module are rejected past 1,000,000 iterations in all; `genvar` updates using bitwise compound operators ([#455](https://github.com/celox-sim/celox/issues/455)) and recursive constant-function expansion in generate constructs are rejected.
+  - `final` procedures <a id="final-procedures"></a>: timing controls, calls to user tasks (including through functions), and functions that schedule events after returning (13.4.4) are rejected; detached `fork … join_none` children declared in a `final` procedure are initialized but never start (see [Execution model](#celox-execution-model)).
+  - Named subroutine arguments: calls whose selection indices have procedural effects, and method defaults using the receiver in an `always_comb` or `assign` call when the receiver or an earlier argument reading the object has effects.
 
 ## Intentional deviations {#intentional-deviations}
 
-These are accepted by Celox but do not follow the standard exactly.
-Code that must stay portable should avoid relying on them.
+### Deviations affecting standard-conforming code {#deviations-standard-code}
 
-- **A missing `static` keyword is forgiven in one case.** IEEE 1800-2023
-  6.21 requires an explicit `static` when a static variable's declaration
-  specifies an initialization value. Celox also accepts the declaration
-  without the keyword with a constant initializer in any procedure, and
-  with a run-time initializer in a procedure that runs once, such as
-  `initial`. In an `always` procedure a run-time initializer without the
-  keyword is rejected; declare the local `static` or `automatic`. Both
-  accepted forms report an `implicit_static_initializer` warning, which the
-  diagnostics policy can silence (`allow`) or escalate (`error`).
-- **Packed values and fills of fixed-size unpacked arrays.** IEEE
-  1800-2023 7.6 assigns a fixed-size unpacked array only an unpacked array
-  of a compatible type. Celox also assigns it a packed value exactly as
-  wide as the whole array, bit for bit, and fills every element with an
-  unbased unsized literal such as `'0`. A value of any other width, a real or a string
-  variable is rejected.
+These accepted IEEE 1800-2023 constructs deliberately behave differently from the standard. Portable code should avoid relying on them:
+
 - **Program continuous assignments do not run in the Reactive region.**
   Continuous assignments in a program are evaluated with the design's
   combinational logic, and design logic that a program writes settles while
   the reactive region set runs, so a program resuming after `#0` reads the
   new values. IEEE 1800-2023 4.5 evaluates them only once the reactive
   region set is empty. Icarus, Verilator, and xezim behave as Celox does.
-- **`$exit` outside a program warns.** A `$exit` call from anywhere other
-  than a program thread is ignored, as 24.7 specifies, but Celox also
-  reports a compilation warning (`Simulator::warnings()`), including for
-  calls in unused function declarations.
+- **Static storage of interface subroutines across modules and virtual interfaces.**
+  A static function or task called through interface ports of several modules
+  keeps its static variables, and the static formals of a task that suspends,
+  once per calling module instead of once per interface instance (13.3.2,
+  13.4.2; [#3739](https://github.com/celox-sim/celox/issues/3739)). Calls
+  through the instance itself and through the port of a single module share
+  one. Likewise, a task or function called through a virtual interface
+  (`vif.drive(req)`, 25.9) holds static variables per calling scope, and
+  formals belong to each call (even on static subroutines).
+- **Procedural `assign` override timing on indirect writes.** While a
+  procedural `assign` is active, a write to its variable other than by a
+  plain assignment statement (an output argument, a concatenation target, a
+  delayed nonblocking assignment, or a hierarchical name in another module)
+  is overridden in the time step it happens rather than suppressed, so a
+  process waiting on the variable can observe the written value.
+- **Run-time `%p` format strings simplify non-string values.** When a `%p`
+  conversion comes from a format string evaluated at run time rather than a
+  compile-time literal, Celox prints `string` values in quotes and any other
+  value as `%0d`.
 - **Coverage is not reported.** Immediate `cover` executes its pass
   statement, but coverage counters and reports are not exposed.
-- **Default time scales for elements without one.** IEEE 1800-2023
-  3.14.2.3 makes a design an error when some design elements have a time
-  unit and precision (declared, inherited or from `` `timescale ``) and
-  others do not. Celox instead warns, naming the elements without one,
-  and each such element takes the default time unit and precision, as
-  other simulators do. Strict mode (`strict = true` / `--strict`) or
-  `mixed_timescale = "error"` in the
-  [`[diagnostics]` table](./celox-toml.md#diagnostics) rejects the
-  design; `mixed_timescale = "allow"` silences the warning.
-- **Storage of interface subroutines called through a virtual interface.**
-  A task or function of an interface called through a virtual interface
-  (`vif.drive(req)`, 25.9) runs for the instance the handle denotes. Its
-  static variables belong to that instance (13.3.2, 6.21), but are held by
-  each scope that makes such calls, as the static storage of a subroutine
-  called through an interface port is (see
-  [Interfaces](#interface-restrictions)). Its formals belong to each call,
-  also those of a static subroutine.
-- **`$psprintf` is `$sformatf`.** The vendor system function `$psprintf`,
-  which many simulators and older UVM code use, is accepted as `$sformatf`
-  (21.3.3); diagnostics name it `$sformatf`.
+- **`$exit` outside a program warns.** A `$exit` call from anywhere other
+  than a program thread is ignored, as 24.7 specifies, and Celox also
+  reports a compilation warning (`exit_outside_program` in
+  [`[diagnostics]`](./celox-toml.md#diagnostics)), including for calls in
+  unused function declarations.
 - **UVM DPI functions are built in.** Imports with the C names of UVM's
   `src/dpi` functions bind to Celox's implementations instead of a user C
   function; see [DPI-C imports](#dpi-c-imports).
+- **Opt-in compatibility modes.** Options in
+  [`[compatibility]`](./celox-toml.md#compatibility) (such as
+  `legacy_empty_reductions` and `shared_always_temporary`) preserve standard
+  IEEE 1800-2023 semantics by default and deviate only when explicitly enabled.
+
+### Permissive acceptance of non-standard code {#deviations-nonstandard-code}
+
+Celox intentionally accepts the following non-standard constructs and compatibility extensions. Portable code should avoid relying on them.
+
+**Warn by default, rejected in strict mode (`strict = true` / `--strict` / `.strict(true)`):**
+
+- **A missing `static` keyword on initialized locals (6.21).** IEEE
+  1800-2023 6.21 requires an explicit `static` when a static variable's
+  declaration specifies an initializer. Celox also accepts the declaration
+  without `static` with a constant initializer in any procedure, and with a
+  run-time initializer in a procedure that runs once (such as `initial`),
+  reporting an `implicit_static_initializer` warning (`warn` by default,
+  `error` in strict mode). In an `always` procedure, a run-time initializer
+  without `static` or `automatic` is rejected.
+- **Default time scales when explicit time scales are mixed (3.14.2.3).**
+  Instead of rejecting designs where only some elements specify or inherit a
+  time scale, Celox reports a `mixed_timescale` warning (`error` in strict
+  mode) naming those elements and assigns them 1 ns / 1 ps, as other
+  simulators do.
+- **Other warn-by-default compatibility diagnostics.** Duplicate module
+  declarations (`duplicate_module`), `$size` on fixed-size interface arrays
+  (`interface_array_query`), `bus.WIDTH` parameter shorthand on interface
+  arrays (`interface_array_parameter`), constant unpacked-array `input` port
+  defaults (`unpacked_port_default`, 23.2.2.4), and memories shared between
+  `always_ff` and another edge process (`multiple_always_ff_drivers`) warn by
+  default and are rejected in strict mode; see
+  [`[diagnostics]`](./celox-toml.md#diagnostics) (alongside `inferred_latch`).
+
+**Accepted even in strict mode (intentional extensions):**
+
+- **Packed values and unbased fills assigned to fixed-size unpacked arrays
+  (7.6).** Celox accepts assigning a packed value of the exact whole-array
+  bit width (bit for bit) and filling every element with an unbased unsized
+  literal such as `'0`. Values of any other width, `real`, or `string` are
+  rejected.
+- **Procedural `force` on variable selects and unpacked array elements
+  (10.6.2).** Extends `force` beyond vector nets to constant bit/part-selects
+  or members of variables, and constant-indexed elements (or constant
+  selects/members) of fixed-size unpacked arrays of packed integrals
+  (emitting `forced_array`).
+- **`$psprintf` is accepted as `$sformatf`.** The vendor system function
+  `$psprintf` is accepted as `$sformatf` (21.3.3); diagnostics name it
+  `$sformatf`.
 
 ## Implementation-defined and unspecified behavior {#semantics-worth-knowing}
 
@@ -719,10 +344,10 @@ Portable code must not depend on these choices.
 ### Constant widths {#constant-widths}
 
 IEEE 1800-2023 lets an implementation limit the width of a vector to no
-less than 65536 bits (6.9.1, 7.4.1). A constant value, such as a parameter,
+less than 65,536 bits (6.9.1, 7.4.1). A constant value, such as a parameter,
 the concatenation that gives it or a part-select of it, may have up to
-1048576 bits. A replication, a constant built bit by bit, and a value inside
-a constant function call may have up to 65536 bits. A wider constant is
+1,048,576 bits. A replication, a constant built bit by bit, and a value inside
+a constant function call may have up to 65,536 bits. A wider constant is
 rejected before it is built.
 
 ### Event scheduling {#timing-semantics}
@@ -773,8 +398,8 @@ Clause 4.7 permits either order in the cases below; Celox is deterministic:
   runs as a process: once at time zero (except `always @*`), then after
   each change of what it reads. A units number outside 2 to -15 or a negative
   precision or field width computed at run time ends the simulation with an
-  error, as a constant one fails the analysis; Celox prints at most 4096
-  decimal places and pads to at most 4096 characters, and a larger
+  error, as a constant one fails the analysis; Celox prints at most 4,096
+  decimal places and pads to at most 4,096 characters, and a larger
   precision or field width is an error.
 - A class or subroutine declared in the compilation unit (`$unit`) uses
   the compilation unit's time unit and precision. A `` `timescale ``
@@ -815,7 +440,7 @@ Clause 4.7 permits either order in the cases below; Celox is deterministic:
   soft `dist` constrains its operand to its items of nonzero weight; while
   it is kept, its weights shape the choice as those of a hard one do
   (18.5.3), and a discarded one has no effect on it.
-- A 4-state rand property takes a 2-state value. The X and Z bits of a
+- A 4-state `rand` property takes a 2-state value. The X and Z bits of a
   4-state state property, of the value of a function a constraint calls
   whose type is 4-state, and of a 4-state caller-scope input of inline
   constraints or of `std::randomize() with`, follow the 4-state semantics
@@ -833,6 +458,14 @@ Clause 4.7 permits either order in the cases below; Celox is deterministic:
   value is state to the other constraints, so they can leave the call no
   solution, and a random variable it reads that is no argument has its
   value before the call.
+- `randsequence` (18.17): a production of several rules picks one by their
+  weights, 1 unless given, from the thread's random number generator
+  (18.14.2). `rand join` interleaves its productions' items at random from
+  the same generator; 18.17.5 gives the bias no formula, so Celox evaluates
+  it once and, at each step, with probability |2 × bias − 1| advances a
+  production with the fewest items left (bias below 0.5) or the most (above
+  0.5), and otherwise any production with items left, each as likely (0.5
+  prefers no length; 0.0 and 1.0 always prefer the shortest and longest).
 - Array `shuffle` draws from the calling process's random stream.
 
 ### Host-dependent results
@@ -885,13 +518,14 @@ which designs need the timed `Simulation` API and what the host can observe.
   explicit `Simulation::finish()`; an idle `step()` or the end of
   `run_until()` does not terminate the reusable Rust simulation. No
   scheduled events run afterwards, so a nonblocking assignment made
-  directly in a `final` procedure never applies its queued update. `$stop`
-  in an `initial` block suspends the simulation (`is_stopped()` is set and
-  the next call continues); in an `always` process it is reported as
-  `RuntimeEvent::Stop`, as `$finish` is `RuntimeEvent::Finish`. Batch hosts
-  without an interactive mode, such as the VPI host, end the run at
-  `$stop`. A checkpoint cannot be taken while suspended
-  (`CheckpointError::Stopped`).
+  directly in a `final` procedure never applies its queued update, and
+  detached `fork … join_none` children declared in a `final` procedure are
+  initialized but never start. `$stop` in an `initial` block suspends the
+  simulation (`is_stopped()` is set and the next call continues); in an
+  `always` process it is reported as `RuntimeEvent::Stop`, as `$finish` is
+  `RuntimeEvent::Finish`. Batch hosts without an interactive mode, such as
+  the VPI host, end the run at `$stop`. A checkpoint cannot be taken while
+  suspended (`CheckpointError::Stopped`).
 - **Reports.** `$info`, `$warning`, `$error`, and `$fatal` — including the
   default `$error` of an assertion without a fail action — are delivered to
   the host as `RuntimeEvent::Report` with severity, message, file, line,
@@ -900,19 +534,18 @@ which designs need the timed `Simulation` API and what the host can observe.
 - **Top-level modules.** A simulation runs the top module it names. A design
   with several top-level modules (23.3.1), such as a testbench's `hdl_top` and
   `hvl_top`, runs them together when Rust's `SimulatorBuilder::tops` or a
-  repeated `celox run --top` names them,
-  each as an instance of its own name under `$root`, with its ports
-  unconnected. Hierarchical names, `%m`, waveform scopes and the VPI and
-  reflection hierarchy then start at a top (`hdl_top.dut`, `$root.hdl_top.dut`):
-  each top is a root scope, as `vpi_iterate(vpiModule, NULL)` returns them.
-  Signals are named from a top, as `signal("hdl_top.clk")` or
-  `child_signal(&[("hdl_top", 0)], "clk")`, and so are forced and live
-  signals. The design's tops are the selected modules: `PreserveTopPorts`
-  keeps the ports of each, `named_signals()` names each top's signals from
-  it (`hdl_top.clk`), `named_hierarchies()` gives each top's hierarchy, and
-  `named_hierarchy()` is `$root` with the tops as its children. Several tops
-  require SystemVerilog sources only and take no
-  parameter overrides.
+  repeated `celox run --top` names them, each as an instance of its own name
+  under `$root`, with its ports unconnected. Hierarchical names, `%m`,
+  waveform scopes and the VPI and reflection hierarchy then start at a top
+  (`hdl_top.dut`, `$root.hdl_top.dut`): each top is a root scope, as
+  `vpi_iterate(vpiModule, NULL)` returns them. Signals are named from a top,
+  as `signal("hdl_top.clk")` or `child_signal(&[("hdl_top", 0)], "clk")`,
+  and so are forced and live signals. The design's tops are the selected
+  modules: `PreserveTopPorts` keeps the ports of each, `named_signals()`
+  names each top's signals from it (`hdl_top.clk`), `named_hierarchies()`
+  gives each top's hierarchy, and `named_hierarchy()` is `$root` with the
+  tops as its children. Several tops require SystemVerilog sources only and
+  take no parameter overrides.
 - **Observable names.** Interfaces are expanded into the modules that use
   them: a member `m` of interface instance `h` becomes the signal `h$m`, an
   interface port at the top becomes ports such as `bus$data`, and a module
@@ -920,8 +553,8 @@ which designs need the timed `Simulation` API and what the host can observe.
   `M$I`. Instance array elements are addressed by their declared index
   (`dut.u[3]`, `child_signal(&[("u", 3)], "y")`). A package variable is
   named `p::v` and a compilation-unit variable `$unit::v` in
-  `sim.signal(…)`; hierarchical names can also reach `string` variables
-  through the host API.
+  `sim.signal(…)`. Hierarchical names can address signals, including
+  `string` variables, in both SystemVerilog code and the host API.
 - **Heap and checkpoints.** Strings, class objects, and containers live in
   a heap collected between time slots and after each `tick`; a `string`,
   class handle, `process` handle, or virtual interface is stored like a
@@ -970,15 +603,11 @@ Mixed designs are a Celox feature, not part of the standard.
 lists. Veryl instantiates an SV module with `$sv::Module`; SV refers to a
 Veryl module or interface by its emitted name (`prj_Module`, or `Module`
 with `omit_project_prefix`; the project is `prj` without a `Veryl.toml`).
-Either language may be the top. Interfaces and `input` / `output` modports
-cross the boundary in both directions.
 
-Unsupported across the boundary: cross-language interface function calls
-and function `import` / `export` modports; interface header functions with
-statement bodies the contract cannot express (such as loops), header-
-dependent formal or return widths, declaration casts whose target size
-depends on interface parameters, and constant functions that cannot be
-lowered symbolically. These remain available within one language.
+| Aspect | Supported across boundary | Not supported across boundary |
+| --- | --- | --- |
+| **Modules and ports** | Either language as top; bidirectional hierarchy crossing; module parameters and plain signal ports | — |
+| **Interfaces and functions** | Interfaces and `input` / `output` modports crossing in both directions | Cross-language interface function calls; function `import` / `export` modports; interface header functions with statement bodies the contract cannot express (such as loops), header-dependent formal or return widths, declaration casts whose target size depends on interface parameters, and constant functions that cannot be lowered symbolically *(these remain available within a single language)* |
 
 ## DPI-C imports {#dpi-c-imports}
 
@@ -1011,53 +640,35 @@ such an import is a run-time error that names the import and says it was
 elaborated without its C body. It is off unless requested; simulation and
 every other build keep the error.
 
-Supported subset; everything else is rejected:
+| Aspect | Supported | Not supported |
+| --- | --- | --- |
+| **Declaration and call site** | `import "DPI-C"` functions, including `context` imports (35.5.3), declared in a module, package, or `$unit` scope, called from `initial`, `always` (including `always @*`), `always_ff`, and subroutines they call | Tasks; calls from continuous assignments or `always_comb`; using the C scope API (`svGetScope`, `svSetScope`, `svGetNameFromScope`, `svGetScopeFromName`, user data) or calling exported SV subroutines inside `context` imports (libraries using those symbols fail to load with an unresolved-symbol error) |
+| **Arguments and return types** | Up to 16 arguments (`input`, `output`, or `inout`); `bit`, `logic` (`svBit` / `svLogic`), `byte`, `shortint`, `int`, `longint` (signed or unsigned), `chandle`, `string` (`const char *`), packed arrays of `bit`/`logic`/`reg`, `integer`, and `time` (`svBitVecVal` / `svLogicVecVal` words); results of the types before packed arrays, or `void` (35.5.5) | More than 16 arguments; `real`, `shortreal`, named types (`typedef`, enums, structs), and unpacked or open arrays |
+| **`export "DPI-C"` (35.7)** | Declarations accepted and checked | Calling exported SV functions from C (see `context` import scope API restriction above) |
 
-- `function` imports (not tasks), also `context` ones (35.5.3), declared in a module, in a
-  package or at compilation-unit scope, called from procedural code:
-  `initial` and `always` processes (`always @*` included), `always_ff`, and
-  the subroutines they call. Calls in continuous assignments and
-  `always_comb` are rejected.
-- Up to 16 arguments, `input`, `output` or `inout`.
-- Argument types `bit`, `logic` (as `svBit` / `svLogic`), `byte`,
-  `shortint`, `int`, `longint` (signed or unsigned), `chandle`, `string`
-  (as `const char *`), packed arrays of `bit`, `logic` or `reg`, and
-  `integer` and `time` (as `svBitVecVal` / `svLogicVecVal` words); results
-  of the types before the packed arrays, or `void` (35.5.5). `real`,
-  `shortreal`, named types (typedefs, enumerations, structures), and
-  unpacked or open arrays are rejected.
-- An `output` or `inout` argument is a pointer to its C type, and to a
-  `const char *` for a `string`. A string or packed array passed to the
-  function is valid until it returns; a string it returns or writes to an
-  output is copied when it returns.
-- In two-state simulation, the unknown bits a function writes to a `logic`
-  argument read as zero.
-- An `always @*` block that calls an import runs when what it reads changes
-  (9.4.2.2), as any other, and no more often: a C function whose result
-  changes without a change of its SystemVerilog arguments is not called
-  again until one changes.
-- A `context` import is called as any other. Its C code cannot use the scope
-  API (`svGetScope`, `svSetScope`, `svGetNameFromScope`, `svGetScopeFromName`,
-  user data) or call exported subroutines: Celox does not provide those C
-  symbols, so a library that uses them fails to load with an unresolved-symbol
-  error naming it.
-- `export "DPI-C"` declarations are accepted and checked (35.7) but no C
-  code can call them (see `context` imports above).
-- UVM's C library functions are provided by Celox and shadow any user
-  implementation of the same name. The
-  `uvm_re_*` functions use the Rust `regex` crate, whose syntax differs
-  from POSIX extended regular expressions in rare constructs;
-  `uvm_dpi_get_next_arg_c` returns `celox` followed by the plusargs and
-  `uvm_dpi_get_tool_name_c` returns `Celox`. The `uvm_hdl_*` and
-  `uvm_polling_*` functions return 0 or `null`, so UVM reports those
-  facilities as unavailable. UVM 1.2's `uvm_re_match`, `uvm_glob_to_re`,
-  `uvm_dump_re_cache`, `uvm_dpi_regcomp`, `uvm_dpi_regexec` and
-  `uvm_dpi_regfree` are provided too. Their reports (`UVM/DPI/REGEX_INV`,
-  `UVM/DPI/REGEX_MAX`, `UVM/DPI/REGCOMP` and the cache message) go through
-  the function the UVM package exports for them, `m__uvm_report_dpi`, as
-  UVM's C library makes them, so they count as UVM reports; the text after
-  `invalid glob or regular expression` is the `regex` crate's reason, not
-  `regerror`'s.
+An `output` or `inout` argument is a pointer to its C type (a pointer to
+`const char *` for `string`). A string or packed array passed to the
+function is valid until it returns; a string it returns or writes to an
+`output` is copied when it returns. In two-state simulation, unknown bits a
+function writes to a `logic` argument read as zero. An `always @*` block
+that calls an import runs when what it reads changes (9.4.2.2) and no more
+often: a C function whose result changes without a change of its
+SystemVerilog arguments is not called again until one changes.
+
+UVM's C library functions are provided by Celox and shadow any user
+implementation of the same name. The `uvm_re_*` functions use the Rust
+`regex` crate, whose syntax differs from POSIX extended regular expressions
+in rare constructs; `uvm_dpi_get_next_arg_c` returns `celox` followed by
+the plusargs and `uvm_dpi_get_tool_name_c` returns `Celox`. The `uvm_hdl_*`
+and `uvm_polling_*` functions return 0 or `null`, so UVM reports those
+facilities as unavailable. UVM 1.2's `uvm_re_match`, `uvm_glob_to_re`,
+`uvm_dump_re_cache`, `uvm_dpi_regcomp`, `uvm_dpi_regexec`, and
+`uvm_dpi_regfree` are provided too. Their reports (`UVM/DPI/REGEX_INV`,
+`UVM/DPI/REGEX_MAX`, `UVM/DPI/REGCOMP`, and the cache message) go through
+the function the UVM package exports for them, `m__uvm_report_dpi`, as UVM's
+C library makes them, so they count as UVM reports; the text after
+`invalid glob or regular expression` is the `regex` crate's reason, not
+`regerror`'s.
 
 ## SystemVerilog emitted by Veryl {#systemverilog-emitted-by-veryl}
 
@@ -1072,6 +683,3 @@ emits. The cases that remain excluded are:
 - Testbench modules (`initial` blocks with clocking and `$finish`
   scheduling, hierarchical assignments) are not emitted as simulatable
   SystemVerilog modules.
-
-
-

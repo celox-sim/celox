@@ -107,6 +107,7 @@ fn host_request_mapping_relocates_operands_and_results() {
         args: vec![value(3u32)],
         results: vec![value(5)],
         strings: vec!["COUNT=%d".into()],
+        scope: None,
     };
     let relocated = site.map(|id| id + 10);
     assert_eq!(relocated.slots().collect::<Vec<_>>(), vec![13, 15]);

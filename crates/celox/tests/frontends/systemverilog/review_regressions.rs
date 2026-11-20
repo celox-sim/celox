@@ -9131,6 +9131,9 @@ fn nonblocking_runtime_element_writes_use_sparse_next_state() {
 
     for (body, sparse) in [
         ("mem[addr] <= data; mem[3][7:0] <= data[7:0];", true),
+        ("mem[addr][data[4:0]] <= data[0];", true),
+        ("mem[addr] <= data; mem[3][data[4:0]] <= data[0];", true),
+        ("mem[3][data[4:0]] <= data[0];", false),
         ("mem[addr] = data;", false),
         ("mem[addr] <= data; mem <= '{default: 0};", false),
     ] {
@@ -9174,6 +9177,85 @@ fn nonblocking_runtime_element_writes_use_sparse_next_state() {
         }
         assert_eq!(regions.contains(&SPARSE_WORKING_REGION), sparse, "{body}");
         assert_eq!(regions.contains(&WORKING_REGION), !sparse, "{body}");
+    }
+}
+
+/// Separate edge-triggered processes writing disjoint elements of one array
+/// must not promote only one process to `SPARSE_WORKING_REGION` while another
+/// commits through `WORKING_REGION`: a sparse commit copies whole 64-bit chunks
+/// from `SPARSE_WORKING_REGION` and would overwrite the neighbour.
+#[test]
+fn disjoint_ff_processes_keep_array_out_of_sparse_next_state() {
+    use celox_design::{SPARSE_WORKING_REGION, WORKING_REGION};
+    use celox_sir::SIRInstruction;
+
+    for (label, source) in [
+        (
+            "constant_element_dynamic_bit",
+            r#"module Top(input logic clk, input logic [2:0] idx, input logic a,
+                input logic [7:0] b, output logic [7:0] first, output logic [7:0] second);
+                logic [7:0] mem [4];
+                always_ff @(posedge clk) mem[2] <= b;
+                always_ff @(posedge clk) begin
+                    mem[1] <= 8'h00;
+                    mem[1][idx] <= a;
+                end
+                assign first = mem[1];
+                assign second = mem[2];
+            endmodule"#,
+        ),
+        (
+            "unrolled_loop_and_constant_element",
+            r#"module Top(input logic clk, input logic [7:0] a, input logic [7:0] b,
+                output logic [7:0] first, output logic [7:0] second);
+                logic [7:0] mem [4];
+                always_ff @(posedge clk) mem[3] <= b;
+                always_ff @(posedge clk) begin
+                    for (int i = 0; i < 2; i = i + 1)
+                        mem[i] <= a;
+                end
+                assign first = mem[1];
+                assign second = mem[3];
+            endmodule"#,
+        ),
+    ] {
+        let result = Simulator::from_sv_sources(vec![(source, Path::new("disjoint.sv"))], "Top")
+            .trace_pre_optimized_sir()
+            .build_with_trace();
+        let sim = result.res.unwrap();
+        let memory = sim.program().get_addr(&[], &["mem"]).unwrap();
+        let program = result.trace.pre_optimized_sir.unwrap();
+        let mut regions = Vec::new();
+        for instruction in program
+            .sir
+            .eval_apply_ffs
+            .values()
+            .flatten()
+            .flat_map(|unit| unit.blocks.values())
+            .flat_map(|block| &block.instructions)
+        {
+            match instruction {
+                SIRInstruction::Store(address, ..) if address.absolute_addr() == memory => {
+                    regions.push(address.region);
+                }
+                SIRInstruction::Commit(source, destination, ..)
+                    if source.absolute_addr() == memory
+                        || destination.absolute_addr() == memory =>
+                {
+                    regions.push(source.region);
+                    regions.push(destination.region);
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            !regions.contains(&SPARSE_WORKING_REGION),
+            "{label}: unexpected sparse region"
+        );
+        assert!(
+            regions.contains(&WORKING_REGION),
+            "{label}: expected working region"
+        );
     }
 }
 

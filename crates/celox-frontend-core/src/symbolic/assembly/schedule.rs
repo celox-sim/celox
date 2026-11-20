@@ -21,12 +21,14 @@ mod comb;
 mod design;
 mod flip_flops;
 mod instrument;
+mod next_state;
 mod projection;
 mod state;
 use comb::*;
 use design::*;
 use flip_flops::*;
 use instrument::*;
+use next_state::*;
 use projection::*;
 use state::*;
 
@@ -145,6 +147,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         expand_design(symbolic, flatten_timing, trace_opts, &mut trace)?;
     let (mut logic, mut units, mut parallel_ff_units, mut split_commits) =
         relocate_design(&design, parallel, flatten_timing, trace_opts, &mut trace)?;
+    let next_state_forms = relocate_next_state(&design, &mut logic.global_arena)?;
     let variables = variable_shapes(&design);
     let (counted, declaration_probes, occurrence_probes) = instrument_occurrences(
         &design,
@@ -239,6 +242,10 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         &occurrence_probes,
         &declaration_probes,
     )?;
+    // Measured only, for now: no unit runs a DAG yet. The DAGs are only
+    // logged, so their arenas are freed here instead of living through
+    // scheduling.
+    drop(next_state_dags(&next_state_forms, &logic));
     let parallel_comb_blocks = parallel.enabled().then(|| logic.comb_blocks.clone());
     // The flag object of a partitioned settle is declared once the
     // partitions are known; reserve its address now.

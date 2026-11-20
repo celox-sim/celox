@@ -43,6 +43,52 @@ struct Slot<'a> {
 }
 
 impl Plan {
+    /// Each settle unit with the record counts the generated unit
+    /// instruments into its copy of it (`Generator::inline_with_exit`), or
+    /// `None` for one it runs as it is or one that may `$finish`. Only a
+    /// compiled run reads the counts, and it clears them when it starts.
+    pub(crate) fn settle_instrumentation(
+        &self,
+        program: &LaidOutProgram,
+        slots: &SchedulerSlots<AbsoluteAddr>,
+    ) -> Vec<Option<Unit>> {
+        let schema = &program.runtime.runtime_schema;
+        let capacity = program.layout().runtime_event_capacity;
+        let batch = capacity > 0
+            && (!schema.runtime_event_sites.is_empty() || !self.service_processes.is_empty());
+        let captures = self.observers.is_some();
+        program
+            .sir
+            .eval_comb
+            .iter()
+            .map(|unit| {
+                let finishes = !self.finish_sites.is_empty()
+                    && (emits_finish(unit, &self.finish_sites)
+                        || captures
+                            && instructions(unit).any(|inst| {
+                                matches!(inst,
+                                SIRInstruction::CombCaptureEvent { site_id, .. }
+                                    if self.finish_sites.contains(site_id))
+                            }));
+                let counts = batch
+                    && instructions(unit).any(|inst| {
+                        matches!(inst, SIRInstruction::RuntimeEvent { .. })
+                            || captures && matches!(inst, SIRInstruction::CombCaptureEvent { .. })
+                    });
+                // A `$finish` flag would end a run that does not read it,
+                // as a settle of the runtime's own loop: such a unit keeps
+                // its instrumented copy.
+                // Nor do units that capture combinational events, which
+                // the runtime's own settles report.
+                let captures_any = instructions(unit)
+                    .any(|inst| matches!(inst, SIRInstruction::CombCaptureEvent { .. }));
+                (counts && !finishes && !captures_any).then(|| {
+                    Generator::instrument_records(unit, &self.finish_sites, slots, counts, captures)
+                })
+            })
+            .collect()
+    }
+
     pub(super) fn generate(
         &self,
         program: &LaidOutProgram,
@@ -295,12 +341,45 @@ impl Plan {
         self.rearm_clocks(&mut g, &cx, slot_end, started, time);
         self.drain_woken(&mut g, &cx, &guards, time, pick, internal_exit);
         self.assertion_regions(&mut g, &cx, pick);
+        // The slot's deferred assertion reports mature, and the heap may
+        // want the host (`native_slot_end`).
+        let heap_returns = self
+            .service_function
+            .filter(|_| super::native_slot_end(&program.runtime))
+            .map(|service| {
+                let context = g.load_at(
+                    slots.defer_limit_settle,
+                    celox_design::SCHEDULER_HOST_CONTEXT_BIT,
+                    64,
+                );
+                let process = g.constant(u64::MAX, 64);
+                let request = g.constant(crate::simulator::native_io::SLOT_END, 64);
+                let first = g.constant(0, 64);
+                let result = g.b.alloc_bit(64, false);
+                g.b.emit(SIRInstruction::ExternCall {
+                    dst: Some(result),
+                    func: service,
+                    args: vec![context, process, request, time, first],
+                });
+                let failed = g.equals(result, 1);
+                let next = g.b.new_block();
+                g.b.seal_block(SIRTerminator::Branch {
+                    cond: failed,
+                    true_block: (internal_exit, Vec::new()),
+                    false_block: (next, Vec::new()),
+                });
+                g.b.switch_to_block(next);
+                g.equals(result, 2)
+            });
         // The run returns after the slot that reaches its budget, or in
         // which its runtime events reach a batch, so that the host drains
         // them before the ring buffer overflows.
         let count = g.load(slots.count, SCHEDULER_TIME_WIDTH);
         let budget = g.load(slots.budget, SCHEDULER_TIME_WIDTH);
         let mut returns = g.binary(1, count, BinaryOp::GeU, budget);
+        if let Some(heap_returns) = heap_returns {
+            returns = g.binary(1, returns, BinaryOp::Or, heap_returns);
+        }
         if let Some(batch) = g.event_batch {
             let events = g.load(slots.events, SCHEDULER_TIME_WIDTH);
             let batch = g.constant(batch, SCHEDULER_TIME_WIDTH);

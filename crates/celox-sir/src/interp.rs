@@ -1,6 +1,7 @@
-//! Tier-0 SIR interpreter for tiered execution.
+//! Tier-0 SIR interpreter for tiered execution, and the reference
+//! evaluator of SIR wherever a unit must be run without a backend.
 //!
-//! When [`crate::ExecutionStrategy::Tiered`] is selected the simulator starts
+//! When Celox's tiered execution strategy is selected the simulator starts
 //! executing execution units on this interpreter immediately after layout,
 //! hiding compilation latency behind the first simulated steps. Hot units are
 //! compiled in the background and swapped in at scheduler safe points; this
@@ -20,8 +21,8 @@
 use std::borrow::Cow;
 use std::fmt;
 
-use celox_sir::extern_abi::ExternValue;
-use celox_sir::{
+use crate::extern_abi::ExternValue;
+use crate::{
     BinaryOp, BlockId, ExecutionUnit, FunctionId, FunctionUnit, RegisterId, RegisterType,
     SIRInstruction, SIROffset, SIRTerminator, SIRValue, TriggerIdWithKind, UnaryOp,
 };
@@ -296,7 +297,7 @@ pub fn execute_unit_with_functions<A, M: InterpMachine<A>>(
 /// schedule was built. Repeated tier-zero evaluations only advance a
 /// generation counter; they do not rebuild register metadata or clear every
 /// slot before dispatching the first instruction.
-pub(crate) fn execute_prepared_unit<A, M: InterpMachine<A>>(
+pub fn execute_prepared_unit<A, M: InterpMachine<A>>(
     unit: &ExecutionUnit<A>,
     machine: &mut M,
     entry_args: &[SIRValue],
@@ -318,7 +319,7 @@ pub(crate) fn execute_prepared_unit<A, M: InterpMachine<A>>(
 /// A hook may execute a top-level region and return its last block. The
 /// original final terminator performs the exit transfer; internal jumps must
 /// preserve parallel arguments. None must leave state/registers unchanged.
-pub(crate) fn execute_prepared_unit_with_hook<A, M: InterpMachine<A>>(
+pub fn execute_prepared_unit_with_hook<A, M: InterpMachine<A>>(
     unit: &ExecutionUnit<A>,
     machine: &mut M,
     entry_args: &[SIRValue],
@@ -548,7 +549,7 @@ fn transfer<A>(
 // Calls nest at most `MAX_CALL_DEPTH` deep, as in the compiled backends:
 // deeper ones fail, where compiled code traps, instead of exhausting memory
 // with activations of frames of no size.
-use celox_sir::MAX_CALL_DEPTH;
+use crate::MAX_CALL_DEPTH;
 
 /// A [`SIRInstruction::Call`] whose callee the interpreter enters next.
 struct CallRequest<'u, A> {
@@ -908,7 +909,7 @@ fn exec_instruction<'u, A, M: InterpMachine<A>>(
         }
         SIRInstruction::ExternCall { dst, func, args } => {
             // The SIR verifier bounds the argument count.
-            let mut values = [0; celox_sir::MAX_EXTERN_CALL_ARGUMENTS];
+            let mut values = [0; crate::MAX_EXTERN_CALL_ARGUMENTS];
             let values = &mut values[..args.len()];
             for (value, &arg) in values.iter_mut().zip(args) {
                 *value = extern_argument(regs, arg)?;
@@ -1877,7 +1878,7 @@ impl BigUintExt for BigUint {
 // ── Register file ─────────────────────────────────────────────────────
 
 #[derive(Default)]
-pub(crate) struct Registers {
+pub struct Registers {
     slots: Vec<RegisterSlot>,
     small_enabled: bool,
     generation: u64,
@@ -1922,7 +1923,7 @@ impl RegisterValue {
 }
 
 impl Registers {
-    pub(crate) fn new(register_map: &HashMap<RegisterId, RegisterType>, four_state: bool) -> Self {
+    pub fn new(register_map: &HashMap<RegisterId, RegisterType>, four_state: bool) -> Self {
         let mut registers = Self::default();
         registers.rebuild(register_map, four_state);
         registers
@@ -1959,7 +1960,7 @@ impl Registers {
         })
     }
 
-    pub(crate) fn get(&self, id: RegisterId) -> Result<Cow<'_, SIRValue>, InterpError> {
+    pub fn get(&self, id: RegisterId) -> Result<Cow<'_, SIRValue>, InterpError> {
         self.initialized_value(id)
             .map(RegisterValue::as_sir)
             .ok_or(InterpError::MissingRegister(id))
@@ -1967,7 +1968,7 @@ impl Registers {
 
     /// The value of register `id` if it is a fully known two-state value
     /// of at most 64 bits, kept without a SIR value.
-    pub(crate) fn get_small(&self, id: RegisterId) -> Result<Option<u64>, InterpError> {
+    pub fn get_small(&self, id: RegisterId) -> Result<Option<u64>, InterpError> {
         self.initialized_value(id)
             .map(RegisterValue::as_small)
             .ok_or(InterpError::MissingRegister(id))
@@ -1979,7 +1980,7 @@ impl Registers {
             .ok_or(InterpError::MissingRegister(id))
     }
 
-    pub(crate) fn set(&mut self, id: RegisterId, value: SIRValue) {
+    pub fn set(&mut self, id: RegisterId, value: SIRValue) {
         if let Some(slot) = self.slots.get_mut(id.0) {
             let small = if self.small_enabled && slot.width <= 64 && value.mask.is_zero() {
                 value.payload.to_u64()

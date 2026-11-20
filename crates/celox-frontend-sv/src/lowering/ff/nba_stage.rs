@@ -29,8 +29,9 @@ pub(super) struct NbaStage {
     pub(super) sites: Option<Vec<NbaArraySite>>,
 }
 
-/// A nonblocking write of a staged unpacked array: the bit range it wrote,
-/// in the array's flattened bits, and whether it ran.
+/// A nonblocking write of a staged unpacked array: the range it wrote and
+/// whether it ran. The range is recorded as the first and last element
+/// when `elements` is set, otherwise in the array's flattened bits.
 pub(super) struct NbaArraySite {
     pub(super) lsb: SourceVarId,
     pub(super) lsb_name: String,
@@ -38,16 +39,69 @@ pub(super) struct NbaArraySite {
     pub(super) msb_name: String,
     pub(super) hit: SourceVarId,
     pub(super) hit_name: String,
+    /// The values the write records in `lsb` and `msb`.
+    pub(super) lsb_value: sv::ir::Expr,
+    pub(super) msb_value: sv::ir::Expr,
+    pub(super) elements: bool,
 }
 
-/// The number of nonblocking writes of the unpacked array `id` in `stmts`,
-/// when each is a select [`stage_nonblocking`] stages and none is in a loop,
-/// so that each runs at most once an evaluation.
-pub(super) fn array_nba_site_count(
-    stmts: &[sv::ir::Stmt],
+impl NbaArraySite {
+    /// The values a write with bounds `msb` and `lsb` records: the index
+    /// of the element both bounds lie in, when the analyzer's positions
+    /// show one, so that the merge need not divide; otherwise the bit
+    /// positions themselves.
+    pub(super) fn bounds(
+        msb: &sv::ir::ConstExpr,
+        lsb: &sv::ir::ConstExpr,
+        element_width: Option<usize>,
+        pm: &ProcModule<'_>,
+    ) -> (sv::ir::Expr, sv::ir::Expr, bool) {
+        let (constants, parameter_types) = (pm.constants, pm.parameter_types);
+        let index = element_width.and_then(|element_width| {
+            let width = i128::try_from(element_width).ok()?;
+            let (msb_base, msb_offset) =
+                split_dynamic_array_offset(msb, constants, parameter_types)?;
+            let (lsb_base, lsb_offset) =
+                split_dynamic_array_offset(lsb, constants, parameter_types)?;
+            let inside = |offset: i128| (0..width).contains(&offset);
+            if msb_base != lsb_base || !inside(msb_offset) || !inside(lsb_offset) {
+                return None;
+            }
+            let index =
+                element_index_position(msb_base, element_width, constants, parameter_types)?;
+            expr_from_const_expr(&index)
+        });
+        match index {
+            Some(index) => (index.clone(), index, true),
+            None => (
+                expr_from_const_expr(lsb).expect("a staged site's bounds are expressions"),
+                expr_from_const_expr(msb).expect("a staged site's bounds are expressions"),
+                false,
+            ),
+        }
+    }
+}
+
+/// The bounds `(msb, lsb)` of the nonblocking writes of the unpacked array
+/// `id` in `stmts`, in the order [`stage_nonblocking`] meets them, when
+/// each is a select it stages and none is in a loop, so that each runs at
+/// most once an evaluation.
+pub(super) fn array_nba_site_bounds<'a>(
+    stmts: &'a [sv::ir::Stmt],
     id: SourceVarId,
     pm: &ProcModule<'_>,
-) -> Option<usize> {
+) -> Option<Vec<(&'a sv::ir::ConstExpr, &'a sv::ir::ConstExpr)>> {
+    let mut bounds = Vec::new();
+    collect_array_nba_site_bounds(stmts, id, pm, &mut bounds)?;
+    Some(bounds)
+}
+
+fn collect_array_nba_site_bounds<'a>(
+    stmts: &'a [sv::ir::Stmt],
+    id: SourceVarId,
+    pm: &ProcModule<'_>,
+    bounds: &mut Vec<(&'a sv::ir::ConstExpr, &'a sv::ir::ConstExpr)>,
+) -> Option<()> {
     let writes = |stmt: &sv::ir::Stmt| {
         let mut found = false;
         stmt.walk(&mut |stmt| match stmt {
@@ -65,7 +119,6 @@ pub(super) fn array_nba_site_count(
         });
         found
     };
-    let mut count = 0;
     for stmt in stmts {
         match stmt {
             sv::ir::Stmt::Assign {
@@ -79,7 +132,7 @@ pub(super) fn array_nba_site_count(
                     array_slice_width: None,
                     ..
                 } if expr_from_const_expr(msb).is_some() && expr_from_const_expr(lsb).is_some() => {
-                    count += 1;
+                    bounds.push((msb, lsb));
                 }
                 _ => return None,
             },
@@ -88,25 +141,25 @@ pub(super) fn array_nba_site_count(
                 else_body,
                 ..
             } => {
-                count += array_nba_site_count(then_body, id, pm)?;
-                count += array_nba_site_count(else_body, id, pm)?;
+                collect_array_nba_site_bounds(then_body, id, pm, bounds)?;
+                collect_array_nba_site_bounds(else_body, id, pm, bounds)?;
             }
             sv::ir::Stmt::Case { items, default, .. } => {
                 for item in items {
-                    count += array_nba_site_count(&item.body, id, pm)?;
+                    collect_array_nba_site_bounds(&item.body, id, pm, bounds)?;
                 }
                 if let Some(default) = default {
-                    count += array_nba_site_count(default, id, pm)?;
+                    collect_array_nba_site_bounds(default, id, pm, bounds)?;
                 }
             }
             sv::ir::Stmt::Block { body, .. } => {
-                count += array_nba_site_count(body, id, pm)?;
+                collect_array_nba_site_bounds(body, id, pm, bounds)?;
             }
             other if writes(other) => return None,
             _ => {}
         }
     }
-    Some(count)
+    Some(())
 }
 
 /// `stmts` with every nonblocking assignment to a staged variable writing
@@ -156,8 +209,7 @@ pub(super) fn stage_nonblocking(
                 nonblocking: true,
             } if stage_of(lhs).is_some() => {
                 let stage = stage_of(lhs).unwrap();
-                if let (Some(sites), sv::ir::LValue::Select { msb, lsb, .. }) = (&stage.sites, lhs)
-                {
+                if let (Some(sites), sv::ir::LValue::Select { .. }) = (&stage.sites, lhs) {
                     let index = next_site.entry(stage.id).or_default();
                     let site = &sites[*index];
                     *index += 1;
@@ -166,14 +218,8 @@ pub(super) fn stage_nonblocking(
                         rhs,
                         nonblocking: false,
                     };
-                    out.push(record(
-                        &site.lsb_name,
-                        expr_from_const_expr(lsb).expect("a staged site's bounds are expressions"),
-                    ));
-                    out.push(record(
-                        &site.msb_name,
-                        expr_from_const_expr(msb).expect("a staged site's bounds are expressions"),
-                    ));
+                    out.push(record(&site.lsb_name, site.lsb_value.clone()));
+                    out.push(record(&site.msb_name, site.msb_value.clone()));
                     out.push(record(
                         &site.hit_name,
                         sv::ir::Expr::Literal("1'b1".to_string()),
@@ -529,15 +575,20 @@ pub(super) fn emit_array_site_merge(
     builder.emit(SIRInstruction::Mux(low, reversed, msb, lsb));
     let high = builder.alloc_bit(64, false);
     builder.emit(SIRInstruction::Mux(high, reversed, lsb, msb));
-    let width = builder.alloc_bit(64, false);
-    builder.emit(SIRInstruction::Imm(
-        width,
-        SIRValue::new(element_width as u64),
-    ));
-    let start = builder.alloc_bit(64, false);
-    builder.emit(SIRInstruction::Binary(start, low, BinaryOp::DivU, width));
-    let end = builder.alloc_bit(64, false);
-    builder.emit(SIRInstruction::Binary(end, high, BinaryOp::DivU, width));
+    let (start, end) = if site.elements {
+        (low, high)
+    } else {
+        let width = builder.alloc_bit(64, false);
+        builder.emit(SIRInstruction::Imm(
+            width,
+            SIRValue::new(element_width as u64),
+        ));
+        let start = builder.alloc_bit(64, false);
+        builder.emit(SIRInstruction::Binary(start, low, BinaryOp::DivU, width));
+        let end = builder.alloc_bit(64, false);
+        builder.emit(SIRInstruction::Binary(end, high, BinaryOp::DivU, width));
+        (start, end)
+    };
     let index = builder.alloc_bit(64, false);
     let header = builder.new_block_with(vec![index]);
     let body_index = builder.alloc_bit(64, false);

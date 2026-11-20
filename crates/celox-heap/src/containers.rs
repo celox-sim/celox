@@ -9,6 +9,27 @@ use std::sync::Arc;
 
 use crate::{Fault, Handle, Heap, Root};
 
+/// Whether heap call `code` is a container operation: it reads containers
+/// and makes new ones, and changes no container a handle already names, so
+/// a change of a container reaches the design only through the handle it
+/// stores (the module documentation). `SET_MASK` completes the container
+/// the `SET` before it made.
+pub fn is_container_value_op(code: u64) -> bool {
+    matches!(
+        code & 0xff,
+        NEW..=RSORT
+            | PATTERN
+            | HANDLE_PATTERN
+            | CONCAT
+            | SLICE
+            | WITH_DEFAULT
+            | SHUFFLE
+            | BOUND
+            | MERGE
+            | SIZED
+    )
+}
+
 pub const NEW: u64 = 80;
 pub const LEN: u64 = 81;
 pub const GET: u64 = 82;

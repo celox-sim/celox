@@ -233,9 +233,14 @@ fn compatibility_settings_flow_through_toml_target_and_cli() {
 fn shared_always_temporary_is_a_compatibility_opt_in_not_a_diagnostic() {
     let project = tempfile::tempdir().unwrap();
     let config = project.path().join("celox.toml");
+    // In four-state mode, neither `always @*` runs at time zero. When `a`
+    // changes at #1, standard semantics wake the second block through writes
+    // to the shared loop index `j` (producing `1 1`), whereas the
+    // `shared_always_temporary` opt-in gives each block its own temporary
+    // index so the second block never wakes (producing `1 0`).
     fs::write(
         project.path().join("top.sv"),
-        "module Top; reg [3:0] a = 4'b0100, b = 4'b0010; reg any_a, any_b; integer j; always @(*) begin any_a = 0; for (j = 0; j < 4; j = j + 1) any_a = any_a | a[j]; end always @(*) begin any_b = 0; for (j = 0; j < 4; j = j + 1) any_b = any_b | b[j]; end initial begin #1; $display(\"%0d %0d\", any_a, any_b); $finish; end endmodule",
+        "module Top; reg [3:0] a = 4'b0000, b = 4'b0010; reg any_a = 0, any_b = 0; integer j; always @(*) begin any_a = 0; for (j = 0; j < 4; j = j + 1) any_a = any_a | a[j]; end always @(*) begin any_b = 0; for (j = 0; j < 4; j = j + 1) any_b = any_b | b[j]; end initial begin #1 a = 4'b0100; #1 $display(\"%0d %0d\", any_a, any_b); $finish; end endmodule",
     )
     .unwrap();
     let run = |args: &[&str]| {
@@ -246,25 +251,26 @@ fn shared_always_temporary_is_a_compatibility_opt_in_not_a_diagnostic() {
             .output()
             .unwrap()
     };
-    fs::write(&config, "sources = ['top.sv']\ntop = 'Top'\n").unwrap();
+    fs::write(
+        &config,
+        "sources = ['top.sv']\ntop = 'Top'\nfour_state = true\n",
+    )
+    .unwrap();
     let standard = run(&[]);
     assert!(standard.status.success(), "{standard:?}");
-    // The shared index wakes the other block mid-loop under the standard
-    // semantics, so neither reduction completes; the compatibility
-    // temporary semantics below completes both.
-    assert_eq!(standard.stdout, b"0 0\n");
+    assert_eq!(standard.stdout, b"1 1\n");
     assert!(
         !String::from_utf8_lossy(&standard.stderr).contains("shared_always_temporary"),
         "{standard:?}"
     );
     fs::write(
         &config,
-        "sources = ['top.sv']\ntop = 'Top'\n[compatibility]\nshared_always_temporary = true\n",
+        "sources = ['top.sv']\ntop = 'Top'\nfour_state = true\n[compatibility]\nshared_always_temporary = true\n",
     )
     .unwrap();
     let compatible = run(&[]);
     assert!(compatible.status.success(), "{compatible:?}");
-    assert_eq!(compatible.stdout, b"1 1\n");
+    assert_eq!(compatible.stdout, b"1 0\n");
     assert!(
         String::from_utf8_lossy(&compatible.stderr).contains("shared_always_temporary"),
         "{compatible:?}"
@@ -273,24 +279,24 @@ fn shared_always_temporary_is_a_compatibility_opt_in_not_a_diagnostic() {
     // under [diagnostics] has no effect, with or without the opt-in.
     fs::write(
         &config,
-        "sources = ['top.sv']\ntop = 'Top'\n[diagnostics]\nshared_always_temporary = 'allow'\n",
+        "sources = ['top.sv']\ntop = 'Top'\nfour_state = true\n[diagnostics]\nshared_always_temporary = 'allow'\n",
     )
     .unwrap();
     let ignored = run(&[]);
     assert!(ignored.status.success(), "{ignored:?}");
-    assert_eq!(ignored.stdout, b"0 0\n");
+    assert_eq!(ignored.stdout, b"1 1\n");
     assert!(
         !String::from_utf8_lossy(&ignored.stderr).contains("shared_always_temporary"),
         "{ignored:?}"
     );
     fs::write(
         &config,
-        "sources = ['top.sv']\ntop = 'Top'\n[compatibility]\nshared_always_temporary = true\n[diagnostics]\nshared_always_temporary = 'error'\n",
+        "sources = ['top.sv']\ntop = 'Top'\nfour_state = true\n[compatibility]\nshared_always_temporary = true\n[diagnostics]\nshared_always_temporary = 'error'\n",
     )
     .unwrap();
     let still_compatible = run(&[]);
     assert!(still_compatible.status.success(), "{still_compatible:?}");
-    assert_eq!(still_compatible.stdout, b"1 1\n");
+    assert_eq!(still_compatible.stdout, b"1 0\n");
     assert!(
         String::from_utf8_lossy(&still_compatible.stderr).contains("shared_always_temporary"),
         "{still_compatible:?}"
