@@ -720,6 +720,12 @@ impl<'a, A: Clone + Eq + Hash> Reinterner<'a, A> {
         }
     }
 
+    /// Use a value already available in the target arena at this source node.
+    /// Install substitutions before copying any roots which depend on them.
+    pub fn substitute(&mut self, source: NodeId, target: NodeId) {
+        self.copies.insert(source, target);
+    }
+
     /// The canonical copy of `root` in `target`, its operands first.
     pub fn copy(
         &mut self,

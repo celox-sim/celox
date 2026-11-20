@@ -54,6 +54,8 @@ type SvFfBlocks = (
     FfEventVars,
     Vec<celox_design::NbaSite<SourceVarId>>,
     celox_frontend_core::symbolic::artifact::NextStateForms,
+    SLTNodeArena<SourceVarId>,
+    ff_graph::EdgeSchedule,
 );
 
 /// The variables `always_ff` event controls are sensed on.
@@ -172,6 +174,7 @@ pub(super) fn lower_ff_processes(
     module: &sv::ir::Module,
     pm: &mut procedural::ProcModule<'_>,
     ff_parts: bool,
+    drivers: &ModuleDrivers,
     next_state_options: NextStateOptions<'_>,
     ff_event_roles: &[FfEventRole],
     shared_memories: &HashSet<String>,
@@ -281,7 +284,27 @@ pub(super) fn lower_ff_processes(
         edge_only_memories(module, pm.constants, pm.parameter_types, foreign_writes);
     let window_writes = kernel_window_writes(module, foreign_writes);
     let random_seeds = process_random_seeds(module);
-    let mut next_state = next_state_options.enabled().then(|| {
+    let graph_first = next_state_options.forms && !pm.four_state && !ff_parts;
+    let mut excluded_graph_targets = HashSet::default();
+    if graph_first {
+        excluded_graph_targets.extend(window_writes.union(shared_variables).cloned());
+        // A held value is a root too. Preserve the publication order where
+        // several processes can write slices of the same object.
+        for (name, writes) in &drivers.writes {
+            let mut processes = writes.iter().filter_map(|write| write.local);
+            if let Some(first) = processes.next()
+                && processes.any(|id| id != first)
+            {
+                excluded_graph_targets.insert(name.clone());
+            }
+        }
+    }
+    let mut procedural_triggers = HashSet::default();
+    let mut graph = ff_graph::FfGraph::default();
+    let measure_forms = next_state_options.report.is_some()
+        || (next_state_options.forms
+            && tracing::enabled!(target: "celox::next_state", tracing::Level::INFO));
+    let mut next_state = measure_forms.then(|| {
         ff_next_state::NextStateReport::new(&specialization(module, pm), next_state_options.report)
     });
     for ((index, process), events) in module.ff_processes().iter().enumerate().zip(process_events) {
@@ -301,7 +324,51 @@ pub(super) fn lower_ff_processes(
         }
         let sites_before = pm.runtime.event_sites.len();
         let extern_calls_before = pm.externs.calls;
-        let clock = inferred_clock(pm, process);
+        let mut lower_procedural = |pm: &mut procedural::ProcModule<'_>| {
+            let clock = inferred_clock(pm, process);
+            let units = ff::Ff::new(pm, random_seeds[&(0, index)])
+                .with_sparse_memories(shared_memories)
+                .with_shared_variables(shared_variables)
+                .with_sparse_candidates(&edge_memories)
+                .with_window_writes(&window_writes)
+                .with_inferred_clock(clock)
+                .lower_process(process.body())?;
+            if let Some(report) = &mut next_state {
+                report.attempt(
+                    pm,
+                    process.body(),
+                    &trigger_set,
+                    ff_next_state::ImperativeUnits {
+                        eval: &units.eval,
+                        apply: &units.apply,
+                        staged: &units.staged,
+                    },
+                );
+            }
+            Ok::<_, sv::AnalyzerError>(units)
+        };
+        if graph_first
+            && graph
+                .try_add(pm, &trigger_set, process.body(), &excluded_graph_targets)
+                .is_some()
+        {
+            if measure_forms {
+                // The diagnostic checks the graph against a separate lowering.
+                let checkpoint = pm.checkpoint();
+                lower_procedural(pm)?;
+                pm.rollback(checkpoint);
+            }
+            continue;
+        }
+        procedural_triggers.insert(trigger_set.clone());
+        graph.flush(
+            pm,
+            &trigger_set,
+            &mut eval_only_ff_blocks,
+            &mut apply_ff_blocks,
+            &mut active_ff_blocks,
+            &mut nba_ff_blocks,
+        );
         let ff::FfProcessUnits {
             eval: eval_only,
             apply,
@@ -310,25 +377,7 @@ pub(super) fn lower_ff_processes(
             targets,
             staged,
             delayed_sites,
-        } = ff::Ff::new(pm, random_seeds[&(0, index)])
-            .with_sparse_memories(shared_memories)
-            .with_shared_variables(shared_variables)
-            .with_sparse_candidates(&edge_memories)
-            .with_window_writes(&window_writes)
-            .with_inferred_clock(clock)
-            .lower_process(process.body())?;
-        if let Some(report) = &mut next_state {
-            report.attempt(
-                pm,
-                process.body(),
-                &trigger_set,
-                ff_next_state::ImperativeUnits {
-                    eval: &eval_only,
-                    apply: &apply,
-                    staged: &staged,
-                },
-            );
-        }
+        } = lower_procedural(pm)?;
         all_delayed_sites.extend(delayed_sites);
         repeated_writes.extend(repeated_ff_writes(&eval_only, &staged));
         // A process without writes still runs for what it hands to the host:
@@ -356,10 +405,26 @@ pub(super) fn lower_ff_processes(
         insert_or_merge_ff_unit(&mut active_ff_blocks, trigger_set.clone(), active);
         insert_or_merge_ff_unit(&mut nba_ff_blocks, trigger_set, nba);
     }
+    for trigger in graph.pending.keys().cloned().collect::<Vec<_>>() {
+        if !procedural_triggers.contains(&trigger) {
+            graph.forms.complete.insert(trigger.clone());
+        }
+        graph.flush(
+            pm,
+            &trigger,
+            &mut eval_only_ff_blocks,
+            &mut apply_ff_blocks,
+            &mut active_ff_blocks,
+            &mut nba_ff_blocks,
+        );
+    }
     // Every process of a trigger evaluates against the pre-edge state before
     // any of them commits (IEEE 1800-2023 10.4.2), so the combined unit runs
     // all evaluations first and all commits afterwards.
     for (trigger_set, eval_only) in &eval_only_ff_blocks {
+        if graph.schedule.contains(trigger_set) {
+            continue;
+        }
         let apply = &apply_ff_blocks[trigger_set];
         let mut eval_apply = merge_sir_eus(&[eval_only.clone(), apply.clone()]).0;
         ff::prune_unreachable_blocks(&mut eval_apply);
@@ -367,16 +432,13 @@ pub(super) fn lower_ff_processes(
     }
     // One process is the whole trigger group.
     parallel_ff_parts.retain(|_, parts| parts.len() > 1);
-    let next_state_forms = match next_state {
-        Some(report) => {
-            let forms = report.finish();
-            if next_state_options.forms {
-                forms
-            } else {
-                Default::default()
-            }
-        }
-        None => Default::default(),
+    let measured = next_state.map(|report| report.finish());
+    let (arena, next_state_forms) = if graph_first {
+        (graph.arena, graph.forms)
+    } else if next_state_options.forms {
+        measured.unwrap_or_default()
+    } else {
+        Default::default()
     };
 
     let split_commit_ff_blocks = active_ff_blocks
@@ -401,6 +463,8 @@ pub(super) fn lower_ff_processes(
         event_vars,
         all_delayed_sites,
         next_state_forms,
+        arena,
+        graph.schedule,
     ))
 }
 
@@ -424,7 +488,7 @@ fn interacts_with_host(
         })
 }
 
-fn insert_or_merge_ff_unit(
+pub(super) fn insert_or_merge_ff_unit(
     blocks: &mut HashMap<TriggerSet<SourceVarId>, ExecutionUnit<RegionedVarAddr>>,
     trigger_set: TriggerSet<SourceVarId>,
     unit: ExecutionUnit<RegionedVarAddr>,

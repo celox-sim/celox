@@ -139,18 +139,28 @@ fn outputs_are_unchanged_by_inlining() {
     assert_eq!(trace!(partitioned), expected);
 }
 
-/// Lowering the flip-flops into next-state forms and building the DAG of
-/// their domain (`SirPass::NextStateDag`) measures them and runs nothing
-/// else: the outputs are the same.
+/// Exercise the shared next-state evaluator through the normal tick and
+/// settle entry points, including a register whose D cone crosses instances.
 #[test]
-fn next_state_dags_change_nothing() {
-    let mut reference = design().build().unwrap();
-    let mut measured = design()
+fn next_state_graph_preserves_feedback_across_edges() {
+    let mut reference = design()
+        .four_state(false)
         .opt_level(OptLevel::O2)
-        .enable_pass(SirPass::NextStateDag)
+        .disable_pass(SirPass::NextStateDag)
         .build()
         .unwrap();
-    assert_eq!(trace!(measured), trace!(reference));
+    let expected = trace!(reference);
+    let graph = || {
+        design()
+            .four_state(false)
+            .opt_level(OptLevel::O2)
+            .enable_pass(SirPass::NextStateDag)
+    };
+    assert_eq!(trace!(graph().build().unwrap()), expected);
+    assert_eq!(trace!(graph().build_interpreter().unwrap()), expected);
+    assert_eq!(trace!(graph().build_cranelift().unwrap()), expected);
+    #[cfg(feature = "wasm-runtime")]
+    assert_eq!(trace!(graph().build_wasm().unwrap()), expected);
 }
 
 /// With the top ports alone observed, the nets inside the instances and the

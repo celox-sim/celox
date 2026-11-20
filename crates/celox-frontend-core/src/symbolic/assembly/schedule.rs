@@ -147,7 +147,22 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         expand_design(symbolic, flatten_timing, trace_opts, &mut trace)?;
     let (mut logic, mut units, mut parallel_ff_units, mut split_commits) =
         relocate_design(&design, parallel, flatten_timing, trace_opts, &mut trace)?;
-    let next_state_forms = relocate_next_state(&design, &mut logic.global_arena)?;
+    let graph_clocks = if fused_ff_factory.is_none()
+        && !four_state
+        && !parallel.enabled()
+        && units.processes.is_empty()
+        && units.eval_apply_ffs.len() <= MERGED_COMB_APPLY_EVENTS
+    {
+        complete_graph_clocks(&design)
+    } else {
+        Default::default()
+    };
+    let measure_graphs = tracing::enabled!(target: "celox::next_state", tracing::Level::INFO);
+    let next_state_forms = if measure_graphs || !graph_clocks.is_empty() {
+        relocate_next_state(&design, &mut logic.global_arena)?
+    } else {
+        BTreeMap::new()
+    };
     let variables = variable_shapes(&design);
     let (counted, declaration_probes, occurrence_probes) = instrument_occurrences(
         &design,
@@ -242,14 +257,34 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         &occurrence_probes,
         &declaration_probes,
     )?;
-    // Measured only, for now: no unit runs a DAG yet. The DAGs are only
-    // logged, so their arenas are freed here instead of living through
-    // scheduling.
-    drop(next_state_dags(&next_state_forms, &logic));
+    // Release the diagnostic DAGs before scheduling the combinational paths.
+    if measure_graphs {
+        drop(next_state_dags(&next_state_forms, &logic));
+    }
     let parallel_comb_blocks = parallel.enabled().then(|| logic.comb_blocks.clone());
     // The flag object of a partitioned settle is declared once the
     // partitions are known; reserve its address now.
     let settle_flags = plan_settle_flags(parallel, &design, &logic, &units, &counted, &clock_nets);
+    let graph_ticks = if settle_flags.is_none()
+        && counted.is_empty()
+        && occurrence_probes.is_empty()
+        && declaration_probes.is_empty()
+        && !logic.comb_blocks.is_empty()
+        && logic.comb_observers.is_empty()
+        && ignored_loops.is_empty()
+        && true_loops.is_empty()
+    {
+        fused_graph_ticks(
+            &graph_clocks,
+            &next_state_forms,
+            &logic,
+            &var_widths,
+            &design.unpacked_element_widths,
+            &units.apply_ffs,
+        )
+    } else {
+        FfUnits::default()
+    };
     let sched_start = flatten_timing.then(std::time::Instant::now);
     let schedule = match scheduler::sort_with_unpacked_element_widths(
         logic.comb_blocks,
@@ -320,7 +355,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
     // a partitioned settle keeps what its skipped partitions stored.
     let merge_comb_apply =
         units.eval_apply_ffs.len() <= MERGED_COMB_APPLY_EVENTS && settle_flags.is_none();
-    let (eval_comb_apply_ffs, fused_direct_ff_writes) = schedule_fused_ffs(
+    let (mut eval_comb_apply_ffs, fused_direct_ff_writes) = schedule_fused_ffs(
         fused_ff_factory,
         fused_inputs,
         &mut units.eval_apply_ffs,
@@ -329,6 +364,8 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         units.next_runtime_error_code,
         flatten_timing,
     )?;
+
+    eval_comb_apply_ffs.extend(graph_ticks);
 
     if let Some(t) = trace
         && trace_opts.scheduled_units

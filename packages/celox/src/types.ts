@@ -417,9 +417,8 @@ export interface SimulatorOptions {
 	 * scheduler_callees (a native image's compiled scheduler calls its larger
 	 * bodies as functions of their own, which compile in parallel; on at
 	 * every level, "-sir:scheduler_callees" inlines them), next_state_dag
-	 * (SystemVerilog: lower clocked processes into next-state forms too and
-	 * build the next-state DAG of each clock domain, a measure for now; off
-	 * unless enabled with "+sir:next_state_dag")
+	 * (schedule eligible two-state SystemVerilog registers from the
+	 * combinational dataflow graph, enabled at O2)
 	 *
 	 * @example ["-sir:reschedule", "+sir:gvn"]
 	 */
