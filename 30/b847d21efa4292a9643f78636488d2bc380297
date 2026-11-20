@@ -1,1 +1,1 @@
-Address follow-up review with context-sized muxes, type-only pattern queries, packed aggregate array widths and conditional delimiters. Include independent review fixes for effect guards and evaluation in loop, initializer and timing paths.
+Fix grouped constant expressions, nested wait predicates and filtered case growth. Verify wait fallback scopes and preserve filter truth conversion.
