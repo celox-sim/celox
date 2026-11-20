@@ -344,6 +344,7 @@ endmodule
     }
     check!(builder().build_interpreter().unwrap(), "interpreter");
     check!(builder().build().unwrap(), "default backend");
+    #[cfg(feature = "cranelift")]
     check!(builder().build_cranelift().unwrap(), "cranelift");
     #[cfg(target_arch = "x86_64")]
     check!(builder().build_native().unwrap(), "native");
