@@ -482068,6 +482068,216 @@ window.BENCHMARK_DATA = {
           "xezimRelease": "0.11.4",
           "run": "https://github.com/celox-sim/celox/actions/runs/44750098657"
         }
+      },
+      {
+        "commit": {
+          "id": "d9f6f5f961d907371ddbaa583000d6524a077d4a",
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "message": "feat(cli): add interactive simulation with Surfer (#4471)",
+          "timestamp": "2026-11-20T13:51:27Z",
+          "url": "https://github.com/celox-sim/celox/commit/d9f6f5f961d907371ddbaa583000d6524a077d4a"
+        },
+        "date": 1795185551413,
+        "cpu": "AMD EPYC 9V74",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "rtlmeter-celox-native/rtlmeter_e906_cmark_v1_x64_two-state_sim",
+            "unit": "us",
+            "value": 5860410.376,
+            "extra": "{\"caseSpec\":{\"design\":\"XuanTie-E906\",\"test\":\"cmark\",\"payload\":\"CoreMark 1.0\",\"maxCycles\":600000,\"args\":[\"+iterations=1\"],\"inputFiles\":[\"tests/cmark/case.pat\"]},\"contract\":\"rtlmeter-steady-state-v1\",\"rtlmeter\":\"4fdd6c3fd154e9b99d3a9d713cf3f4977e284f94\",\"state\":\"two-state\",\"cycles\":356423,\"maxCycles\":600000,\"samples\":[42074734295,43592219414,43912203039],\"simSamples\":[5798765448,5860410376,5976318090],\"cyclesPerSec\":60818.78,\"throughputKhz\":60.82,\"configuration\":{\"celox\":\"native O2; threads=1; steady-state simulation\",\"verilator\":\"--binary --timing --assert; -O3; C++ -O3; -j1; steady-state simulation\",\"xezim\":\"release default VM; persistent caches disabled; full four-state; --verbose; --max-time 60s\"},\"versions\":{\"celox\":\"celox 0.14.0\",\"verilator\":\"Verilator 5.054 2026-11-01 rev vUNKNOWN-built20261120-bbb60a4\",\"xezim\":\"xezim version 0.11.4\\ngit unknown (unknown)\\ntag unknown\"},\"binarySha256\":{\"celox\":\"1fb036aa144e1bdbcb33345ff2c0dde189013fe70626e464b5278c5fb736dbc0\",\"verilator\":\"d74a5f9cbe9665135fcdcfe2415894e26951d98eb5f01621c38955e6845003d9\",\"xezim\":\"afbe25c3906450a35335fb65da2ff6212f0b3e654a0f16c11a2f28a7c29d4e65\"},\"sourceSha256\":\"b766f95e043e89715cbc466d69e95fd042f1ea9fc846f5d97712184665ad4b1d\",\"run\":\"https://github.com/celox-sim/celox/actions/runs/44750098657\"}"
+          },
+          {
+            "name": "rtlmeter-verilator/rtlmeter_e906_cmark_v1_x64_two-state_sim",
+            "unit": "us",
+            "value": 3046545.829,
+            "extra": "{\"caseSpec\":{\"design\":\"XuanTie-E906\",\"test\":\"cmark\",\"payload\":\"CoreMark 1.0\",\"maxCycles\":600000,\"args\":[\"+iterations=1\"],\"inputFiles\":[\"tests/cmark/case.pat\"]},\"contract\":\"rtlmeter-steady-state-v1\",\"rtlmeter\":\"4fdd6c3fd154e9b99d3a9d713cf3f4977e284f94\",\"state\":\"two-state\",\"cycles\":356424,\"maxCycles\":600000,\"samples\":[69081223628,70979251536,72204991008],\"simSamples\":[2878627117,3046545829,3061063343],\"cyclesPerSec\":116992.82,\"throughputKhz\":116.99,\"configuration\":{\"celox\":\"native O2; threads=1; steady-state simulation\",\"verilator\":\"--binary --timing --assert; -O3; C++ -O3; -j1; steady-state simulation\",\"xezim\":\"release default VM; persistent caches disabled; full four-state; --verbose; --max-time 60s\"},\"versions\":{\"celox\":\"celox 0.14.0\",\"verilator\":\"Verilator 5.054 2026-11-01 rev vUNKNOWN-built20261120-bbb60a4\",\"xezim\":\"xezim version 0.11.4\\ngit unknown (unknown)\\ntag unknown\"},\"binarySha256\":{\"celox\":\"1fb036aa144e1bdbcb33345ff2c0dde189013fe70626e464b5278c5fb736dbc0\",\"verilator\":\"d74a5f9cbe9665135fcdcfe2415894e26951d98eb5f01621c38955e6845003d9\",\"xezim\":\"afbe25c3906450a35335fb65da2ff6212f0b3e654a0f16c11a2f28a7c29d4e65\"},\"sourceSha256\":\"b766f95e043e89715cbc466d69e95fd042f1ea9fc846f5d97712184665ad4b1d\",\"run\":\"https://github.com/celox-sim/celox/actions/runs/44750098657\"}"
+          },
+          {
+            "name": "rtlmeter-celox-native/rtlmeter_e906_cmark_v1_x64_four-state_sim",
+            "unit": "us",
+            "value": 18568507.006,
+            "extra": "{\"caseSpec\":{\"design\":\"XuanTie-E906\",\"test\":\"cmark\",\"payload\":\"CoreMark 1.0\",\"maxCycles\":600000,\"args\":[\"+iterations=1\"],\"inputFiles\":[\"tests/cmark/case.pat\"]},\"contract\":\"rtlmeter-steady-state-v1\",\"rtlmeter\":\"4fdd6c3fd154e9b99d3a9d713cf3f4977e284f94\",\"state\":\"four-state\",\"cycles\":356423,\"maxCycles\":600000,\"samples\":[73449065785,73707841122,76477871546],\"simSamples\":[18296092811,18568507006,18758961684],\"cyclesPerSec\":19195.03,\"throughputKhz\":19.2,\"configuration\":{\"celox\":\"native O2; threads=1; steady-state simulation\",\"verilator\":\"--binary --timing --assert; -O3; C++ -O3; -j1; steady-state simulation\",\"xezim\":\"release default VM; persistent caches disabled; full four-state; --verbose; --max-time 60s\"},\"versions\":{\"celox\":\"celox 0.14.0\",\"verilator\":\"Verilator 5.054 2026-11-01 rev vUNKNOWN-built20261120-bbb60a4\",\"xezim\":\"xezim version 0.11.4\\ngit unknown (unknown)\\ntag unknown\"},\"binarySha256\":{\"celox\":\"1fb036aa144e1bdbcb33345ff2c0dde189013fe70626e464b5278c5fb736dbc0\",\"verilator\":\"d74a5f9cbe9665135fcdcfe2415894e26951d98eb5f01621c38955e6845003d9\",\"xezim\":\"afbe25c3906450a35335fb65da2ff6212f0b3e654a0f16c11a2f28a7c29d4e65\"},\"sourceSha256\":\"b766f95e043e89715cbc466d69e95fd042f1ea9fc846f5d97712184665ad4b1d\",\"run\":\"https://github.com/celox-sim/celox/actions/runs/44750098657\"}"
+          },
+          {
+            "name": "rtlmeter-xezim/rtlmeter_e906_cmark_v1_x64_four-state_sim",
+            "unit": "us",
+            "value": 34701400,
+            "extra": "{\"caseSpec\":{\"design\":\"XuanTie-E906\",\"test\":\"cmark\",\"payload\":\"CoreMark 1.0\",\"maxCycles\":600000,\"args\":[\"+iterations=1\"],\"inputFiles\":[\"tests/cmark/case.pat\"]},\"contract\":\"rtlmeter-steady-state-v1\",\"rtlmeter\":\"4fdd6c3fd154e9b99d3a9d713cf3f4977e284f94\",\"state\":\"four-state\",\"cycles\":356423,\"maxCycles\":600000,\"samples\":[35752899222,35868038761,35951071292],\"simSamples\":[34609200000,34701400000,34821200000],\"cyclesPerSec\":10271.14,\"throughputKhz\":10.27,\"configuration\":{\"celox\":\"native O2; threads=1; steady-state simulation\",\"verilator\":\"--binary --timing --assert; -O3; C++ -O3; -j1; steady-state simulation\",\"xezim\":\"release default VM; persistent caches disabled; full four-state; --verbose; --max-time 60s\"},\"versions\":{\"celox\":\"celox 0.14.0\",\"verilator\":\"Verilator 5.054 2026-11-01 rev vUNKNOWN-built20261120-bbb60a4\",\"xezim\":\"xezim version 0.11.4\\ngit unknown (unknown)\\ntag unknown\"},\"binarySha256\":{\"celox\":\"1fb036aa144e1bdbcb33345ff2c0dde189013fe70626e464b5278c5fb736dbc0\",\"verilator\":\"d74a5f9cbe9665135fcdcfe2415894e26951d98eb5f01621c38955e6845003d9\",\"xezim\":\"afbe25c3906450a35335fb65da2ff6212f0b3e654a0f16c11a2f28a7c29d4e65\"},\"sourceSha256\":\"b766f95e043e89715cbc466d69e95fd042f1ea9fc846f5d97712184665ad4b1d\",\"run\":\"https://github.com/celox-sim/celox/actions/runs/44750098657\"}"
+          }
+        ],
+        "rtlmeter": {
+          "case": "e906",
+          "results": [
+            {
+              "engine": "celox",
+              "stateModel": "two-state",
+              "status": "passed",
+              "samples": [
+                {
+                  "status": "passed",
+                  "processNs": 43592219414,
+                  "simNs": 5798765448,
+                  "cycles": 356423,
+                  "cyclesPerSec": 61465.32,
+                  "throughputKhz": 61.47
+                },
+                {
+                  "status": "passed",
+                  "processNs": 43912203039,
+                  "simNs": 5976318090,
+                  "cycles": 356423,
+                  "cyclesPerSec": 59639.23,
+                  "throughputKhz": 59.64
+                },
+                {
+                  "status": "passed",
+                  "processNs": 42074734295,
+                  "simNs": 5860410376,
+                  "cycles": 356423,
+                  "cyclesPerSec": 60818.78,
+                  "throughputKhz": 60.82
+                }
+              ],
+              "experimental": false,
+              "probe": "passed",
+              "negativeControl": "passed"
+            },
+            {
+              "engine": "verilator",
+              "stateModel": "two-state",
+              "status": "passed",
+              "samples": [
+                {
+                  "status": "passed",
+                  "processNs": 72204991008,
+                  "simNs": 3046545829,
+                  "cycles": 356424,
+                  "cyclesPerSec": 116992.82,
+                  "throughputKhz": 116.99
+                },
+                {
+                  "status": "passed",
+                  "processNs": 69081223628,
+                  "simNs": 3061063343,
+                  "cycles": 356424,
+                  "cyclesPerSec": 116437.97,
+                  "throughputKhz": 116.44
+                },
+                {
+                  "status": "passed",
+                  "processNs": 70979251536,
+                  "simNs": 2878627117,
+                  "cycles": 356424,
+                  "cyclesPerSec": 123817.36,
+                  "throughputKhz": 123.82
+                }
+              ],
+              "experimental": false,
+              "probe": "passed",
+              "negativeControl": "passed"
+            },
+            {
+              "engine": "xezim",
+              "stateModel": "two-state",
+              "status": "unsupported",
+              "samples": [],
+              "experimental": false,
+              "reason": "No global two-state mode; XEZIM_INIT_ZERO only changes initialization"
+            },
+            {
+              "engine": "celox",
+              "stateModel": "four-state",
+              "status": "passed",
+              "samples": [
+                {
+                  "status": "passed",
+                  "processNs": 76477871546,
+                  "simNs": 18296092811,
+                  "cycles": 356423,
+                  "cyclesPerSec": 19480.83,
+                  "throughputKhz": 19.48
+                },
+                {
+                  "status": "passed",
+                  "processNs": 73449065785,
+                  "simNs": 18758961684,
+                  "cycles": 356423,
+                  "cyclesPerSec": 19000.15,
+                  "throughputKhz": 19
+                },
+                {
+                  "status": "passed",
+                  "processNs": 73707841122,
+                  "simNs": 18568507006,
+                  "cycles": 356423,
+                  "cyclesPerSec": 19195.03,
+                  "throughputKhz": 19.2
+                }
+              ],
+              "experimental": false,
+              "probe": "passed",
+              "negativeControl": "passed"
+            },
+            {
+              "engine": "verilator",
+              "stateModel": "four-state",
+              "status": "failed",
+              "samples": [],
+              "experimental": true,
+              "probe": "failed",
+              "reason": "State-model probe failed; see probe logs"
+            },
+            {
+              "engine": "xezim",
+              "stateModel": "four-state",
+              "status": "passed",
+              "samples": [
+                {
+                  "status": "passed",
+                  "processNs": 35752899222,
+                  "simNs": 34609200000,
+                  "cycles": 356423,
+                  "cyclesPerSec": 10298.5,
+                  "throughputKhz": 10.3
+                },
+                {
+                  "status": "passed",
+                  "processNs": 35868038761,
+                  "simNs": 34701400000,
+                  "cycles": 356423,
+                  "cyclesPerSec": 10271.14,
+                  "throughputKhz": 10.27
+                },
+                {
+                  "status": "passed",
+                  "processNs": 35951071292,
+                  "simNs": 34821200000,
+                  "cycles": 356423,
+                  "cyclesPerSec": 10235.8,
+                  "throughputKhz": 10.24
+                }
+              ],
+              "experimental": false,
+              "probe": "passed",
+              "negativeControl": "passed"
+            }
+          ],
+          "versions": {
+            "celox": "celox 0.14.0",
+            "verilator": "Verilator 5.054 2026-11-01 rev vUNKNOWN-built20261120-bbb60a4",
+            "xezim": "xezim version 0.11.4\ngit unknown (unknown)\ntag unknown"
+          },
+          "xezimRelease": "0.11.4",
+          "run": "https://github.com/celox-sim/celox/actions/runs/44750098657"
+        }
       }
     ]
   }
