@@ -1,3 +1,5 @@
+Address review feedback on casez constant expressions, aggregate scrutinee types, lazy predicate evaluation and loop test paths. Rebase on master for validation.
+
 Revision history for #4225:
 
 rev 9 (content) 2026-11-20 09:44 UTC
