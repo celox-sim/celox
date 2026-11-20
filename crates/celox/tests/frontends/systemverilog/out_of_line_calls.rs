@@ -6052,3 +6052,49 @@ endmodule
         }
     }
 }
+
+#[test]
+fn out_of_line_default_arguments_preserve_nonblocking_assignments() {
+    // Nested omitted default arguments evaluated inside out-of-line function
+    // units still propagate suspension/NBA requirements so nonblocking updates
+    // commit in the NBA region rather than blocking immediately.
+    let source = r#"`timescale 1ns/1ns
+module Top(output logic default_q, output logic default_mirror, output logic explicit_q);
+  bit d = 1;
+  function automatic logic sample_default();
+    default_mirror <= d;
+    return d;
+  endfunction
+  function automatic logic inner(input logic arg = sample_default());
+    return arg;
+  endfunction
+  function automatic logic outer(input logic arg = inner());
+    return arg;
+  endfunction
+  initial begin
+    default_mirror = 0;
+    explicit_q <= outer(d);
+    default_q <= outer() ^ default_mirror;
+    #1;
+    if (default_q !== 1 || default_mirror !== 1 || explicit_q !== 1)
+      $fatal(1, "t1 mismatch");
+    d = 0;
+    explicit_q <= outer(d);
+    default_q <= outer() ^ default_mirror;
+    #1;
+    if (default_q !== 1 || default_mirror !== 0 || explicit_q !== 0)
+      $fatal(1, "t2 mismatch");
+    $finish;
+  end
+endmodule
+"#;
+    for four_state in [false, true] {
+        let mut sim =
+            Simulation::from_sv_sources(vec![(source, Path::new("default-nba.sv"))], "Top")
+                .four_state(four_state)
+                .force_out_of_line_calls()
+                .build()
+                .unwrap_or_else(|error| panic!("{error}"));
+        sim.run_until(5).unwrap();
+    }
+}
