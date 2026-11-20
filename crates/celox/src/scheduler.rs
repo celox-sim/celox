@@ -227,6 +227,47 @@ pub(crate) fn enable_native_services(program: &mut LaidOutProgram) {
     }
 }
 
+/// Whether the compiled scheduler ends each of its slots with a call of its
+/// native services (`native_io::SLOT_END`): one that matures the deferred
+/// assertion reports of the slot (IEEE 1800-2023 16.4.1: the observed ones
+/// in its Observed region, then the final ones in its Postponed region) and
+/// asks to return to the host when the heap holds a fault or wants a
+/// collection. With it a run spans many slots of a design with deferred
+/// assertions or heap handles, which the host otherwise ends at every slot.
+/// The reports it matures are those of combinational processes and none of
+/// them is fatal; other designs keep the host's slot ends.
+pub(crate) fn native_slot_end(program: &crate::ir::RuntimeProgram) -> bool {
+    let schema = &program.runtime_schema;
+    if !cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen")))
+        || !schema
+            .extern_functions
+            .iter()
+            .any(|function| function.name == crate::simulator::native_io::SYMBOL)
+    {
+        return false;
+    }
+    let observed: HashSet<u32> = schema
+        .comb_observers
+        .iter()
+        .map(|observer| observer.site_id)
+        .collect();
+    let mut deferred = schema
+        .runtime_event_sites
+        .iter()
+        .enumerate()
+        .filter(|(_, site)| site.deferred.is_some())
+        .peekable();
+    let has_deferred = deferred.peek().is_some();
+    let maturable =
+        deferred.all(|(index, site)| observed.contains(&(index as u32)) && !site.kind.is_fatal());
+    let handles = program
+        .design
+        .state_objects
+        .values()
+        .any(|metadata| metadata.value_kind != celox_design::ValueKind::Bits);
+    maturable && (has_deferred || handles)
+}
+
 /// Declare the native services of `program`, unless it already does.
 pub(crate) fn require_native_services(program: &mut LaidOutProgram) {
     let schema = &mut program.runtime.runtime_schema;
@@ -335,7 +376,23 @@ pub(crate) fn attach(program: &mut LaidOutProgram, wiring_clocks: bool, outline:
                     || (cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen")))
                         && plan.service_function.is_some()
                         && program.runtime.runtime_schema.scheduler.is_some()))
-                .then(|| generate_unit(&plan, program, &schema.slots, outline, &mut callees));
+                .then(|| {
+                    if outline && !program.settle_instrumented {
+                        // Instrument the settle where it is, as the
+                        // scheduler would its inlined copy: it then calls
+                        // the settle's own code instead of a copy.
+                        let instrumented = plan.settle_instrumentation(program, &schema.slots);
+                        for (unit, instrumented) in
+                            program.sir.eval_comb.iter_mut().zip(instrumented)
+                        {
+                            if let Some(instrumented) = instrumented {
+                                *unit = instrumented;
+                            }
+                        }
+                        program.settle_instrumented = true;
+                    }
+                    generate_unit(&plan, program, &schema.slots, outline, &mut callees)
+                });
                 let tracked = plan.tracked();
                 let kernel_events = plan
                     .kernels
@@ -760,6 +817,8 @@ struct WaitCheck<'a> {
 
 #[cfg(test)]
 mod test_support;
+#[cfg(test)]
+pub(crate) use nba::observations_match_for_test;
 #[cfg(test)]
 pub(crate) use test_support::*;
 

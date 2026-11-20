@@ -8,6 +8,7 @@ pub(super) fn lower_module(
     four_state: bool,
     implicit_nets_allowed: bool,
     ff_parts: bool,
+    next_state: NextStateOptions<'_>,
     warnings: &mut Vec<crate::warning::PendingWarning>,
     force_signals: &[String],
     level_lists: LevelLists<'_>,
@@ -22,6 +23,7 @@ pub(super) fn lower_module(
         four_state,
         implicit_nets_allowed,
         ff_parts,
+        next_state,
         warnings,
         force_signals,
         level_lists,
@@ -98,6 +100,7 @@ fn lower_module_with_overrides(
     four_state: bool,
     implicit_nets_allowed: bool,
     ff_parts: bool,
+    next_state: NextStateOptions<'_>,
     warnings: &mut Vec<crate::warning::PendingWarning>,
     force_signals: &[String],
     level_lists: LevelLists<'_>,
@@ -117,11 +120,22 @@ fn lower_module_with_overrides(
                 && demoted.contains(&process.creation_order())
         })
     {
-        module = std::borrow::Cow::Owned(module.into_owned().run_comb_processes_as_processes(
-            |_, process| demoted.contains(&process.creation_order()),
-        ));
+        module = std::borrow::Cow::Owned(
+            module
+                .into_owned()
+                .run_comb_processes_as_processes(!four_state, |_, process| {
+                    demoted.contains(&process.creation_order())
+                }),
+        );
     }
-    let sharing = share_always_variables(&module, &constants, &parameter_types, shared, warnings);
+    let sharing = share_always_variables(
+        &module,
+        &constants,
+        &parameter_types,
+        four_state,
+        shared,
+        warnings,
+    );
     let shared_process_variables = match sharing {
         Some((shared_module, names)) => {
             module = std::borrow::Cow::Owned(shared_module);
@@ -135,7 +149,7 @@ fn lower_module_with_overrides(
         module = std::borrow::Cow::Owned(
             module
                 .into_owned()
-                .run_comb_processes_as_processes(|index, _| level.contains(&index)),
+                .run_comb_processes_as_processes(!four_state, |index, _| level.contains(&index)),
         );
     }
     // The rewrite visits the edge processes in order, once each.
@@ -638,6 +652,7 @@ fn lower_module_with_overrides(
             parallel_ff_parts,
             event_vars,
             delayed_sites,
+            next_state_forms,
         ),
         mut runtime_event_sites,
         mut runtime_errors,
@@ -664,6 +679,7 @@ fn lower_module_with_overrides(
             module,
             &mut pm,
             ff_parts,
+            next_state,
             &ff_event_roles,
             &shared_memories,
             foreign_writes,
@@ -767,6 +783,7 @@ fn lower_module_with_overrides(
             time_slot: name_to_id.get(TIME_SLOT).copied(),
             sample_shadows: Vec::new(),
             initial_copies: Vec::new(),
+            next_state: next_state_forms,
         },
         variables,
         port_order,

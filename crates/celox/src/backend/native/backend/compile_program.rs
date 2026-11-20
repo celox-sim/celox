@@ -80,14 +80,21 @@ pub(super) fn compile_program_with_outlining_threshold(
     // settle calls the settle's own code instead: the whole settle, or its
     // chunk when the settle compiles in chunks.
     let callee_base = extern_count + sir.sir.functions.len();
+    // The scheduler runs a unit without the typed shadows of its wide
+    // commits, which only its analyses read; the settle's own code keeps
+    // them, and runs the same.
+    let is_settle_unit = |unit: &ExecutionUnit<RegionedAbsoluteAddr>,
+                          callee: &ExecutionUnit<RegionedAbsoluteAddr>| {
+        unit == callee || *crate::settle::without_shadow_commits(unit) == *callee
+    };
     let settle_callees: Vec<Option<usize>> = sir
         .scheduler_callees
         .iter()
         .map(|callee| match &sir.sir.eval_comb[..] {
-            [comb] if comb == callee => Some(0),
+            [comb] if is_settle_unit(comb, callee) => Some(0),
             units if split_comb => units
                 .iter()
-                .position(|unit| unit == callee)
+                .position(|unit| is_settle_unit(unit, callee))
                 .map(|chunk| chunk + 1),
             _ => None,
         })

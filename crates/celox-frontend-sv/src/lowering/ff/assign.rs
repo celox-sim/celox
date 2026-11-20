@@ -343,6 +343,19 @@ impl Ff<'_, '_> {
                 ) {
                     return self.write_element(id, element_width, &offset, access, arena, node);
                 }
+                // A bit at a run-time position within a run-time element of a
+                // memory published sparsely: only its element is written.
+                if self.writes.sparse_memories.contains(&id)
+                    && let Some((_, element_width, offset)) = dynamic_array_bit_lvalue(
+                        lhs,
+                        self.m.variables,
+                        self.m.name_to_id,
+                        constants,
+                        parameter_types,
+                    )
+                {
+                    return self.write_element_bit(id, element_width, &offset, arena, node);
+                }
                 if let Some(write) = dynamic_packed_write(
                     lhs,
                     self.m.variables,
@@ -685,6 +698,60 @@ impl Ff<'_, '_> {
         )
     }
 
+    /// Write one bit at flattened run-time position `offset` of a sparsely
+    /// published unpacked array of `element_width`-bit elements (see
+    /// [`dynamic_array_bit_lvalue`]). A position outside the array, which
+    /// an out-of-range or unknown index of either dimension gives, writes
+    /// nothing (IEEE 1800-2023 7.4.6, 11.5.1).
+    fn write_element_bit(
+        &mut self,
+        id: SourceVarId,
+        element_width: usize,
+        offset: &sv::ir::ConstExpr,
+        arena: &mut SLTNodeArena<SourceVarId>,
+        node: NodeId,
+    ) -> Result<(), sv::AnalyzerError> {
+        let offset = expr_from_select_position(offset, self.m.constants, self.m.parameter_types)
+            .ok_or_else(|| unsupported("dynamic assignment index"))?;
+        let offset = self.propagate(&offset);
+        let (position, _) = lower_expr_with_context(
+            &offset,
+            self.m.variables,
+            self.m.name_to_id,
+            self.m.constants,
+            self.m.parameter_types,
+            arena,
+            None,
+            None,
+        )
+        .ok_or_else(|| unsupported("dynamic assignment index"))?;
+        let position = coerce_node_width(arena, position, Some(64), false).map_err(slt_error)?;
+        let stride = slt_constant(arena, BigUint::from(element_width), 64, false)?;
+        let index = arena
+            .alloc(SLTNode::Binary(position, BinaryOp::DivU, stride))
+            .map_err(slt_error)?;
+        let bit = arena
+            .alloc(SLTNode::Binary(position, BinaryOp::RemU, stride))
+            .map_err(slt_error)?;
+        let element_count = self.m.var(id).width / element_width;
+        let (index, valid) = dynamic_array_index_guard_slt(arena, index, element_count)
+            .ok_or_else(|| unsupported("dynamic assignment index"))?;
+        let index = self.lower_slt(arena, index)?;
+        let bit = self.lower_slt(arena, bit)?;
+        let valid = self.lower_slt(arena, valid)?;
+        let value = self.lower_slt(arena, node)?;
+        let offset = SIROffset::Element {
+            index,
+            element_width,
+            bit_offset: 0,
+            dynamic_bit_offset: Some(bit),
+        };
+        self.when(valid, |this| {
+            this.store(id, offset, 1, value);
+            Ok(())
+        })
+    }
+
     /// Write one element (or a part of it) of an unpacked array at a run-time
     /// index. An unknown or out-of-range index writes nothing.
     pub(super) fn write_element(
@@ -697,10 +764,20 @@ impl Ff<'_, '_> {
         node: NodeId,
     ) -> Result<(), sv::AnalyzerError> {
         let target_width = access.msb - access.lsb + 1;
-        let offset = expr_from_select_position(offset, self.m.constants, self.m.parameter_types)
-            .ok_or_else(|| unsupported("dynamic assignment index"))?;
+        let element_index = element_index_position(
+            offset,
+            element_width,
+            self.m.constants,
+            self.m.parameter_types,
+        );
+        let offset = expr_from_select_position(
+            element_index.as_ref().unwrap_or(offset),
+            self.m.constants,
+            self.m.parameter_types,
+        )
+        .ok_or_else(|| unsupported("dynamic assignment index"))?;
         let offset = self.propagate(&offset);
-        let (bit_offset, _) = lower_expr_with_context(
+        let (position, _) = lower_expr_with_context(
             &offset,
             self.m.variables,
             self.m.name_to_id,
@@ -711,12 +788,15 @@ impl Ff<'_, '_> {
             None,
         )
         .ok_or_else(|| unsupported("dynamic assignment index"))?;
-        let bit_offset =
-            coerce_node_width(arena, bit_offset, Some(64), false).map_err(slt_error)?;
-        let stride = slt_constant(arena, BigUint::from(element_width), 64, false)?;
-        let index = arena
-            .alloc(SLTNode::Binary(bit_offset, BinaryOp::DivU, stride))
-            .map_err(slt_error)?;
+        let position = coerce_node_width(arena, position, Some(64), false).map_err(slt_error)?;
+        let index = if element_index.is_some() {
+            position
+        } else {
+            let stride = slt_constant(arena, BigUint::from(element_width), 64, false)?;
+            arena
+                .alloc(SLTNode::Binary(position, BinaryOp::DivU, stride))
+                .map_err(slt_error)?
+        };
         let element_count = self.m.var(id).width / element_width.max(1);
         let (index, valid) = dynamic_array_index_guard_slt(arena, index, element_count)
             .ok_or_else(|| unsupported("dynamic assignment index"))?;

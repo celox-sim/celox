@@ -1159,6 +1159,9 @@ pub(super) fn analyze_package_with_symbols(
     // contain `::` itself.
     let own = imports::scope_names(tree)?;
     let mut variables = package_variables(name, tree)?;
+    // The variables the package declares itself, and the static properties
+    // of its classes below: each is a net unless it gets a signal.
+    let mut declared = variables.clone();
     let mut module = Module::from_scope_with_parameter_overrides(
         tree,
         session,
@@ -1180,13 +1183,13 @@ pub(super) fn analyze_package_with_symbols(
     // The static properties of its classes are variables of the package,
     // shared by every scope that uses them (IEEE 1800-2023 8.9).
     for class in &symbols.classes {
-        variables.extend(
-            class
-                .statics
-                .iter()
-                .filter(|property| property.owner == class.name)
-                .map(|property| property.variable.clone()),
-        );
+        let statics = class
+            .statics
+            .iter()
+            .filter(|property| property.owner == class.name)
+            .map(|property| property.variable.clone());
+        declared.extend(statics.clone());
+        variables.extend(statics);
     }
     // Each scope declares its own signals for virtual interfaces.
     symbols
@@ -1203,8 +1206,12 @@ pub(super) fn analyze_package_with_symbols(
             .any(|signal| scope::initializes(process, signal.name()))
     });
     symbols.signals = constants;
-    // A declaration of a user-defined net type gives no signal.
-    if let Some(net) = variables.iter().find(|variable| {
+    // A declaration of a user-defined net type gives no signal. A static of
+    // a subroutine is a variable, never a net: one that has no signal here,
+    // such as the receiver an inline randomization of a class of another
+    // package captures, which a specialization of this package's class
+    // template lowers for that package, is that package's.
+    if let Some(net) = declared.iter().find(|variable| {
         !state
             .iter()
             .any(|signal| signal.name() == variable.as_str())

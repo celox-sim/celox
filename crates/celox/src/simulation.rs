@@ -406,16 +406,19 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
             return CompiledSlots::None;
         }
         // Waveforms record, the heap collects, deferred assertions mature
-        // and a slot observer looks at every slot boundary.
+        // and a slot observer looks at every slot boundary. The compiled
+        // scheduler can mature the reports and hand the heap back itself
+        // (`scheduler::native_slot_end`).
         let vcd = &self.sv_vcd;
+        let native_slot_end = crate::scheduler::native_slot_end(&self.program);
         if self.slot_end.postponed_output
-            || self.slot_end.deferred_assertions
+            || (self.slot_end.deferred_assertions && !native_slot_end)
             || self.observation.observer.is_some()
             || self.vcd_writer.is_some()
             || vcd.path.is_some()
             || vcd.started.is_some()
             || vcd.pending
-            || !self.handle_slots().is_empty()
+            || (!self.handle_slots().is_empty() && !native_slot_end)
             // A fused flip-flop's delayed updates are collected by the
             // runtime at each slot boundary, at their capture time, when
             // no generated queue publishes them instead.

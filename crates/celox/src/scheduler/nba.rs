@@ -202,3 +202,32 @@ impl Queue {
 
 #[cfg(all(test, target_arch = "x86_64", not(feature = "arm64-codegen")))]
 mod tests;
+
+/// Whether the observations of every NBA target of `program`, built for all
+/// targets at once, are those built for each target alone; the targets'
+/// count, and of how many any watch, wait or probe observes the update.
+#[cfg(test)]
+pub(crate) fn observations_match_for_test(program: &LaidOutProgram) -> (usize, usize) {
+    let shared = program.shared_storage();
+    let targets: Vec<_> = program
+        .runtime
+        .runtime_schema
+        .nba_sites
+        .iter()
+        .map(|site| site.target)
+        .collect();
+    let all = observations::Observations::for_targets(program, &shared, &targets);
+    let mut observed = 0;
+    for (target, batched) in targets.iter().zip(&all) {
+        let alone = observations::Observations::new(program, *target);
+        assert_eq!(
+            format!("{batched:?}"),
+            format!("{alone:?}"),
+            "target {target:?}"
+        );
+        observed += usize::from(
+            format!("{alone:?}") != format!("{:?}", observations::Observations::new_empty()),
+        );
+    }
+    (targets.len(), observed)
+}

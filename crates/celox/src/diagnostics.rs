@@ -13,6 +13,11 @@ pub struct RuntimeDiagnostics {
     /// unit and call it instead of inlining it (`CELOX_SV_FORCE_OUT_OF_LINE`),
     /// a test switch that changes the generated code, not the behavior.
     pub sv_force_out_of_line: bool,
+    /// A file to which the SystemVerilog frontend appends the next-state
+    /// form report of each module's `always_ff` processes
+    /// (`CELOX_SV_FF_NEXT_STATE_REPORT`), a diagnostic that leaves the
+    /// simulated behavior unchanged.
+    pub sv_ff_next_state_report: Option<std::path::PathBuf>,
 }
 
 #[cfg(feature = "host-runtime")]
@@ -98,6 +103,9 @@ mod host {
                     .get(OsStr::new("CELOX_SV_RECURSION_REPORT"))
                     .map(std::path::PathBuf::from),
                 sv_force_out_of_line: enabled("CELOX_SV_FORCE_OUT_OF_LINE"),
+                sv_ff_next_state_report: variables
+                    .get(OsStr::new("CELOX_SV_FF_NEXT_STATE_REPORT"))
+                    .map(std::path::PathBuf::from),
             };
             let sir = crate::optimizer::SirDiagnostics {
                 pass_timing,

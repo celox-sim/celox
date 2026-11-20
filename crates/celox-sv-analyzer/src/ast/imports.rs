@@ -22,6 +22,10 @@ pub(super) struct ScopeImports {
     pub explicit: Vec<(String, String)>,
     /// `import p::*;`
     pub wildcard: Vec<String>,
+    /// The first token of the first wildcard import of each package of
+    /// `wildcard`: it makes the package's names candidates only for the
+    /// references after it (IEEE 1800-2023 26.3).
+    pub wildcard_at: HashMap<String, usize>,
     /// Every package named by an import or a package scope.
     pub packages: Vec<String>,
     /// Every `p::x` reference, as `(p, x)`. `p` may also name a class.
@@ -124,6 +128,10 @@ impl ScopeImports {
                         let package = normalize_identifier(&package.spelling);
                         imports.packages.push(package.clone());
                         if !in_block {
+                            imports
+                                .wildcard_at
+                                .entry(package.clone())
+                                .or_insert(native.tokens.start);
                             imports.wildcard.push(package);
                         }
                     }
@@ -715,7 +723,9 @@ struct GenerateScope {
     start: usize,
     end: usize,
     explicit: Vec<(String, String)>,
-    wildcard: Vec<String>,
+    /// `import p::*;`, with the first token of the import, which makes the
+    /// names of `p` candidates only for the references after it (26.3).
+    wildcard: Vec<(String, usize)>,
     declared: HashSet<String>,
 }
 impl GenerateScope {
@@ -743,7 +753,12 @@ fn procedural_scopes(procedural: &[ProceduralImport], tree: &SyntaxTree) -> Vec<
         if let Some(block) = blocks.iter_mut().find(|block| block.end == import.end) {
             block.start = block.start.min(import.offset);
             block.explicit.extend(import.explicit.iter().cloned());
-            block.wildcard.extend(import.wildcard.iter().cloned());
+            block.wildcard.extend(
+                import
+                    .wildcard
+                    .iter()
+                    .map(|package| (package.clone(), import.offset)),
+            );
             continue;
         }
         blocks.push(GenerateScope {
@@ -752,7 +767,11 @@ fn procedural_scopes(procedural: &[ProceduralImport], tree: &SyntaxTree) -> Vec<
             start: import.offset,
             end: import.end,
             explicit: import.explicit.clone(),
-            wildcard: import.wildcard.clone(),
+            wildcard: import
+                .wildcard
+                .iter()
+                .map(|package| (package.clone(), import.offset))
+                .collect(),
             declared: HashSet::default(),
         });
     }
@@ -888,7 +907,7 @@ fn generate_scopes(tree: &SyntaxTree) -> Converted<Vec<GenerateScope>> {
                             }
                             PackageBindingItemKind::Wildcard(package) => scopes[owner]
                                 .wildcard
-                                .push(normalize_identifier(&package.spelling)),
+                                .push((normalize_identifier(&package.spelling), item.tokens.start)),
                             _ => {}
                         }
                     }
@@ -898,6 +917,24 @@ fn generate_scopes(tree: &SyntaxTree) -> Converted<Vec<GenerateScope>> {
         }
     }
     Ok(scopes)
+}
+
+/// That the references to `name` on the two sides of the wildcard import
+/// that makes it visible, which denote `earlier` and `later`, denote one
+/// declaration: a scope binds a name once, so they cannot denote two
+/// (IEEE 1800-2023 26.3 binds each reference by its position).
+fn one_declaration(
+    name: &str,
+    earlier: Option<&String>,
+    later: Option<&String>,
+) -> Result<(), AnalyzerError> {
+    if earlier == later {
+        return Ok(());
+    }
+    Err(AnalyzerError::Unsupported(format!(
+        "references to `{name}` both before and after the wildcard import that makes it \
+         visible, which denote different declarations"
+    )))
 }
 
 /// What a reference in a generate block names.
@@ -947,7 +984,8 @@ fn scope_lookup(
             return Ok(ScopeLookup::Imported(scope.id, target));
         }
         let mut found: Option<(String, &String)> = None;
-        for package_name in &scope.wildcard {
+        // A wildcard import makes candidates for the references after it.
+        for (package_name, _) in scope.wildcard.iter().filter(|(_, at)| *at < offset) {
             let Some(target) = packages
                 .get(package_name)
                 .ok_or_else(|| AnalyzerError::UnknownPackage {
@@ -1244,7 +1282,7 @@ fn resolve_scope_imports(
             .explicit
             .iter()
             .map(|(package, _)| package)
-            .chain(&scope.wildcard)
+            .chain(scope.wildcard.iter().map(|(package, _)| package))
         {
             package(name)?;
         }
@@ -1428,11 +1466,19 @@ fn resolve_scope_imports(
     for (package_name, name) in &imports.explicit {
         bind_explicitly(&mut bindings, package_name, name, "import")?;
     }
-    // The packages a wildcard import makes `name` a candidate through, and
-    // the one declaration they provide.
-    let candidates = |name: &String| -> Result<Option<(String, Vec<String>)>, AnalyzerError> {
+    // The packages a wildcard import before `offset` makes `name` a
+    // candidate through for a reference there, and the one declaration they
+    // provide (IEEE 1800-2023 26.3).
+    let candidates = |name: &String,
+                      offset: usize|
+     -> Result<Option<(String, Vec<String>)>, AnalyzerError> {
         let mut found: Option<(String, Vec<String>)> = None;
-        for package_name in &imports.wildcard {
+        for package_name in imports.wildcard.iter().filter(|package| {
+            imports
+                .wildcard_at
+                .get(*package)
+                .is_none_or(|at| *at < offset)
+        }) {
             let Some(target) = package(package_name)?.provides(name) else {
                 continue;
             };
@@ -1474,6 +1520,9 @@ fn resolve_scope_imports(
     let mut scoped: HashMap<String, Vec<(celox_sv_syntax::BodyItemId, String)>> =
         HashMap::default();
     let mut block_imports: HashMap<usize, HashMap<String, String>> = HashMap::default();
+    // The references an import of a block resolves, with the declaration
+    // each denotes at its position (checked against the aliases below).
+    let mut block_resolved: Vec<(String, usize, String)> = Vec::new();
     if scoped_imports {
         for scope in &all_scopes {
             let mut explicit: HashMap<&String, String> = HashMap::default();
@@ -1510,6 +1559,7 @@ fn resolve_scope_imports(
                 match scope_lookup(name, offset, &all_scopes, &provided, packages)? {
                     ScopeLookup::Declared => {}
                     ScopeLookup::Imported(ScopeOwner::Generate(block), target) => {
+                        block_resolved.push((name.clone(), offset, target.clone()));
                         scoped
                             .entry(name.clone())
                             .or_default()
@@ -1518,6 +1568,7 @@ fn resolve_scope_imports(
                     // The builder of the block's body binds it there, from
                     // the block's first import on.
                     ScopeLookup::Imported(ScopeOwner::Procedural(block), target) => {
+                        block_resolved.push((name.clone(), offset, target.clone()));
                         block_imports
                             .entry(block)
                             .or_default()
@@ -1581,11 +1632,10 @@ fn resolve_scope_imports(
                 if let Some(export_offset) = imports
                     .export_offsets
                     .get(&(package_name.clone(), name.clone()))
-                    && referenced
-                        .get(name)
-                        .and_then(|offsets| offsets.first())
-                        .is_some_and(|reference| reference < export_offset)
-                    && let Some((earlier, _)) = candidates(name)?
+                    && let Some(&reference) =
+                        referenced.get(name).and_then(|offsets| offsets.first())
+                    && reference < *export_offset
+                    && let Some((earlier, _)) = candidates(name, reference)?
                     && earlier != target
                 {
                     return Err(AnalyzerError::ImportConflict {
@@ -1599,19 +1649,87 @@ fn resolve_scope_imports(
             }
         }
     }
+    // The unit's imports before the module (IEEE 1800-2023 26.3).
+    let unit_imports: Vec<_> = unit
+        .iter()
+        .flat_map(|unit| &unit.visibility.imports)
+        .filter(|(offset, ..)| *offset < start)
+        .collect();
+    // The declaration that `name` denotes in the compilation unit around the
+    // scope, when the scope neither declares nor imports it: an item of the
+    // unit declared before the scope, or one the unit's imports before it
+    // import, explicitly or through a wildcard.
+    let outer_target = |name: &String| -> Result<Option<String>, AnalyzerError> {
+        let Some(unit) = unit else {
+            return Ok(None);
+        };
+        if unit.declares_before(name, start) {
+            return Ok(Some(format!("{}::{name}", packages::UNIT)));
+        }
+        // Several explicit imports of `name` must import one declaration.
+        let mut explicit: Option<String> = None;
+        for (_, package_name, _) in unit_imports
+            .iter()
+            .filter(|(_, _, item)| item.as_ref() == Some(name))
+        {
+            let provided = provided(package_name, name)?;
+            match &explicit {
+                Some(known) if *known != provided => {
+                    return Err(AnalyzerError::ImportConflict {
+                        name: name.clone(),
+                        detail: format!("explicitly imported as both `{known}` and `{provided}`"),
+                    });
+                }
+                Some(_) => {}
+                None => explicit = Some(provided),
+            }
+        }
+        if explicit.is_some() {
+            return Ok(explicit);
+        }
+        let mut found: Option<(String, &String)> = None;
+        for (_, package_name, _) in unit_imports.iter().filter(|(_, _, item)| item.is_none()) {
+            let Some(target) = package(package_name)?.provides(name) else {
+                continue;
+            };
+            match &found {
+                Some((known, first)) if *known != target => {
+                    return Err(AnalyzerError::ImportConflict {
+                        name: name.clone(),
+                        detail: format!(
+                            "declared by both wildcard-imported packages `{first}` and \
+                             `{package_name}`"
+                        ),
+                    });
+                }
+                Some(_) => {}
+                None => found = Some((target, package_name)),
+            }
+        }
+        Ok(found.map(|(target, _)| target))
+    };
     if !imports.wildcard.is_empty() {
-        for name in referenced.keys().cloned() {
-            if local.contains(&name) {
+        for (name, offsets) in &referenced {
+            if local.contains(name) {
                 continue;
             }
             // An explicitly imported name is not a wildcard candidate
             // (IEEE 1800-2023 26.3).
-            if bindings.iter().any(|binding| binding.name == name) {
+            if bindings.iter().any(|binding| binding.name == *name) {
                 continue;
             }
-            if let Some((target, through)) = candidates(&name)? {
+            // A wildcard import binds the references after it; the scope
+            // binds the name once, to what the last of them denote, and the
+            // check below rejects references the binding would change.
+            let mut resolved: Option<Option<(String, Vec<String>)>> = None;
+            for &offset in offsets {
+                if let Some(found) = candidates(name, offset)? {
+                    resolved = Some(Some(found));
+                }
+            }
+            if let Some(Some((target, through))) = resolved {
                 bindings.push(Binding {
-                    name,
+                    name: name.clone(),
                     target,
                     through,
                 });
@@ -1649,69 +1767,12 @@ fn resolve_scope_imports(
             }
             explicit.insert(name, target);
         }
-        let unit_imports: Vec<_> = unit
-            .visibility
-            .imports
-            .iter()
-            .filter(|(offset, ..)| *offset < start)
-            .collect();
-        // The declaration the unit's explicit imports of `name` import:
-        // several must import one (IEEE 1800-2023 26.3).
-        let unit_explicit = |name: &String| -> Result<Option<String>, AnalyzerError> {
-            let mut target: Option<String> = None;
-            for (_, package_name, _) in unit_imports
-                .iter()
-                .filter(|(_, _, item)| item.as_ref() == Some(name))
-            {
-                let provided = provided(package_name, name)?;
-                match &target {
-                    Some(known) if *known != provided => {
-                        return Err(AnalyzerError::ImportConflict {
-                            name: name.clone(),
-                            detail: format!(
-                                "explicitly imported as both `{known}` and `{provided}`"
-                            ),
-                        });
-                    }
-                    Some(_) => {}
-                    None => target = Some(provided),
-                }
-            }
-            Ok(target)
-        };
         for name in referenced.keys() {
             if local.contains(name) || bindings.iter().any(|binding| binding.name == *name) {
                 continue;
             }
-            let target = if unit.declares_before(name, start) {
-                uses_unit = true;
-                Some(format!("{}::{name}", packages::UNIT))
-            } else if let Some(target) = unit_explicit(name)? {
-                Some(target)
-            } else {
-                let mut found: Option<(String, &String)> = None;
-                for (_, package_name, _) in
-                    unit_imports.iter().filter(|(_, _, item)| item.is_none())
-                {
-                    let Some(target) = package(package_name)?.provides(name) else {
-                        continue;
-                    };
-                    match &found {
-                        Some((known, first)) if *known != target => {
-                            return Err(AnalyzerError::ImportConflict {
-                                name: name.clone(),
-                                detail: format!(
-                                    "declared by both wildcard-imported packages `{first}` and \
-                                     `{package_name}`"
-                                ),
-                            });
-                        }
-                        Some(_) => {}
-                        None => found = Some((target, package_name)),
-                    }
-                }
-                found.map(|(target, _)| target)
-            };
+            let target = outer_target(name)?;
+            uses_unit |= unit.declares_before(name, start);
             if let Some(target) = target {
                 bindings.push(Binding {
                     name: name.clone(),
@@ -1785,6 +1846,84 @@ fn resolve_scope_imports(
                 .entry(*block)
                 .or_default()
                 .insert(name.clone(), target.clone());
+        }
+    }
+    // Each name is bound by an alias of a scope: of the module, a generate
+    // block or a procedural block (an export too binds one of the module).
+    // An alias covers every reference in its scope, so every reference it
+    // covers has to denote, at its own position (IEEE 1800-2023 26.3), the
+    // declaration the alias binds; the bindings are not positional yet.
+    {
+        let module_bindings: HashMap<&String, &String> = bindings
+            .iter()
+            .map(|binding| (&binding.name, &binding.target))
+            .collect();
+        let mut aliased: HashSet<&String> = module_bindings.keys().copied().collect();
+        aliased.extend(generate_imports.values().flat_map(|names| names.keys()));
+        aliased.extend(block_imports.values().flat_map(|names| names.keys()));
+        let mut importing: Vec<&GenerateScope> = all_scopes
+            .iter()
+            .filter(|scope| !scope.explicit.is_empty() || !scope.wildcard.is_empty())
+            .collect();
+        importing.sort_by_key(|scope| scope.end - scope.start);
+        // The declaration the alias that covers the reference at `offset`
+        // binds `name` to: the innermost block's that names it, or the
+        // module's.
+        let served = |name: &String, offset: usize| -> Option<&String> {
+            for scope in importing.iter().filter(|scope| scope.contains(offset)) {
+                let names = match scope.id {
+                    ScopeOwner::Generate(block) => generate_imports.get(&block),
+                    ScopeOwner::Procedural(start) => block_imports.get(&start),
+                };
+                if let Some(target) = names.and_then(|names| names.get(name)) {
+                    return Some(target);
+                }
+            }
+            module_bindings.get(name).copied()
+        };
+        // The declaration `name` denotes at `offset` in the module's scope:
+        // an explicit import, an export before it, a wildcard import before
+        // it, or the compilation unit around.
+        let mut outer: HashMap<String, Option<String>> = HashMap::default();
+        let mut denoted = |name: &String, offset: usize| -> Result<Option<String>, AnalyzerError> {
+            if let Some((package_name, _)) = imports.explicit.iter().find(|(_, item)| item == name)
+            {
+                return provided(package_name, name).map(Some);
+            }
+            for export in &imports.exports {
+                if let Export::Item(package_name, item) = export
+                    && item == name
+                    && imports
+                        .export_offsets
+                        .get(&(package_name.clone(), name.clone()))
+                        .is_some_and(|at| *at < offset)
+                {
+                    return provided(package_name, name).map(Some);
+                }
+            }
+            if let Some((target, _)) = candidates(name, offset)? {
+                return Ok(Some(target));
+            }
+            if let Some(target) = outer.get(name) {
+                return Ok(target.clone());
+            }
+            let target = outer_target(name)?;
+            outer.insert(name.clone(), target.clone());
+            Ok(target)
+        };
+        for (name, offset, target) in &block_resolved {
+            if aliased.contains(name) {
+                one_declaration(name, served(name, *offset), Some(target))?;
+            }
+        }
+        for (name, offsets) in &referenced {
+            if local.contains(name) || !aliased.contains(name) {
+                continue;
+            }
+            for &offset in offsets {
+                let meaning = denoted(name, offset)?;
+                one_declaration(name, served(name, offset), meaning.as_ref())?;
+            }
         }
     }
     symbols.generate_imports = generate_imports;

@@ -10,38 +10,11 @@ impl SLTToSIRLowerer {
         access: &BitAccess,
     ) -> RegisterId {
         let width = access.msb - access.lsb + 1;
-        if self.four_state {
-            // A bit-select transports Z. Lowering it to bitwise AND would
-            // incorrectly turn every retained Z into X (IEEE 1800 11.4.8).
-            let dest = builder.alloc_logic(width);
-            builder.emit(SIRInstruction::Slice(dest, reg, access.lsb, width));
-            return dest;
-        }
-        let shift_amt = builder.alloc_bit(64, false);
-        builder.emit(SIRInstruction::Imm(
-            shift_amt,
-            SIRValue::new(access.lsb as u64),
-        ));
-
-        let shifted = builder.alloc_logic(width);
-        builder.emit(SIRInstruction::Binary(
-            shifted,
-            reg,
-            BinaryOp::Shr,
-            shift_amt,
-        ));
-
-        let mask_val = (BigUint::from(1u64) << width) - BigUint::from(1u64);
-        let mask_reg = builder.alloc_bit(width, false);
-        builder.emit(SIRInstruction::Imm(mask_reg, SIRValue::new(mask_val)));
-
+        // One Slice in both modes: the backends lower it to a shift and a
+        // mask, and in four-state it transports Z, which a bitwise AND would
+        // turn into X (IEEE 1800 11.4.8).
         let dest = builder.alloc_logic(width);
-        builder.emit(SIRInstruction::Binary(
-            dest,
-            shifted,
-            BinaryOp::And,
-            mask_reg,
-        ));
+        builder.emit(SIRInstruction::Slice(dest, reg, access.lsb, width));
         dest
     }
 

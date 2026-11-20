@@ -1030,7 +1030,7 @@ pub fn sort_lanes<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
         unpacked_element_widths,
         direct_ff_writes_by_action: &prepared.direct_ff_writes_by_action,
         four_state,
-        split_large_units: true,
+        unit_limits: Some(UnitLimits::DEFAULT),
     };
     let mut runtime_errors = HashMap::default();
     let mut next_runtime_error_code = first_runtime_error_code;

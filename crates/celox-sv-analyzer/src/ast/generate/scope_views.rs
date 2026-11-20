@@ -2,7 +2,7 @@
 
 use super::*;
 
-type Key = [usize; 7];
+type Key = [usize; 8];
 
 pub(in crate::ast) struct ScopeViews<'a> {
     dimensions: &'a PackedDimensions,
@@ -62,6 +62,8 @@ fn key(item: &Item) -> Key {
         Arc::as_ptr(&item.parameter_dimensions) as usize,
         item.qualified_types.identity(),
         item.constant_types.identity(),
+        // The generate scope, which `%m` names.
+        fxhash::hash(item.scope_name()),
     ]
 }
 

@@ -435,6 +435,90 @@ endmodule
         assert_ne!(single.last().unwrap()[1], BigUint::from(0u8));
     }
 
+    /// A memory only nonblocking element writes of one edge process update,
+    /// published sparsely, of 4,096 bits: combinational logic reads it, and
+    /// some writes store the value the element already holds.
+    const SPARSE_MEMORY: &str = r#"`timescale 1ns/1ns
+module Top (
+    output logic [63:0] q,
+    output logic [63:0] r
+);
+    logic [63:0] mem [0:63];
+    logic clk = 0;
+    logic we = 0;
+    logic [5:0] wa = 0, ra = 0;
+    logic [63:0] wd = 64'd1;
+    always #1 clk = ~clk;
+    always_ff @(posedge clk) if (we) mem[wa] <= wd;
+    assign q = mem[ra];
+    always_comb r = q ^ {58'd0, ra};
+    always #2 we = ~we;
+    always #3 wa = wa + 6'd1;
+    always #4 wd = wa[0] ? mem[wa] : wd * 64'd3 + 64'd1;
+    always #5 ra = ra + 6'd3;
+endmodule
+"#;
+
+    /// A sparse commit marks the readers of its memory without comparing the
+    /// whole memory, and the partitions still settle as one pass does.
+    #[test]
+    fn sparse_memory_commits_wake_their_readers() {
+        let single = matches_single_pass(SPARSE_MEMORY, &["q", "r"], 400);
+        // Some reads saw written elements.
+        assert!(
+            single
+                .iter()
+                .any(|values| values[0] != BigUint::from(0u8) && values[0] != BigUint::from(1u8))
+        );
+    }
+
+    /// A sparse memory element its writer stores again with the value it
+    /// holds, read by a process that pulses `p` whenever it runs: the
+    /// unchanged write changes nothing, so the reader runs only when the
+    /// element first takes the value, and the waiter on `p` wakes once.
+    const UNCHANGED_SPARSE_WRITE: &str = r#"`timescale 1ns/1ns
+module Top (
+    output logic [7:0] seen
+);
+    logic [63:0] mem [0:63];
+    logic clk = 0;
+    logic [5:0] wa = 0;
+    logic p;
+    always #1 clk = ~clk;
+    always_ff @(posedge clk) mem[wa] <= 64'd5;
+    always @* begin p = 1'b0; if (mem[0] == 64'd5) begin p = 1'b1; p = 1'b0; end end
+    initial begin
+        seen = 8'd0;
+        forever begin
+            @(posedge p);
+            seen = seen + 8'd1;
+        end
+    end
+endmodule
+"#;
+
+    #[test]
+    fn unchanged_sparse_writes_do_not_wake_readers() {
+        let single = matches_single_pass(UNCHANGED_SPARSE_WRITE, &["seen"], 40);
+        assert_eq!(single.last().unwrap()[0], BigUint::from(1u8));
+        // The unchanged writes run no partition again: the memory's readers
+        // run around its first write, not at every edge.
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        {
+            let mut sim = Simulation::from_sv_sources(
+                vec![(UNCHANGED_SPARSE_WRITE, Path::new("top.sv"))],
+                "Top",
+            )
+            .settle_partition(SettlePartition::Always)
+            .settle_profile(true)
+            .build_native()
+            .unwrap();
+            sim.run_until(40).unwrap();
+            let profile = sim.settle_profile().expect("built with a settle profile");
+            assert!(profile.total_runs() < 10, "{profile:?}");
+        }
+    }
+
     /// `p` pulses and returns to 0 within one evaluation of its process,
     /// so the settle sees no change of `p` itself, only of its occurrence
     /// counters: those must still set the flag of the process waiting on it.

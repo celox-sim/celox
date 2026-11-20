@@ -120,7 +120,10 @@ impl Comb<'_, '_> {
                 if *nonblocking && !self.allow_nonblocking {
                     return Err(unsupported("nonblocking assignment inside always_comb"));
                 }
-                self.assign(&mut store, frames, lhs, rhs)?;
+                self.nonblocking_now = *nonblocking && self.next_state.is_some();
+                let assigned = self.assign(&mut store, frames, lhs, rhs);
+                self.nonblocking_now = false;
+                assigned?;
                 Ok(store)
             }
             sv::ir::Stmt::AssignConcat {
@@ -131,7 +134,10 @@ impl Comb<'_, '_> {
                 if *nonblocking && !self.allow_nonblocking {
                     return Err(unsupported("nonblocking assignment inside always_comb"));
                 }
-                self.assign_concat(&mut store, frames, parts, rhs)?;
+                self.nonblocking_now = *nonblocking && self.next_state.is_some();
+                let assigned = self.assign_concat(&mut store, frames, parts, rhs);
+                self.nonblocking_now = false;
+                assigned?;
                 Ok(store)
             }
             // A timing control suspends a process; this lowering has none.

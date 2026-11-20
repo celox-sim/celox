@@ -42,6 +42,7 @@ x86_64-codegen = [
 ]
 
 [dependencies]
+imbl = "7"
 veryl-simulator = { workspace = true, optional = true }
 celox-backend-common = { workspace = true }
 toml                  = { workspace = true }

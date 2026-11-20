@@ -700,6 +700,11 @@ impl Heap {
         self.fault.take()
     }
 
+    /// Whether a fault is waiting for [`Self::take_fault`].
+    pub fn has_fault(&self) -> bool {
+        self.fault.is_some()
+    }
+
     /// Whether `handle` names a live object.
     pub fn contains_object(&self, handle: Handle) -> bool {
         self.objects.contains_key(&handle)

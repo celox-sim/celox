@@ -898,3 +898,76 @@ fn masked_found_recurrence_becomes_wide_or_reduction() {
         0
     );
 }
+
+/// A "found" chain whose every intermediate value is read elsewhere, as a
+/// priority loop reads `found` at each step: each value is lowered from the
+/// previous one, not as a reduction of all the conditions before it, so the
+/// code grows linearly with the chain.
+#[test]
+fn found_chain_with_shared_steps_lowers_each_step_from_the_previous() {
+    const STEPS: usize = 48;
+    let mut arena = SLTNodeArena::new();
+    let one = constant(&mut arena, 1, 1);
+    let mut found = constant(&mut arena, 0, 1);
+    let mut steps = Vec::new();
+    for index in 0..STEPS {
+        // Separate variables, so the conditions do not compact into one word.
+        let condition = input(&mut arena, 100 + index as u32, 1);
+        found = arena
+            .alloc(SLTNode::Mux {
+                cond: condition,
+                then_expr: one,
+                else_expr: found,
+            })
+            .unwrap();
+        steps.push(found);
+    }
+    // Most significant first: bit `index` is the value after step `index`.
+    let all_steps = arena
+        .alloc(SLTNode::Concat(
+            steps.iter().rev().map(|step| (*step, 1)).collect(),
+        ))
+        .unwrap();
+
+    let mut builder = SIRBuilder::new();
+    let result = SLTToSIRLowerer::new(false).lower(
+        &mut builder,
+        all_steps,
+        &arena,
+        &mut crate::HashMap::default(),
+    );
+    let eu = finish_lowering(builder);
+
+    let concatenated: usize = eu
+        .blocks
+        .values()
+        .flat_map(|block| &block.instructions)
+        .map(|instruction| match instruction {
+            SIRInstruction::Concat(_, parts) => parts.len(),
+            _ => 0,
+        })
+        .sum();
+    assert!(
+        concatenated <= 2 * STEPS,
+        "{concatenated} concatenated parts for {STEPS} steps"
+    );
+
+    let conditions = 0x8000_0400_0011u64;
+    let memory = (0..STEPS)
+        .map(|index| {
+            (
+                100 + index as u32,
+                TestSIRValue {
+                    payload: BigUint::from(conditions >> index & 1),
+                    mask: BigUint::from(0u8),
+                },
+            )
+        })
+        .collect();
+    let values = execute_fold_group_sir_with_memory(&eu, &memory);
+    let expected = (0..STEPS).fold(0u64, |bits, index| {
+        let found = conditions & ((2u64 << index) - 1) != 0;
+        bits | (u64::from(found) << index)
+    });
+    assert_eq!(values[&result].payload, BigUint::from(expected));
+}
