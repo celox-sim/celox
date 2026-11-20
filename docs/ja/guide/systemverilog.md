@@ -5,9 +5,12 @@ Celox は **Rust API** から SystemVerilog をシミュレートできます。
 TypeScript パッケージと Vite プラグインは、現時点では Veryl のみを読み込みます。
 
 Celox は IEEE Std 1800™-2023 に従います。
-標準をなぞる代わりに、[逸脱事項のページ](./systemverilog-reference)では
-未対応の構文、意図的な逸脱、処理系定義の選択だけを挙げています。
-そこに無い挙動は標準どおりです。見つからない差異は不具合として扱ってください。
+標準をなぞる代わりに、[対応範囲と逸脱事項のページ](./systemverilog-reference)では
+**未対応の機能**、**部分対応の機能**（対応・未対応の対照表）、**個別制約**、
+**意図的な逸脱**を分けて整理しています。
+記載のない未対応・制限・逸脱に該当しない有効な IEEE 1800-2023 コードは標準どおりに動作します
+（見つからない差異は不具合として扱ってください）。既定モードでは既定警告付きの互換緩和をいくつか受理しますが、
+strict モード（`strict = true` / `--strict`）で記載のない IEEE 1800-2023 外のコードを受け入れてしまう場合も不具合です。
 
 ## 最初のモジュールを動かす
 
@@ -68,24 +71,18 @@ X/Z を扱う場合は builder に `.four_state(true)` を指定します。
 状態モデルは [4 値シミュレーション](./four-state)を参照してください。
 Veryl と混在する階層では `Simulation::from_sources(veryl).with_sv_sources(sv)` を使います。
 
-## 標準からの逸脱
+## 対応概要と標準からの逸脱
 
 未対応の構文は、構文名と追跡 issue を含む `Unsupported` エラーで拒否します。
 黙って無視することはありません。
-デザインを移植するときに変更が必要になりやすいのは次の領域です。
 
-- Boolean と固定遅延 sequence の部分集合を超える並行アサーション、
-  スカラ部分集合を超えるクラスのランダム化と制約。
-- `bind`、checker、covergroup、clocking ブロック、`specify` ブロック、UDP、
-  `defparam`、手続き的な `force` / `release`、`disable fork` 以外の `disable`。
-- `always_comb` と `always_latch` 内のノンブロッキング代入、複数モジュールに
-  またがるネットのドライバ（モジュール間のトライステートバス）、`always_ff` の `iff`。
-- `ref` ポート、non-ANSI ポート式、遅延・強度付きゲートプリミティブ、
-  interface の一部の機能。
-
-完全な一覧は[逸脱事項のページ](./systemverilog-reference#what-is-not-supported)です。
-意図的な逸脱や、乱数・時刻の既定値・
-イベント実行順序といった処理系定義の選択もそこにまとめています。
+| 区分 | 概要 | 詳細 |
+| --- | --- | --- |
+| **未対応** | `bind`、checker、covergroup、clocking ブロック、`specify` ブロック、UDP、`ref` ポート、`disable fork` 以外の `disable`、`wait_order`、unpacked / tagged union | [未対応の機能](./systemverilog-reference#what-is-not-supported) |
+| **部分対応** | ポート/ネット/`defparam`/ゲート、階層参照、interface、virtual interface、unpacked 構造体、手続き的 `force`/`assign`、遅延、イベント制御、クラス、ランダム化、動的コンテナ、並行アサーション、I/O の対応・未対応対照表 | [部分対応の機能](./systemverilog-reference#partial-support) |
+| **個別制約** | non-ANSI ポート式、`always_comb` / `always_latch` 内のノンブロッキング代入、ループ展開上限などの個別の制限 | [個別制約](./systemverilog-reference#narrow-limitations) |
+| **標準準拠コードへの逸脱** | program 継続代入の実行領域、モジュール間 interface の static 記憶域、手続き的 `assign` の上書きタイミング、実行時 `%p`、`$exit` 警告など | [標準準拠コードに影響する逸脱](./systemverilog-reference#deviations-standard-code) |
+| **標準外コードの許容** | オプションや既定警告の緩和（`strict = true` / `--strict` でエラー化）および変数選択への `force` や `$psprintf` などの非標準拡張 | [標準外コードの許容](./systemverilog-reference#deviations-nonstandard-code) |
 
 ## Veryl と混在させる
 
@@ -105,12 +102,16 @@ C と SV の型を一致させる必要があるため、どちらも `unsafe` A
 
 ## 個別の挙動を調べる {#semantics-worth-knowing}
 
-- [未対応の構文](./systemverilog-reference#what-is-not-supported)
-- [意図的な逸脱](./systemverilog-reference#intentional-deviations)
+- [未対応の機能](./systemverilog-reference#what-is-not-supported)
+- [部分対応の機能](./systemverilog-reference#partial-support)
+- [個別制約](./systemverilog-reference#narrow-limitations)
+- [標準準拠コードに影響する逸脱](./systemverilog-reference#deviations-standard-code)
+- [標準外コードの許容](./systemverilog-reference#deviations-nonstandard-code)
 - [イベント実行順序の選択](./systemverilog-reference#timing-semantics)
 - [時間単位と精度の既定値](./systemverilog-reference#time-and-precision)
 - [乱数のシードと再現性](./systemverilog-reference#random-numbers)
 - [終了処理と `final` 手続き](./systemverilog-reference#celox-execution-model)
+- [メモリファイル（`$readmemh` / `$readmemb`）](./systemverilog-reference#memory-files)
 
 ## Veryl が出力する SystemVerilog
 

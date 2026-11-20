@@ -105,6 +105,16 @@ design with a testbench scheduler keeps them inline, as does
 `-sir:scheduler_callees` (`SirPass::SchedulerCallees`), which is on at every
 level.
 
+The next-state model of clocked logic is being built behind
+`+sir:next_state_dag` (`SirPass::NextStateDag`), off at every level. The
+SystemVerilog frontend also lowers each `always_ff` it can into a next-state
+form: the value of each register range at the edge as an expression of the
+state before it, and a write port for each nonblocking write of a memory
+element at a run-time index. Assembly relocates the forms of a clock domain
+into one DAG, interned canonically, with each read of a combinational net
+replaced by the net's drivers. The DAG is only measured so far, on the
+`celox::next_state` tracing target; the processes' units still run.
+
 Cranelift performs the corresponding target optimization through its own IR and
 pass pipeline. WebAssembly generation likewise remains backend-private. No
 machine-level result is written back into SIR.

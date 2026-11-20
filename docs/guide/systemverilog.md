@@ -1,15 +1,18 @@
 # SystemVerilog Support
 
 Celox can simulate SystemVerilog through its **Rust API**.
-Supply your source files and choose a top module. The TypeScript package and Vite plugin currently load
-Veryl only.
+Supply your source files and choose a top module. The TypeScript package and
+Vite plugin currently load Veryl only.
 
 Celox follows IEEE Std 1800™-2023.
 Instead of restating the standard, the
-[deviations page](./systemverilog-reference) lists only what is unsupported,
-what intentionally differs, and which implementation-defined choices Celox
-makes. Anything not listed there behaves as the standard specifies; a
-difference you cannot find there is a bug.
+[conformance and deviations page](./systemverilog-reference) separates
+**unsupported features**, **partially supported subsets** (with Supported /
+Not supported tables), **narrow limitations**, and **intentional deviations**.
+Valid IEEE 1800-2023 code not listed there behaves as the standard specifies
+(an unlisted difference is a bug). Default mode accepts several
+warn-by-default compatibility relaxations; in strict mode (`strict = true` /
+`--strict`), accepting unlisted non-IEEE 1800-2023 code is also a bug.
 
 ## Start with a module
 
@@ -73,27 +76,18 @@ The [4-state guide](./four-state) explains the state model.
 For a mixed hierarchy, build the `Simulation` with
 `Simulation::from_sources(veryl).with_sv_sources(sv)`.
 
-## Deviations from the standard
+## Support overview and deviations
 
 Unsupported constructs are rejected with an `Unsupported` error naming the
 construct and its tracking issue; nothing is silently ignored.
-The areas most likely to require changes when porting a design are:
 
-- Concurrent assertions beyond the Boolean and fixed-delay sequence subset,
-  and class randomization and constraints beyond the scalar subset.
-- `bind`, checkers, covergroups, clocking blocks, `specify` blocks, UDPs,
-  `defparam`, procedural `force` / `release`, and `disable` (other than
-  `disable fork`).
-- Nonblocking assignments in `always_comb` and `always_latch`, net drivers
-  in several modules (tri-state buses across modules), and `iff` in
-  `always_ff`.
-- `ref` ports, non-ANSI port expressions, gate primitives with delays or
-  strengths, and several interface features.
-
-The [deviations page](./systemverilog-reference#what-is-not-supported) is
-the complete list, including intentional differences and
-implementation-defined choices for random numbers, time defaults, and event
-scheduling order.
+| Category | Summary | Reference |
+| --- | --- | --- |
+| **Not supported** | `bind`, checkers, covergroups, clocking blocks, `specify` blocks, UDPs, `ref` ports, `disable` (other than `disable fork`), `wait_order`, and unpacked/tagged unions | [Unsupported features](./systemverilog-reference#what-is-not-supported) |
+| **Partially supported** | Side-by-side Supported / Not supported tables for ports/nets/`defparam`/gates, hierarchical references, interfaces, virtual interfaces, unpacked structs, procedural `force`/`assign`, delays, event controls, classes, randomization, dynamic containers, concurrent assertions, and I/O | [Partially supported features](./systemverilog-reference#partial-support) |
+| **Narrow limitations** | Specific restrictions such as non-ANSI port expressions, nonblocking assignments in `always_comb`/`always_latch`, and loop unrolling bounds | [Narrow limitations](./systemverilog-reference#narrow-limitations) |
+| **Deviations (standard code)** | Deliberate differences on valid IEEE 1800-2023 code: program continuous assignment region, cross-module interface static storage, procedural `assign` override timing, run-time `%p`, and `$exit` warnings | [Deviations affecting standard code](./systemverilog-reference#deviations-standard-code) |
+| **Permissive non-standard acceptance** | Optional/warn-by-default relaxations (`strict = true` / `--strict` promotes warnings to errors) plus non-standard extensions such as variable `force` selects and `$psprintf` | [Permissive non-standard acceptance](./systemverilog-reference#deviations-nonstandard-code) |
 
 ## Mix SystemVerilog and Veryl
 
@@ -115,12 +109,16 @@ types and call sites.
 
 ## Find a specific behavior {#semantics-worth-knowing}
 
-- [Unsupported constructs](./systemverilog-reference#what-is-not-supported)
-- [Intentional deviations](./systemverilog-reference#intentional-deviations)
+- [Unsupported features](./systemverilog-reference#what-is-not-supported)
+- [Partially supported features](./systemverilog-reference#partial-support)
+- [Narrow limitations](./systemverilog-reference#narrow-limitations)
+- [Deviations affecting standard-conforming code](./systemverilog-reference#deviations-standard-code)
+- [Permissive acceptance of non-standard code](./systemverilog-reference#deviations-nonstandard-code)
 - [Event scheduling choices](./systemverilog-reference#timing-semantics)
 - [Time units and precision defaults](./systemverilog-reference#time-and-precision)
 - [Random seeds and reproducibility](./systemverilog-reference#random-numbers)
 - [Termination and `final` procedures](./systemverilog-reference#celox-execution-model)
+- [Memory files (`$readmemh` / `$readmemb`)](./systemverilog-reference#memory-files)
 
 ## SystemVerilog emitted by Veryl
 

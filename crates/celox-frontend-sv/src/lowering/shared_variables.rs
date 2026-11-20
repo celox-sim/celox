@@ -88,6 +88,7 @@ pub(super) fn share_always_variables(
     module: &sv::ir::Module,
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
+    four_state: bool,
     shared: SharedAlways<'_>,
     warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Option<(sv::ir::Module, HashSet<String>)> {
@@ -186,7 +187,7 @@ pub(super) fn share_always_variables(
         renamed
     });
     Some((
-        module.run_comb_processes_with_deferred_rearm(|index, _| {
+        module.run_comb_processes_with_deferred_rearm(!four_state, |index, _| {
             processes
                 .contains(&index)
                 .then_some(deferred_rearm.contains(&index))
@@ -437,11 +438,15 @@ pub(super) fn shared_edge_variables(
         .collect()
 }
 
-/// The unpacked arrays that only edge-triggered processes of `module` drive.
-/// A process that writes one of them only by nonblocking assignments, at
-/// least one of them at a run-time element, publishes just the elements it
+/// The unpacked arrays that a single edge-triggered process of `module` drives.
+/// When that process writes one of them only by nonblocking assignments, at
+/// least one of them at a run-time element, it publishes just the elements it
 /// wrote (see `Ff::lower_process`) instead of seeding and committing the
-/// whole array on every edge.
+/// whole array on every edge. Arrays driven by several edge processes are
+/// handled by `shared_edge_memories` when their ranges overlap; when their
+/// ranges are disjoint, promoting only one process to sparse publication
+/// would commit whole 64-bit chunks from `SPARSE_WORKING_REGION` over another
+/// process's `WORKING_REGION` commit to a neighbouring element.
 ///
 /// This uses the drivers within `module`. The sparse commit copies back
 /// only the 64-bit chunks the process wrote, so a write from another scope
@@ -494,10 +499,10 @@ pub(super) fn edge_only_memories(
             let drivers = index
                 .get_or_insert_with(|| ModuleDrivers::new(module, constants, parameter_types))
                 .local(signal.name());
-            !drivers.is_empty()
-                && drivers
-                    .iter()
-                    .all(|(id, _)| (first_ff..end_ff).contains(id))
+            let Some((first, _)) = drivers.first() else {
+                return false;
+            };
+            (first_ff..end_ff).contains(first) && drivers.iter().all(|(id, _)| id == first)
         })
         .map(|signal| signal.name().to_string())
         .collect()

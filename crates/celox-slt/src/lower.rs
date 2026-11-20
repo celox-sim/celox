@@ -201,6 +201,13 @@ struct LoweringCostCache {
     owned_slice_lower_costs: Vec<Option<u128>>,
     contains_shared_nontrivial: Vec<Option<bool>>,
     is_speculatable_pure: Vec<Option<bool>>,
+    /// Whether the cone of a node has no operation a guarded concat must not
+    /// skip (see `guarded_concat_root_is_supported`).
+    guarded_concat_supported: Vec<Option<bool>>,
+    /// The index in `zero_facts` of a node's zero-controller facts, or
+    /// `u32::MAX`. The facts depend on `fanout`, so they live as long as it.
+    zero_facts_slot: Vec<u32>,
+    zero_facts: Vec<ZeroControllerFacts>,
     traversal_seen: Vec<bool>,
     traversal_work: Vec<NodeId>,
     dirty: Vec<bool>,
@@ -220,6 +227,8 @@ impl LoweringCostCache {
         self.owned_slice_lower_costs.resize(node_count, None);
         self.contains_shared_nontrivial.resize(node_count, None);
         self.is_speculatable_pure.resize(node_count, None);
+        self.guarded_concat_supported.resize(node_count, None);
+        self.zero_facts_slot.resize(node_count, u32::MAX);
         self.traversal_seen.resize(node_count, false);
         self.dirty.resize(node_count, false);
     }
@@ -245,9 +254,12 @@ impl LoweringCostCache {
             self.owned_slice_lower_costs[node.0] = None;
             self.contains_shared_nontrivial[node.0] = None;
             self.is_speculatable_pure[node.0] = None;
+            self.guarded_concat_supported[node.0] = None;
+            self.zero_facts_slot[node.0] = u32::MAX;
             self.traversal_seen[node.0] = false;
             self.dirty[node.0] = false;
         }
+        self.zero_facts.clear();
         // Clear old entries before shrinking; new entries start empty.
         self.resize(node_count);
     }
@@ -723,62 +735,69 @@ impl SLTToSIRLowerer {
         node: NodeId,
         arena: &SLTNodeArena<A>,
     ) -> bool {
-        let mut pending = vec![node];
-        let mut seen = crate::HashSet::default();
-        while let Some(node) = pending.pop() {
-            if !seen.insert(node) {
-                continue;
-            }
-            match arena.get(node) {
-                SLTNode::Input { signed, .. } | SLTNode::Constant(_, _, _, signed) => {
-                    if !signed {
-                        return false;
-                    }
-                }
-                SLTNode::Binary(lhs, op, rhs) => match op {
-                    BinaryOp::DivS | BinaryOp::RemS => {}
-                    BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => pending.push(*lhs),
-                    BinaryOp::Add
-                    | BinaryOp::Sub
-                    | BinaryOp::Mul
-                    | BinaryOp::And
-                    | BinaryOp::Or
-                    | BinaryOp::Xor => {
-                        pending.push(*rhs);
-                        pending.push(*lhs);
-                    }
-                    _ => return false,
-                },
-                SLTNode::Unary(
-                    UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Minus | UnaryOp::BitNot,
-                    inner,
-                ) => pending.push(*inner),
-                SLTNode::Unary(
-                    UnaryOp::Float {
-                        op: celox_design::FloatUnaryOp::ToSigned { .. },
-                        ..
-                    },
-                    _,
-                ) => {}
-                SLTNode::Capture { expr, .. } => pending.push(*expr),
-                SLTNode::Mux {
-                    then_expr,
-                    else_expr,
-                    ..
-                } => {
-                    pending.push(*else_expr);
-                    pending.push(*then_expr);
-                }
-                SLTNode::ForFold {
-                    loop_signed: true,
-                    result: crate::SLTForFoldResult::State(_),
-                    ..
-                } => {}
-                _ => return false,
-            }
-        }
-        true
+        bound_signed(node, arena)
     }
+}
+
+/// Whether the lowering treats `node` as a signed value where an operation
+/// extends its operands by their signedness: every leaf it passes through
+/// is signed.
+pub(crate) fn bound_signed<A: Hash + Eq + Clone>(node: NodeId, arena: &SLTNodeArena<A>) -> bool {
+    let mut pending = vec![node];
+    let mut seen = crate::HashSet::default();
+    while let Some(node) = pending.pop() {
+        if !seen.insert(node) {
+            continue;
+        }
+        match arena.get(node) {
+            SLTNode::Input { signed, .. } | SLTNode::Constant(_, _, _, signed) => {
+                if !signed {
+                    return false;
+                }
+            }
+            SLTNode::Binary(lhs, op, rhs) => match op {
+                BinaryOp::DivS | BinaryOp::RemS => {}
+                BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => pending.push(*lhs),
+                BinaryOp::Add
+                | BinaryOp::Sub
+                | BinaryOp::Mul
+                | BinaryOp::And
+                | BinaryOp::Or
+                | BinaryOp::Xor => {
+                    pending.push(*rhs);
+                    pending.push(*lhs);
+                }
+                _ => return false,
+            },
+            SLTNode::Unary(
+                UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Minus | UnaryOp::BitNot,
+                inner,
+            ) => pending.push(*inner),
+            SLTNode::Unary(
+                UnaryOp::Float {
+                    op: celox_design::FloatUnaryOp::ToSigned { .. },
+                    ..
+                },
+                _,
+            ) => {}
+            SLTNode::Capture { expr, .. } => pending.push(*expr),
+            SLTNode::Mux {
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                pending.push(*else_expr);
+                pending.push(*then_expr);
+            }
+            SLTNode::ForFold {
+                loop_signed: true,
+                result: crate::SLTForFoldResult::State(_),
+                ..
+            } => {}
+            _ => return false,
+        }
+    }
+    true
 }
 
 impl Drop for SLTToSIRLowerer {

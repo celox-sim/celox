@@ -75,6 +75,9 @@ pub(crate) struct PlanSummary {
     /// settled state (`Lazy::kernels`).
     pub(crate) lazy: Option<Vec<bool>>,
     pub(crate) incremental: bool,
+    /// The events whose domains commit their blocking results in the
+    /// Active region with a settle before NBA (`Plan::active`).
+    pub(crate) active: Vec<AbsoluteAddr>,
 }
 
 #[cfg(test)]
@@ -93,6 +96,11 @@ pub(crate) fn plan_for_test(program: &LaidOutProgram) -> Result<PlanSummary, Str
             .map(|&event| plan.events[event].signal)
             .collect(),
         lazy: plan.lazy.as_ref().map(|lazy| lazy.kernels.clone()),
+        active: plan
+            .active
+            .iter()
+            .map(|&event| plan.events[event].signal)
+            .collect(),
         incremental: plan.incremental.is_some(),
         settle_reads: plan.settle_reads,
         fallback: plan.fallback,

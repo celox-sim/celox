@@ -29,7 +29,7 @@ mod diagnostics;
 // Without a host runtime nothing builds simulators, so nothing links DPI-C.
 #[cfg_attr(not(feature = "host-runtime"), allow(dead_code))]
 mod dpi;
-mod interpreter;
+use celox_sir::interp as interpreter;
 mod ir;
 mod memory_file_reader;
 mod optimizer;

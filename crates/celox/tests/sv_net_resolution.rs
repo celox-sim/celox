@@ -58,6 +58,7 @@ resolution_backend!(resolves_two_drivers_interpreter, build_interpreter);
 resolution_backend!(resolves_two_drivers_cranelift, build);
 #[cfg(target_arch = "x86_64")]
 resolution_backend!(resolves_two_drivers_native, build_native);
+#[cfg(feature = "wasm-runtime")]
 resolution_backend!(resolves_two_drivers_wasm, build_wasm);
 
 /// Runs `source`, whose `initial` block prints lines, and returns them.

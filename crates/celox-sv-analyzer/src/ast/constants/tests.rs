@@ -188,3 +188,46 @@ fn native_constant_calls_preserve_contextual_operand_shapes() {
         Some(8)
     );
 }
+
+/// The scan for unknown digits tells unknown bits exactly as parsing does:
+/// for wide and narrow literals of every base, unbased literals, strings
+/// holding the letters, and malformed text.
+#[test]
+fn unknown_bits_of_literals_are_those_their_parse_gives() {
+    let wide_hex = format!("2496'h{}", "0123456789abcdef".repeat(39));
+    let wide_decimal = format!("2496'd{}", "9876543210".repeat(70));
+    let wide_unknown = format!("2496'h{}x", "f".repeat(623));
+    let literals = [
+        "8'h5a",
+        "8'hx5",
+        "8'hX5",
+        "8'b1z0?",
+        "8'o7z",
+        "4'dx",
+        "4'dZ",
+        "4'd?",
+        "16'shffff",
+        "'x",
+        "'Z",
+        "'?",
+        "'1",
+        "'0",
+        "42",
+        "-3",
+        "\"xyz\"",
+        "\"no\"",
+        "8'hxyz",
+        "12'h_x_",
+        "1.5",
+        wide_hex.as_str(),
+        wide_decimal.as_str(),
+        wide_unknown.as_str(),
+    ];
+    for literal in literals {
+        let parsed = crate::typecheck::parse_integral_literal(literal)
+            .is_some_and(|parsed| parsed.mask != num_bigint::BigUint::default());
+        assert_eq!(literal_has_unknown_bits(literal), parsed, "{literal}");
+    }
+    assert!(literal_has_unknown_bits(&wide_unknown));
+    assert!(!literal_has_unknown_bits(&wide_hex));
+}

@@ -1467,3 +1467,57 @@ fn final_alias_redirection_rewrites_functions_and_call_effects() {
     assert_eq!(effects.reads, [canonical]);
     assert!(sir.calls_summarized());
 }
+
+/// An access through an alias of an alias names the chain's root, so the
+/// load of a copy and the store of the home it shares are one address to
+/// the passes that order memory accesses: RTLMeter VeeR-EL2 hoisted a reset
+/// copy's load above the store of the reset it shares a home with.
+#[test]
+fn final_alias_redirection_names_the_root_of_a_chain() {
+    let root = address(0);
+    let middle = address(1);
+    let leaf = address(2);
+    let unit = single_block_unit(
+        vec![
+            SIRInstruction::Imm(RegisterId(0), SIRValue::new(1u8)),
+            store(root, 0, 1),
+            load(1, leaf, 1),
+            load(2, middle, 1),
+        ],
+        &[(0, 1), (1, 1), (2, 1)],
+    );
+    let mut sir = SirProgram {
+        eval_comb: vec![unit],
+        eval_apply_ffs: HashMap::default(),
+        eval_comb_apply_ffs: HashMap::default(),
+        merge_comb_apply: false,
+        eval_comb_stateful: None,
+        eval_only_ffs: HashMap::default(),
+        apply_ffs: HashMap::default(),
+        parallel: None,
+        processes: Vec::new(),
+        functions: Vec::new(),
+    };
+    let design = celox_design::ElaboratedDesign::default();
+    let runtime_schema = celox_design::RuntimeSchema::default();
+    let mut layout_requirements = celox_state_layout::LayoutRequirements::default();
+    let mut program = OptimizationContext {
+        sir: &mut sir,
+        design: &design,
+        runtime_schema: &runtime_schema,
+        layout_requirements: &mut layout_requirements,
+    };
+    redirect_final_alias_accesses(
+        &mut program,
+        &[
+            (leaf.absolute_addr(), middle.absolute_addr()),
+            (middle.absolute_addr(), root.absolute_addr()),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    assert_eq!(
+        sir.eval_comb[0].blocks[&BlockId(0)].instructions[2..],
+        [load(1, root, 1), load(2, root, 1)]
+    );
+}

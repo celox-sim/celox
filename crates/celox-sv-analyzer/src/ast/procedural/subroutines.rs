@@ -845,6 +845,14 @@ pub(in crate::ast) fn lower_subroutine(
         system_functions::Body::Subroutine,
     );
     builder.set_owner(qualified_name.clone());
+    // A subroutine of a generate block is named under it.
+    let scope = match (builder.dims.scope_name.as_deref(), scope) {
+        (
+            Some(expression_binding::ScopeName::Relative(block)),
+            expression_binding::ScopeName::Relative(path),
+        ) => expression_binding::ScopeName::Relative(format!("{block}.{path}")),
+        (_, scope) => scope,
+    };
     builder.dims.scope_name = Some(std::sync::Arc::new(scope));
     builder.task_timing = native.kind == celox_sv_syntax::SubroutineKind::Task;
     let first_local = builder.state.locals.len();

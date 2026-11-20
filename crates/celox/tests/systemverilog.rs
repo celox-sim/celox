@@ -237,6 +237,8 @@ mod module_class_overrides;
 
 #[path = "frontends/systemverilog/block_imports.rs"]
 mod block_imports;
+#[path = "frontends/systemverilog/import_positions.rs"]
+mod import_positions;
 
 #[path = "frontends/systemverilog/top_level_modules.rs"]
 mod top_level_modules;

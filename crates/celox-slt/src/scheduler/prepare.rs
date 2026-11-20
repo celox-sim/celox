@@ -2,6 +2,57 @@
 
 use super::*;
 
+/// Materialize any remaining shared grouped folds in `indices` and emit their
+/// projection stores in order.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emit_prepared_fold_group_paths<
+    Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display,
+>(
+    indices: &[usize],
+    jointly_lowered: &HashSet<NodeId>,
+    input: &[LogicPath<Addr>],
+    lowerer: &mut crate::SLTToSIRLowerer,
+    builder: &mut SIRBuilder<Addr>,
+    arena: &SLTNodeArena<Addr>,
+    lower_cache: &mut HashMap<NodeId, RegisterId>,
+    dep_memo: &mut HashMap<NodeId, HashSet<Addr>>,
+    inverse_dep_memo: &mut HashMap<Addr, HashSet<NodeId>>,
+    unpacked_element_widths: &HashMap<Addr, usize>,
+) {
+    if indices.is_empty() {
+        return;
+    }
+
+    let prepared_results = prepare_fold_group_projections(
+        indices,
+        jointly_lowered,
+        input,
+        lowerer,
+        builder,
+        arena,
+        lower_cache,
+        dep_memo,
+        inverse_dep_memo,
+    );
+    for &idx in indices {
+        let path = &input[idx];
+        collect_logic_path_input_deps(path, arena, dep_memo, inverse_dep_memo);
+        let prepared_result = prepared_results.get(&idx).map(|projection| {
+            lowerer.project_materialized(builder, projection.packed_result, projection.access)
+        });
+        emit_logic_path_store_with_result(
+            lowerer,
+            builder,
+            path,
+            arena,
+            lower_cache,
+            unpacked_element_widths,
+            prepared_result,
+        );
+        invalidate_logic_path_target(path, inverse_dep_memo, lower_cache);
+    }
+}
+
 /// Lower a consecutive set of exact grouped-fold paths.  The packed fold
 /// results are computed atomically, then each projection is created and stored
 /// in topological order.  Ordinary paths bypass this buffer entirely.
@@ -22,35 +73,28 @@ pub(super) fn flush_pending_fold_paths<Addr: Clone + Eq + Ord + Hash + Debug + C
         return;
     }
 
-    let prepared_results = prepare_atomic_fold_group_results(
-        pending,
-        input,
+    let indices = std::mem::take(pending);
+    let jointly_lowered = jointly_lower_fold_group_families(
+        &indices,
         fold_group_schedule_index,
+        lowerer,
+        builder,
+        arena,
+        lower_cache,
+        four_state,
+    );
+    emit_prepared_fold_group_paths(
+        &indices,
+        &jointly_lowered,
+        input,
         lowerer,
         builder,
         arena,
         lower_cache,
         dep_memo,
         inverse_dep_memo,
-        four_state,
+        unpacked_element_widths,
     );
-    for idx in pending.drain(..) {
-        let path = &input[idx];
-        collect_logic_path_input_deps(path, arena, dep_memo, inverse_dep_memo);
-        let prepared_result = prepared_results.get(&idx).map(|projection| {
-            lowerer.project_materialized(builder, projection.packed_result, projection.access)
-        });
-        emit_logic_path_store_with_result(
-            lowerer,
-            builder,
-            path,
-            arena,
-            lower_cache,
-            unpacked_element_widths,
-            prepared_result,
-        );
-        invalidate_logic_path_target(path, inverse_dep_memo, lower_cache);
-    }
 }
 
 pub(super) fn is_exact_fold_path<Addr: Clone + Eq + Hash + Copy>(

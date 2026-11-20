@@ -53,6 +53,201 @@ pub(super) fn retained_storage(
     stores: &HashSet<AbsoluteAddr>,
 ) -> HashSet<AbsoluteAddr> {
     /// The bits of each home a settle has stored so far, as sorted,
+    /// disjoint `[start, end)` ranges. A persistent map: the paths of a
+    /// settle share what they stored before they split, so passing it on to
+    /// a block copies nothing.
+    type Covered = imbl::GenericHashMap<
+        (u32, AbsoluteAddr),
+        Vec<(usize, usize)>,
+        fxhash::FxBuildHasher,
+        imbl::shared_ptr::DefaultSharedPtr,
+    >;
+    let mut retained = HashSet::default();
+    fn add(covered: &mut Covered, key: (u32, AbsoluteAddr), start: usize, end: usize) {
+        let mut ranges = covered.get(&key).cloned().unwrap_or_default();
+        ranges.push((start, end));
+        ranges.sort_unstable();
+        let mut merged: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
+        for &(start, end) in ranges.iter() {
+            match merged.last_mut() {
+                Some(last) if start <= last.1 => last.1 = last.1.max(end),
+                _ => merged.push((start, end)),
+            }
+        }
+        covered.insert(key, merged);
+    }
+    /// What both `known` and `other` cover; `known` itself when that is
+    /// all of it, so that an unchanged block need not run again.
+    fn meet(known: &Covered, other: &Covered) -> Covered {
+        if known.ptr_eq(other) {
+            return known.clone();
+        }
+        let (small, large) = if known.len() <= other.len() {
+            (known, other)
+        } else {
+            (other, known)
+        };
+        let mut met = Covered::default();
+        let mut same = known.len() <= other.len();
+        for (key, left) in small {
+            let Some(right) = large.get(key) else {
+                same = false;
+                continue;
+            };
+            if left == right {
+                met.insert(*key, left.clone());
+                continue;
+            }
+            let both: Vec<(usize, usize)> = left
+                .iter()
+                .flat_map(|&(ls, le)| {
+                    right.iter().filter_map(move |&(rs, re)| {
+                        let (start, end) = (ls.max(rs), le.min(re));
+                        (start < end).then_some((start, end))
+                    })
+                })
+                .collect();
+            if known.get(key) != Some(&both) {
+                same = false;
+            }
+            if !both.is_empty() {
+                met.insert(*key, both);
+            }
+        }
+        if same && met.len() == known.len() {
+            known.clone()
+        } else {
+            met
+        }
+    }
+    // Record every storage whose entry value can reach a read before a
+    // covering write. Keep scanning so independent homes are analyzed once.
+    let mut step = |block: &celox_sir::BasicBlock<RegionedAbsoluteAddr>, covered: &mut Covered| {
+        for inst in &block.instructions {
+            // A call may read any part of what it reads before anything in
+            // the settle stored it, and what it writes it need not write on
+            // every path, so it covers nothing.
+            if let StateAccess::Objects(sources) = inst.state_reads() {
+                retained.extend(
+                    sources
+                        .iter()
+                        .map(|source| storage(source.absolute_addr()))
+                        .filter(|home| stores.contains(home)),
+                );
+            }
+            match inst {
+                SIRInstruction::Load(_, source, offset, width)
+                | SIRInstruction::Commit(source, _, offset, width, _) => {
+                    let home = storage(source.absolute_addr());
+                    if stores.contains(&home) {
+                        let read = offset.constant_bit_offset().is_some_and(|start| {
+                            covered.get(&(source.region, home)).is_some_and(|ranges| {
+                                ranges
+                                    .iter()
+                                    .any(|&(s, e)| s <= start && start + width <= e)
+                            })
+                        });
+                        if !read {
+                            retained.insert(home);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            match inst {
+                SIRInstruction::Store(target, offset, width, ..)
+                | SIRInstruction::Commit(_, target, offset, width, _) => {
+                    let home = storage(target.absolute_addr());
+                    if stores.contains(&home)
+                        && let Some(start) = offset.constant_bit_offset()
+                    {
+                        add(covered, (target.region, home), start, start + width);
+                    }
+                }
+                _ => {}
+            }
+        }
+    };
+    let mut entry = Covered::default();
+    for unit in units {
+        // What every path stores before each block, from the paths found
+        // so far: a fixed point from above, as loops only remove. A block
+        // runs again only when what reaches it changed, lowest first.
+        let mut before: HashMap<celox_sir::BlockId, Covered> = HashMap::default();
+        before.insert(unit.entry_block_id, entry.clone());
+        let mut after: HashMap<celox_sir::BlockId, Covered> = HashMap::default();
+        let mut pending: BTreeSet<celox_sir::BlockId> = BTreeSet::from([unit.entry_block_id]);
+        while let Some(id) = pending.pop_first() {
+            let Some(block) = unit.blocks.get(&id) else {
+                continue;
+            };
+            let mut covered = before[&id].clone();
+            step(block, &mut covered);
+            if after
+                .get(&id)
+                .is_some_and(|known| known.ptr_eq(&covered) || *known == covered)
+            {
+                continue;
+            }
+            let successors: Vec<_> = match &block.terminator {
+                SIRTerminator::Jump(target, _) => vec![*target],
+                SIRTerminator::Branch {
+                    true_block,
+                    false_block,
+                    ..
+                } => vec![true_block.0, false_block.0],
+                SIRTerminator::Switch { cases, default, .. } => cases
+                    .iter()
+                    .map(|case| case.target)
+                    .chain([*default])
+                    .collect(),
+                SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
+            };
+            for successor in successors {
+                let next = match before.get(&successor) {
+                    Some(known) => {
+                        let next = meet(known, &covered);
+                        if next.ptr_eq(known) {
+                            continue;
+                        }
+                        next
+                    }
+                    None => covered.clone(),
+                };
+                before.insert(successor, next);
+                pending.insert(successor);
+            }
+            after.insert(id, covered);
+        }
+        // The next unit starts from what every return of this one stored.
+        let mut returns = unit
+            .blocks
+            .iter()
+            .filter(|(_, block)| matches!(block.terminator, SIRTerminator::Return))
+            .filter_map(|(id, _)| after.get(id));
+        entry = match returns.next() {
+            Some(first) => returns.fold(first.clone(), |met, next| meet(&met, next)),
+            None => Covered::default(),
+        };
+    }
+    #[cfg(test)]
+    assert_eq!(
+        retained,
+        retained_storage_reference(units, storage, stores),
+        "the worklist finds what the full passes find"
+    );
+    retained
+}
+
+/// [`retained_storage`] by full passes over every block with copied maps,
+/// as it was computed before: the tests check that both agree.
+#[cfg(test)]
+fn retained_storage_reference(
+    units: &[Unit],
+    storage: &impl Fn(AbsoluteAddr) -> AbsoluteAddr,
+    stores: &HashSet<AbsoluteAddr>,
+) -> HashSet<AbsoluteAddr> {
+    /// The bits of each home a settle has stored so far, as sorted,
     /// disjoint `[start, end)` ranges.
     type Covered = HashMap<(u32, AbsoluteAddr), Vec<(usize, usize)>>;
     let mut retained = HashSet::default();
@@ -357,6 +552,38 @@ pub(super) fn makes_opaque_calls(
         }
         _ => makes_host_calls(inst),
     }
+}
+
+/// Whether `inst` is a call of a container operation of the heap, whose
+/// code `constants` (the immediates of its unit) give: it changes no state
+/// of the design but its result, a value or the handle of a new container
+/// that the unit stores where the container lives
+/// ([`celox_heap::containers::is_container_value_op`]).
+pub(super) fn container_value_call(
+    inst: &SIRInstruction<RegionedAbsoluteAddr>,
+    constants: &HashMap<RegisterId, u64>,
+) -> bool {
+    matches!(
+        inst,
+        SIRInstruction::ExternCall { func, args, .. }
+            if *func == celox_sir::extern_abi::HEAP_HELPER_ID
+                && args
+                    .first()
+                    .and_then(|code| constants.get(code))
+                    .is_some_and(|&code| celox_heap::containers::is_container_value_op(code))
+    )
+}
+
+/// The immediates of `unit` that fit 64 bits, by register.
+pub(super) fn unit_constants(unit: &Unit) -> HashMap<RegisterId, u64> {
+    instructions(unit)
+        .filter_map(|inst| match inst {
+            SIRInstruction::Imm(register, value) => u64::try_from(&value.payload)
+                .ok()
+                .map(|value| (*register, value)),
+            _ => None,
+        })
+        .collect()
 }
 
 pub(super) fn makes_host_calls(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {

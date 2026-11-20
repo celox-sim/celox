@@ -199,12 +199,14 @@ and [SIR reference](https://celox-sim.github.io/celox/internals/ir-reference).
 Celox is under active development. Its focus is design-level testing of RTL
 written in Veryl or SystemVerilog. For SystemVerilog, Celox follows
 IEEE Std 1800-2023: the
-[deviations page](https://celox-sim.github.io/celox/guide/systemverilog-reference)
-lists the unsupported constructs (such as `bind`, checkers, covergroups,
-clocking blocks, `specify` blocks, and UDPs), the intentional deviations, and
-the implementation-defined choices. Anything not listed there follows the
-standard, and unsupported code is rejected with a diagnostic naming the
-construct instead of being silently mis-simulated. Celox is not a gate-level
+[conformance and deviations page](https://celox-sim.github.io/celox/guide/systemverilog-reference)
+lists unsupported features (such as `bind`, checkers, covergroups,
+clocking blocks, `specify` blocks, and UDPs), partially supported subsets,
+intentional deviations, and implementation-defined choices. Valid IEEE
+1800-2023 code not listed there is expected to follow the standard (and
+unimplemented constructs are rejected with an `Unsupported` diagnostic rather
+than silently mis-simulated); in strict mode (`--strict`), accepting unlisted
+non-IEEE 1800-2023 code is likewise a bug. Celox is not a gate-level
 timing simulator.
 
 The scope keeps the simulator small enough to make architectural changes,

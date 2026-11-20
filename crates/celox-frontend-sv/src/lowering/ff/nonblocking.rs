@@ -296,10 +296,16 @@ impl Ff<'_, '_> {
         ) {
             // A run-time element: its whole selected part or nothing.
             let width = access.msb - access.lsb + 1;
-            let offset = expr_from_select_position(&offset, constants, parameter_types)
-                .ok_or_else(|| unsupported("dynamic assignment index"))?;
+            let element_index =
+                element_index_position(&offset, element_width, constants, parameter_types);
+            let offset = expr_from_select_position(
+                element_index.as_ref().unwrap_or(&offset),
+                constants,
+                parameter_types,
+            )
+            .ok_or_else(|| unsupported("dynamic assignment index"))?;
             let offset = self.propagate(&offset);
-            let (bit_offset, _) = lower_expr_with_context(
+            let (position, _) = lower_expr_with_context(
                 &offset,
                 self.m.variables,
                 self.m.name_to_id,
@@ -310,13 +316,16 @@ impl Ff<'_, '_> {
                 None,
             )
             .ok_or_else(|| unsupported("dynamic assignment index"))?;
-            let bit_offset =
-                coerce_node_width(&mut arena, bit_offset, Some(NBA_POSITION_WIDTH), false)
-                    .map_err(slt_error)?;
-            let stride = slt_constant(&mut arena, BigUint::from(element_width), 64, false)?;
-            let index = arena
-                .alloc(SLTNode::Binary(bit_offset, BinaryOp::DivU, stride))
+            let position = coerce_node_width(&mut arena, position, Some(NBA_POSITION_WIDTH), false)
                 .map_err(slt_error)?;
+            let stride = slt_constant(&mut arena, BigUint::from(element_width), 64, false)?;
+            let index = if element_index.is_some() {
+                position
+            } else {
+                arena
+                    .alloc(SLTNode::Binary(position, BinaryOp::DivU, stride))
+                    .map_err(slt_error)?
+            };
             let (index, valid) =
                 dynamic_array_index_guard_slt(&mut arena, index, var_width / element_width.max(1))
                     .ok_or_else(|| unsupported("dynamic assignment index"))?;
