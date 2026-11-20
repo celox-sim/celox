@@ -17,7 +17,7 @@ mod expression_tests;
 mod format;
 pub mod lowering;
 mod value;
-pub use expression::CompiledExpr;
+pub use expression::{CompiledExpr, SelectionWindow};
 pub use format::{
     DisplayFormatArg, FieldSpec, MAX_FIELD_WIDTH, format_display_arg, format_sized_display_arg,
     format_sv_display_arg, format_veryl_display_arg, pad_veryl_field,
@@ -692,6 +692,16 @@ pub enum ExprOpcode<L = usize> {
         element_width: usize,
         width: usize,
     },
+    /// Compile the overlap as three 64-bit fields: source offset, slice
+    /// offset, and overlap width, from least to most significant.
+    ArraySliceWindow {
+        size: usize,
+        count: usize,
+        stride: usize,
+        subtract: usize,
+        step: usize,
+        signed: bool,
+    },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -705,6 +715,10 @@ pub struct ExprBytecode<L = usize> {
 impl<L> ExprBytecode<L> {
     pub fn new(ops: Vec<ExprOpcode<L>>) -> Self {
         Self { ops, kernel: None }
+    }
+
+    pub fn is_array_slice_window(&self) -> bool {
+        matches!(self.ops.last(), Some(ExprOpcode::ArraySliceWindow { .. }))
     }
 
     pub fn kernel(&self) -> Option<&ExpressionKernel<L>> {
@@ -1050,6 +1064,21 @@ impl<L> ExprBytecode<L> {
                 ExprOpcode::Ternary { then_len, else_len } => {
                     ExprOpcode::Ternary { then_len, else_len }
                 }
+                ExprOpcode::ArraySliceWindow {
+                    size,
+                    count,
+                    stride,
+                    subtract,
+                    step,
+                    signed,
+                } => ExprOpcode::ArraySliceWindow {
+                    size,
+                    count,
+                    stride,
+                    subtract,
+                    step,
+                    signed,
+                },
                 ExprOpcode::IndexOffset { first, end, stride } => {
                     ExprOpcode::IndexOffset { first, end, stride }
                 }

@@ -356,8 +356,10 @@ pub(super) fn checked_reference_bits(
 pub(super) struct ArraySliceGeometry<'a> {
     pub prefix: &'a [Expression],
     pub anchor: &'a Expression,
-    pub first: usize,
-    pub end: usize,
+    pub count: usize,
+    pub size: usize,
+    pub subtract: usize,
+    pub step: usize,
     pub stride: usize,
     pub width: usize,
 }
@@ -388,16 +390,21 @@ pub(super) fn array_slice_geometry<'a>(
         return None;
     }
     let width = stride.checked_mul(count)?;
-    let (first, end, stride) = match op {
-        VarSelectOp::Colon | VarSelectOp::PlusColon => (0, size - count + 1, stride),
-        VarSelectOp::MinusColon => (count - 1, size, stride),
-        VarSelectOp::Step => (0, size / count, width),
-    };
     Some(ArraySliceGeometry {
         prefix,
         anchor,
-        first,
-        end,
+        count,
+        size,
+        subtract: if matches!(op, VarSelectOp::MinusColon) {
+            count - 1
+        } else {
+            0
+        },
+        step: if matches!(op, VarSelectOp::Step) {
+            count
+        } else {
+            1
+        },
         stride,
         width,
     })

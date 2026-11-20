@@ -659,6 +659,19 @@ pub(super) fn exec_one_detailed<B: SimBackend>(
             forward_display(&rendered, *newline);
             ExecResult::Continue
         }
+        GenericTestbenchStatement::Assign { dst, expr }
+            if dst
+                .selection
+                .as_ref()
+                .is_some_and(|sel| sel.offset.bytecode().is_array_slice_window()) =>
+        {
+            if let Err(e) = settle_testbench(sim) {
+                return ExecResult::Fail(format!("eval_comb: {e}"));
+            }
+            let (value, mask) = eval_expr_four_state(sim, expr);
+            sim_set_logic_target(sim, dst, value.to_biguint(), mask);
+            ExecResult::Continue
+        }
         GenericTestbenchStatement::If { .. }
         | GenericTestbenchStatement::For { .. }
         | GenericTestbenchStatement::Assign { .. }
@@ -753,24 +766,27 @@ pub(super) fn exec_one_detailed<B: SimBackend>(
             }
             let value = value.as_ref().map(|value| {
                 let (bits, mask) = if let Some(target) = value_target {
-                    let offset = target
-                        .selection
-                        .as_ref()
-                        .map_or(0, |s| eval_expr(sim, &s.offset).to_u64() as usize);
-                    let available = target.signal.width.saturating_sub(offset).min(target.width);
+                    let window = target.selection.as_ref().map_or(
+                        celox_testbench::SelectionWindow {
+                            offset: 0,
+                            skip: 0,
+                            width: target.width,
+                        },
+                        |sel| sel.window(&eval_expr(sim, &sel.offset), target.signal.width),
+                    );
+                    let in_bounds = width_mask(window.width);
                     let invalid = if sim.backend.layout().four_state && target.signal.is_4state {
-                        width_mask(target.width) ^ width_mask(available)
+                        width_mask(target.width) ^ (&in_bounds << window.skip)
                     } else {
                         BigUint::default()
                     };
-                    if available == 0 {
+                    if window.width == 0 {
                         (invalid.clone(), invalid)
                     } else {
                         let (bits, mask) = sim.get_four_state(target.signal);
-                        let in_bounds = width_mask(available);
                         (
-                            ((bits >> offset) & &in_bounds) | &invalid,
-                            ((mask >> offset) & in_bounds) | invalid,
+                            ((((bits >> window.offset) & &in_bounds) << window.skip) | &invalid),
+                            ((((mask >> window.offset) & in_bounds) << window.skip) | invalid),
                         )
                     }
                 } else {
@@ -843,7 +859,7 @@ pub(super) fn exec_one_detailed<B: SimBackend>(
                     ret.selection.as_ref().map_or(ret.signal.width, |s| s.width);
                 let value = resize_component_return(value, source_width, signed, destination_width);
                 let mask = resize_component_return(mask, source_width, signed, destination_width);
-                sim_set_queue_target(sim, ret, value, mask);
+                sim_set_logic_target(sim, ret, value, mask);
             }
             ExecResult::Continue
         }

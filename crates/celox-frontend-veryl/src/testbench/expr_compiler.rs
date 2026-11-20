@@ -969,13 +969,25 @@ impl ExprCompiler<'_> {
             stride /= size;
             self.emit_index_offset(&mut ops, expr, 0, size, stride);
         }
-        self.emit_index_offset(
-            &mut ops,
-            geometry.anchor,
-            geometry.first,
-            geometry.end,
-            geometry.stride,
-        );
+        let context = self.root_context(geometry.anchor);
+        self.emit_in_context(geometry.anchor, &mut ops, Some(context));
+        if context.signed {
+            // Small loads can use a wider bytecode register. Take the sign
+            // from the expression's logical width before extending it.
+            ops.push(TbOpcode::Resize {
+                source_width: context.width,
+                target_width: context.width,
+                signed: true,
+            });
+        }
+        ops.push(TbOpcode::ArraySliceWindow {
+            size: geometry.size,
+            count: geometry.count,
+            stride: geometry.stride,
+            subtract: geometry.subtract,
+            step: geometry.step,
+            signed: context.signed,
+        });
         Some((ops, geometry.width))
     }
 

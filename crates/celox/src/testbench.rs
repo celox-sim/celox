@@ -400,11 +400,8 @@ fn sim_set_target<B: SimBackend>(
         return;
     };
 
-    let offset = eval_expr(sim, &selection.offset).to_u64() as usize;
-    let width = selection
-        .width
-        .min(target.signal.width.saturating_sub(offset));
-    if width == 0 {
+    let window = selection.window(&eval_expr(sim, &selection.offset), target.signal.width);
+    if window.width == 0 {
         return;
     }
 
@@ -414,14 +411,11 @@ fn sim_set_target<B: SimBackend>(
         } else {
             sim.get_four_state(target.signal)
         };
-    let selected_mask = width_mask(width) << offset;
-    let clear_mask = width_mask(target.signal.width) ^ &selected_mask;
-    let selected_value = (value.to_biguint() & width_mask(width)) << offset;
     write_testbench_signal(sim, target.signal, |sim| {
         sim.set_four_state(
             target.signal,
-            (root & &clear_mask) | selected_value,
-            root_mask & clear_mask,
+            window.merge(root, value.to_biguint()),
+            window.merge(root_mask, BigUint::default()),
         )
     });
 }
@@ -460,7 +454,7 @@ fn collect_testbench_heap<B: SimBackend>(
     sim.maybe_collect_heap(saved_roots);
 }
 
-fn sim_set_queue_target<B: SimBackend>(
+fn sim_set_logic_target<B: SimBackend>(
     sim: &mut crate::Simulator<B>,
     target: &TestbenchTarget<SignalRef, celox_testbench::CompiledExpr>,
     value: BigUint,
@@ -479,21 +473,18 @@ fn sim_set_queue_target<B: SimBackend>(
         sim.set_four_state(target.signal, value, mask);
         return;
     };
-    let offset = eval_expr(sim, &selection.offset).to_u64() as usize;
-    let width = selection
-        .width
-        .min(target.signal.width.saturating_sub(offset));
-    if width == 0 {
+    let window = selection.window(&eval_expr(sim, &selection.offset), target.signal.width);
+    if window.width == 0 {
         return;
     }
     let (old_value, old_mask) = sim.get_four_state(target.signal);
-    let field = width_mask(width);
-    let keep = width_mask(target.signal.width) ^ (&field << offset);
-    sim.set_four_state(
-        target.signal,
-        (old_value & &keep) | ((value & &field) << offset),
-        (old_mask & keep) | ((mask & field) << offset),
-    );
+    write_testbench_signal(sim, target.signal, |sim| {
+        sim.set_four_state(
+            target.signal,
+            window.merge(old_value, value),
+            window.merge(old_mask, mask),
+        );
+    });
 }
 
 fn execution_random_seed(seed: Option<u64>) -> u64 {

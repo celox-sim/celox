@@ -297,3 +297,74 @@ fn initial_array_slices_read_and_write_multiple_elements() {
     .unwrap();
     assert_eq!(result, celox::TestResult::Pass);
 }
+
+#[test]
+fn initial_array_slices_keep_the_overlap_in_each_row() {
+    let source = r#"
+#[test(Top)] module Top {
+    var data: logic<8>[2, 5];
+    var upper: logic<8>[2];
+    var lower: logic<8>[2];
+    var stepped: logic<8>[2];
+    var missing_all: logic<8>[2];
+    var negative: logic<8>[2];
+    var from_unknown: logic<8>[2];
+    var idx: u8;
+    var signed_idx: i8;
+    var unknown_idx: logic<3>;
+    initial {
+        data[0][0] = 8'h11;
+        data[0][1] = 8'h22;
+        data[0][2] = 8'h33;
+        data[0][4] = 8'h55;
+        data[1][0] = 8'h77;
+        idx = 4;
+        upper = data[0][idx+:2];
+        idx = 0;
+        lower = data[0][idx-:2];
+        idx = 2;
+        stepped = data[0][idx step 2];
+        signed_idx = -3;
+        missing_all = data[0][signed_idx+:2];
+        signed_idx = -1;
+        negative = data[0][signed_idx+:2];
+        unknown_idx = 3'bx01;
+        from_unknown = data[0][unknown_idx+:2];
+        $finish();
+    }
+}
+"#;
+    fn check<B: celox::SimBackend>(mut sim: Simulator<B>, four_state: bool) {
+        let program = celox::testbench::compile_initial_testbench(&sim).unwrap();
+        assert_eq!(
+            celox::testbench::run_compiled_testbench(&mut sim, &program),
+            celox::TestResult::Pass
+        );
+        let expected = [
+            ("upper", 0x0055u32, 0xff00u32),
+            ("lower", 0x1100, 0x00ff),
+            ("stepped", 0x0055, 0xff00),
+            ("missing_all", 0, 0xffff),
+            ("negative", 0x1100, 0x00ff),
+            ("from_unknown", if four_state { 0 } else { 0x3322 }, 0xffff),
+        ];
+        for (name, bits, missing) in expected {
+            let mask = if four_state { missing } else { 0 };
+            assert_eq!(
+                sim.get_four_state(sim.signal(name)),
+                ((bits | mask).into(), mask.into()),
+                "{name}, four_state={four_state}"
+            );
+        }
+    }
+    for four_state in [false, true] {
+        let builder = || Simulator::builder(source, "Top").four_state(four_state);
+        check(builder().build_interpreter().unwrap(), four_state);
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(builder().build_native().unwrap(), four_state);
+        #[cfg(feature = "cranelift")]
+        check(builder().build_cranelift().unwrap(), four_state);
+        #[cfg(feature = "wasm-runtime")]
+        check(builder().build_wasm().unwrap(), four_state);
+    }
+}
