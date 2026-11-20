@@ -21,6 +21,8 @@ use celox::{
 };
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 
+#[path = "celox/cdsp.rs"]
+mod cdsp;
 #[path = "celox/checkpoint_fs.rs"]
 mod checkpoint_fs;
 #[path = "celox/project.rs"]
@@ -64,6 +66,12 @@ struct RunArgs {
 
     #[command(flatten)]
     execution: runner::ExecutionArgs,
+
+    /// Listen on loopback TCP for one Surfer client (SystemVerilog).
+    #[arg(long, value_name = "PORT", conflicts_with_all = [
+        "compile_only", "save_state_on", "save_state_at_time", "save_state_dir", "restore_checkpoint"
+    ])]
+    cdsp: Option<u16>,
 
     /// Maximum SV scheduler steps or Veryl ticks (default: project setting or 1000000).
     /// Does not bound compilation or work within a single step/tick.
@@ -124,6 +132,7 @@ impl SaveStateArgs {
 }
 
 struct RunConfig {
+    cdsp: Option<u16>,
     execution: runner::ExecutionArgs,
     design: Design,
     opt_level: celox::OptLevel,
@@ -188,6 +197,7 @@ fn resolve_run_config(arguments: RunArgs) -> RunConfig {
                 .exit()
         });
     RunConfig {
+        cdsp: arguments.cdsp,
         execution: arguments.execution,
         opt_level: design.opt_level.unwrap_or(celox::OptLevel::O2),
         max_steps: arguments
@@ -205,6 +215,9 @@ fn run_testbench(arguments: RunArgs) -> Result<(), String> {
     arguments.design.opt_level = Some(arguments.opt_level);
     if arguments.design.is_sv() {
         return run_sv(arguments);
+    }
+    if arguments.cdsp.is_some() {
+        return Err("--cdsp requires a SystemVerilog testbench".into());
     }
     if arguments.execution.native_image_input.is_none()
         && !arguments.design.sources.iter().all(|path| {
@@ -237,9 +250,10 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
     });
     // Install before compiling so requests received during compilation are
     // deferred until the first safe simulation boundary.
-    let signal = (cfg!(unix) && !arguments.save_state.no_checkpoint_on_signal)
-        .then(state_signal::StateSignal::install)
-        .transpose()?;
+    let signal =
+        (cfg!(unix) && arguments.cdsp.is_none() && !arguments.save_state.no_checkpoint_on_signal)
+            .then(state_signal::StateSignal::install)
+            .transpose()?;
     let force_signals = !arguments.design.signal_access.force_signals.is_empty();
     let hotspot = arguments
         .execution
@@ -266,6 +280,12 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
         .signal_access(arguments.design.signal_access.clone())
         .plusargs(arguments.plusargs.iter().cloned())
         .defer_initialization(arguments.save_state.restore_checkpoint.is_some());
+    // Live waveform reads need every signal store, including unused internal nets.
+    let builder = if arguments.cdsp.is_some() {
+        builder.dead_store_policy(celox::DeadStorePolicy::Off)
+    } else {
+        builder
+    };
     let builder = arguments
         .design
         .dpi_libraries
@@ -325,29 +345,35 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
                 .map_err(|error| format!("compilation failed:\n{error}"))?;
             let compile_elapsed = compile_start.elapsed();
             report_warnings(simulation.warnings())?;
-            let progress = if let Some(path) = &arguments.save_state.restore_checkpoint {
-                Some(system_checkpoint::restore(&mut simulation, path)?)
+            let (result, execute_elapsed) = if let Some(port) = arguments.cdsp {
+                let start = std::time::Instant::now();
+                let result = cdsp::serve(&mut simulation, max_steps, port, &mut std::io::stdout());
+                (result, start.elapsed())
             } else {
-                None
+                let progress = if let Some(path) = &arguments.save_state.restore_checkpoint {
+                    Some(system_checkpoint::restore(&mut simulation, path)?)
+                } else {
+                    None
+                };
+                let mut saves = StateSaves::new(
+                    &simulation,
+                    arguments.design.signal_root(),
+                    &arguments.save_state,
+                    signal,
+                )?;
+                if let Some(progress) = progress {
+                    saves.restore_progress(&simulation, arguments.design.signal_root(), progress)?;
+                }
+                let start = std::time::Instant::now();
+                let result = simulate_sv(
+                    &mut simulation,
+                    max_steps,
+                    saves,
+                    &mut std::io::stdout(),
+                    arguments.execution.report,
+                );
+                (result, start.elapsed())
             };
-            let mut saves = StateSaves::new(
-                &simulation,
-                arguments.design.signal_root(),
-                &arguments.save_state,
-                signal,
-            )?;
-            if let Some(progress) = progress {
-                saves.restore_progress(&simulation, arguments.design.signal_root(), progress)?;
-            }
-            let execute_start = std::time::Instant::now();
-            let result = simulate_sv(
-                &mut simulation,
-                max_steps,
-                saves,
-                &mut std::io::stdout(),
-                arguments.execution.report,
-            );
-            let execute_elapsed = execute_start.elapsed();
             if arguments.execution.report {
                 writeln!(
                     std::io::stdout(),
@@ -837,13 +863,18 @@ impl SvOutput {
     }
 
     /// The run's error for what the events reported, if any.
-    fn check<B: celox::SimBackend>(&self, simulation: &celox::Simulation<B>) -> Result<(), String> {
+    fn check_errors(&self) -> Result<(), String> {
         if self.missed != 0 {
             return Err(format!("{} runtime events were lost", self.missed));
         }
         if self.fatal {
             return Err("SystemVerilog testbench reported $fatal".to_string());
         }
+        Ok(())
+    }
+
+    fn check<B: celox::SimBackend>(&self, simulation: &celox::Simulation<B>) -> Result<(), String> {
+        self.check_errors()?;
         if self.stopped || simulation.is_stopped() {
             return Err(
                 "SystemVerilog testbench requested $stop; interactive simulation is unavailable"
