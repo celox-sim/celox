@@ -366,9 +366,17 @@ pub(crate) fn expand_runtime_array_slice<'a>(
         ));
     };
     let dim = prefix.len();
-    let count = eval_constexpr_usize(bound, "array slice width")?;
-    // `[first:last]` has a compile-time count only when both bounds are, so a
-    // runtime slice is always `+:`, `-:`, or `step`.
+    let bound = eval_constexpr_usize(bound, "array slice bound")?;
+    let (count, fixed_end) = if matches!(op, VarSelectOp::Colon) {
+        let start = eval_constexpr_usize(first, "array slice start")?;
+        let count = start
+            .zip(bound)
+            .and_then(|(start, end)| end.checked_sub(start))
+            .and_then(|span| span.checked_add(1));
+        (count, bound)
+    } else {
+        (bound, None)
+    };
     let (Some(&dim_size), Some(count)) = (shape.get(dim), count) else {
         return Err(ParserError::illegal_context(
             "array slice",
@@ -376,7 +384,7 @@ pub(crate) fn expand_runtime_array_slice<'a>(
             Some(&token),
         ));
     };
-    if count == 0 || count > dim_size || matches!(op, VarSelectOp::Colon) {
+    if count == 0 || count > dim_size {
         return Err(ParserError::illegal_context(
             "array slice",
             format!("runtime array slice width {count} must be within dimension size {dim_size}"),
@@ -467,61 +475,68 @@ pub(crate) fn expand_runtime_array_slice<'a>(
         let equal = binary(original.clone(), Op::Eq, bits.clone());
         Expression::Unary(Op::LogicNot, Box::new(two_state(&equal)), unknown())
     };
-    let first_bits = two_state(first);
-    let mut invalid =
-        (!first.comptime().r#type.is_2state()).then(|| unknown_coordinate(first, &first_bits));
-    let first = &first_bits;
-
-    // Work with `t = start + bias`, which is never negative, so that every
-    // comparison and offset below is unsigned. A signed coordinate is biased
-    // into an unsigned one by flipping its sign bit.
-    let first_width = crate::context_width::get_expr_width(first).ok_or_else(|| {
-        ParserError::illegal_context(
-            "array slice",
-            "the slice index has no known width",
-            Some(&first.token_range()),
-        )
-    })?;
-    let count_bits = (usize::BITS - count.leading_zeros()) as usize;
-    if first_width + 2 * count_bits + 2 > 64 {
-        return Err(ParserError::illegal_context(
-            "array slice",
-            format!("a {first_width}-bit runtime slice index is too wide to bounds-check"),
-            Some(&first.token_range()),
-        ));
-    }
-    let (unsigned_first, sign_bias) = if crate::context_width::expression_signed(first) {
-        let sign = 1u64 << (first_width - 1);
-        (
-            binary(
-                first.clone(),
-                Op::BitXor,
-                Expression::create_value(Value::new(sign, first_width, false), token),
-            ),
-            sign,
-        )
-    } else {
-        (first.clone(), 0)
-    };
+    let mut invalid = None;
     let count = count as u64;
-    let (t, bias) = match op {
-        VarSelectOp::PlusColon => (
-            binary(unsigned_first, Op::Add, literal(count - 1)),
-            sign_bias + count - 1,
-        ),
-        VarSelectOp::MinusColon => (
-            binary(unsigned_first, Op::Add, literal(0)),
-            sign_bias + count - 1,
-        ),
-        VarSelectOp::Step => (
-            binary(
-                binary(unsigned_first, Op::Mul, literal(count)),
-                Op::Add,
-                literal(count - 1),
+    let (t, bias) = if let Some(end) = fixed_end {
+        // Only the prefix is runtime-dependent. The last element is
+        // already the start plus the bias.
+        (literal(end as u64), count - 1)
+    } else {
+        let first_bits = two_state(first);
+        invalid =
+            (!first.comptime().r#type.is_2state()).then(|| unknown_coordinate(first, &first_bits));
+        let first = &first_bits;
+
+        // Work with `t = start + bias`, which is never negative, so that every
+        // comparison and offset below is unsigned. A signed coordinate is biased
+        // into an unsigned one by flipping its sign bit.
+        let first_width = crate::context_width::get_expr_width(first).ok_or_else(|| {
+            ParserError::illegal_context(
+                "array slice",
+                "the slice index has no known width",
+                Some(&first.token_range()),
+            )
+        })?;
+        let count_bits = (u64::BITS - count.leading_zeros()) as usize;
+        if first_width + 2 * count_bits + 2 > 64 {
+            return Err(ParserError::illegal_context(
+                "array slice",
+                format!("a {first_width}-bit runtime slice index is too wide to bounds-check"),
+                Some(&first.token_range()),
+            ));
+        }
+        let (unsigned_first, sign_bias) = if crate::context_width::expression_signed(first) {
+            let sign = 1u64 << (first_width - 1);
+            (
+                binary(
+                    first.clone(),
+                    Op::BitXor,
+                    Expression::create_value(Value::new(sign, first_width, false), token),
+                ),
+                sign,
+            )
+        } else {
+            (first.clone(), 0)
+        };
+        match op {
+            VarSelectOp::PlusColon => (
+                binary(unsigned_first, Op::Add, literal(count - 1)),
+                sign_bias + count - 1,
             ),
-            sign_bias * count + count - 1,
-        ),
-        VarSelectOp::Colon => unreachable!("rejected above"),
+            VarSelectOp::MinusColon => (
+                binary(unsigned_first, Op::Add, literal(0)),
+                sign_bias + count - 1,
+            ),
+            VarSelectOp::Step => (
+                binary(
+                    binary(unsigned_first, Op::Mul, literal(count)),
+                    Op::Add,
+                    literal(count - 1),
+                ),
+                sign_bias * count + count - 1,
+            ),
+            VarSelectOp::Colon => unreachable!("handled by the fixed range"),
+        }
     };
     let dim_size = dim_size as u64;
     let highest = bias + dim_size - count;

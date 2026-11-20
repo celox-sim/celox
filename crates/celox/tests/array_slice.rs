@@ -112,6 +112,50 @@ assign col1 = {c1[1], c1[0]};
     }
     }
 
+    fn fixed_array_slice_uses_runtime_row(sim) {
+        @ignore_on(sv);
+        @setup { let code = r#"
+module Top (
+    clk: input clock,
+    row: input logic<2>,
+    comb: output logic<16>,
+    seq: output logic<16>,
+) {
+    var data: logic<8>[2, 4];
+    assign data[0] = '{8'h11, 8'h22, 8'h33, 8'h44};
+    assign data[1] = '{8'h55, 8'h66, 8'h77, 8'h88};
+
+    var selected: logic<8>[2];
+    assign selected = data[row][64'd1:64'd2];
+    assign comb = {selected[1], selected[0]};
+
+    var registered: logic<8>[2];
+    always_ff (clk) {
+        registered = data[row][1:2];
+    }
+    assign seq = {registered[1], registered[0]};
+}
+"#; }
+        @build Simulator::builder(code, "Top").four_state(true);
+        let row = sim.signal("row");
+        let comb = sim.signal("comb");
+        let seq = sim.signal("seq");
+        let clk = sim.event("clk");
+        for (value, mask, expected, expected_mask) in [
+            (0u8, 0u8, 0x3322u32, 0u32),
+            (1, 0, 0x7766, 0),
+            (2, 0, 0xffff, 0xffff),
+            (1, 2, 0xffff, 0xffff),
+            (3, 2, 0xffff, 0xffff),
+        ] {
+            sim.modify(|io| io.set_four_state(row, value.into(), mask.into())).unwrap();
+            sim.tick(clk).unwrap();
+            for signal in [comb, seq] {
+                assert_eq!(sim.get_four_state(signal), (expected.into(), expected_mask.into()));
+            }
+        }
+    }
+
     fn test_runtime_array_slice_evaluates_each_coordinate_once(sim) {
         @ignore_on(sv);
         @setup { let code = r#"
