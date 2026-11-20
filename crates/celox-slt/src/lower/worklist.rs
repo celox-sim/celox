@@ -129,6 +129,19 @@ impl SLTToSIRLowerer {
                             then_expr,
                             else_expr,
                         } => {
+                            if !self.four_state
+                                && env.is_none()
+                                && let Some(result) = self.lower_packed_decode(
+                                    builder,
+                                    node,
+                                    arena,
+                                    cache,
+                                    allow_cache,
+                                )
+                            {
+                                value = Some(result);
+                                continue;
+                            }
                             self.with_mux_stats(|stats| stats.normal_seen += 1);
                             let width = self
                                 .get_width(*then_expr, arena)
