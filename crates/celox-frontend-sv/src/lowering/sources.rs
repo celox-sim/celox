@@ -92,14 +92,6 @@ pub(super) fn analyze_sources_with_requests(
         tracing::debug!("[analysis] {label}: {:?}", checkpoint.elapsed());
         checkpoint = std::time::Instant::now();
     };
-    let (elaboration, interface_member_paths) = sv::plan_interfaces_of_first_modules(
-        sources,
-        &bindings,
-        analysis_options.first_duplicate_module,
-    )?;
-    step("plan_interfaces");
-    let root_names = elaboration.root_names.clone();
-    let mut modules = HashMap::default();
     let mut declared_modules = HashSet::default();
     let sources: Vec<_> = sources
         .iter()
@@ -112,6 +104,13 @@ pub(super) fn analyze_sources_with_requests(
             Ok((std::rc::Rc::new(parsed), *code, *path))
         })
         .collect::<Result<_, sv::AnalyzerError>>()?;
+    step("parse");
+    let parsed: Vec<&sv::ParsedSource> = sources.iter().map(|(source, ..)| &**source).collect();
+    let (elaboration, interface_member_paths) =
+        sv::ParsedSource::plan_interfaces_with_member_paths(&parsed, &bindings)?;
+    step("plan_interfaces");
+    let root_names = elaboration.root_names.clone();
+    let mut modules = HashMap::default();
     let mut interfaces = sv::ModuleInterfaces::default();
     for (source, _, _) in &sources {
         interfaces.extend(source.module_interfaces().clone());
@@ -137,8 +136,6 @@ pub(super) fn analyze_sources_with_requests(
         );
     }
     let interfaces = std::sync::Arc::new(interfaces);
-    step("parse");
-    let parsed: Vec<&sv::ParsedSource> = sources.iter().map(|(source, ..)| &**source).collect();
     // The interfaces that virtual interface types name, before their
     // instances are known (see `virtual_interfaces`).
     let first_duplicate_module = analysis_options.first_duplicate_module;
