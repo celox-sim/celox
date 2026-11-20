@@ -307,6 +307,9 @@ impl BodyBuilder<'_, '_, '_> {
         &mut self,
         root: celox_sv_syntax::ExprId,
     ) -> Result<Vec<Stmt>, AnalyzerError> {
+        // A pattern predicate in an argument is prepared first, so the
+        // conversion below substitutes its result (12.6.3).
+        self.prepare_pattern_values(root)?;
         let native = self.syntax().declarations();
         if let Some((mut value, _)) =
             array_reductions::bind(root, native, &self.tree, self.session, &self.dims)?

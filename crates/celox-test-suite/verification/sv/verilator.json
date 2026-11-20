@@ -23,6 +23,7 @@
     "verilator/mailboxes.json",
     "verilator/operators.json",
     "verilator/packed_structs.json",
+    "verilator/pattern_matching.json",
     "verilator/procedural.json",
     "verilator/program.json",
     "verilator/property_selects.json",

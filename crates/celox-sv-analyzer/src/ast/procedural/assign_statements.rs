@@ -80,6 +80,10 @@ impl BodyBuilder<'_, '_, '_> {
         deferred_destination_checks: Option<&mut Vec<Expr>>,
     ) -> Result<Vec<Stmt>, AnalyzerError> {
         let (left, right) = native;
+        // A pattern predicate in the value is prepared first, so the
+        // conversion below substitutes its result (12.6.3).
+        self.prepare_pattern_values(left)?;
+        self.prepare_pattern_values(right)?;
         expression_binding::objects::reject_covergroup(
             &self.tree,
             self.session,

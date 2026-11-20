@@ -196,6 +196,13 @@ impl BodyBuilder<'_, '_, '_> {
                         ));
                     }
                     stmts.extend(effects);
+                    self.prepare_pattern_values(root)?;
+                    if !automatic && !self.pattern_prelude.is_empty() {
+                        return Err(unsupported(
+                            "pattern matching in a static variable initializer",
+                        ));
+                    }
+                    stmts.append(&mut self.pattern_prelude);
                     let target = LValue::Ident(signal.name().to_string());
                     let mut scoped = self.dims.clone();
                     scoped.insert(

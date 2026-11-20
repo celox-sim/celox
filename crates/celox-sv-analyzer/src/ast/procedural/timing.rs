@@ -145,7 +145,13 @@ impl BodyBuilder<'_, '_, '_> {
         if let Some(stmts) = self.virtual_event_control(id)? {
             return Ok(stmts);
         }
-        Ok(vec![self.native_timing_control(id)?])
+        let control = self.native_timing_control(id)?;
+        let mut stmts = std::mem::take(&mut self.pattern_prelude);
+        if !stmts.is_empty() && !matches!(control, Stmt::Delay { .. }) {
+            return Err(unsupported("pattern matching in an event expression"));
+        }
+        stmts.push(control);
+        Ok(stmts)
     }
 
     pub(super) fn virtual_event_control(

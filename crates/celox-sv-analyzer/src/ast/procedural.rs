@@ -23,6 +23,7 @@ mod locals;
 mod loops;
 mod multiclock;
 mod ordering;
+mod pattern_match;
 use foreach::ForeachLoop;
 pub(super) mod dpi_reports;
 mod places;
@@ -382,6 +383,17 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
     /// block being lowered that leave the statement or a production, and
     /// how each leaves (see `randsequence`).
     pub(super) randsequence_exits: HashMap<celox_sv_syntax::StatementId, randsequence::Exit>,
+    /// Statements a pattern predicate in a value context generated, to
+    /// run before the statement that holds the value (see
+    /// `pattern_match::pattern_value`), and the hidden result variable of
+    /// each such expression, by its syntax id.
+    pub(super) pattern_prelude: Vec<Stmt>,
+    pub(super) pattern_results: HashMap<celox_sv_syntax::ExprId, Expr>,
+    pattern_truth: HashMap<celox_sv_syntax::ExprId, String>,
+    /// The determined-true tests of the conditional arms a pattern
+    /// value is being converted inside, innermost last: a nested
+    /// pattern's setup runs only where its arm is selected.
+    pub(super) pattern_guards: Vec<Expr>,
 }
 
 /// The names a body declares: its scopes of locals, innermost last, and
@@ -709,6 +721,10 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             randsequence_depth: 0,
             randsequence_expanded: 0,
             randsequence_exits: HashMap::default(),
+            pattern_prelude: Vec::new(),
+            pattern_results: HashMap::default(),
+            pattern_truth: HashMap::default(),
+            pattern_guards: Vec::new(),
             tree: BodyContext::Scope(tree),
             outer_contexts: Vec::new(),
             session,
@@ -1253,6 +1269,10 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     }
 
     fn native_value(&mut self, id: celox_sv_syntax::ExprId) -> Result<Expr, AnalyzerError> {
+        self.prepare_pattern_values(id)?;
+        if let Some(value) = self.pattern_value(id)? {
+            return Ok(value);
+        }
         let mut value = expression_binding::value(
             id,
             self.syntax().declarations(),

@@ -33,7 +33,11 @@ impl BodyBuilder<'_, '_, '_> {
             return Err(unsupported("implicit intra-assignment event control"));
         }
         let mut output = self.effects(&[right])?;
-        let target_effects = self.effects(&[left])?;
+        self.prepare_pattern_values(right)?;
+        output.append(&mut self.pattern_prelude);
+        let mut target_effects = self.effects(&[left])?;
+        self.prepare_pattern_values(left)?;
+        target_effects.append(&mut self.pattern_prelude);
         let shape = dimensions::operand_shape(left, &self.tree, self.session, &self.dims)?
             .ok_or_else(|| unsupported("intra-assignment target type"))?;
         if type_names::declared_type(&shape)
@@ -94,6 +98,8 @@ impl BodyBuilder<'_, '_, '_> {
         let waits = self.timing_control_statements(control)?;
         if let Some(count) = repeat_count {
             output.extend(self.effects(&[count])?);
+            let value = self.native_value(count)?;
+            output.append(&mut self.pattern_prelude);
             let count_shape =
                 dimensions::operand_shape(count, &self.tree, self.session, &self.dims)?
                     .ok_or_else(|| unsupported("intra-assignment repeat count type"))?;
@@ -117,7 +123,7 @@ impl BodyBuilder<'_, '_, '_> {
                 return Err(unsupported("wide intra-assignment repeat count"));
             }
             output.push(Stmt::Loop {
-                kind: LoopKind::Repeat(self.native_value(count)?),
+                kind: LoopKind::Repeat(value),
                 init: Vec::new(),
                 condition: None,
                 step: Vec::new(),
