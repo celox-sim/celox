@@ -713,6 +713,8 @@
 * fix(sv): keep disjoint FF array element writes out of sparse next state by @tignear in https://github.com/celox-sim/celox/pull/4445
 * chore(deps): update rust crate clap to v4.6.8 by @renovate[bot] in https://github.com/celox-sim/celox/pull/4449
 * fix(deps): update wasmtime to 49.0.6 and 50.0.2 for RUSTSEC-2026-0566..0573 by @tignear in https://github.com/celox-sim/celox/pull/4417
+* chore(deps): update rust crate cranelift to v0.137.2 by @renovate[bot] in https://github.com/celox-sim/celox/pull/4452
+* fix(sv): fix ARM64 NBA test guard and out-of-line default NBA lowering by @tignear in https://github.com/celox-sim/celox/pull/4458
 
 ## New Contributors
 * @dependabot[bot] made their first contribution in https://github.com/celox-sim/celox/pull/3061
