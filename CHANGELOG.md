@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.15.0 (2026-11-20)
+
+## What's Changed
+* perf(sv): reuse parsed sources for interface planning by @tignear in https://github.com/celox-sim/celox/pull/4462
+* perf(sv): schedule register updates from the combinational SLT by @tignear in https://github.com/celox-sim/celox/pull/4463
+* feat(sv): support pattern matching in case, if and conditional expressions by @tignear in https://github.com/celox-sim/celox/pull/4225
+* perf(slt): pack small two-state decodes into an immediate by @tignear in https://github.com/celox-sim/celox/pull/4464
+* perf(slt): inline nets whose readers converge on one path by @tignear in https://github.com/celox-sim/celox/pull/4465
+* feat(cli): add interactive simulation with Surfer by @tignear in https://github.com/celox-sim/celox/pull/4471
+* chore(deps): update rust crate data-encoding to v2.11.1 by @renovate[bot] in https://github.com/celox-sim/celox/pull/4474
+* fix(veryl)!: upgrade to Veryl 0.22.1 by @tignear in https://github.com/celox-sim/celox/pull/4472
+
+
+**Full Changelog**: https://github.com/celox-sim/celox/compare/v0.14.0...v0.15.0
+
 ## 0.14.0 (2026-11-20)
 
 ## What's Changed
