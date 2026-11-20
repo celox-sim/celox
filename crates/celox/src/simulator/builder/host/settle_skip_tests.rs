@@ -223,3 +223,45 @@ fn guarded_dpi_calls_and_records_keep_unchanged_settles_skipped() {
         }
     }
 }
+
+/// A testbench memory model: an associative array a falling-edge process
+/// writes with blocking assignments and a process reads, so the domain
+/// commits its blocking results in the Active region. `{observer}` is what
+/// else reads it.
+fn blocking_memory(observer: &str) -> String {
+    format!(
+        r#"`timescale 1ns/1ns
+module Top;
+    bit clk = 0;
+    always #5 clk = ~clk;
+    bit [7:0] mem [bit [31:0]];
+    logic [7:0] count = 0;
+    always @(negedge clk) mem[count] = count ^ 8'h5a;
+    always_ff @(posedge clk) count <= count + 8'd1;
+    int entries;
+    initial forever begin #7; entries = mem.num(); end
+    {observer}
+    initial begin #200; $finish; end
+endmodule"#
+    )
+}
+
+/// The heap's container operations change the design only through the
+/// handle stored back into the memory, so a domain that writes a memory no
+/// waiter, clock or combinational observer reads needs no settle between its
+/// Active-region commit and NBA. One a waiter observes through
+/// combinational logic keeps it, and runs as the reference does.
+#[test]
+fn container_writes_settle_before_nba_only_for_their_observers() {
+    let unread = blocking_memory("");
+    assert!(plan(&unread).active.is_empty());
+    let observed = blocking_memory(
+        "logic [7:0] q;
+    assign q = mem.exists(count) ? mem[count] : 8'hff;
+    logic [7:0] seen = 0;
+    always @(q) seen = seen + 8'd1;",
+    );
+    assert!(!plan(&observed).active.is_empty());
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    agrees(&observed, 200, &["count", "q", "seen", "entries"]);
+}

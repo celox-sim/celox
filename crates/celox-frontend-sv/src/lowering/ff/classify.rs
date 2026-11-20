@@ -85,15 +85,16 @@ impl Ff<'_, '_> {
         }
         // A run-time bit select within one array element writes only that
         // element (see `write`); a run-time element may be any of them.
-        let element_write = dynamic_array_element_lvalue(
+        let element_lvalue = dynamic_array_element_lvalue(
             lvalue,
             self.m.variables,
             self.m.name_to_id,
             self.m.constants,
             self.m.parameter_types,
         )
-        .is_some()
-            || dynamic_array_bit_lvalue(
+        .is_some();
+        let bit_lvalue = !element_lvalue
+            && dynamic_array_bit_lvalue(
                 lvalue,
                 self.m.variables,
                 self.m.name_to_id,
@@ -101,7 +102,7 @@ impl Ff<'_, '_> {
                 self.m.parameter_types,
             )
             .is_some();
-        let whole = (!element_write)
+        let window = (!element_lvalue)
             .then(|| {
                 dynamic_packed_write(
                     lvalue,
@@ -112,14 +113,18 @@ impl Ff<'_, '_> {
                 )
             })
             .flatten()
-            .and_then(|write| write.window)
-            .unwrap_or(BitAccess::new(0, variable.width - 1));
+            .and_then(|write| write.window);
+        let whole = window.unwrap_or(BitAccess::new(0, variable.width - 1));
         if constant.is_none() {
             // `write` takes the same order: a constant range, then one
             // run-time element, then a read-modify-write of the variable.
-            if element_write {
+            // A run-time bit select inside a single constant element has a
+            // narrow `window` and does not need sparse promotion by itself,
+            // yet remains compatible with sparse publication when another
+            // write in the same process addresses a run-time element.
+            if element_lvalue || (bit_lvalue && window.is_none()) {
                 self.writes.element_writes.insert(id);
-            } else {
+            } else if !bit_lvalue {
                 self.writes.other_writes.insert(id);
             }
         }

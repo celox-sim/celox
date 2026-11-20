@@ -448,9 +448,9 @@ struct HierarchicalNames<'a> {
     /// Whether to lower each subroutine that can be out of line (see
     /// `AnalysisOptions::force_out_of_line_calls`).
     force_out_of_line: bool,
-    /// Where to append the next-state report of the module's `always_ff`
-    /// processes, if anywhere (see `AnalysisOptions::ff_next_state_report`).
-    next_state_report: Option<&'a std::path::Path>,
+    /// What the module's `always_ff` processes are lowered to besides their
+    /// units.
+    next_state: NextStateOptions<'a>,
     /// The keys of the class properties that level waits of the design
     /// read, whose stores the module counts (see `ff::property_changes`).
     /// A wait that reads any other property is rejected.
@@ -461,6 +461,24 @@ struct HierarchicalNames<'a> {
     /// The instances of the design, or a lowering that only discovers the
     /// hierarchy (see [`Instances`]).
     instances: Instances<'a>,
+}
+
+/// The next-state forms of `always_ff` processes a lowering makes beside
+/// their units (see `ff_next_state`).
+#[derive(Clone, Copy, Default)]
+struct NextStateOptions<'a> {
+    /// Where to append the report of the forms, if anywhere
+    /// (`AnalysisOptions::ff_next_state_report`).
+    report: Option<&'a std::path::Path>,
+    /// Whether the forms go into the lowered module
+    /// (`AnalysisOptions::ff_next_state`).
+    forms: bool,
+}
+
+impl NextStateOptions<'_> {
+    fn enabled(&self) -> bool {
+        self.report.is_some() || self.forms
+    }
 }
 
 /// What a lowering knows of the instances of the design.
@@ -500,7 +518,7 @@ impl<'a> HierarchicalNames<'a> {
             analyzed: None,
             recursion_report: None,
             force_out_of_line: false,
-            next_state_report: None,
+            next_state: NextStateOptions::default(),
             properties: &NO_PROPERTIES,
             time_format: false,
             instances,

@@ -680,6 +680,7 @@ pub fn parse_sv(
             .as_deref()
             .map(std::sync::Arc::from),
         force_out_of_line_calls: diagnostics.sv_force_out_of_line,
+        ff_next_state: optimize_options.is_enabled(crate::optimizer::SirPass::NextStateDag),
         ff_next_state_report: diagnostics
             .sv_ff_next_state_report
             .as_deref()

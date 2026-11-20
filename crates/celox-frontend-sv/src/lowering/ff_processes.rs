@@ -53,6 +53,7 @@ type SvFfBlocks = (
     >,
     FfEventVars,
     Vec<celox_design::NbaSite<SourceVarId>>,
+    celox_frontend_core::symbolic::artifact::NextStateForms,
 );
 
 /// The variables `always_ff` event controls are sensed on.
@@ -171,7 +172,7 @@ pub(super) fn lower_ff_processes(
     module: &sv::ir::Module,
     pm: &mut procedural::ProcModule<'_>,
     ff_parts: bool,
-    next_state_report: Option<&std::path::Path>,
+    next_state_options: NextStateOptions<'_>,
     ff_event_roles: &[FfEventRole],
     shared_memories: &HashSet<String>,
     foreign_writes: &HashMap<String, hierarchy::ForeignWrites>,
@@ -280,8 +281,9 @@ pub(super) fn lower_ff_processes(
         edge_only_memories(module, pm.constants, pm.parameter_types, foreign_writes);
     let window_writes = kernel_window_writes(module, foreign_writes);
     let random_seeds = process_random_seeds(module);
-    let mut next_state = next_state_report
-        .map(|path| ff_next_state::NextStateReport::new(&specialization(module, pm), path));
+    let mut next_state = next_state_options.enabled().then(|| {
+        ff_next_state::NextStateReport::new(&specialization(module, pm), next_state_options.report)
+    });
     for ((index, process), events) in module.ff_processes().iter().enumerate().zip(process_events) {
         pm.call_unit();
         let mut events = events
@@ -319,6 +321,7 @@ pub(super) fn lower_ff_processes(
             report.attempt(
                 pm,
                 process.body(),
+                &trigger_set,
                 ff_next_state::ImperativeUnits {
                     eval: &eval_only,
                     apply: &apply,
@@ -364,9 +367,17 @@ pub(super) fn lower_ff_processes(
     }
     // One process is the whole trigger group.
     parallel_ff_parts.retain(|_, parts| parts.len() > 1);
-    if let Some(report) = next_state {
-        report.print();
-    }
+    let next_state_forms = match next_state {
+        Some(report) => {
+            let forms = report.finish();
+            if next_state_options.forms {
+                forms
+            } else {
+                Default::default()
+            }
+        }
+        None => Default::default(),
+    };
 
     let split_commit_ff_blocks = active_ff_blocks
         .into_iter()
@@ -389,6 +400,7 @@ pub(super) fn lower_ff_processes(
         parallel_ff_parts,
         event_vars,
         all_delayed_sites,
+        next_state_forms,
     ))
 }
 

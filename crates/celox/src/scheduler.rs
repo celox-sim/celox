@@ -818,6 +818,8 @@ struct WaitCheck<'a> {
 #[cfg(test)]
 mod test_support;
 #[cfg(test)]
+pub(crate) use nba::observations_match_for_test;
+#[cfg(test)]
 pub(crate) use test_support::*;
 
 #[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]

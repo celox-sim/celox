@@ -361,6 +361,21 @@ pub(crate) fn redirect_final_alias_accesses(
     if aliases.is_empty() {
         return;
     }
+    // Every access names the root of its alias chain: a link may name another
+    // alias (`a -> b -> c`), and two accesses of one home under different
+    // names look independent to the passes that order memory accesses by
+    // address, which may then move a load of `b` above the store of `c`.
+    let root = |mut address: AbsoluteAddr| {
+        for _ in 0..aliases.len() {
+            match aliases.get(&address) {
+                Some(&next) if next != address => address = next,
+                _ => break,
+            }
+        }
+        address
+    };
+    let aliases: HashMap<AbsoluteAddr, AbsoluteAddr> =
+        aliases.keys().map(|&alias| (alias, root(alias))).collect();
     let redirect = |address: &mut RegionedAbsoluteAddr| {
         if address.region == STABLE_REGION
             && let Some(&canonical) = aliases.get(&address.absolute_addr())

@@ -49,8 +49,8 @@ pub(super) struct ImperativeUnits<'u> {
 
 pub(super) struct NextStateReport {
     module: String,
-    /// The file the report lines are appended to.
-    path: std::path::PathBuf,
+    /// The file the report lines are appended to, if any.
+    path: Option<std::path::PathBuf>,
     /// The lines of the forms that differ from their units.
     mismatches: Vec<String>,
     /// The arena each process's form is lowered in.
@@ -61,6 +61,8 @@ pub(super) struct NextStateReport {
     dag: SLTNodeArena<SourceVarId>,
     roots: Vec<NextStateRoot>,
     ports: Vec<RamWritePort>,
+    /// The forms taken, in `dag`, with their processes' trigger sets.
+    forms: Vec<(TriggerSet<SourceVarId>, NextState)>,
     processes: usize,
     lowered: usize,
     checked: usize,
@@ -69,16 +71,17 @@ pub(super) struct NextStateReport {
 }
 
 impl NextStateReport {
-    pub(super) fn new(module: &str, path: &std::path::Path) -> Self {
+    pub(super) fn new(module: &str, path: Option<&std::path::Path>) -> Self {
         Self {
             module: module.to_string(),
-            path: path.to_path_buf(),
+            path: path.map(std::path::Path::to_path_buf),
             mismatches: Vec::new(),
             raw: SLTNodeArena::new(),
             raw_roots: Vec::new(),
             dag: SLTNodeArena::new(),
             roots: Vec::new(),
             ports: Vec::new(),
+            forms: Vec::new(),
             processes: 0,
             lowered: 0,
             checked: 0,
@@ -97,6 +100,7 @@ impl NextStateReport {
         &mut self,
         pm: &mut procedural::ProcModule<'_>,
         body: &[sv::ir::Stmt],
+        trigger_set: &TriggerSet<SourceVarId>,
         units: ImperativeUnits<'_>,
     ) {
         self.processes += 1;
@@ -110,7 +114,7 @@ impl NextStateReport {
         let Some((form, canonical, checked)) = taken else {
             return;
         };
-        let reads_temporary = reachable(&self.dag, form_nodes(&canonical))
+        let reads_temporary = reachable(&self.dag, canonical.nodes())
             .into_iter()
             .any(|node| {
                 matches!(self.dag.get(node), SLTNode::Input { variable, .. }
@@ -122,9 +126,10 @@ impl NextStateReport {
         }
         self.lowered += 1;
         self.checked += usize::from(checked);
-        self.raw_roots.extend(form_nodes(&form));
-        self.roots.extend(canonical.roots);
-        self.ports.extend(canonical.ports);
+        self.raw_roots.extend(form.nodes());
+        self.roots.extend(canonical.roots.iter().cloned());
+        self.ports.extend(canonical.ports.iter().cloned());
+        self.forms.push((trigger_set.clone(), canonical));
     }
 
     /// The form of a process, its canonical copy and whether the check ran
@@ -173,11 +178,24 @@ impl NextStateReport {
         Some((form, canonical, checked))
     }
 
-    pub(super) fn print(mut self) {
-        let dag_roots: Vec<NodeId> = form_nodes(&NextState {
+    /// Report the measures, if a report was asked for, and hand back the
+    /// forms taken.
+    pub(super) fn finish(mut self) -> celox_frontend_core::symbolic::artifact::NextStateForms {
+        if let Some(path) = self.path.clone() {
+            self.print(&path);
+        }
+        celox_frontend_core::symbolic::artifact::NextStateForms {
+            arena: self.dag,
+            forms: self.forms,
+        }
+    }
+
+    fn print(&mut self, path: &std::path::Path) {
+        let dag_roots: Vec<NodeId> = NextState {
             roots: self.roots.clone(),
             ports: self.ports.clone(),
-        })
+        }
+        .nodes()
         .collect();
         let nodes = reachable(&self.raw, self.raw_roots.iter().copied()).len();
         let canonical = Canonicalizer::new(&self.raw).count(self.raw_roots.iter().copied());
@@ -210,21 +228,12 @@ impl NextStateReport {
         if let Ok(mut file) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&self.path)
+            .open(path)
         {
             use std::io::Write;
             let _ = file.write_all((lines.join("\n") + "\n").as_bytes());
         }
     }
-}
-
-/// The nodes a form's roots and ports compute.
-fn form_nodes(form: &NextState) -> impl Iterator<Item = NodeId> + '_ {
-    form.roots.iter().map(|root| root.value).chain(
-        form.ports
-            .iter()
-            .flat_map(|port| [port.index, port.value, port.guard]),
-    )
 }
 
 /// `form`, lowered in `raw`, copied into the canonical DAG `dag`.
@@ -341,7 +350,7 @@ fn next_state_unit(
     let mut cache = HashMap::default();
     let map = |id: &SourceVarId| stable(*id);
     let mut mapped_nodes = Vec::new();
-    for node in form_nodes(form) {
+    for node in form.nodes() {
         mapped_nodes.push(
             dag.get(node)
                 .map_addr(node, dag, &mut mapped, &mut cache, &map)

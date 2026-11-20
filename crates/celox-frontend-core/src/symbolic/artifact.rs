@@ -180,6 +180,22 @@ pub struct SimModule {
     /// Variables and copies that start with their value; see
     /// `RuntimeSchema::initial_copies`.
     pub initial_copies: Vec<(SourceVarId, SourceVarId)>,
+    /// The next-state forms of the module's `always_ff` processes, when
+    /// the frontend lowered them so; see [`NextStateForms`].
+    pub next_state: NextStateForms,
+}
+
+/// The next-state forms (`celox_slt::next_state`) of the edge-triggered
+/// processes a frontend lowered into one: each with its trigger set, its
+/// nodes in `arena`. A process without one keeps only its units; a process
+/// with one keeps them too, and assembly chooses which runs.
+#[derive(Clone, Debug, Default)]
+pub struct NextStateForms {
+    pub arena: SLTNodeArena<SourceVarId>,
+    pub forms: Vec<(
+        TriggerSet<SourceVarId>,
+        celox_slt::next_state::NextStateForm<SourceVarId>,
+    )>,
 }
 
 /// A nonblocking site whose kernel has two paths, as

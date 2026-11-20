@@ -14,15 +14,37 @@ pub(super) struct WorkLoweringContext<'a, Addr: Clone + Eq + Hash> {
     pub(super) unpacked_element_widths: &'a HashMap<Addr, usize>,
     pub(super) direct_ff_writes_by_action: &'a [Vec<VarAtomBase<Addr>>],
     pub(super) four_state: bool,
-    /// Start a new execution unit when one grows past [`EU_BLOCK_LIMIT`].
-    /// Shared comb/FF lowering keeps one unit because its staged FF state
-    /// publishes at the end of the same function.
-    pub(super) split_large_units: bool,
+    /// The size at which a new execution unit starts, or `None` to keep
+    /// one: shared comb/FF lowering keeps one unit because its staged FF
+    /// state publishes at the end of the same function.
+    pub(super) unit_limits: Option<UnitLimits>,
 }
 
 /// Maximum blocks in a single EU before flushing to a new one.
 /// This prevents Cranelift from choking on massive functions.
 pub(super) const EU_BLOCK_LIMIT: usize = 20_000;
+
+/// Maximum instructions in a single EU before flushing to a new one. Blocks
+/// alone do not bound a unit: a unit of few large blocks, such as wide
+/// datapaths, reached millions of instructions, and a code generator's
+/// memory grows with the instructions of the unit it compiles.
+pub(super) const EU_INSTRUCTION_LIMIT: usize = 1_000_000;
+
+/// The size at which a combinational unit is cut. A unit is cut only
+/// between partitions, or between the work of a settle that has none: one
+/// partition, or one piece of work, larger than the limits stays whole.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct UnitLimits {
+    pub(super) blocks: usize,
+    pub(super) instructions: usize,
+}
+
+impl UnitLimits {
+    pub(super) const DEFAULT: Self = Self {
+        blocks: EU_BLOCK_LIMIT,
+        instructions: EU_INSTRUCTION_LIMIT,
+    };
+}
 
 pub(super) const UNROLL_THRESHOLD: usize = 32;
 
@@ -53,6 +75,10 @@ pub(super) struct WorkLowering<'a, Addr: Clone + Eq + Hash> {
     pub(super) partition_merge: Option<BlockId>,
     /// Where a group of clean, effect-free partitions can be skipped.
     pub(super) partition_group_merge: Option<BlockId>,
+    /// The partition after the last of the open partition group.
+    pub(super) partition_group_end: Option<usize>,
+    /// The instructions the builder had built when the current unit began.
+    pub(super) unit_start: usize,
     /// The wait flags of a settle that counts its work, which its run
     /// counters follow ([`SettlePartitioning::profile`]).
     pub(super) settle_profile_waits: Option<usize>,
@@ -82,6 +108,8 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
             in_partition: false,
             partition_merge: None,
             partition_group_merge: None,
+            partition_group_end: None,
+            unit_start: 0,
             settle_profile_waits: None,
             settle_profile: None,
             partition_old: Vec::new(),
@@ -281,12 +309,46 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
         if partitions.len() < 4 || partitions.iter().any(|partition| partition.pinned) {
             return;
         }
-        if self.context.split_large_units && self.builder.block_count() >= EU_BLOCK_LIMIT {
-            if let Some(eu) = self.builder.flush_eu() {
-                self.execution_units.push(eu);
-            }
+        if self.unit_full() {
+            self.flush_unit();
         }
-        let width = partitions.len() * 8;
+        self.open_partition_group(flags, first, partitions.len());
+    }
+
+    /// Whether the current unit reached its limits, so that the next
+    /// boundary between partitions or pieces of work starts a new one.
+    fn unit_full(&self) -> bool {
+        self.context.unit_limits.is_some_and(|limits| {
+            self.builder.block_count() >= limits.blocks
+                || self.builder.built().instructions - self.unit_start >= limits.instructions
+        })
+    }
+
+    /// End the current unit and start another; register and block IDs are
+    /// unit-scoped, so the lowering cache starts over.
+    fn flush_unit(&mut self) {
+        if let Some(eu) = self.builder.flush_eu() {
+            self.execution_units.push(eu);
+        }
+        self.unit_start = self.builder.built().instructions;
+        self.lower_cache.clear();
+    }
+
+    /// End the current unit before the next piece of work when not inside a
+    /// partition and the current unit has reached its limits.
+    fn maybe_flush_unit(&mut self) {
+        if !self.in_partition && self.unit_full() {
+            self.flush_unit();
+        }
+    }
+
+    /// Skip the `count` partitions from `first` together when none of their
+    /// flags is set: one load of their flag bytes tests them all.
+    fn open_partition_group(&mut self, flags: Addr, first: usize, count: usize) {
+        if count < 4 {
+            return;
+        }
+        let width = count * 8;
         let word = self.builder.alloc_bit(width, false);
         self.builder.emit(SIRInstruction::Load(
             word,
@@ -309,9 +371,11 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
         });
         self.builder.switch_to_block(body);
         self.partition_group_merge = Some(done);
+        self.partition_group_end = Some(first + count);
     }
 
     pub(super) fn end_partition_group(&mut self) {
+        self.partition_group_end = None;
         if let Some(done) = self.partition_group_merge.take() {
             self.builder
                 .seal_block(SIRTerminator::Jump(done, Vec::new()));
@@ -330,12 +394,17 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
         partition: &PlannedPartition<Addr>,
     ) {
         self.flush_pending_folds();
-        if self.partition_group_merge.is_none()
-            && self.context.split_large_units
-            && self.builder.block_count() >= EU_BLOCK_LIMIT
-        {
-            if let Some(eu) = self.builder.flush_eu() {
-                self.execution_units.push(eu);
+        if self.unit_full() {
+            // A full unit ends before this partition, also within a group:
+            // the group then ends here, and the rest of its partitions
+            // form one in the next unit.
+            match self.partition_group_end {
+                Some(end) if self.partition_group_merge.is_some() => {
+                    self.end_partition_group();
+                    self.flush_unit();
+                    self.open_partition_group(flags, index, end - index);
+                }
+                _ => self.flush_unit(),
             }
         }
         self.lower_cache.clear();
@@ -458,22 +527,143 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
     }
 
     /// Lower the buffered run of exact grouped-fold paths.
+    ///
+    /// Outside a partition and under unit limits, each jointly lowered family
+    /// and each remaining independent root is emitted and stored as its own
+    /// atomic piece of work, checking the unit budget between them so deferred
+    /// fold roots cannot accumulate past the limit into one execution unit.
     pub(super) fn flush_pending_folds(&mut self) {
+        if self.pending_fold_indices.is_empty() {
+            return;
+        }
         let context = self.context;
-        flush_pending_fold_paths(
-            &mut self.pending_fold_indices,
-            context.input,
-            context.fold_group_schedule_index,
-            self.lowerer,
-            &mut self.builder,
-            context.arena,
-            &mut self.lower_cache,
-            &mut self.dep_memo,
-            &mut self.inverse_dep_memo,
-            context.unpacked_element_widths,
-            context.four_state,
-        );
+        if self.in_partition || context.unit_limits.is_none() {
+            flush_pending_fold_paths(
+                &mut self.pending_fold_indices,
+                context.input,
+                context.fold_group_schedule_index,
+                self.lowerer,
+                &mut self.builder,
+                context.arena,
+                &mut self.lower_cache,
+                &mut self.dep_memo,
+                &mut self.inverse_dep_memo,
+                context.unpacked_element_widths,
+                context.four_state,
+            );
+            self.pending_fold_roots.clear();
+            return;
+        }
+
+        let pending = std::mem::take(&mut self.pending_fold_indices);
         self.pending_fold_roots.clear();
+        let schedule_index = context.fold_group_schedule_index;
+        let candidates = discover_exact_fold_groups(&pending, schedule_index);
+        let mut emitted_roots = HashSet::default();
+        if candidates.len() >= 2 {
+            let (compatible, shared_load) = joint_fold_compatibility(&candidates, context.arena);
+            let mut available = vec![true; candidates.len()];
+            let mut rejected = HashSet::<Vec<NodeId>>::default();
+            while let Some(family) = best_weighted_fold_family(
+                &candidates,
+                &available,
+                &compatible,
+                &shared_load,
+                &rejected,
+                context.four_state,
+            ) {
+                let roots = family
+                    .members
+                    .iter()
+                    .map(|member| candidates[*member].root)
+                    .collect::<Vec<_>>();
+                self.maybe_flush_unit();
+                if self.lowerer.lower_fold_groups_jointly(
+                    &mut self.builder,
+                    &roots,
+                    context.arena,
+                    &mut self.lower_cache,
+                ) {
+                    for member in family.members {
+                        available[member] = false;
+                    }
+                    let family_roots: HashSet<NodeId> = roots.into_iter().collect();
+                    let family_indices: Vec<usize> = pending
+                        .iter()
+                        .copied()
+                        .filter(|&idx| {
+                            schedule_index.direct_group_by_path[idx]
+                                .is_some_and(|root| family_roots.contains(&root))
+                        })
+                        .collect();
+                    emit_prepared_fold_group_paths(
+                        &family_indices,
+                        &family_roots,
+                        context.input,
+                        self.lowerer,
+                        &mut self.builder,
+                        context.arena,
+                        &mut self.lower_cache,
+                        &mut self.dep_memo,
+                        &mut self.inverse_dep_memo,
+                        context.unpacked_element_widths,
+                    );
+                    emitted_roots.extend(family_roots);
+                } else {
+                    rejected.insert(family_signature(&family, &candidates));
+                }
+            }
+        }
+
+        let mut remaining_roots: Vec<NodeId> = Vec::new();
+        let mut by_root: HashMap<NodeId, Vec<usize>> = HashMap::default();
+        let mut ungrouped: Vec<usize> = Vec::new();
+        for idx in pending {
+            match schedule_index.direct_group_by_path[idx] {
+                Some(root) if emitted_roots.contains(&root) => {}
+                Some(root) => {
+                    by_root
+                        .entry(root)
+                        .or_insert_with(|| {
+                            remaining_roots.push(root);
+                            Vec::new()
+                        })
+                        .push(idx);
+                }
+                None => ungrouped.push(idx),
+            }
+        }
+        let empty_joint = HashSet::default();
+        for root in remaining_roots {
+            self.maybe_flush_unit();
+            emit_prepared_fold_group_paths(
+                &by_root[&root],
+                &empty_joint,
+                context.input,
+                self.lowerer,
+                &mut self.builder,
+                context.arena,
+                &mut self.lower_cache,
+                &mut self.dep_memo,
+                &mut self.inverse_dep_memo,
+                context.unpacked_element_widths,
+            );
+        }
+        if !ungrouped.is_empty() {
+            self.maybe_flush_unit();
+            emit_prepared_fold_group_paths(
+                &ungrouped,
+                &empty_joint,
+                context.input,
+                self.lowerer,
+                &mut self.builder,
+                context.arena,
+                &mut self.lower_cache,
+                &mut self.dep_memo,
+                &mut self.inverse_dep_memo,
+                context.unpacked_element_widths,
+            );
+        }
     }
 
     /// Emit SIR for one logic path and keep the lowering cache coherent.
@@ -510,6 +700,13 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
         let input = context.input;
         let adj = context.adj;
         let component_by_path = context.component_by_path;
+        // A full unit ends before the next piece of combinational work: a
+        // path, a cycle or a guarded region, each kept whole. Within a
+        // partition, only its boundary ends a unit.
+        if !matches!(work, ScheduledWork::Ff(_)) && !self.in_partition && self.unit_full() {
+            self.flush_pending_folds();
+            self.maybe_flush_unit();
+        }
         let singleton;
         let scc = match work {
             ScheduledWork::CombPath(path) => {
@@ -519,6 +716,7 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
             ScheduledWork::CombScc(scc) => scc.as_slice(),
             ScheduledWork::GuardedComb { condition, paths } => {
                 self.flush_pending_folds();
+                self.maybe_flush_unit();
                 emit_scheduled_guard_region(
                     self.lowerer,
                     &mut self.builder,
@@ -574,6 +772,7 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
         if is_loop {
             // Exact grouped folds are atomic with respect to a loop SCC.
             self.flush_pending_folds();
+            self.maybe_flush_unit();
             let mut authorized = user_safety_limit.is_some();
             'check_scc: for &v_idx in scc {
                 for &u_idx in &adj[v_idx] {
@@ -815,19 +1014,7 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
                 self.builder.switch_to_block(exit_block);
             }
         } else {
-            // DAG Part — flush before emitting if the EU has grown too large
-            if context.split_large_units
-                && !self.in_partition
-                && self.builder.block_count() >= EU_BLOCK_LIMIT
-            {
-                self.flush_pending_folds();
-                if let Some(eu) = self.builder.flush_eu() {
-                    self.execution_units.push(eu);
-                    // Clear the lowering cache — register IDs are EU-scoped
-                    self.lower_cache.clear();
-                }
-            }
-
+            // DAG Part
             let idx = scc[0];
             let exact_fold = is_exact_fold_path(idx, context.fold_group_schedule_index);
             let fold_root = exact_fold
@@ -858,6 +1045,7 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
                     // and this projection's activation guard would find them
                     // unchanged.
                 } else {
+                    self.maybe_flush_unit();
                     self.emit_node(idx);
                 }
             }
