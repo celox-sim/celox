@@ -666,6 +666,8 @@ four-state expectations; the assertions remain enabled on all Celox variants.
 
 | Group | Stage | Tool | Cases | Reason |
 | --- | --- | --- | ---: | --- |
+| `sv_icarus_pattern_matching` | compile | icarus | 11 | Icarus 13.0 rejects the typedef of a tagged union with unpacked structure members and does not parse pattern matching (IEEE 1800-2023 7.3.2, 12.6). The [pre-exclusion result](verification/repros/sv_pattern_matching_icarus.json) is retained. |
+| `sv_verilator_pattern_matching` | compile | verilator | 11 | Verilator 5.054 reports tagged unions, void tagged members, pattern variables and `&&&` expressions as unsupported (IEEE 1800-2023 7.3.2, 12.6). The [pre-exclusion result](verification/repros/sv_pattern_matching_verilator.json) is retained. |
 | `sv_icarus_automatic_task_arrays` | execute | icarus | 1 | Icarus 13.0 shares an automatic task's unpacked local array across overlapping calls. IEEE 1800-2023 13.3.1–13.3.2 require separate storage for each activation. The [pre-exclusion result](verification/repros/sv_timed_task_arrays_icarus.json) retains the first call returning 31 instead of 11. The scalar activation case remains enabled for Icarus. |
 | `sv_icarus_expression_event_sample` | execute | icarus | 1 | Icarus 13.0 wakes a process that writes an operand of an event expression and then waits on it (`a = 1; @(a ^ b);`). IEEE 1800-2023 9.4.2 synchronizes the statement with a value change of the expression, and the write came before the event control. Verilator 5.052 agrees with the expected value. The [pre-exclusion result](verification/repros/sv_expression_event_sample_icarus.json) is retained. |
 | `sv_verilator_implicit_event_in_process` | compile | verilator | 1 | Verilator 5.052 rejects `@*` in an `initial forever` ("Unsupported: Event control with implicit sensitivity (@*) in this context"); IEEE 1800-2023 9.4.2.2 permits it in any procedural timing control. Icarus 13.0 passes the case. The [pre-exclusion diagnostic](verification/repros/sv_implicit_event_in_process_verilator.json) is retained. |
@@ -1076,9 +1078,13 @@ and [Icarus evidence](verification/sv/icarus/tagged_unions.json), with exact
 failure matching in the full-suite gate. Reproduce with `verify-sv-verilator`
 or `verify-sv-icarus` and `--filter tagged_unions::`.
 
-This implementation supports scalar packed tagged unions. Unpacked tagged
-unions, `matches`/`case matches`, and continuous or concatenation drivers of
-tagged members remain unsupported. Whole-union copies through ports and
+This implementation supports scalar packed tagged unions, and unpacked
+tagged unions whose members have a packed form (such as unpacked structures
+of integral members), which are laid out the same way. Pattern matching in
+`case`/`if` conditional predicates and conditional expressions
+(IEEE 1800-2023 12.6) is supported for values of integral, structure and
+tagged union type whose scrutinee has a declared type. Continuous or
+concatenation drivers of tagged members remain unsupported. Whole-union copies through ports and
 continuous assignments are supported. Port connections currently require a
 signal of the same declared tagged union type; constructor expressions at
 instance connections require an intermediate typed signal. Use four-state simulation to preserve

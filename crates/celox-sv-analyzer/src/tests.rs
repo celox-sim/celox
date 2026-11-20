@@ -2496,8 +2496,10 @@ fn preserves_enum_types_in_instance_parameter_overrides() {
 }
 
 #[test]
-fn rejects_conditional_predicate_conjunction_terms() {
-    let error = analyze_source(
+fn conditional_predicate_conjunction_terms() {
+    // A predicate is a sequence of clauses joined by `&&&`, Boolean
+    // clauses included (IEEE 1800-2023 12.6.2).
+    analyze_source(
         r#"
             module Top(input logic a, b, output logic y);
                 always_comb begin
@@ -2508,11 +2510,48 @@ fn rejects_conditional_predicate_conjunction_terms() {
         "#,
         Path::new("predicate_conjunction.sv"),
     )
-    .expect_err("unsupported predicate conjunctions must not be partially lowered")
-    .to_string();
+    .expect("predicate conjunction clauses should analyze");
+}
+
+#[test]
+fn filtered_case_patterns_share_the_remaining_arms() {
+    let labels = (0..12)
+        .map(|label| format!("{label} &&& enabled : $display({label});\n"))
+        .collect::<String>();
+    let source = format!(
+        "module Top(input bit [7:0] data, input bit enabled);\n\
+         initial case (data) matches\n{labels}\n\
+         default: $display(0); endcase endmodule",
+    );
+    let ir = analyze_source(&source, Path::new("filtered_case_patterns.sv")).unwrap();
+    let mut statements = 0;
+    for stmt in ir.modules()[0].initial_processes()[0].body() {
+        stmt.walk(&mut |_| statements += 1);
+    }
     assert!(
-        error.contains("`&&&` in a condition"),
-        "unexpected error: {error}"
+        statements < 12 * 10,
+        "case lowered to {statements} statements"
+    );
+}
+
+#[test]
+fn rejects_binding_a_non_integral_structure_pattern_member() {
+    let error = analyze_source(
+        r#"
+            module Top;
+                typedef struct { string text; int id; } record_t;
+                record_t record;
+                initial if (record matches '{text: .s, id: .*}) $display(s);
+            endmodule
+        "#,
+        Path::new("non_integral_structure_pattern.sv"),
+    )
+    .expect_err("a flat pattern cannot bind a string member");
+    assert!(
+        error
+            .to_string()
+            .contains("pattern matching against a non-integral value"),
+        "{error}",
     );
 }
 

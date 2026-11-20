@@ -49,7 +49,7 @@ fn dimension_operands(dimension: &DimensionKind, operands: &mut Vec<ExprId>) {
 }
 
 /// Every operand of `kind`, in source order.
-fn operands(kind: &ExprKind) -> Vec<ExprId> {
+pub(super) fn operands(kind: &ExprKind) -> Vec<ExprId> {
     let mut operands = Vec::new();
     match kind {
         ExprKind::Literal(_) | ExprKind::Name(_) | ExprKind::Type(_) => {}
@@ -70,6 +70,13 @@ fn operands(kind: &ExprKind) -> Vec<ExprId> {
             then_expression,
             else_expression,
         } => operands.extend([*condition, *then_expression, *else_expression]),
+        ExprKind::PatternMatch {
+            expression,
+            pattern,
+        } => {
+            operands.push(*expression);
+            pattern.constants(&mut operands);
+        }
         ExprKind::Tagged { value, .. } => operands.extend(*value),
         ExprKind::Call {
             expression,
@@ -155,6 +162,35 @@ fn operands(kind: &ExprKind) -> Vec<ExprId> {
     operands
 }
 
+/// Whether a system query reads its first argument only for its type.
+fn unevaluated_operand(native: &Declarations, callee: ExprId) -> bool {
+    matches!(&native.expression(callee).kind, ExprKind::Name(name)
+        if SystemFunction::from_name(&name.spelling)
+            .is_some_and(SystemFunction::has_unevaluated_operand))
+}
+
+pub(super) fn unevaluated_argument(native: &Declarations, kind: &ExprKind) -> Option<ExprId> {
+    let ExprKind::Call {
+        expression,
+        arguments,
+    } = kind
+    else {
+        return None;
+    };
+    if unevaluated_operand(native, *expression) {
+        return arguments.first()?.value;
+    }
+    None
+}
+
+pub(super) fn evaluated_operands(native: &Declarations, kind: &ExprKind) -> Vec<ExprId> {
+    let mut evaluated = operands(kind);
+    if unevaluated_argument(native, kind).is_some() {
+        evaluated.remove(1);
+    }
+    evaluated
+}
+
 /// The destination and source of `$cast(destination, source)` call `id`.
 fn cast_operands(native: &Declarations, id: ExprId) -> Option<(ExprId, ExprId)> {
     let ExprKind::Call {
@@ -215,23 +251,12 @@ fn updating(
         path.push(id);
         jobs.push((id, true));
         let kind = &native.expression(id).kind;
-        let mut evaluated = operands(kind);
-        // A query does not evaluate its first operand (20.6, 20.7): after
-        // the callee, skip it.
-        if let ExprKind::Call {
-            expression,
-            arguments,
-        } = kind
-            && let ExprKind::Name(name) = &native.expression(*expression).kind
-            && SystemFunction::from_name(&name.spelling)
-                .is_some_and(SystemFunction::has_unevaluated_operand)
-            && arguments
-                .first()
-                .is_some_and(|argument| argument.value.is_some())
-        {
-            evaluated.remove(1);
-        }
-        jobs.extend(evaluated.into_iter().rev().map(|id| (id, false)));
+        jobs.extend(
+            evaluated_operands(native, kind)
+                .into_iter()
+                .rev()
+                .map(|id| (id, false)),
+        );
     }
     updating
 }
@@ -311,6 +336,17 @@ impl BodyBuilder<'_, '_, '_> {
             return Ok(());
         }
         let native = self.syntax().declarations();
+        let pattern_value = match &native.expression(id).kind {
+            ExprKind::PatternMatch { .. } => true,
+            ExprKind::Conditional { condition, .. } => self.predicate_is_patterned(*condition),
+            _ => false,
+        };
+        if pattern_value {
+            let outer = std::mem::take(&mut self.pattern_prelude);
+            self.pattern_value(id)?;
+            stmts.extend(std::mem::replace(&mut self.pattern_prelude, outer));
+            return Ok(());
+        }
         if let Some((destination, source, CastPlan::Assign)) = self.cast_plan(id)? {
             self.effect(destination, updating, stmts)?;
             self.effect(source, updating, stmts)?;
@@ -389,11 +425,7 @@ impl BodyBuilder<'_, '_, '_> {
             {
                 self.effect(*expression, updating, stmts)?;
                 // A query does not evaluate its first operand (20.6, 20.7).
-                let unevaluated = match &native.expression(*expression).kind {
-                    ExprKind::Name(name) => SystemFunction::from_name(&name.spelling)
-                        .is_some_and(SystemFunction::has_unevaluated_operand),
-                    _ => false,
-                };
+                let unevaluated = unevaluated_operand(native, *expression);
                 // An update in $ferror's output index is lifted into the
                 // prelude. Save the preceding FD first, including its calls,
                 // so that the prelude cannot reorder the two arguments.
@@ -1452,7 +1484,10 @@ impl BodyBuilder<'_, '_, '_> {
 
     /// Evaluate the truth of `id` into a hidden 1-bit local, which `id`
     /// binds to from now on, and return its unique name.
-    fn truth(&mut self, id: ExprId, stmts: &mut Vec<Stmt>) -> Converted<String> {
+    pub(super) fn truth(&mut self, id: ExprId, stmts: &mut Vec<Stmt>) -> Converted<String> {
+        let outer = std::mem::take(&mut self.pattern_prelude);
+        self.prepare_pattern_values(id)?;
+        stmts.extend(std::mem::replace(&mut self.pattern_prelude, outer));
         let value = expression_binding::bind_chandle_value(
             id,
             self.syntax().declarations(),
@@ -1608,14 +1643,17 @@ impl BodyBuilder<'_, '_, '_> {
     /// The statements of a loop whose condition `id` has increment or
     /// decrement operators, which run every time it is evaluated: they
     /// start each iteration, which ends the loop when the condition does not
-    /// hold. `None` when the condition has no operator.
+    /// hold. `None` when the condition needs no setup.
     pub(super) fn loop_condition(&mut self, id: ExprId) -> Converted<Option<Vec<Stmt>>> {
         let mut stmts = self.effects(&[id])?;
-        if stmts.is_empty() {
+        if stmts.is_empty() && !self.condition_has_pattern(id) {
             return Ok(None);
         }
+        self.prepare_pattern_values(id)?;
+        let condition = self.native_chandle_value(id)?;
+        stmts.append(&mut self.pattern_prelude);
         stmts.push(Stmt::If {
-            condition: self.native_chandle_value(id)?,
+            condition,
             then_body: Vec::new(),
             else_body: vec![Stmt::Break],
         });

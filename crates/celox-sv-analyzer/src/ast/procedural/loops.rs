@@ -50,6 +50,9 @@ impl BodyBuilder<'_, '_, '_> {
         if item.pattern.is_some() {
             return Err(unsupported("pattern matching in a condition"));
         }
+        // A pattern predicate in the condition is prepared first, so
+        // the conversion below substitutes its result (12.6.3).
+        self.prepare_pattern_values(item.expression)?;
         // A Boolean test, which may be of a chandle (IEEE 1800-2023 6.14).
         let condition = expression_binding::bind_chandle_value(
             item.expression,
@@ -86,6 +89,8 @@ impl BodyBuilder<'_, '_, '_> {
                     .ok_or_else(|| unsupported("for-loop variable type"))?;
                     for variable in &group.variables {
                         init.extend(self.effects(&[variable.value])?);
+                        self.prepare_pattern_values(variable.value)?;
+                        init.append(&mut self.pattern_prelude);
                         let source = instances::normalize_identifier(&variable.name.spelling);
                         let target = LValue::Ident(source.clone());
                         let mut scoped = self.dims.clone();
@@ -118,6 +123,9 @@ impl BodyBuilder<'_, '_, '_> {
             Some(ForInitialization::Assignments(values)) => {
                 for value in values {
                     init.extend(self.effects(&[value.left, value.right])?);
+                    self.prepare_pattern_values(value.left)?;
+                    self.prepare_pattern_values(value.right)?;
+                    init.append(&mut self.pattern_prelude);
                     match self.aggregate_property_assignment("=", false, value.left, value.right)? {
                         Some(stmts) => init.extend(stmts),
                         None => init.extend(self.assignment_value(
@@ -146,6 +154,9 @@ impl BodyBuilder<'_, '_, '_> {
                     ..
                 } => {
                     steps.extend(self.effects(&[*left, *right])?);
+                    self.prepare_pattern_values(*left)?;
+                    self.prepare_pattern_values(*right)?;
+                    steps.append(&mut self.pattern_prelude);
                     match self.aggregate_property_assignment(operator, false, *left, *right)? {
                         Some(stmts) => steps.extend(stmts),
                         None => {

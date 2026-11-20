@@ -67,6 +67,12 @@ pub enum ExprKind {
         then_expression: ExprId,
         else_expression: ExprId,
     },
+    /// `expression matches pattern` in a conditional predicate
+    /// (IEEE 1800-2023 12.6.2, 12.6.3).
+    PatternMatch {
+        expression: ExprId,
+        pattern: Pattern,
+    },
     /// Parenthesized assignment expression; distinct from a binary value op.
     Assignment {
         left: ExprId,
@@ -979,8 +985,9 @@ pub struct Procedure {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PredicateItem {
     pub expression: ExprId,
-    /// Pattern grammar is retained explicitly until its dedicated parser moves.
-    pub pattern: Option<TokenRange>,
+    /// A `matches` pattern of this clause (IEEE 1800-2023 12.6.2), kept for
+    /// source compatibility; new parses put it in the expression.
+    pub pattern: Option<Pattern>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -995,6 +1002,89 @@ pub struct ConditionalBranch {
     pub body: StatementId,
 }
 
+/// A pattern of a pattern-matching construct (IEEE 1800-2023 12.6).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Pattern {
+    /// `( pattern )`
+    Group(Box<Pattern>),
+    /// `. name`: binds the corresponding value to a new variable.
+    Variable(Name),
+    /// `.*`: matches anything, binds nothing.
+    Wildcard,
+    /// A constant expression, matched by equality.
+    Constant(ExprId),
+    /// `tagged member [pattern]`
+    Tagged {
+        member: Name,
+        pattern: Option<Box<Pattern>>,
+    },
+    /// `'{ ... }` over the members of a structure value.
+    Structure(Vec<PatternField>),
+}
+
+/// One field of a structure pattern.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PatternField {
+    /// The member at this position.
+    Positional(Pattern),
+    /// `member : pattern`; members may be named in any order or omitted.
+    Named(Name, Pattern),
+}
+
+impl Pattern {
+    /// This pattern with each constant expression it holds mapped by `map`.
+    pub fn map_expressions(&self, map: &mut impl FnMut(ExprId) -> ExprId) -> Pattern {
+        match self {
+            Pattern::Group(inner) => Pattern::Group(Box::new(inner.map_expressions(map))),
+            Pattern::Variable(name) => Pattern::Variable(name.clone()),
+            Pattern::Wildcard => Pattern::Wildcard,
+            Pattern::Constant(id) => Pattern::Constant(map(*id)),
+            Pattern::Tagged { member, pattern } => Pattern::Tagged {
+                member: member.clone(),
+                pattern: pattern
+                    .as_ref()
+                    .map(|inner| Box::new(inner.map_expressions(map))),
+            },
+            Pattern::Structure(fields) => Pattern::Structure(
+                fields
+                    .iter()
+                    .map(|field| match field {
+                        PatternField::Positional(pattern) => {
+                            PatternField::Positional(pattern.map_expressions(map))
+                        }
+                        PatternField::Named(name, pattern) => {
+                            PatternField::Named(name.clone(), pattern.map_expressions(map))
+                        }
+                    })
+                    .collect(),
+            ),
+        }
+    }
+
+    /// The constant expressions this pattern holds, in source order.
+    pub fn constants(&self, found: &mut Vec<ExprId>) {
+        match self {
+            Pattern::Group(inner) => inner.constants(found),
+            Pattern::Variable(_) | Pattern::Wildcard => {}
+            Pattern::Constant(id) => found.push(*id),
+            Pattern::Tagged { pattern, .. } => {
+                if let Some(inner) = pattern {
+                    inner.constants(found);
+                }
+            }
+            Pattern::Structure(fields) => {
+                for field in fields {
+                    match field {
+                        PatternField::Positional(pattern) | PatternField::Named(_, pattern) => {
+                            pattern.constants(found)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CaseMatch {
     Expression(ExprId),
@@ -1002,14 +1092,16 @@ pub enum CaseMatch {
         left: ExprId,
         right: ExprId,
     },
-    /// Tagged pattern syntax remains an explicit unconverted grammar leaf.
-    Pattern(TokenRange),
+    /// A pattern of a `case ... matches` item (IEEE 1800-2023 12.6.1).
+    Pattern(Pattern),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CaseArm {
     pub matches: Vec<CaseMatch>,
     pub default: bool,
+    /// The `&&&` filter of a pattern-matching case item (12.6.1).
+    pub filter: Option<ExprId>,
     pub body: StatementId,
     pub tokens: TokenRange,
 }
@@ -1984,6 +2076,13 @@ impl ExprKind {
                 condition: map(*condition),
                 then_expression: map(*then_expression),
                 else_expression: map(*else_expression),
+            },
+            ExprKind::PatternMatch {
+                expression,
+                pattern,
+            } => ExprKind::PatternMatch {
+                expression: map(*expression),
+                pattern: pattern.map_expressions(map),
             },
             ExprKind::Assignment {
                 left,

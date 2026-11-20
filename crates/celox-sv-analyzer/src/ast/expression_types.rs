@@ -338,6 +338,8 @@ fn resolve(
         }),
         // `randomize() with {...}` returns int (18.7).
         ExprKind::RandomizeWith { .. } => values::integral(&mut session.types, 32, true, false),
+        // A pattern match gives one determined bit (12.6).
+        ExprKind::PatternMatch { .. } => values::integral(&mut session.types, 1, false, true),
         // A typed assignment pattern has its type (10.9).
         ExprKind::Pattern {
             target: Some(target),
