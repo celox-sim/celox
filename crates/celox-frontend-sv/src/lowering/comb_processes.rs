@@ -3,6 +3,7 @@
 use super::*;
 
 pub(super) fn lower_comb_processes(
+    mut arena: SLTNodeArena<SourceVarId>,
     module: &sv::ir::Module,
     tables: &procedural::ModuleTables,
     port_assignments: &[(SourceVarId, Vec<sv::ir::Stmt>)],
@@ -30,7 +31,6 @@ pub(super) fn lower_comb_processes(
     ),
     sv::AnalyzerError,
 > {
-    let mut arena = SLTNodeArena::new();
     let mut comb_blocks = Vec::new();
     let mut alternatives = Vec::new();
     let mut observers = Vec::new();

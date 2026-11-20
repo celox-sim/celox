@@ -38,6 +38,7 @@ pub(crate) fn attach_instance_glue(
     four_state: bool,
     allow_inferred_latches: bool,
     foreign: bool,
+    private_wires: bool,
     hierarchical_targets: &HashSet<String>,
     warnings: &mut Vec<crate::warning::PendingWarning>,
     calls: Option<&mut recursion::CallGraph>,
@@ -249,6 +250,7 @@ pub(crate) fn attach_instance_glue(
     let gated_waits = design_waits.gated;
     let (comb_blocks, arena, created, comb_observers, comb_sites, comb_alternatives) =
         lower_comb_processes(
+            std::mem::take(&mut module.arena),
             &lowered.source,
             &tables,
             &port_assignments,
@@ -283,6 +285,48 @@ pub(crate) fn attach_instance_glue(
     push_event_copies(&lowered.event_copies, &mut comb_blocks, &mut arena)?;
     module.comb_boundaries = comb_boundaries(&comb_blocks);
     module.comb_blocks = comb_blocks;
+    module.arena = arena;
+    if !module.next_state.forms.is_empty() && !four_state {
+        let pm = procedural::ProcModule::new(
+            &lowered.source,
+            &tables,
+            &mut parent_variables,
+            &mut signal_names,
+            &lowered.constants,
+            &lowered.parameter_types,
+            four_state,
+            warnings,
+        );
+        let mut connected = HashSet::default();
+        for (_, _, _, connections) in &resolved_instances {
+            for actual in connections.iter().filter_map(|c| c.actual_expr.as_ref()) {
+                procedural::expr_idents(actual, &mut connected);
+            }
+        }
+        let wires = lowered
+            .source
+            .signals()
+            .iter()
+            .filter(|signal| {
+                private_wires
+                    && signal.is_net()
+                    && signal.package_variable().is_none()
+                    && !connected.contains(signal.name())
+                    && signal.hierarchical().is_none()
+                    && !hierarchical_targets.contains(signal.name())
+            })
+            .filter_map(|signal| pm.id(signal.name()))
+            .filter(|id| {
+                !pm.var(*id).kind.is_port()
+                    && pm.force_controls(*id).is_none()
+                    && !pm.force_holds.contains_key(id)
+            })
+            .collect();
+        lowered
+            .edge_schedule
+            .lower(&pm, module, &wires)
+            .map_err(|detail| ParserError::illegal_context("edge schedule", detail, None))?;
+    }
     // Signals a kernel or an imperative combinational unit may store twice
     // between two runtime checks get counters; assembly uses them only for
     // the ones a flip-flop domain or wait watches.
@@ -309,7 +353,6 @@ pub(crate) fn attach_instance_glue(
             |address| (address.region == WORKING_REGION).then_some(address.var_id),
         ));
     }
-    module.arena = arena;
     // Combinational event sites follow the flip-flop ones, including the
     // events run-time loops emit.
     let site_base = module.runtime_event_sites.len() as u32;

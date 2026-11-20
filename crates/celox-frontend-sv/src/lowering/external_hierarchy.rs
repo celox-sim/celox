@@ -247,6 +247,7 @@ fn prepare_external_hierarchy_collecting(
             })
             .collect();
         LoweredSvModule {
+            edge_schedule: Default::default(),
             source: dummy_ir.modules()[0].clone(),
             implicit_nets_allowed: false,
             sim_module: signature.sim_module.clone(),
@@ -545,6 +546,7 @@ fn prepare_external_hierarchy_collecting(
             four_state,
             allow_inferred_latches,
             true,
+            false,
             &HashSet::default(),
             warnings,
             None,

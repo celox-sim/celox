@@ -1,7 +1,6 @@
 //! The next-state form of a module's `always_ff` processes, when a report
 //! asks for it (`AnalysisOptions::ff_next_state_report`): lowered beside
-//! the imperative units, which still run, and reported with the measures
-//! every step of the next-state execution model is gated on.
+//! a reference imperative lowering and checked independently of the executing schedule.
 //!
 //! Each process's form ([`comb::NextState`]) is copied through the
 //! canonicalizing allocator ([`celox_slt::canon::intern`]) into one DAG of
@@ -27,11 +26,10 @@
 use std::collections::BTreeMap;
 
 use super::comb::{NextState, NextStateRoot, RamWritePort};
+use super::ff_graph::{canonical_copy, next_state_unit};
 use super::*;
-use celox_sir::RegisterId;
 use celox_sir::interp::{InterpError, InterpMachine, ResolvedAccess, StoreSnapshot, execute_unit};
-use celox_slt::SLTToSIRLowerer;
-use celox_slt::canon::{Canonicalizer, Reinterner, reachable, same_op_bit_runs};
+use celox_slt::canon::{Canonicalizer, reachable, same_op_bit_runs};
 use num_traits::{ToPrimitive, Zero};
 
 /// The random states before the edge each form is checked on, besides the
@@ -180,14 +178,22 @@ impl NextStateReport {
 
     /// Report the measures, if a report was asked for, and hand back the
     /// forms taken.
-    pub(super) fn finish(mut self) -> celox_frontend_core::symbolic::artifact::NextStateForms {
+    pub(super) fn finish(
+        mut self,
+    ) -> (
+        SLTNodeArena<SourceVarId>,
+        celox_frontend_core::symbolic::artifact::NextStateForms,
+    ) {
         if let Some(path) = self.path.clone() {
             self.print(&path);
         }
-        celox_frontend_core::symbolic::artifact::NextStateForms {
-            arena: self.dag,
-            forms: self.forms,
-        }
+        (
+            self.dag,
+            celox_frontend_core::symbolic::artifact::NextStateForms {
+                complete: Default::default(),
+                forms: self.forms,
+            },
+        )
     }
 
     fn print(&mut self, path: &std::path::Path) {
@@ -236,45 +242,12 @@ impl NextStateReport {
     }
 }
 
-/// `form`, lowered in `raw`, copied into the canonical DAG `dag`.
-fn canonical_copy(
-    raw: &SLTNodeArena<SourceVarId>,
-    dag: &mut SLTNodeArena<SourceVarId>,
-    form: &NextState,
-) -> Result<NextState, celox_slt::canon::ReinternError> {
-    let mut copier = Reinterner::new(raw);
-    let mut copy = |node: NodeId| copier.copy(dag, node);
-    let mut canonical = NextState::default();
-    for root in &form.roots {
-        canonical.roots.push(NextStateRoot {
-            value: copy(root.value)?,
-            ..root.clone()
-        });
-    }
-    for port in &form.ports {
-        canonical.ports.push(RamWritePort {
-            index: copy(port.index)?,
-            value: copy(port.value)?,
-            guard: copy(port.guard)?,
-            ..port.clone()
-        });
-    }
-    Ok(canonical)
-}
-
 /// The outcome of an equivalence check.
 enum Check {
     Equal,
     /// The check could not run, and why.
     Unchecked(String),
     Mismatch(String),
-}
-
-fn stable(var_id: SourceVarId) -> RegionedVarAddr {
-    RegionedVarAddrBase {
-        region: STABLE_REGION,
-        var_id,
-    }
 }
 
 /// Whether `form` ends every visible variable where the imperative units
@@ -286,7 +259,7 @@ fn check(
     units: &ImperativeUnits<'_>,
     seed: u64,
 ) -> Check {
-    let unit = match next_state_unit(pm, dag, form) {
+    let unit = match next_state_unit(pm, dag, form, STABLE_REGION) {
         Ok(unit) => unit,
         Err(reason) => return Check::Mismatch(format!("form not lowered: {reason}")),
     };
@@ -337,97 +310,6 @@ fn check(
         }
     }
     Check::Equal
-}
-
-/// The SIR of `form`: every root and port computed from the state before
-/// the edge, then the roots stored, then the ports in source order.
-fn next_state_unit(
-    pm: &procedural::ProcModule<'_>,
-    dag: &SLTNodeArena<SourceVarId>,
-    form: &NextState,
-) -> Result<ExecutionUnit<RegionedVarAddr>, String> {
-    let mut mapped = SLTNodeArena::<RegionedVarAddr>::new();
-    let mut cache = HashMap::default();
-    let map = |id: &SourceVarId| stable(*id);
-    let mut mapped_nodes = Vec::new();
-    for node in form.nodes() {
-        mapped_nodes.push(
-            dag.get(node)
-                .map_addr(node, dag, &mut mapped, &mut cache, &map)
-                .map_err(|error| error.to_string())?,
-        );
-    }
-    let element_widths: HashMap<RegionedVarAddr, usize> = pm
-        .variables
-        .iter()
-        .filter_map(|(&id, variable)| Some((stable(id), unpacked_element_width(variable)?)))
-        .collect();
-    let mut lowerer =
-        SLTToSIRLowerer::new(pm.four_state).with_unpacked_input_types(&mapped, &element_widths);
-    let mut b = SIRBuilder::<RegionedVarAddr>::new();
-    let registers: Vec<RegisterId> = mapped_nodes
-        .into_iter()
-        .map(|node| lowerer.lower(&mut b, node, &mapped, &mut HashMap::default()))
-        .collect();
-    let (root_registers, port_registers) = registers.split_at(form.roots.len());
-    for (root, &value) in form.roots.iter().zip(root_registers) {
-        let width = root.access.msb - root.access.lsb + 1;
-        if b.register(&value).width() != width {
-            return Err(format!("root of {width} bits has a value of another width"));
-        }
-        b.emit(SIRInstruction::Store(
-            stable(root.target),
-            SIROffset::Static(root.access.lsb),
-            width,
-            value,
-            Vec::new(),
-            Vec::new(),
-        ));
-    }
-    for (port, registers) in form.ports.iter().zip(port_registers.chunks(3)) {
-        let &[index, value, guard] = registers else {
-            unreachable!("a port computes three nodes");
-        };
-        let write = b.new_block();
-        let next = b.new_block();
-        b.seal_block(SIRTerminator::Branch {
-            cond: guard,
-            true_block: (write, Vec::new()),
-            false_block: (next, Vec::new()),
-        });
-        b.switch_to_block(write);
-        b.emit(SIRInstruction::Store(
-            stable(port.array),
-            SIROffset::Element {
-                index,
-                element_width: port.element_width,
-                bit_offset: port.access.lsb,
-                dynamic_bit_offset: None,
-            },
-            port.access.msb - port.access.lsb + 1,
-            value,
-            Vec::new(),
-            Vec::new(),
-        ));
-        b.seal_block(SIRTerminator::Jump(next, Vec::new()));
-        b.switch_to_block(next);
-    }
-    // A form that writes nothing is a unit that does nothing.
-    Ok(b.flush_eu().unwrap_or_else(|| ExecutionUnit {
-        entry_block_id: BlockId(0),
-        blocks: [(
-            BlockId(0),
-            celox_sir::BasicBlock {
-                id: BlockId(0),
-                params: Vec::new(),
-                instructions: Vec::new(),
-                terminator: SIRTerminator::Return,
-            },
-        )]
-        .into_iter()
-        .collect(),
-        register_map: HashMap::default(),
-    }))
 }
 
 /// The state of a module for one equivalence check: each variable of each

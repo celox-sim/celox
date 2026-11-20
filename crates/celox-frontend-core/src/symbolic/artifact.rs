@@ -187,11 +187,12 @@ pub struct SimModule {
 
 /// The next-state forms (`celox_slt::next_state`) of the edge-triggered
 /// processes a frontend lowered into one: each with its trigger set, its
-/// nodes in `arena`. A process without one keeps only its units; a process
-/// with one keeps them too, and assembly chooses which runs.
+/// nodes in the same `SimModule::arena` as all combinational paths.
 #[derive(Clone, Debug, Default)]
 pub struct NextStateForms {
-    pub arena: SLTNodeArena<SourceVarId>,
+    /// Trigger groups whose forms account for every executable process.
+    /// Assembly may schedule these roots with the combinational producers.
+    pub complete: HashSet<TriggerSet<SourceVarId>>,
     pub forms: Vec<(
         TriggerSet<SourceVarId>,
         celox_slt::next_state::NextStateForm<SourceVarId>,
