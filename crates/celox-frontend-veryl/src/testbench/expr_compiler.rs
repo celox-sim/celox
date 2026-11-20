@@ -945,6 +945,7 @@ impl ExprCompiler<'_> {
         stride: usize,
     ) {
         let context = self.root_context(coordinate);
+        let start = ops.len();
         self.emit_in_context(coordinate, ops, Some(context));
         if context.signed && context.width < 64 {
             ops.push(TbOpcode::Resize {
@@ -953,7 +954,36 @@ impl ExprCompiler<'_> {
                 signed: true,
             });
         }
-        ops.push(TbOpcode::IndexOffset { first, end, stride });
+        if start == 1
+            && let TbOpcode::ConstU64(base) = ops[0]
+            && let Some(coordinate) = ExprBytecode::new(ops[1..].to_vec()).literal_u64()
+        {
+            let offset = usize::try_from(coordinate)
+                .ok()
+                .filter(|coordinate| (first..end).contains(coordinate))
+                .and_then(|coordinate| (coordinate - first).checked_mul(stride))
+                .and_then(|delta| base.checked_add(delta as u64))
+                .unwrap_or(u64::MAX);
+            ops.truncate(1);
+            ops[0] = TbOpcode::ConstU64(offset);
+        } else {
+            ops.push(TbOpcode::IndexOffset { first, end, stride });
+        }
+    }
+
+    fn append_bit_offset(base: &mut Vec<UnboundTbOpcode>, offset: Vec<UnboundTbOpcode>) {
+        if let [TbOpcode::ConstU64(base)] = base.as_mut_slice()
+            && let [TbOpcode::ConstU64(offset)] = offset.as_slice()
+        {
+            *base = base.saturating_add(*offset);
+        } else {
+            base.extend(offset);
+            base.push(TbOpcode::IndexOffset {
+                first: 0,
+                end: usize::MAX,
+                stride: 1,
+            });
+        }
     }
 
     fn array_slice_offset(
@@ -1093,12 +1123,7 @@ impl ExprCompiler<'_> {
                 }
             };
             let selected_width = elements.checked_mul(scale)?;
-            ops.extend(part_ops);
-            ops.push(TbOpcode::IndexOffset {
-                first: 0,
-                end: usize::MAX,
-                stride: 1,
-            });
+            Self::append_bit_offset(&mut ops, part_ops);
             Some((ops, selected_width))
         } else {
             if select.0.len() > packed_dims.len() {
@@ -1190,12 +1215,7 @@ impl ExprCompiler<'_> {
             accessed_width
         } else {
             let (select_ops, width) = self.selection_offset(select, &info.packed_dims)?;
-            offset_ops.extend(select_ops);
-            offset_ops.push(TbOpcode::IndexOffset {
-                first: 0,
-                end: usize::MAX,
-                stride: 1,
-            });
+            Self::append_bit_offset(&mut offset_ops, select_ops);
             width
         };
 

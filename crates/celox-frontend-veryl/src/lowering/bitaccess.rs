@@ -313,6 +313,12 @@ pub fn reject_runtime_array_slice(index: &VarIndex) -> Result<(), ParserError> {
     Ok(())
 }
 
+pub(crate) struct RuntimeArraySlice {
+    pub value: Expression,
+    pub missing: Option<Expression>,
+    pub width: usize,
+}
+
 /// Lower a runtime unpacked-array slice (`a[i+:k]`, `a[i-:k]`, `a[i step k]`).
 ///
 /// The slice is read as one run of `k` consecutive elements starting at a
@@ -320,10 +326,10 @@ pub fn reject_runtime_array_slice(index: &VarIndex) -> Result<(), ParserError> {
 /// that run by how far the clamp moved it then leaves exactly the elements
 /// outside the array empty; those read X (0 when two-state) without shifting
 /// their in-range neighbors (IEEE 1800-2023 7.4.6).
-pub fn expand_runtime_array_slice(
+pub(crate) fn expand_runtime_array_slice(
     module: &Module,
     factor: &Factor,
-) -> Result<Option<Expression>, ParserError> {
+) -> Result<Option<RuntimeArraySlice>, ParserError> {
     let Factor::Variable(var_id, index, select, comptime) = factor else {
         return Ok(None);
     };
@@ -419,17 +425,16 @@ pub fn expand_runtime_array_slice(
             }))),
         )
     };
-    let first = &two_state(first);
-    let prefix = prefix
-        .iter()
-        .map(|expr| {
-            if eval_constexpr(expr).is_some() {
-                expr.clone()
-            } else {
-                two_state(expr)
-            }
-        })
-        .collect::<Vec<_>>();
+    let unknown_coordinate = |original: &Expression, bits: &Expression| {
+        // Equality with the two-state coordinate is true only when every
+        // bit is known. Coercing the equality to bit maps an X result to 0.
+        let equal = binary(original.clone(), Op::Eq, bits.clone());
+        Expression::Unary(Op::LogicNot, Box::new(two_state(&equal)), unknown())
+    };
+    let first_bits = two_state(first);
+    let mut invalid =
+        (!first.comptime().r#type.is_2state()).then(|| unknown_coordinate(first, &first_bits));
+    let first = &first_bits;
 
     // Work with `t = start + bias`, which is never negative, so that every
     // comparison and offset below is unsigned. A signed coordinate is biased
@@ -485,17 +490,16 @@ pub fn expand_runtime_array_slice(
     let dim_size = dim_size as u64;
     let highest = bias + dim_size - count;
 
-    // Out-of-range prefix coordinates select no row at all.
-    let mut invalid = None;
+    // An invalid prefix coordinate selects no row at all.
     let mut clamped_prefix = Vec::with_capacity(prefix.len());
-    for (expr, &size) in prefix.iter().zip(&shape) {
-        if eval_constexpr(expr).is_some() {
-            clamped_prefix.push(expr.clone());
-            continue;
+    for (original, &size) in prefix.iter().zip(&shape) {
+        let expr = two_state(original);
+        if !original.comptime().r#type.is_2state() {
+            invalid = or(invalid, unknown_coordinate(original, &expr));
         }
         let mut out_of_range = binary(expr.clone(), Op::GreaterEq, literal(size as u64));
-        if crate::context_width::expression_signed(expr) {
-            let width = crate::context_width::get_expr_width(expr).unwrap_or(64);
+        if crate::context_width::expression_signed(&expr) {
+            let width = crate::context_width::get_expr_width(&expr).unwrap_or(64);
             let mut zero = Expression::create_value(Value::new(0, width, true), token);
             zero.comptime_mut().r#type.signed = true;
             out_of_range = binary(
@@ -588,26 +592,21 @@ pub fn expand_runtime_array_slice(
     };
     let all =
         |value: BigUint| Expression::create_value(Value::new_biguint(value, width, false), token);
-    let ones = (BigUint::from(1u8) << width) - BigUint::from(1u8);
     let shifted = align(run);
-    let (empty, value) = if variable.r#type.is_2state() {
-        (all(BigUint::zero()), shifted)
+    let (selected, missing) = if variable.r#type.is_2state() {
+        (ternary(invalid, all(BigUint::zero()), shifted), None)
     } else {
-        // `create_value` types a literal as two-state `bit`, which drops X.
-        let mut x = Expression::create_value(Value::new_x(width, false), token);
-        x.comptime_mut().r#type.kind = TypeKind::Logic;
-        let empty_positions = Expression::Unary(Op::BitNot, Box::new(align(all(ones))), unknown());
-        (
-            x.clone(),
-            binary(shifted, Op::BitOr, binary(empty_positions, Op::BitAnd, x)),
-        )
+        let ones = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+        let holes = Expression::Unary(Op::BitNot, Box::new(align(all(ones.clone()))), unknown());
+        (shifted, Some(ternary(invalid, all(ones), holes)))
     };
     // A concatenation keeps the shifts self-determined at the slice width.
-    let selected = ternary(invalid, empty, value);
-    Ok(Some(Expression::Concatenation(
-        vec![(selected, None)],
-        Box::new(comptime.clone()),
-    )))
+    let value = Expression::Concatenation(vec![(selected, None)], Box::new(comptime.clone()));
+    Ok(Some(RuntimeArraySlice {
+        value,
+        missing,
+        width,
+    }))
 }
 
 /// Validate and normalize a variable select before any consumer constructs IR.

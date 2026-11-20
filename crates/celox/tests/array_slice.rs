@@ -85,6 +85,16 @@ assign col1 = {c1[1], c1[0]};
             );
         }
     }
+    let row = sim.signal("row");
+    for payload in [0b01u8, 0b11] {
+        sim.modify(|io| io.set_four_state(sel, payload.into(), 0b10u8.into())).unwrap();
+        assert_eq!(
+            sim.get_four_state(row),
+            (0xffffu32.into(), 0xffffu32.into()),
+            "row with an X/Z prefix coordinate",
+        );
+    }
+
     let neg = sim.signal("neg");
     for (value, expected) in [
         (0b000u8, (0x1201u32, 0u32)),
@@ -195,7 +205,7 @@ var data: logic<8>[4];
 assign data[0] = 8'h01;
 assign data[1] = 8'h12;
 assign data[2] = 8'h34;
-assign data[3] = 8'h80;
+assign data[3] = 8'b10z0_0000;
 var r: logic<8>[2];
 always_ff {
 if_reset {
@@ -223,8 +233,8 @@ o_data: inst_o,
     sim.modify(|io| io.set(rst, 1u8)).unwrap();
     for (value, ff, comb) in [
         (0u8, (0x01ffu32, 0x00ffu32), (0x1201u32, 0u32)),
-        (2, (0x3412, 0), (0x8034, 0)),
-        (3, (0x8034, 0), (0xff80, 0xff00)),
+        (2, (0x3412, 0), (0x8034, 0x2000)),
+        (3, (0x8034, 0x2000), (0xff80, 0xff20)),
     ] {
         sim.modify(|io| io.set(sel, value)).unwrap();
         sim.tick(clk).unwrap();
@@ -234,6 +244,13 @@ o_data: inst_o,
             (comb.0.into(), comb.1.into()),
             "inst_o with sel={value}",
         );
+    }
+    for payload in [0b01u8, 0b11] {
+        sim.modify(|io| io.set_four_state(sel, payload.into(), 0b10u8.into())).unwrap();
+        sim.tick(clk).unwrap();
+        for signal in [q, inst_o] {
+            assert_eq!(sim.get_four_state(signal), (0xffffu32.into(), 0xffffu32.into()));
+        }
     }
     }
 }

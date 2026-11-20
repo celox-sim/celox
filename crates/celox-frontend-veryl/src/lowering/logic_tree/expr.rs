@@ -857,7 +857,37 @@ fn eval_factor(
     context: Option<ValueContext>,
 ) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
     if let Some(expanded) = crate::bitaccess::expand_runtime_array_slice(module, factor)? {
-        return eval_expression_in_context(module, store, &expanded, arena, context);
+        let Some(missing) = expanded.missing else {
+            return eval_expression_in_context(module, store, &expanded.value, arena, context);
+        };
+        let ((value, mut sources), boundaries) =
+            eval_expression_in_context(module, store, &expanded.value, arena, None)?;
+        let ((missing, missing_sources), missing_boundaries) =
+            eval_expression_in_context(module, store, &missing, arena, None)?;
+        sources.extend(missing_sources);
+
+        // Set both planes for missing bits while leaving in-range X/Z intact.
+        let plane_width = expanded.width.next_multiple_of(64);
+        let value = coerce_node_width(arena, value, Some(plane_width), false)?;
+        let missing = coerce_node_width(arena, missing, Some(plane_width), false)?;
+        let planes = arena.alloc(SLTNode::Unary(UnaryOp::ToPlanes, value))?;
+        let mask = arena.alloc(SLTNode::Concat(vec![
+            (missing, plane_width),
+            (missing, plane_width),
+        ]))?;
+        let filled = arena.alloc(SLTNode::Binary(planes, BinaryOp::Or, mask))?;
+        let result = arena.alloc(SLTNode::Unary(UnaryOp::FromPlanes, filled))?;
+        let result = coerce_node_width(arena, result, Some(expanded.width), false)?;
+        let result = coerce_node_width(
+            arena,
+            result,
+            context.map(|context| context.width),
+            context.is_some_and(|context| context.signed),
+        )?;
+        return Ok((
+            (result, sources),
+            merge_boundaries(boundaries, missing_boundaries),
+        ));
     }
     let context_width = context.map(|context| context.width);
     let context_signed = context

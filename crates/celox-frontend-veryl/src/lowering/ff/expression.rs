@@ -109,9 +109,58 @@ impl<'a> FfParser<'a> {
         context: Option<ValueContext>,
     ) -> Result<(), ParserError> {
         if let Some(expanded) = crate::bitaccess::expand_runtime_array_slice(self.module, factor)? {
-            return self.parse_expression_in_context(
-                &expanded, targets, domain, convert, sources, ir_builder, context,
+            let Some(missing) = expanded.missing else {
+                return self.parse_expression_in_context(
+                    &expanded.value,
+                    targets,
+                    domain,
+                    convert,
+                    sources,
+                    ir_builder,
+                    context,
+                );
+            };
+            self.parse_expression_in_context(
+                &expanded.value,
+                targets,
+                domain,
+                convert,
+                sources,
+                ir_builder,
+                None,
+            )?;
+            let value = self.stack.pop_back().unwrap();
+            self.parse_expression_in_context(
+                &missing, targets, domain, convert, sources, ir_builder, None,
+            )?;
+            let missing = self.stack.pop_back().unwrap();
+
+            // Setting both planes makes the missing bits X and preserves
+            // the exact X/Z encoding of every bit read from the array.
+            let plane_width = expanded.width.next_multiple_of(64);
+            let value = self.cast_reg_width_ext(ir_builder, value, plane_width, false);
+            let missing = self.coerce_register_to_formal(
+                ir_builder,
+                missing,
+                plane_width,
+                false,
+                false,
+                true,
             );
+            let planes = ir_builder.alloc_bit(plane_width * 2, false);
+            ir_builder.emit(SIRInstruction::Unary(planes, UnaryOp::ToPlanes, value));
+            let mask = ir_builder.alloc_bit(plane_width * 2, false);
+            ir_builder.emit(SIRInstruction::Concat(mask, vec![missing, missing]));
+            let filled = ir_builder.alloc_bit(plane_width * 2, false);
+            ir_builder.emit(SIRInstruction::Binary(filled, planes, BinaryOp::Or, mask));
+            let result = ir_builder.alloc_logic(plane_width);
+            ir_builder.emit(SIRInstruction::Unary(result, UnaryOp::FromPlanes, filled));
+            let result = self.cast_reg_width_ext(ir_builder, result, expanded.width, false);
+            let result = context.map_or(result, |context| {
+                self.cast_reg_width_ext(ir_builder, result, context.width, context.signed)
+            });
+            self.stack.push_back(result);
+            return Ok(());
         }
         let context_width = context.map(|context| context.width);
         match factor {
