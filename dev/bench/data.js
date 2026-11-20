@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795155255928,
+  "lastUpdate": 1795155469132,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -460568,6 +460568,32 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-celox-jit/heliodor_suite_71_linux_boot_execution",
             "unit": "ms",
             "value": 151385.692329
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "1932566285e6d49a203b3cd54859c34423993dc6",
+          "message": "fix(sir-opt): fold an XOR chain over all bits of a wide source (#4412)",
+          "timestamp": "2026-11-19T10:17:39Z",
+          "url": "https://github.com/celox-sim/celox/commit/1932566285e6d49a203b3cd54859c34423993dc6"
+        },
+        "date": 1795155469132,
+        "cpu": "AMD EPYC 9V45",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-celox-tiered/heliodor_suite_71_linux_boot_end_to_end",
+            "unit": "ms",
+            "value": 180229.703648
           }
         ]
       }
