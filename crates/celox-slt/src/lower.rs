@@ -13,6 +13,7 @@ mod loops;
 mod mask_constants;
 mod mux;
 mod or_scan;
+mod packed_decode;
 mod slices;
 mod worklist;
 
