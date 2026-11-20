@@ -27,6 +27,37 @@ ends, including on a test failure or step limit. Recording keeps eligible
 compiled schedulers enabled; they return to the host at waveform boundaries.
 Waveform recording cannot be combined with `--compile-only`.
 
+## Interactive simulation with Surfer
+
+Use `--cdsp <PORT>` to run a SystemVerilog testbench under Surfer's control:
+
+```sh
+celox run top.sv --top Top --cdsp 12345
+surfer cxxrtl+tcp://127.0.0.1:12345
+```
+
+Run the commands in separate terminals. Celox initializes the design at time
+zero and waits on loopback for one desktop Surfer client. Use Surfer's
+simulation controls to run, pause, or resume. You can browse the signal
+hierarchy and inspect the recorded waveforms while paused and after the testbench
+finishes. Closing the client ends the Celox session. Interactive sessions
+start from time zero and cannot save or restore CLI checkpoints.
+
+::: warning Use FST to inspect X and Z
+The live CDSP waveform displays both X and Z as zero. To distinguish them,
+record an FST file in four-state mode and open it in Surfer.
+
+```sh
+celox run top.sv --top Top --four-state --fst waves.fst
+surfer waves.fst
+```
+
+To also control execution from Surfer, add `--cdsp 12345` to the Celox command.
+:::
+
+The server uses [CXXRTL Debug Server Protocol version 0](https://cxxrtl.org/protocol.html).
+Celox keeps the live waveform history in memory for the duration of the session.
+
 ## Basic Usage
 
 Pass `vcd` (or `fst`) with the output file path when creating a simulator:

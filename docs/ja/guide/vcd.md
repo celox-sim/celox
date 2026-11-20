@@ -25,6 +25,36 @@ CLI はシミュレーションの各時刻を記録し、テスト失敗やス�
 ファイルをフラッシュします。波形有効時も適用可能な compiled scheduler を使用し、
 波形を記録する境界でホストに戻ります。`--compile-only` との併用はできません。
 
+## Surfer からシミュレーションを操作する
+
+SystemVerilog テストベンチを Surfer から操作するには、`--cdsp <PORT>` を指定します。
+
+```sh
+celox run top.sv --top Top --cdsp 12345
+surfer cxxrtl+tcp://127.0.0.1:12345
+```
+
+それぞれ別の端末で実行します。Celox は時刻ゼロで初期化を行い、ループバック経由で
+デスクトップ版 Surfer からの接続を 1 件待ちます。Surfer の操作ボタンで実行・一時停止・
+再開ができ、一時停止中や終了後も信号階層と記録済みの波形を確認できます。
+クライアントを閉じると Celox のセッションも終了します。
+対話セッションは時刻ゼロから始まり、CLI チェックポイントの保存と復元には対応していません。
+
+::: warning X と Z を確認するには FST を使う
+CDSP のライブ波形では、X と Z がどちらも 0 として表示されます。
+X と Z を区別するには、4 状態モードで FST を出力し、Surfer で開いてください。
+
+```sh
+celox run top.sv --top Top --four-state --fst waves.fst
+surfer waves.fst
+```
+
+Surfer から実行も操作する場合は、Celox のコマンドに `--cdsp 12345` を追加してください。
+:::
+
+接続には [CXXRTL Debug Server Protocol version 0](https://cxxrtl.org/protocol.html) を使います。
+ライブ波形の履歴はセッションの間、メモリに保持されます。
+
 ## 基本的な使い方
 
 シミュレータ作成時に `vcd`（または `fst`）オプションで出力先ファイルパスを指定します：

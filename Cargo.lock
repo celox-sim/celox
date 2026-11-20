@@ -445,6 +445,7 @@ dependencies = [
  "clap",
  "codspeed-criterion-compat",
  "criterion",
+ "data-encoding",
  "fxhash",
  "imbl",
  "insta",
