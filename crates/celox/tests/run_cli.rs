@@ -1432,3 +1432,202 @@ fn repeated_tops_run_together() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(output.stdout, b"Top set\nOther read 7\n");
 }
+
+#[test]
+fn sv_cdsp_exposes_live_waveforms_and_controls_simulation() {
+    use std::{
+        fmt::Write as _,
+        io::{BufRead, BufReader, Write},
+        net::{SocketAddr, TcpStream},
+        process::{Child, Stdio},
+        time::Duration,
+    };
+
+    use serde_json::{Value, json};
+
+    struct Server(Child);
+    impl Drop for Server {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn send(stream: &mut impl Write, message: Value) {
+        serde_json::to_writer(&mut *stream, &message).unwrap();
+        stream.write_all(&[0]).unwrap();
+    }
+
+    fn receive(stream: &mut impl BufRead) -> Value {
+        let mut frame = Vec::new();
+        assert!(stream.read_until(0, &mut frame).unwrap() > 0);
+        assert_eq!(frame.pop(), Some(0));
+        serde_json::from_slice(&frame).unwrap()
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("top.sv");
+    std::fs::write(
+        &source,
+        r#"
+        `timescale 1ns/1ps
+        module Dut(input logic [64:0] data);
+        endmodule
+        module Top;
+            logic [64:0] counter;
+            Dut dut(counter);
+            initial begin
+                counter = 65'h1_00000000_12345678;
+                #2 counter = 65'h0_00000001_00000002;
+                #3 begin
+                    $display("reached breakpoint");
+                    $stop;
+                    counter = 65'h1_00000002_00000003;
+                end
+                #2 $finish;
+            end
+        endmodule
+        "#,
+    )
+    .unwrap();
+
+    let mut server = Server(
+        Command::new(env!("CARGO_BIN_EXE_celox"))
+            .arg("run")
+            .arg(&source)
+            .args(["--top", "Top", "--cdsp", "0"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let (ready, address) = std::sync::mpsc::channel();
+    let stderr = server.0.stderr.take().unwrap();
+    let log = std::thread::spawn(move || {
+        let mut transcript = String::new();
+        for line in BufReader::new(stderr).lines() {
+            let line = line.unwrap();
+            if let Some(addr) = line.strip_prefix("CDSP listening at cxxrtl+tcp://") {
+                let _ = ready.send(addr.parse::<SocketAddr>().unwrap());
+            }
+            writeln!(&mut transcript, "{line}").unwrap();
+        }
+        transcript
+    });
+    let timeout = Duration::from_secs(15);
+    let address = address
+        .recv_timeout(timeout)
+        .expect("Celox did not start CDSP");
+    let mut write = TcpStream::connect_timeout(&address, timeout).unwrap();
+    write.set_read_timeout(Some(timeout)).unwrap();
+    write.set_write_timeout(Some(timeout)).unwrap();
+    let mut read = BufReader::new(write.try_clone().unwrap());
+    send(&mut write, json!({ "type": "greeting", "version": 0 }));
+    assert_eq!(receive(&mut read)["type"], "greeting");
+
+    let command = |write: &mut TcpStream, read: &mut BufReader<TcpStream>, request: Value| {
+        let mut request = request;
+        request["type"] = json!("command");
+        send(write, request.clone());
+        let response = receive(read);
+        assert_eq!(response["type"], "response", "{response}");
+        assert_eq!(response["command"], request["command"]);
+        response
+    };
+
+    let status = command(
+        &mut write,
+        &mut read,
+        json!({ "command": "get_simulation_status" }),
+    );
+    assert_eq!(status["status"], "paused");
+    assert_eq!(status["latest_time"], "0.000000000000000");
+    assert_eq!(status["next_sample_time"], "0.000000002000000");
+    let scopes = command(
+        &mut write,
+        &mut read,
+        json!({ "command": "list_scopes", "scope": null }),
+    );
+    assert_eq!(scopes["scopes"]["dut"]["definition"]["name"], "Dut");
+    let items = command(
+        &mut write,
+        &mut read,
+        json!({ "command": "list_items", "scope": null }),
+    );
+    assert_eq!(items["items"]["dut data"]["width"], 65);
+    command(
+        &mut write,
+        &mut read,
+        json!({
+            "command": "reference_items", "reference": "signals", "items": [["counter"], ["dut data"]],
+        }),
+    );
+    command(
+        &mut write,
+        &mut read,
+        json!({
+            "command": "run_simulation", "until_time": "0.000000003000000",
+            "until_diagnostics": [], "sample_item_values": true,
+        }),
+    );
+    let event = receive(&mut read);
+    assert_eq!(event["event"], "simulation_paused");
+    assert_eq!(event["cause"], "until_time");
+    assert_eq!(event["time"], "0.000000002000000");
+
+    // Pipeline run and pause in one write. Both commands are accepted before
+    // the simulator advances beyond this slot.
+    let run = json!({
+        "type": "command", "command": "run_simulation", "until_time": null,
+        "until_diagnostics": [], "sample_item_values": true,
+    });
+    let pause = json!({ "type": "command", "command": "pause_simulation" });
+    write
+        .write_all(format!("{run}\0{pause}\0").as_bytes())
+        .unwrap();
+    assert_eq!(receive(&mut read)["command"], "run_simulation");
+    let paused = receive(&mut read);
+    assert_eq!(paused["command"], "pause_simulation");
+    assert_eq!(paused["time"], "0.000000002000000");
+
+    send(&mut write, run.clone());
+    assert_eq!(receive(&mut read)["command"], "run_simulation");
+    let event = receive(&mut read);
+    assert_eq!(event["event"], "simulation_paused");
+    assert_eq!(event["cause"], "until_diagnostics");
+    assert_eq!(event["time"], "0.000000005000000");
+    send(&mut write, run);
+    assert_eq!(receive(&mut read)["command"], "run_simulation");
+    let event = receive(&mut read);
+    assert_eq!(event["event"], "simulation_finished");
+    assert_eq!(event["time"], "0.000000007000000");
+    send(
+        &mut write,
+        json!({
+            "type": "command", "command": "query_interval",
+            "interval": ["0.0", "0.000000007000000"], "collapse": true,
+            "items": "signals", "item_values_encoding": "base64(u32)", "diagnostics": true,
+        }),
+    );
+    let wave = receive(&mut read);
+    let samples = wave["samples"].as_array().unwrap();
+    assert_eq!(samples.len(), 4);
+    assert_eq!(
+        samples[0]["item_values"],
+        "eFY0EgAAAAABAAAAeFY0EgAAAAABAAAA"
+    );
+    assert_eq!(
+        samples[1]["item_values"],
+        "AgAAAAEAAAAAAAAAAgAAAAEAAAAAAAAA"
+    );
+    assert_eq!(samples[2]["diagnostics"][0]["text"], "reached breakpoint\n");
+    assert_eq!(samples[2]["diagnostics"][1]["type"], "break");
+    assert_eq!(
+        samples[3]["item_values"],
+        "AwAAAAIAAAABAAAAAwAAAAIAAAABAAAA"
+    );
+
+    drop((read, write));
+    let result = server.0.wait().unwrap();
+    assert!(result.success(), "{}", log.join().unwrap());
+}
