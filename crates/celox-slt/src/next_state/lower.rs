@@ -1,6 +1,6 @@
 //! Lower the sampled roots and indexed writes of one state transition together.
 use super::{NextStateForm, ValueRoot};
-use crate::{HashMap, HashSet, SLTNode, SLTNodeArena, SLTToSIRLowerer};
+use crate::{HashMap, HashSet, NodeId, SLTNode, SLTNodeArena, SLTToSIRLowerer};
 use celox_design::{SPARSE_WORKING_REGION, STABLE_REGION, WORKING_REGION};
 use celox_sir::{
     BlockId, ExecutionUnit, RegisterId, SIRBuilder, SIRInstruction, SIROffset, SIRTerminator,
@@ -217,16 +217,33 @@ fn lower_edge<A: Copy + Eq + Hash + Debug + Display, B: Copy + Eq + Hash + Debug
         } => Some((cond, then_expr, else_expr)),
         _ => None,
     };
-    let group = stream && !four_state && captured.is_empty();
-    let same_selector =
-        |a: &_, b: &_| group && mux(*a).zip(mux(*b)).is_some_and(|(a, b)| a.0 == b.0);
-    let mut roots = form.roots.as_slice();
-    for nodes in root_nodes.chunk_by(same_selector) {
-        let (bank, remaining) = roots.split_at(nodes.len());
-        roots = remaining;
-        if nodes.len() == 1 {
-            let root = &bank[0];
-            let value = lowerer.lower(&mut b, nodes[0], &mapped, &mut lowered);
+    let target = |i: usize| form.roots[i].target;
+    let selector = |i: usize| mux(root_nodes[i]).map(|(cond, ..)| cond);
+    let group = stream && !four_state;
+    let mut order: Vec<_> = (0..root_nodes.len()).collect();
+    if group {
+        group_staged_roots(
+            &mut order,
+            |i| address(target(i), WORKING_REGION),
+            |i| captured.contains(&target(i)),
+            selector,
+        );
+    }
+    for bank in order.chunk_by(|&a, &b| {
+        group
+            && !captured.contains(&target(a))
+            && !captured.contains(&target(b))
+            && selector(a).is_some_and(|cond| selector(b) == Some(cond))
+    }) {
+        if let &[i] = bank {
+            let root = &form.roots[i];
+            let value = lowerer.lower(&mut b, root_nodes[i], &mapped, &mut lowered);
+            // Common-enable extraction replaced the root mux with its active arm.
+            let value = if join.is_some() {
+                lowerer.cast_reg_width(&mut b, value, crate::get_width(root.value, dag))
+            } else {
+                value
+            };
             let capture = captured.contains(&root.target);
             let region = if capture {
                 STABLE_REGION
@@ -241,7 +258,7 @@ fn lower_edge<A: Copy + Eq + Hash + Debug + Display, B: Copy + Eq + Hash + Debug
             }
             continue;
         }
-        let (condition, ..) = mux(nodes[0]).expect("a bank of muxes");
+        let (condition, ..) = mux(root_nodes[bank[0]]).expect("a bank of muxes");
         let cond = lowerer.lower(&mut b, condition, &mapped, &mut lowered);
         let yes = b.new_block();
         let no = b.new_block();
@@ -254,10 +271,15 @@ fn lower_edge<A: Copy + Eq + Hash + Debug + Display, B: Copy + Eq + Hash + Debug
         for arm in [yes, no] {
             b.switch_to_block(arm);
             let mut local = Vec::new();
-            for (root, &node) in bank.iter().zip(nodes) {
+            for &i in bank {
+                let root = &form.roots[i];
+                let node = root_nodes[i];
                 let (_, then_expr, else_expr) = mux(node).expect("a bank of muxes");
                 let expr = if arm == yes { then_expr } else { else_expr };
                 let value = lowerer.lower(&mut b, expr, &mapped, &mut lowered);
+                // Match full mux lowering, including an enclosing common enable.
+                let value =
+                    lowerer.cast_reg_width(&mut b, value, crate::get_width(root.value, dag));
                 local.extend(lowerer.take_scheduled_region_insertions());
                 let store = root_store(&b, root, address(root.target, WORKING_REGION), value)?;
                 b.emit(store);
@@ -326,6 +348,33 @@ fn lower_edge<A: Copy + Eq + Hash + Debug + Display, B: Copy + Eq + Hash + Debug
     ))
 }
 
+/// Reads in a pure staged transition see only stable state. Gather independent
+/// writes at the first use of their selector. Keep captured values in place,
+/// and preserve source order for multiple writes to the same staging slot.
+fn group_staged_roots<B: Copy + Eq + Hash>(
+    order: &mut [usize],
+    target: impl Fn(usize) -> B,
+    captured: impl Fn(usize) -> bool,
+    selector: impl Fn(usize) -> Option<NodeId>,
+) {
+    let mut seen = HashSet::default();
+    let repeated: HashSet<_> = order
+        .iter()
+        .copied()
+        .map(&target)
+        .filter(|&addr| !seen.insert(addr))
+        .collect();
+    for run in order.split_mut(|&i| captured(i) || repeated.contains(&target(i))) {
+        let mut first = HashMap::default();
+        for &i in run.iter() {
+            if let Some(cond) = selector(i) {
+                first.entry(cond).or_insert(i);
+            }
+        }
+        run.sort_by_cached_key(|&i| selector(i).map_or(i, |cond| first[&cond]));
+    }
+}
+
 fn root_store<A, B: Copy + Eq + Hash + Debug + Display>(
     b: &SIRBuilder<B>,
     root: &ValueRoot<A>,
@@ -344,4 +393,134 @@ fn root_store<A, B: Copy + Eq + Hash + Debug + Display>(
         Vec::new(),
         Vec::new(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use celox_design::BitAccess;
+
+    fn input(arena: &mut SLTNodeArena<u32>, variable: u32, width: usize) -> NodeId {
+        arena
+            .alloc(SLTNode::Input {
+                variable,
+                access: BitAccess::new(0, width - 1),
+                index: Vec::new(),
+                signed: false,
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn interleaved_registers_share_a_selector_in_a_mixed_sample() {
+        let mut arena = SLTNodeArena::new();
+        let cond = input(&mut arena, 0, 1);
+        let [a, b, c] = [1, 2, 3].map(|id| input(&mut arena, id, 8));
+        let narrow = input(&mut arena, 4, 3);
+        let mut mux = |then_expr, else_expr| {
+            arena
+                .alloc(SLTNode::Mux {
+                    cond,
+                    then_expr,
+                    else_expr,
+                })
+                .unwrap()
+        };
+        let root = |target, value| ValueRoot {
+            target,
+            value,
+            access: BitAccess::new(0, 7),
+        };
+        let form = NextStateForm {
+            roots: vec![
+                root(10, mux(narrow, b)),
+                root(11, c),
+                root(12, mux(b, narrow)),
+                root(13, a),
+            ],
+            ports: Vec::new(),
+        };
+        let address = |id, region| region * 100 + id;
+        let (unit, captures) = sample_transition(
+            &arena,
+            &form,
+            address,
+            &HashMap::default(),
+            &HashSet::from_iter([13]),
+        )
+        .unwrap();
+        unit.verify();
+        assert_eq!(captures.len(), 1);
+        let writes: Vec<_> = unit
+            .blocks
+            .values()
+            .map(|block| {
+                block
+                    .instructions
+                    .iter()
+                    .filter_map(|ins| match ins {
+                        SIRInstruction::Store(addr, ..) => Some(*addr),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let bank = [address(10, WORKING_REGION), address(12, WORKING_REGION)];
+        assert_eq!(
+            writes
+                .iter()
+                .filter(|block| block.as_slice() == bank)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn shared_enable_widens_the_active_value_before_storing() {
+        let mut arena = SLTNodeArena::new();
+        let cond = input(&mut arena, 0, 1);
+        let data = input(&mut arena, 1, 32);
+        let hold = input(&mut arena, 2, 64);
+        let mux = arena
+            .alloc(SLTNode::Mux {
+                cond,
+                then_expr: data,
+                else_expr: hold,
+            })
+            .unwrap();
+        let form = NextStateForm {
+            roots: vec![ValueRoot {
+                target: 2,
+                access: BitAccess::new(0, 63),
+                value: mux,
+            }],
+            ports: Vec::new(),
+        };
+        for publication in [Publication::Direct, Publication::Deferred] {
+            let unit = lower_transition(
+                &arena,
+                &form,
+                publication,
+                false,
+                |id, region| region * 100 + id,
+                &HashMap::default(),
+            )
+            .unwrap();
+            unit.verify();
+        }
+    }
+
+    #[test]
+    fn overlapping_writes_and_captured_values_keep_their_positions() {
+        let mut order = [0, 1, 2, 3, 4, 5, 6, 7];
+        let slots = [0, 1, 2, 3, 3, 5, 6, 7];
+        let guards = [0, 1, 0, 0, 1, 0, 1, 0];
+        group_staged_roots(
+            &mut order,
+            |i| slots[i],
+            |i| i == 6,
+            |i| Some(NodeId(guards[i])),
+        );
+        assert_eq!(order, [0, 2, 1, 3, 4, 5, 6, 7]);
+    }
 }
