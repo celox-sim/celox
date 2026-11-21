@@ -1,1 +1,6 @@
-Address Rust CI failures at their introducing layers and validate IR snapshots and hierarchical parameter selects across the stack.
+Revision history for #4495:
+
+rev 2 (rebase) 2026-11-21 11:57 UTC — Address Rust CI failures at their introducing layers and validate IR snapshots and hierarchical parameter selects across the stack.
+rev 1 (initial) 2026-11-21 11:57 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":4495,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"8ccbbd993df6c5f1dd744ecb3dbf135e89f2bc39","timestamp_iso":"2026-11-21T11:57:56Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"8ccbbd993df6c5f1dd744ecb3dbf135e89f2bc39","new_sha":"f418562972b87d988cb77e8b107415283758d5a3","timestamp_iso":"2026-11-21T11:57:56Z","reason":"Address Rust CI failures at their introducing layers and validate IR snapshots and hierarchical parameter selects across the stack.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/8ccbbd993df6c5f1dd744ecb3dbf135e89f2bc39...f418562972b87d988cb77e8b107415283758d5a3"}]} -->
