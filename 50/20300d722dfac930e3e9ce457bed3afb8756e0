@@ -1,1 +1,1 @@
-Address Rust CI failures at their introducing layers and validate IR snapshots and hierarchical parameter selects across the stack.
+Refresh five code-generation snapshots for the two-state mux, direct bit slices and scheduler memory layout. The regression suites pass with updates disabled on both affected downstream PRs.
