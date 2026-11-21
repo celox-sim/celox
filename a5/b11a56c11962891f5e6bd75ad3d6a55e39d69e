@@ -1,6 +1,1 @@
-Revision history for #4497:
-
-rev 2 (rebase) 2026-11-21 11:57 UTC — Address Rust CI failures at their introducing layers and validate IR snapshots and hierarchical parameter selects across the stack.
-rev 1 (initial) 2026-11-21 11:57 UTC
-
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":4497,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"4ffbdd38dc6cef4767785a27ad5fba4530c3068b","timestamp_iso":"2026-11-21T11:57:56Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"4ffbdd38dc6cef4767785a27ad5fba4530c3068b","new_sha":"a5b11a56c11962891f5e6bd75ad3d6a55e39d69e","timestamp_iso":"2026-11-21T11:57:56Z","reason":"Address Rust CI failures at their introducing layers and validate IR snapshots and hierarchical parameter selects across the stack.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/4ffbdd38dc6cef4767785a27ad5fba4530c3068b...a5b11a56c11962891f5e6bd75ad3d6a55e39d69e"}]} -->
+Preserve mux result width when lowering grouped register writes and extracted common enables. Reproduced both wrong-width failures and added regression coverage before applying the fix.
