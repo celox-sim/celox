@@ -2826,6 +2826,151 @@ endmodule"#;
     assert_eq!(tiered.get(tiered.signal("wide_q")), 8u8.into());
 }
 
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[test]
+fn event_schedule_shares_downstream_work_on_simultaneous_memory_and_register_edges() {
+    let source = r#"`timescale 1ns/1ns
+module Top(output wire [7:0] left_y, right_y, both, output bit [7:0] old_word, output wire is_z);
+    bit a, b;
+    bit [7:0] q, r, mem [0:3];
+    logic unknown_value;
+    always @(posedge a) unknown_value <= q[0] ? 1'bz : 1'bx;
+    assign is_z = unknown_value === 1'bz;
+    always #2 a = ~a;
+    always #6 b = ~b;
+    always @(posedge a) begin q <= q + 1; mem[q[1:0]] <= q + 8'd19; end
+    always @(posedge b) begin r <= r + 3; old_word <= mem[q[1:0]]; end
+    assign left_y = q + mem[r[1:0]];
+    assign right_y = r ^ 8'h35;
+    assign both = left_y + right_y;
+    integer hits;
+    always @(both) hits = hits + 1;
+endmodule"#;
+    for four_state in [false, true] {
+        let builder = || {
+            crate::Simulation::from_sv_sources(
+                vec![(source, std::path::Path::new("event-domains.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+            .opt_level(crate::OptLevel::O2)
+        };
+        let (program, ..) = builder()
+            .emit_triggers()
+            .into_laid_out_program(crate::MemoryLayoutMode::Packed, false, false)
+            .unwrap();
+        assert!(program.layout().settle.is_none());
+        let plan = crate::scheduler::plan_for_test(&program).unwrap();
+        let a = program.get_addr(&[], &["a"]).unwrap();
+        let b = program.get_addr(&[], &["b"]).unwrap();
+        let q = program.get_addr(&[], &["q"]).unwrap();
+        let r = program.get_addr(&[], &["r"]).unwrap();
+        assert_ne!(plan.publications[&q], plan.publications[&r]);
+        assert!(
+            plan.event_groups
+                .iter()
+                .any(|g| g.contains(&a) && g.contains(&b)),
+            "{:?}",
+            plan.event_groups
+        );
+        assert!(
+            plan.event_groups
+                .iter()
+                .any(|g| g.contains(&b) && !g.contains(&a))
+        );
+        let mut compiled = builder()
+            .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+            .build_native()
+            .unwrap();
+        let mut reference = builder()
+            .scheduler_mode(crate::SchedulerMode::Reference)
+            .build_native()
+            .unwrap();
+        for time in [2, 6, 10, 18, 30, 42, 60] {
+            compiled.run_until(time).unwrap();
+            reference.run_until(time).unwrap();
+            for name in ["left_y", "right_y", "both", "old_word", "is_z"] {
+                assert_eq!(
+                    compiled.get(compiled.signal(name)),
+                    reference.get(reference.signal(name)),
+                    "{name} at {time}"
+                );
+            }
+        }
+        assert!(compiled.scheduler_stats().checked_steps > 0);
+    }
+}
+
+/// Delayed records can publish together after their issuing process has
+/// suspended. Each destination must schedule its own users at publication.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[test]
+fn delayed_nba_activates_the_destination_across_mask_words() {
+    use std::fmt::Write;
+    let mut source = String::from(
+        "`timescale 1ns/1ns
+module Top(output wire [69:0] y, output wire both); bit clk; always #3 clk = ~clk; ",
+    );
+    for i in 0..70 {
+        writeln!(source, "logic q{i}; assign y[{i}] = q{i} ^ clk;").unwrap();
+    }
+    source.push_str("initial begin ");
+    for i in 0..70 {
+        writeln!(source, "q{i} <= #{} 1;", 5 + i % 3).unwrap();
+    }
+    source.push_str("end assign both = y[0] ^ y[68]; endmodule");
+    for four_state in [false, true] {
+        let builder = || {
+            crate::Simulation::from_sv_sources(
+                vec![(&source, std::path::Path::new("delayed-sites.sv"))],
+                "Top",
+            )
+            .observable_updates(true)
+            .four_state(four_state)
+            .opt_level(crate::OptLevel::O2)
+        };
+        let (mut program, ..) = builder()
+            .emit_triggers()
+            .into_laid_out_program(crate::MemoryLayoutMode::Packed, false, false)
+            .unwrap();
+        // The native builder installs the observation setting after layout.
+        program
+            .runtime
+            .runtime_schema
+            .scheduler
+            .as_mut()
+            .unwrap()
+            .update_points = true;
+        let plan = crate::scheduler::plan_for_test(&program).unwrap();
+        let targets: crate::HashSet<_> = plan.nba_groups.iter().flatten().collect();
+        assert!(
+            targets.len() >= 70,
+            "scheduled {} NBA targets",
+            targets.len()
+        );
+        let mut compiled = builder()
+            .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+            .build_native()
+            .unwrap();
+        let mut reference = builder()
+            .scheduler_mode(crate::SchedulerMode::Reference)
+            .build_native()
+            .unwrap();
+        for time in [1, 2, 3, 5, 6, 7, 9] {
+            compiled.run_until(time).unwrap();
+            reference.run_until(time).unwrap();
+            for output in ["y", "both"] {
+                assert_eq!(
+                    compiled.get(compiled.signal(output)),
+                    reference.get(reference.signal(output)),
+                    "{output} at {time}"
+                );
+            }
+        }
+        assert!(compiled.scheduler_stats().checked_steps > 0);
+    }
+}
+
 /// A partitioned settle has a clock cone of its own: the partitions
 /// the kernels' clock writes dirty and those they publish to. The slot
 /// after a clock toggle runs only the cone; a kernel writing data as
@@ -3278,6 +3423,91 @@ fn the_scheduler_calls_the_settle_unless_it_instruments_it() {
                 .any(|unit| *crate::settle::without_shadow_commits(unit) == *callee)
         });
         assert_eq!(is_settle, bound, "{record}");
+    }
+}
+
+/// A short final word overlaps its predecessor. Exercise changes in every
+/// lane, including the overlap, on edges shared with a second writer.
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+#[test]
+fn packed_commit_words_preserve_each_readers_changes() {
+    use std::fmt::Write as _;
+    let mut source = String::from(
+        r#"`timescale 1ns/1ns
+module Top(output wire [18:0] y, output wire [9:0] mixed, output bit [18:0] sampled);
+bit a, b, bias;
+bit [18:0] d = 1;
+always #2 a = ~a;
+always #6 b = ~b;
+always @(negedge a) d <= {d[17:0], d[18]};
+always @(posedge b) begin sampled <= y; bias <= ~bias; end
+integer hits; always @(y) hits = hits + 1;
+"#,
+    );
+    for i in 0..19 {
+        writeln!(source, "bit [2:0] q{i}; always @(posedge a) q{i} <= d[{i}] ? 3'd5 : 3'd2; assign y[{i}] = ^(q{i} & 3'd4);").unwrap();
+        if i % 2 == 0 {
+            writeln!(source, "assign mixed[{}] = q{i}[1] ^ bias;", i / 2).unwrap();
+        }
+    }
+    source.push_str("endmodule");
+    let builder = || {
+        let mut builder = crate::Simulation::from_sv_sources(
+            vec![(&source, std::path::Path::new("packed-commits.sv"))],
+            "Top",
+        )
+        .emit_triggers()
+        .four_state(false)
+        .opt_level(crate::OptLevel::O2);
+        builder.native_file_calls = true;
+        builder
+    };
+    let (program, ..) = builder()
+        .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, true, false)
+        .unwrap();
+    let main = program
+        .runtime
+        .runtime_schema
+        .scheduler
+        .as_ref()
+        .unwrap()
+        .unit
+        .unwrap();
+    let writes = std::iter::once(&program.sir.processes[main])
+        .chain(&program.scheduler_callees)
+        .flat_map(|unit| unit.blocks.values())
+        .flat_map(|block| &block.instructions)
+        .filter(|inst| {
+            matches!(inst, crate::ir::SIRInstruction::ExternCall {func,..}
+            if *func == celox_sir::native_memory::NativeMemoryOp::WriteState.function())
+        })
+        .count();
+    assert!(
+        writes > 0,
+        "expected adjacent registers to use word commits"
+    );
+    let mut compiled = builder()
+        .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+        .build_native()
+        .unwrap();
+    let mut reference = builder()
+        .scheduler_mode(crate::SchedulerMode::Reference)
+        .build_native()
+        .unwrap();
+    for (step, time) in (2..=82).step_by(4).enumerate() {
+        compiled.run_until(time).unwrap();
+        reference.run_until(time).unwrap();
+        assert_eq!(
+            compiled.get(compiled.signal("y")),
+            (1u32 << (step % 19)).into()
+        );
+        for name in ["y", "mixed", "sampled"] {
+            assert_eq!(
+                compiled.get(compiled.signal(name)),
+                reference.get(reference.signal(name)),
+                "{name} at {time}"
+            );
+        }
     }
 }
 

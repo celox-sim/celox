@@ -577,3 +577,46 @@ fn a_timed_wait_observes_mixed_clock_publication() {
     #[cfg(feature = "wasm-runtime")]
     check!(graph().build_wasm());
 }
+
+#[test]
+fn transposed_column_reductions_use_words_and_preserve_observed_columns() {
+    const SOURCE: &str = r#"
+module Top(input wire [11:0] data, input wire [2:0] mask, output wire [3:0] result);
+    wire [3:0] rows [0:2];
+    wire [2:0] columns [3:0];
+    for (genvar r=0; r<3; r++) begin
+        assign rows[r] = data[4*r+:4] & {4{mask[r]}};
+        for (genvar c=0; c<4; c++) assign columns[c][r] = rows[r][c];
+    end
+    for (genvar c=0; c<4; c++) assign result[c] = |columns[c];
+endmodule"#;
+    let builder = || {
+        Simulator::from_sv_sources(vec![(SOURCE, Path::new("columns.sv"))], "Top")
+            .four_state(false)
+            .opt_level(OptLevel::O2)
+            .dead_store_policy(DeadStorePolicy::PreserveTopPorts)
+    };
+    let before = settle_plan(builder().disable_pass(SirPass::NetInlining));
+    assert!(stores(&before, ".columns"));
+    let after = settle_plan(builder());
+    assert!(!stores(&after, ".columns"), "{after}");
+    let observed = settle_plan(builder().live_signal(vec![], vec!["columns".into()]));
+    assert!(stores(&observed, ".columns"), "{observed}");
+    let mut sim = builder().build_native().unwrap();
+    let data = sim.signal("data");
+    let mask = sim.signal("mask");
+    let result = sim.signal("result");
+    for value in [0x124u16, 0x738, 0xa5c, 0xf91] {
+        for enables in 0..8u8 {
+            sim.modify(|io| {
+                io.set(data, value);
+                io.set(mask, enables);
+            })
+            .unwrap();
+            let expected = (0..3)
+                .filter(|i| enables & (1 << i) != 0)
+                .fold(0u16, |sum, i| sum | ((value >> (4 * i)) & 15));
+            assert_eq!(sim.get(result), expected.into());
+        }
+    }
+}

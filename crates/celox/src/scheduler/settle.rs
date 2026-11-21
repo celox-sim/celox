@@ -19,6 +19,19 @@ impl Generator<'_> {
         }
     }
 
+    /// Preserve all pending publications until the next settle. Even a target
+    /// without downstream units can require retained logic to run.
+    pub(super) fn mark_publication(&mut self, index: Option<usize>) {
+        if let Some(index) = index {
+            let one = self.constant(1, 1);
+            self.store_at(self.slots.settle_events, index, 1, one);
+        }
+        let pending = self.load(self.slots.dirty, SCHEDULER_FLAG_WIDTH);
+        let bit = self.constant(PUBLISHED, SCHEDULER_FLAG_WIDTH);
+        let pending = self.binary(SCHEDULER_FLAG_WIDTH, pending, BinaryOp::Or, bit);
+        self.store(self.slots.dirty, SCHEDULER_FLAG_WIDTH, pending);
+    }
+
     /// Run the stateful part of a deferred settle (`Lazy::eager`) where the
     /// reference settles, then continue at `target`, as
     /// [`Self::settle_then`]: one copy serves every caller.
@@ -129,7 +142,9 @@ impl Generator<'_> {
                 false_block: (settled, Vec::new()),
             });
             self.b.switch_to_block(settle);
-            if let Some(cone) = self.incremental {
+            if let Some(schedule) = self.incremental.and_then(|plan| plan.events.as_ref()) {
+                self.emit_event_schedule(schedule, units, dirty);
+            } else if let Some(cone) = self.incremental {
                 let partial = self.b.new_block();
                 let full = self.b.new_block();
                 let done = self.b.new_block();
@@ -195,6 +210,63 @@ impl Generator<'_> {
         }
         let targets = self.continuations.clone();
         self.dispatch_continuations(&targets, internal_exit);
+    }
+
+    fn emit_event_schedule(&mut self, schedule: &EventSchedule, units: &[Unit], dirty: RegisterId) {
+        // Masks can span many words in designs with procedural NBA sites.
+        // Read only words used by a predicate, and share their masked tests.
+        let mut words = HashMap::default();
+        let mut tests = HashMap::default();
+        let zero = self.constant(0, 64);
+        let full = self.mask_bit(dirty, 0);
+        let clock = self.mask_bit(dirty, 1);
+        let full_or_clock = self.binary(1, full, BinaryOp::Or, clock);
+        // Compute each distinct domain predicate once in a dominating block.
+        let mut predicates = HashMap::default();
+        for (a, _) in &schedule.groups {
+            if !a.every_settle {
+                predicates
+                    .entry((&a.events, a.clock_inputs))
+                    .or_insert_with(|| {
+                        let base = if a.clock_inputs { full_or_clock } else { full };
+                        if a.events == BigUint::ZERO {
+                            return base;
+                        }
+                        let mut active = base;
+                        for (word, mask) in a
+                            .events
+                            .iter_u64_digits()
+                            .enumerate()
+                            .filter(|(_, mask)| *mask != 0)
+                        {
+                            let pending = *words.entry(word).or_insert_with(|| {
+                                let value = self.load_at(self.slots.settle_events, word * 64, 64);
+                                self.store_at(self.slots.settle_events, word * 64, 64, zero);
+                                value
+                            });
+                            let hit = *tests.entry((word, mask)).or_insert_with(|| {
+                                let mask = self.constant(mask, 64);
+                                let masked = self.binary(64, mask, BinaryOp::And, pending);
+                                self.binary(1, masked, BinaryOp::Ne, zero)
+                            });
+                            active = self.binary(1, active, BinaryOp::Or, hit);
+                        }
+                        active
+                    });
+            }
+        }
+        for (a, r) in &schedule.groups {
+            let run = |g: &mut Self| {
+                for &index in r {
+                    g.inline_with_exit(&units[index], None);
+                }
+            };
+            if a.every_settle {
+                run(self);
+            } else {
+                self.if_bit(predicates[&(&a.events, a.clock_inputs)], 0, run);
+            }
+        }
     }
 
     /// SIR switches have byte-sized selectors. Dispatch larger continuation

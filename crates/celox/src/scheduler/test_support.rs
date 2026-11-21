@@ -75,6 +75,9 @@ pub(crate) struct PlanSummary {
     /// settled state (`Lazy::kernels`).
     pub(crate) lazy: Option<Vec<bool>>,
     pub(crate) incremental: bool,
+    pub(crate) nba_groups: Vec<Vec<AbsoluteAddr>>,
+    pub(crate) publications: HashMap<AbsoluteAddr, u64>,
+    pub(crate) event_groups: Vec<Vec<AbsoluteAddr>>,
     /// The events whose domains commit their blocking results in the
     /// Active region with a settle before NBA (`Plan::active`).
     pub(crate) active: Vec<AbsoluteAddr>,
@@ -102,6 +105,50 @@ pub(crate) fn plan_for_test(program: &LaidOutProgram) -> Result<PlanSummary, Str
             .map(|&event| plan.events[event].signal)
             .collect(),
         incremental: plan.incremental.is_some(),
+        nba_groups: plan
+            .incremental
+            .as_ref()
+            .and_then(|plan| plan.events.as_ref())
+            .map(|schedule| {
+                schedule
+                    .groups
+                    .iter()
+                    .map(|(activation, _)| {
+                        schedule
+                            .nba_targets
+                            .iter()
+                            .filter(|(_, index)| activation.events.bit(**index as u64))
+                            .map(|(target, _)| *target)
+                            .collect()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        publications: plan
+            .incremental
+            .as_ref()
+            .and_then(|plan| plan.events.as_ref())
+            .map(|schedule| schedule.publications.clone())
+            .unwrap_or_default(),
+        event_groups: plan
+            .incremental
+            .as_ref()
+            .and_then(|plan| plan.events.as_ref())
+            .map(|schedule| {
+                schedule
+                    .groups
+                    .iter()
+                    .map(|(activation, _)| {
+                        plan.events
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, _)| activation.events.bit(*i as u64))
+                            .map(|(_, event)| event.signal)
+                            .collect()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
         settle_reads: plan.settle_reads,
         fallback: plan.fallback,
     })

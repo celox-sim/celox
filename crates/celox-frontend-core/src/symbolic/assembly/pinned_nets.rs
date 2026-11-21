@@ -89,7 +89,18 @@ pub(super) fn pinned_nets(
         );
         pinned.extend(observer.local_inputs.iter().map(|(var, _)| *var));
     }
-    pinned.extend(unpacked_element_widths.keys().copied());
+    pinned.extend(
+        timing
+            .host_request_sites
+            .iter()
+            .flat_map(HostRequestSite::slots),
+    );
+    pinned.extend(
+        timing
+            .nba_sites
+            .iter()
+            .flat_map(|site| [site.target, site.value]),
+    );
     for (&instance, module) in instance_modules {
         for (&var_id, variable) in &modules[module].variables {
             let port = variable.kind.is_port()
@@ -101,7 +112,8 @@ pub(super) fn pinned_nets(
                 };
             if port
                 || variable.metadata.value_kind != celox_design::ValueKind::Bits
-                || !variable.metadata.array_dims.is_empty()
+                || (!variable.metadata.array_dims.is_empty()
+                    && !unpacked_element_widths.contains_key(&bindings.locate(instance, var_id)))
             {
                 pinned.insert(bindings.locate(instance, var_id));
             }

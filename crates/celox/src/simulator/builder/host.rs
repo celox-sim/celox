@@ -484,13 +484,6 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
         self
     }
 
-    /// Cut the combinational settle into partitions that run only when
-    /// state they read changed ([`crate::SirPass::PartitionedSettle`]).
-    ///
-    /// [`crate::SettlePartition::Estimated`] partitions a large settle of
-    /// a design with several clock events;
-    /// [`crate::SettlePartition::Always`] partitions every settle it can,
-    /// for testing.
     /// Count the work of a partitioned settle: each partition's runs,
     /// the runs that changed something it compares, and the settles.
     /// The counters live at the end of the settle's flags; read them
@@ -505,6 +498,13 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
         self
     }
 
+    /// Cut the combinational settle into partitions that run only when
+    /// state they read changed ([`crate::SirPass::PartitionedSettle`]).
+    ///
+    /// [`crate::SettlePartition::Estimated`] partitions a large settle of
+    /// a design with several clock events;
+    /// [`crate::SettlePartition::Always`] partitions every settle it can,
+    /// for testing.
     pub fn settle_partition(mut self, partition: crate::SettlePartition) -> Self {
         self.options.optimize_options = self
             .options

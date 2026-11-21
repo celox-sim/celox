@@ -517,6 +517,28 @@ endmodule
         }
     }
 
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    #[test]
+    fn idle_wide_sparse_memory_does_not_wake_readers() {
+        let source = UNCHANGED_SPARSE_WRITE
+            .replace("mem [0:63]", "mem [0:1023]")
+            .replace("logic [5:0] wa", "logic [9:0] wa")
+            .replace("logic p;", "logic p; bit we = 1; initial #2 we = 0;")
+            .replace(") mem[wa] <=", ") if (we) mem[wa] <=");
+        let mut sim =
+            Simulation::from_sv_sources(vec![(source.as_str(), Path::new("wide.sv"))], "Top")
+                .settle_partition(SettlePartition::Always)
+                .settle_profile(true)
+                .build_native()
+                .unwrap();
+        sim.run_until(4).unwrap();
+        let runs = sim.settle_profile().unwrap().total_runs();
+        let seen = sim.signal("seen");
+        assert_eq!(sim.get(seen), BigUint::from(1u8));
+        sim.run_until(40).unwrap();
+        assert_eq!(sim.settle_profile().unwrap().total_runs(), runs);
+    }
+
     /// `p` pulses and returns to 0 within one evaluation of its process,
     /// so the settle sees no change of `p` itself, only of its occurrence
     /// counters: those must still set the flag of the process waiting on it.

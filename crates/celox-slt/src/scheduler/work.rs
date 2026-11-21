@@ -326,7 +326,7 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
 
     /// End the current unit and start another; register and block IDs are
     /// unit-scoped, so the lowering cache starts over.
-    fn flush_unit(&mut self) {
+    pub(super) fn flush_unit(&mut self) {
         if let Some(eu) = self.builder.flush_eu() {
             self.execution_units.push(eu);
         }

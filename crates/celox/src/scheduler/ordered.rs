@@ -423,7 +423,8 @@ impl Plan {
         for &event in tracked {
             g.if_bit(mask, event, |g| {
                 ordered.push(g, event);
-                g.inline_writers(
+                g.inline_event_writers(
+                    &self.events[event],
                     self.events[event]
                         .eval_only
                         .as_ref()
@@ -617,7 +618,8 @@ impl Plan {
         } else if targets.len() == 1 {
             let valid = g.equals(event, targets[0] as u64);
             g.arena_require(valid);
-            g.inline_writers(
+            g.inline_event_writers(
+                &self.events[targets[0]],
                 self.events[targets[0]]
                     .apply
                     .as_ref()

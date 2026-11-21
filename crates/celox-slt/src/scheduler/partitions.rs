@@ -156,7 +156,7 @@ fn shared_lowered_nodes<Addr: Clone + Eq + Hash>(
 /// For each piece of scheduled work, whether a partition must not start at
 /// it: a node that work before it lowered for later work is reused at or
 /// after it (see [`shared_lowered_nodes`]).
-fn held_work<Addr: Clone + Eq + Hash>(
+pub(super) fn held_work<Addr: Clone + Eq + Hash>(
     prepared: &PreparedSchedule<Addr>,
     arena: &SLTNodeArena<Addr>,
 ) -> Vec<bool> {
@@ -257,6 +257,47 @@ pub(super) fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Cop
                     .any(|atom| partitioning.clock_nets.contains(&atom.id))
         })
     };
+    // Propagate clock domains through single-driver acyclic paths. Unknown
+    // inputs and procedural or feedback outputs keep their ordinary cuts.
+    let mut domains = partitioning.write_domains;
+    let mut driven = HashSet::default();
+    let mut mixed = HashSet::default();
+    for path in input {
+        if let Some(target) = path.target.var()
+            && (!driven.insert(target.id) || domains.contains_key(&target.id))
+        {
+            mixed.insert(target.id);
+        }
+    }
+    for target in &mixed {
+        domains.remove(target);
+    }
+    let mut path_domain = |work: &ScheduledWork| {
+        let ScheduledWork::CombPath(id) = *work else {
+            return None;
+        };
+        let path = &input[id];
+        let LogicPathTarget::Var(target) = &path.target else {
+            return None;
+        };
+        if mixed.contains(&target.id)
+            || prepared.adj[id].contains(&id)
+            || !path.previous_sources.is_empty()
+            || path_has_effects(path)
+        {
+            return None;
+        }
+        let mut events = Vec::new();
+        for source in path.sources.iter().chain(&path.address_sources) {
+            events.extend_from_slice(domains.get(&source.id)?);
+        }
+        events.sort_unstable();
+        events.dedup();
+        domains.insert(target.id, events.clone());
+        Some((path, target.id, events))
+    };
+    // Values touched by this run and the domain of the path touching each.
+    let mut group_values = HashMap::default();
     let mut first_work = Vec::new();
     let mut cost = 0;
     let mut previous_clocked = false;
@@ -265,11 +306,31 @@ pub(super) fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Cop
             continue;
         }
         let clocked = clocked(work);
+        let domain_path = path_domain(work);
+        // Keep connected paths and fanout from the same signal straight-line
+        // when they are activated by the same set of events. Independent
+        // registers on one busy clock can still change independently.
+        let extend = domain_path.as_ref().is_some_and(|(path, _, events)| {
+            !events.is_empty()
+                && path
+                    .sources
+                    .iter()
+                    .chain(&path.address_sources)
+                    .any(|src| group_values.get(&src.id) == Some(events))
+        });
         if first_work.is_empty()
-            || (!held[index] && (cost >= partitioning.target_cost || clocked != previous_clocked))
+            || (!held[index]
+                && ((cost >= partitioning.target_cost && !extend) || clocked != previous_clocked))
         {
             first_work.push(index);
             cost = 0;
+            group_values.clear();
+        }
+        if let Some((path, output, events)) = domain_path {
+            for src in path.sources.iter().chain(&path.address_sources) {
+                group_values.insert(src.id, events.clone());
+            }
+            group_values.insert(output, events);
         }
         previous_clocked = clocked;
         cost += work_paths(work)

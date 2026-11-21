@@ -13,6 +13,7 @@ pub(super) fn declare_scheduler_slots(
     root: ModuleId,
     process_count: usize,
     expected_events: usize,
+    nba_sites: usize,
 ) -> Option<celox_design::SchedulerSlots<SourceVarId>> {
     let variables = &mut modules.get_mut(&root)?.variables;
     let mut next = variables.keys().map(|id| id.0 + 1).max().unwrap_or(0);
@@ -55,6 +56,10 @@ pub(super) fn declare_scheduler_slots(
         finish: declare("finish".into(), FLAG),
         cont: declare("cont".into(), TIME),
         dirty: declare("dirty".into(), FLAG),
+        settle_events: declare(
+            "settle_events".into(),
+            (events + nba_sites).next_multiple_of(TIME) + TIME,
+        ),
         defer_limit_settle: declare(
             "defer_limit_settle".into(),
             celox_design::SCHEDULER_CONTROL_WIDTH,

@@ -21,6 +21,68 @@ impl Generator<'_> {
         }
     }
 
+    pub(super) fn inline_event_writers(
+        &mut self,
+        event: &Event,
+        units: &[Unit],
+        finish_exit: celox_sir::BlockId,
+    ) {
+        let Some((index, offset)) = self
+            .incremental
+            .and_then(|plan| plan.events.as_ref())
+            .and_then(|schedule| {
+                schedule
+                    .writers
+                    .get(&event.signal)
+                    .map(|&index| (index, schedule.publication_offset))
+            })
+        else {
+            self.inline_writers(units, finish_exit);
+            return;
+        };
+        let mut published = false;
+        let mut coarse = false;
+        let layout = self.program.layout();
+        // Outlined native bodies support raw state words. Trace and four-state
+        // layouts keep their typed writes and per-object observations.
+        let pack = self.outlined.is_some() && !layout.four_state && layout.trace.is_none();
+        let eligible = |u: &Unit| pack && packed_commits::dense_commits(layout, u);
+        for batch in units.chunk_by(|a, b| eligible(a) && eligible(b)) {
+            if eligible(&batch[0])
+                && let Some(body) = self.packed_publications(batch)
+            {
+                published = true;
+                self.inline_with_exit(&body, None);
+                continue;
+            }
+            for unit in batch {
+                if !instructions(unit).flat_map(written_storage).any(|write| {
+                    write.region == STABLE_REGION && self.settle_reads(write.absolute_addr())
+                }) {
+                    self.inline_with_exit(unit, None);
+                } else if let Some(body) = self.clock_publications(unit) {
+                    published = true;
+                    self.inline_with_exit(&body, None);
+                } else {
+                    coarse = true;
+                    self.inline_with_exit(unit, None);
+                }
+            }
+        }
+        if coarse {
+            self.mark_publication(Some(index));
+        }
+        if published {
+            let changes = self.load_at(self.slots.settle_events, offset, 64);
+            let zero = self.constant(0, 64);
+            let any = self.binary(1, changes, BinaryOp::Ne, zero);
+            self.if_bit(any, 0, |g| g.mark_publication(None));
+        }
+        if units.iter().any(|unit| self.unit_finishes(unit)) {
+            self.check_finish(finish_exit);
+        }
+    }
+
     fn inline_writer_with_exit(&mut self, unit: &Unit, finish_exit: Option<celox_sir::BlockId>) {
         if self.partitioned_glue.is_some() {
             // Partition instrumentation already compares every external
@@ -61,14 +123,29 @@ impl Generator<'_> {
                     // Case inequality compares both planes, including X/Z-only
                     // changes, and always produces a known boolean.
                     let changed = self.binary(1, before, BinaryOp::NeCase, after);
-                    let changed = if clock_only {
-                        let two = self.constant(2, SCHEDULER_FLAG_WIDTH);
+                    let cause = if clock_only {
+                        2
+                    } else if let Some((offset, mask)) = self.publication(address) {
+                        let old = self.load_at(self.slots.settle_events, offset, 64);
+                        let readers = self.constant(mask, 64);
+                        let zero = self.constant(0, 64);
+                        let bits = self.b.alloc_bit(64, false);
+                        self.b
+                            .emit(SIRInstruction::Mux(bits, changed, readers, zero));
+                        let pending = self.binary(64, old, BinaryOp::Or, bits);
+                        self.store_at(self.slots.settle_events, offset, 64, pending);
+                        PUBLISHED
+                    } else {
+                        1
+                    };
+                    let changed = if cause == 1 {
+                        changed
+                    } else {
+                        let bits = self.constant(cause, SCHEDULER_FLAG_WIDTH);
                         let zero = self.constant(0, SCHEDULER_FLAG_WIDTH);
                         let flag = self.b.alloc_bit(SCHEDULER_FLAG_WIDTH, false);
-                        self.b.emit(SIRInstruction::Mux(flag, changed, two, zero));
+                        self.b.emit(SIRInstruction::Mux(flag, changed, bits, zero));
                         flag
-                    } else {
-                        changed
                     };
                     dirty = self.binary(SCHEDULER_FLAG_WIDTH, dirty, BinaryOp::Or, changed);
                 }

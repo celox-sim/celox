@@ -15,7 +15,8 @@ const TRAILER_MAGIC: &[u8; 8] = b"CELOXNPI";
 // Version 72 adds the frames of function units to the runtime schema.
 // Version 73 adds the update points of the scheduler schema.
 // Version 74 adds the value change kernels of the scheduler schema.
-const CONTAINER_VERSION: u16 = 75;
+// Version 76 adds the pending register-event mask to the scheduler slots.
+const CONTAINER_VERSION: u16 = 76;
 const TRAILER_SIZE: usize = 32;
 // This optional prefix descriptor does not change the Postcard payload. Older
 // readers ignore framing flags and continue to locate the payload at EOF.

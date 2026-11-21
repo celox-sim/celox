@@ -35,22 +35,22 @@ Bindings:
   apply_ff trigger=rst
 --- MIR after main optimization, before regalloc-owned late folds ---
 bb0:
-  v0 = load.i8 [sim + 1232]
+  v0 = load.i8 [sim + 1248]
   store.i8 [sim + 48], v0
   ret
 --- MIR after late memory folds, before allocation-owned scheduling ---
 bb0:
-  v0 = load.i8 [sim + 1232]
+  v0 = load.i8 [sim + 1248]
   store.i8 [sim + 48], v0
   ret
 --- MIR after allocation-owned scheduling, before spill reconstruction ---
 bb0:
-  v0 = load.i8 [sim + 1232]
+  v0 = load.i8 [sim + 1248]
   store.i8 [sim + 48], v0
   ret
 --- MIR after register allocation and post-RA peepholes ---
 bb0:
-  v0 = load.i8 [sim + 1232]
+  v0 = load.i8 [sim + 1248]
   store.i8 [sim + 48], v0
   ret
 Spill frame: 0 bytes
@@ -61,7 +61,7 @@ x86-64 disassembly of emitted function:
   0x00000005  movq xmm15,rax
   0x0000000a  wrgsbase rdi
 bb0:
-  0x0000000f  movzx eax,byte [gs:4D0h]
+  0x0000000f  movzx eax,byte [gs:4E0h]
   0x00000018  mov [gs:30h],al
   0x00000020  xor eax,eax
   0x00000022  jmp short 0000000000000024h
@@ -220,7 +220,7 @@ Register assignment:
   v4 -> rax
 x86-64 disassembly of emitted function:
   0x00000000  rdgsbase rax
-  0x00000005  mov [rdi+510h],rax
+  0x00000005  mov [rdi+520h],rax
   0x0000000c  wrgsbase rdi
   0x00000011  mov rax,[gs:8]
   0x0000001a  test rax,rax
@@ -249,7 +249,7 @@ bb3:
   0x0000006d  xor eax,eax
   0x0000006f  movq r10,xmm15
   0x00000074  mov [gs:8],r10
-  0x0000007d  mov r11,[gs:510h]
+  0x0000007d  mov r11,[gs:520h]
   0x00000086  wrgsbase r11
   0x0000008b  ret
 
@@ -265,7 +265,7 @@ bb0:
   v1 = and.w32 v4, 0x1
   v5 = sub v1, 1
   v3 = and.w32 v2, v5
-  store.i8 [sim + 1232], v3
+  store.i8 [sim + 1248], v3
   ret
 --- MIR after late memory folds, before allocation-owned scheduling ---
 bb0:
@@ -275,7 +275,7 @@ bb0:
   v1 = and.w32 v4, 0x1
   v5 = sub v1, 1
   v3 = and.w32 v2, v5
-  store.i8 [sim + 1232], v3
+  store.i8 [sim + 1248], v3
   ret
 --- MIR after allocation-owned scheduling, before spill reconstruction ---
 bb0:
@@ -285,7 +285,7 @@ bb0:
   v1 = and.w32 v4, 0x1
   v5 = sub v1, 1
   v3 = and.w32 v2, v5
-  store.i8 [sim + 1232], v3
+  store.i8 [sim + 1248], v3
   ret
 --- MIR after register allocation and post-RA peepholes ---
 bb0:
@@ -295,7 +295,7 @@ bb0:
   v1 = and.w32 v4, 0x1
   v5 = sub v1, 1
   v3 = and.w32 v2, v5
-  store.i8 [sim + 1232], v3
+  store.i8 [sim + 1248], v3
   ret
 Spill frame: 0 bytes
 Register assignment:
@@ -316,7 +316,7 @@ bb0:
   0x00000024  and edx,1
   0x00000027  sub rdx,1
   0x0000002b  and eax,edx
-  0x0000002d  mov [gs:4D0h],al
+  0x0000002d  mov [gs:4E0h],al
   0x00000035  xor eax,eax
   0x00000037  jmp short 0000000000000039h
   0x00000039  movq r11,xmm15

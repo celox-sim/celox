@@ -234,6 +234,11 @@ pub fn clobbers(inst: &MInst) -> &'static [PhysReg] {
         // only genuinely live-through values are moved to their homes.
         MInst::SparseCommitWorklist { .. } => ALLOCATABLE_REGS,
         MInst::CallExtern { func, .. }
+            if celox_sir::extern_abi::native_region_index(*func).is_some() =>
+        {
+            ALLOCATABLE_REGS
+        }
+        MInst::CallExtern { func, .. }
             if celox_sir::extern_abi::native_kernel_index(*func).is_some() =>
         {
             NATIVE_KERNEL_CLOBBERS

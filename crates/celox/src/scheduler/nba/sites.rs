@@ -337,6 +337,16 @@ impl Sites {
         changed
     }
 
+    fn notify(&self, g: &mut Generator<'_>, index: usize) {
+        if let Some(schedule) = g.incremental.and_then(|plan| plan.events.as_ref()) {
+            let target = self.sites[index].target;
+            let home = g.shared.get(&target).copied().unwrap_or(target);
+            g.mark_publication(schedule.nba_targets.get(&home).copied());
+        } else {
+            g.mark_dirty();
+        }
+    }
+
     fn update(
         &self,
         g: &mut Generator<'_>,
@@ -346,7 +356,7 @@ impl Sites {
     ) {
         let changed = self.apply(g, index, record);
         g.if_bit(changed, 0, |g| {
-            g.mark_dirty();
+            self.notify(g, index);
             g.check_waits_at(checks, false);
         });
     }
@@ -518,27 +528,37 @@ impl Sites {
         // Every site's update joins one wait check: the queue can hold a
         // record of any site, and checking the waits in each site's block
         // would copy them once per site of the design.
-        let changed = g.b.alloc_bit(1, false);
-        let applied = g.b.new_block_with(vec![changed]);
+        let applied = g.b.new_block();
         let blocks: Vec<_> = self.sites.iter().map(|_| g.b.new_block()).collect();
         let mut targets = vec![bad; self.site_count];
         for (&id, &block) in self.global.iter().zip(&blocks) {
             targets[id] = block;
         }
         g.dispatch_sites(site, &targets, bad);
+        let precise = g.incremental.is_some_and(|plan| plan.events.is_some());
         for (index, block) in blocks.into_iter().enumerate() {
             let site = &self.sites[index];
             g.b.switch_to_block(block);
             let differs = self.apply(g, index, Some(record));
             let class = Self::class(site, g);
             self.queue.release(g, record, class);
-            g.b.seal_block(SIRTerminator::Jump(applied, vec![differs]));
+            let notify = if precise { g.b.new_block() } else { applied };
+            g.b.seal_block(SIRTerminator::Branch {
+                cond: differs,
+                true_block: (notify, Vec::new()),
+                false_block: (again, Vec::new()),
+            });
+            if precise {
+                g.b.switch_to_block(notify);
+                self.notify(g, index);
+                g.b.seal_block(SIRTerminator::Jump(applied, Vec::new()));
+            }
         }
         g.b.switch_to_block(applied);
-        g.if_bit(changed, 0, |g| {
+        if !precise {
             g.mark_dirty();
-            g.check_waits_at(checks, false);
-        });
+        }
+        g.check_waits_at(checks, false);
         g.b.seal_block(SIRTerminator::Jump(again, Vec::new()));
         g.b.switch_to_block(flagged);
         for (index, site) in self.sites.iter().enumerate() {
