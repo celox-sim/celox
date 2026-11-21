@@ -111,11 +111,16 @@ pub(super) fn expand_design(
         &clock_domains,
         &top_instances(&expanded, hidden_root, &package_instances),
     );
+    let nba_sites = instance_modules
+        .values()
+        .map(|id| modules[id].nba_sites.len())
+        .sum();
     let scheduler_slots = declare_scheduler_slots(
         &mut modules,
         root_id,
         process_count,
         expected_events + waited_inputs,
+        nba_sites,
     );
     // Whether every automatically started process has reached its first
     // suspension: one combinational path computes it from their statuses,

@@ -559,6 +559,14 @@ fn partitioned_sort(
     paths: Vec<LogicPath<u32>>,
     arena: &SLTNodeArena<u32>,
 ) -> super::ScheduleResult<u32> {
+    partitioned_sort_with_domains(paths, arena, Default::default())
+}
+
+fn partitioned_sort_with_domains(
+    paths: Vec<LogicPath<u32>>,
+    arena: &SLTNodeArena<u32>,
+    write_domains: crate::HashMap<u32, Vec<u32>>,
+) -> super::ScheduleResult<u32> {
     let widths = (10..14).map(|id| (id, 8)).collect();
     super::sort_with_unpacked_element_widths(
         paths,
@@ -574,10 +582,52 @@ fn partitioned_sort(
             target_cost: 1,
             external_readers: crate::HashMap::default(),
             clock_nets: crate::HashSet::default(),
+            write_domains,
             profile: None,
         }),
     )
     .unwrap()
+}
+
+#[test]
+fn a_chain_in_one_event_domain_needs_no_intermediate_publication() {
+    let mut arena = SLTNodeArena::new();
+    let paths = vec![
+        simple_path(&mut arena, 13, Some(12)),
+        simple_path(&mut arena, 12, Some(11)),
+        simple_path(&mut arena, 11, Some(10)),
+    ];
+    let result =
+        partitioned_sort_with_domains(paths.clone(), &arena, [(10, vec![1])].into_iter().collect());
+    // A single run lowers straight-line without a flag allocation.
+    assert!(result.partitions.is_empty());
+    let mixed = partitioned_sort_with_domains(
+        paths,
+        &arena,
+        [(10, vec![1]), (12, vec![2])].into_iter().collect(),
+    );
+    assert_eq!(mixed.partitions.len(), 3);
+}
+
+#[test]
+fn fanout_shares_a_run_but_independent_registers_on_the_same_clock_do_not() {
+    let mut arena = SLTNodeArena::new();
+    let paths = vec![
+        simple_path(&mut arena, 11, Some(10)),
+        simple_path(&mut arena, 12, Some(10)),
+        simple_path(&mut arena, 13, Some(14)),
+    ];
+    let result = partitioned_sort_with_domains(
+        paths,
+        &arena,
+        [(10, vec![1]), (14, vec![1])].into_iter().collect(),
+    );
+    let writes: Vec<_> = result
+        .partitions
+        .iter()
+        .map(|partition| partition.writes.as_slice())
+        .collect();
+    assert_eq!(writes, [&[11, 12][..], &[13][..]]);
 }
 
 #[test]
@@ -670,6 +720,7 @@ fn settle_partitions_compare_only_the_written_bits() {
                 target_cost: 1,
                 external_readers: crate::HashMap::default(),
                 clock_nets: crate::HashSet::default(),
+                write_domains: Default::default(),
                 profile: None,
             }),
         )
@@ -741,6 +792,7 @@ fn settle_partitions_mark_external_readers() {
             target_cost: 1,
             external_readers: [(11, vec![1])].into_iter().collect(),
             clock_nets: crate::HashSet::default(),
+            write_domains: Default::default(),
             profile: None,
         }),
     )
@@ -823,6 +875,7 @@ fn settle_copy_partitions_mark_external_readers() {
             target_cost: 1,
             external_readers: [(12, vec![1])].into_iter().collect(),
             clock_nets: crate::HashSet::default(),
+            write_domains: Default::default(),
             profile: None,
         }),
     )
@@ -1719,6 +1772,7 @@ fn acyclic_process_unit_runs_at_its_first_projection_only() {
             target_cost: 1,
             external_readers: crate::HashMap::default(),
             clock_nets: crate::HashSet::default(),
+            write_domains: Default::default(),
             profile: None,
         }),
     ] {

@@ -21,6 +21,7 @@ impl<'a> PlanBuilder<'a> {
         // which the frontend sized for the events it expected.
         for (name, slot) in [
             ("levels", slots.levels),
+            ("settle_events", slots.settle_events),
             ("unknown_levels", slots.unknown_levels),
             ("exit_arg", slots.exit_arg),
         ] {

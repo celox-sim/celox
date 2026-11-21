@@ -6,7 +6,7 @@ use celox_frontend_core::watch::{self, GatedCode, WatchCode, WatchSnapshot};
 type Range = (AbsoluteAddr, usize, usize);
 
 #[derive(Clone, Debug)]
-pub(super) struct Observations {
+pub(in crate::scheduler) struct Observations {
     watches: Vec<WatchCode<RegionedAbsoluteAddr>>,
     probes: Vec<(AbsoluteAddr, Vec<Range>)>,
 }
@@ -22,7 +22,7 @@ impl Observations {
     /// waits and occurrence probes for all targets, where a pass per target
     /// made the scheduler's generation quadratic in the NBA sites of a
     /// design with many watched signals.
-    pub(super) fn for_targets(
+    pub(in crate::scheduler) fn for_targets(
         program: &LaidOutProgram,
         shared: &HashMap<AbsoluteAddr, AbsoluteAddr>,
         targets: &[AbsoluteAddr],
@@ -200,6 +200,25 @@ impl Observations {
             }
         }
         Self { watches, probes }
+    }
+
+    pub(in crate::scheduler) fn counter_addresses(
+        &self,
+    ) -> impl Iterator<Item = AbsoluteAddr> + '_ {
+        self.watches
+            .iter()
+            .flat_map(|watch| {
+                watch
+                    .counters
+                    .iter()
+                    .map(|(_, addr)| addr.absolute_addr())
+                    .chain(
+                        watch.gated.iter().flat_map(|gate| {
+                            [gate.all.absolute_addr(), gate.gated.absolute_addr()]
+                        }),
+                    )
+            })
+            .chain(self.probes.iter().map(|(counter, _)| *counter))
     }
 
     fn probe_words(g: &mut Generator<'_>, ranges: &[Range]) -> Vec<RegisterId> {

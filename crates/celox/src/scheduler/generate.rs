@@ -123,6 +123,8 @@ impl Plan {
             .map(|service| nba::Sites::new(program, &native_nbas, service, &self.events));
         let mut g = Generator {
             inlined_instructions: 0,
+            constant_block: None,
+            constants: HashMap::default(),
             program,
             nbas: nbas.as_ref(),
             observers: self.observers.as_ref(),

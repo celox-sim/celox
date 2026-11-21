@@ -1,7 +1,6 @@
 use super::shared::{def_reg, replace_reg_in_terminator};
 use crate::ir::*;
 use crate::{HashMap, HashSet};
-use num_bigint::BigUint;
 use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_SCALAR_COALESCED_STORE_BITS: usize = 64;
@@ -921,7 +920,6 @@ pub(in crate::optimizer) fn optimize_block<
     unit_replacement_map: &mut HashMap<RegisterId, RegisterId>,
     reg_counter: &mut usize,
     skip_final_schedule: bool,
-    four_state: bool,
     element_widths: &HashMap<A, usize>,
 ) {
     const MAX_INFLIGHT_LOADS: usize = 8;
@@ -929,7 +927,6 @@ pub(in crate::optimizer) fn optimize_block<
         &mut block.instructions,
         register_map,
         reg_counter,
-        four_state,
         element_widths,
     );
 
@@ -977,7 +974,6 @@ fn coalesce_static_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std::has
     instructions: &mut Vec<SIRInstruction<A>>,
     register_map: &mut HashMap<RegisterId, RegisterType>,
     reg_counter: &mut usize,
-    four_state: bool,
     element_widths: &HashMap<A, usize>,
 ) {
     #[derive(Clone)]
@@ -1043,7 +1039,7 @@ fn coalesce_static_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std::has
     }
 
     let mut insertions: HashMap<usize, Vec<SIRInstruction<A>>> = HashMap::default();
-    let mut replacements: HashMap<usize, Vec<SIRInstruction<A>>> = HashMap::default();
+    let mut replacements: HashMap<usize, SIRInstruction<A>> = HashMap::default();
 
     for seg in segments {
         if seg.loads.len() < 2
@@ -1154,64 +1150,10 @@ fn coalesce_static_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std::has
 
             for ld in loads {
                 let rel_off = ld.offset - word_base;
-                if four_state || element_width.is_some() {
-                    replacements.insert(
-                        ld.index,
-                        vec![SIRInstruction::Slice(ld.dst, wide_reg, rel_off, ld.width)],
-                    );
-                    continue;
-                }
-                let mut ops: Vec<SIRInstruction<A>> = Vec::new();
-                let mut source_reg = wide_reg;
-
-                if rel_off != 0 {
-                    let shift_reg = next_reg_id(register_map, reg_counter);
-                    register_map.insert(shift_reg, RegisterType::Logic { width: 64 });
-                    ops.push(SIRInstruction::Imm(
-                        shift_reg,
-                        SIRValue::new(rel_off as u64),
-                    ));
-
-                    let shifted_reg = next_reg_id(register_map, reg_counter);
-                    register_map.insert(shifted_reg, RegisterType::Logic { width: 64 });
-                    ops.push(SIRInstruction::Binary(
-                        shifted_reg,
-                        source_reg,
-                        BinaryOp::Shr,
-                        shift_reg,
-                    ));
-                    source_reg = shifted_reg;
-                }
-
-                if ld.width < 64 {
-                    let mask_reg = next_reg_id(register_map, reg_counter);
-                    register_map.insert(mask_reg, RegisterType::Logic { width: 64 });
-                    let mask = if ld.width == 64 {
-                        BigUint::from(u64::MAX)
-                    } else {
-                        let one = BigUint::from(1u8);
-                        (one.clone() << ld.width) - one
-                    };
-                    ops.push(SIRInstruction::Imm(mask_reg, SIRValue::new(mask)));
-                    ops.push(SIRInstruction::Binary(
-                        ld.dst,
-                        source_reg,
-                        BinaryOp::And,
-                        mask_reg,
-                    ));
-                } else {
-                    let zero_reg = next_reg_id(register_map, reg_counter);
-                    register_map.insert(zero_reg, RegisterType::Logic { width: 64 });
-                    ops.push(SIRInstruction::Imm(zero_reg, SIRValue::new(0u8)));
-                    ops.push(SIRInstruction::Binary(
-                        ld.dst,
-                        source_reg,
-                        BinaryOp::Or,
-                        zero_reg,
-                    ));
-                }
-
-                replacements.insert(ld.index, ops);
+                replacements.insert(
+                    ld.index,
+                    SIRInstruction::Slice(ld.dst, wide_reg, rel_off, ld.width),
+                );
             }
         }
     }
@@ -1226,8 +1168,8 @@ fn coalesce_static_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std::has
             out.extend(ops);
         }
 
-        if let Some(ops) = replacements.remove(&i) {
-            out.extend(ops);
+        if let Some(slice) = replacements.remove(&i) {
+            out.push(slice);
         } else {
             out.push(inst.clone());
         }

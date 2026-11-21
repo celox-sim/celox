@@ -82,12 +82,7 @@ Execution Unit 0:
     r88: bit<64>
     r89: logic<20>
     r90: logic<4>
-    r91: logic<64>
-    r92: logic<64>
-    r93: logic<64>
-    r94: logic<64>
-    r95: logic<64>
-    r97: logic<20>
+    r91: logic<20>
   b0:
     r0 = SIRValue(0x0)
     r1 = SIRValue(0x3)
@@ -105,14 +100,9 @@ Execution Unit 0:
     r25 = Load(addr=v (region=0), offset=8, bits=1)
     r29 = Load(addr=v (region=0), offset=9, bits=1)
     r33 = Load(addr=v (region=0), offset=10, bits=1)
-    r91 = SIRValue(0x3)
-    r92 = r90 Shr r91
+    r5 = Slice(r90, offset=3, width=1)
     r37 = Load(addr=v (region=0), offset=11, bits=1)
-    r93 = SIRValue(0x1)
-    r5 = r92 And r93
-    r94 = SIRValue(0x2)
-    r95 = r90 Shr r94
-    r6 = r95 And r93
+    r6 = Slice(r90, offset=2, width=1)
     r7 = r5 Ne r6
     r11 = r9 Ne r6
     r41 = Load(addr=v (region=0), offset=12, bits=1)
@@ -165,8 +155,8 @@ Execution Unit 0:
     r82 = r78 Or r81
     r85 = r83 Ne r76
     r86 = r82 Or r85
-    r97 = Concat(r6, r6, r6, r6, r6, r6, r6, r6, r6, r6, r6, r6, r6, r6, r6, r6, r6, r76, r76, r76)
-    Store(addr=v (region=0), offset=0, bits=20, src_reg = 97)
+    r91 = Concat(r6, r6, r6, r6, r6, r6, r6, r6, r6, r6, r6, r6, r6, r6, r6, r6, r6, r76, r76, r76)
+    Store(addr=v (region=0), offset=0, bits=20, src_reg = 91)
     r87 = SIRValue(0x1)
     r88 = r2 Add r87
     Branch(r86 ? b1 [r88] : b3)

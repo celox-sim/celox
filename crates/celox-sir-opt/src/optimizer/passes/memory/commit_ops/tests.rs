@@ -108,6 +108,59 @@ fn forwarding_preserves_working_commit_when_old_stable_is_read_before_it() {
 }
 
 #[test]
+fn publish_after_last_old_read_eliminates_the_pending_copy() {
+    let stable = addr(STABLE_REGION);
+    let mut eu = forwarding_eu(false);
+    eu.blocks.get_mut(&BlockId(0)).unwrap().instructions.insert(
+        1,
+        SIRInstruction::Load(RegisterId(1), stable, SIROffset::Static(0), 8),
+    );
+    schedule_pending_writes(std::slice::from_mut(&mut eu));
+    let hazards = direct_stable_store_hazards(&eu);
+    inline_commit_forwarding_with_hazards(&mut eu, &hazards);
+    assert!(matches!(eu.blocks[&BlockId(0)].instructions.as_slice(),
+        [SIRInstruction::Load(_, old, ..), SIRInstruction::Store(new, ..)]
+        if *old == stable && *new == stable));
+}
+
+#[test]
+fn pending_read_keeps_the_write_before_the_observer() {
+    let mut eu = forwarding_eu(false);
+    let block = eu.blocks.get_mut(&BlockId(0)).unwrap();
+    block.instructions.splice(
+        1..1,
+        [
+            SIRInstruction::Load(RegisterId(2), addr(WORKING_REGION), SIROffset::Static(0), 8),
+            SIRInstruction::Load(RegisterId(1), addr(STABLE_REGION), SIROffset::Static(0), 8),
+        ],
+    );
+    let before = block.instructions.clone();
+    schedule_pending_writes(std::slice::from_mut(&mut eu));
+    assert_eq!(eu.blocks[&BlockId(0)].instructions, before);
+}
+
+#[test]
+fn a_working_observer_in_another_unit_requires_the_staged_value() {
+    let mut writer = forwarding_eu(false);
+    let block = writer.blocks.get_mut(&BlockId(0)).unwrap();
+    block.instructions.insert(
+        1,
+        SIRInstruction::Load(RegisterId(1), addr(STABLE_REGION), SIROffset::Static(0), 8),
+    );
+    let original = block.instructions.clone();
+    let mut observer = forwarding_eu(false);
+    observer.blocks.get_mut(&BlockId(0)).unwrap().instructions = vec![SIRInstruction::Load(
+        RegisterId(1),
+        addr(WORKING_REGION),
+        SIROffset::Static(0),
+        8,
+    )];
+    let mut event = [writer, observer];
+    schedule_pending_writes(&mut event);
+    assert_eq!(event[0].blocks[&BlockId(0)].instructions, original);
+}
+
+#[test]
 fn forwarding_ignores_a_later_read_of_a_disjoint_bit_range() {
     let stable = addr(STABLE_REGION);
     let mut eu = forwarding_eu(false);

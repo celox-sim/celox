@@ -166,7 +166,8 @@ impl Plan {
         g.b.switch_to_block(fire);
         for &index in tracked {
             g.if_bit(mask, index, |g| {
-                g.inline_writers(
+                g.inline_event_writers(
+                    &self.events[index],
                     self.events[index]
                         .eval_only
                         .as_ref()
@@ -208,7 +209,8 @@ impl Plan {
         let pending = g.load_at(slots.exit_arg, self.event_bits, self.event_bits);
         for &index in tracked {
             g.if_bit(pending, index, |g| {
-                g.inline_writers(
+                g.inline_event_writers(
+                    &self.events[index],
                     self.events[index]
                         .apply
                         .as_ref()
@@ -368,13 +370,14 @@ impl Plan {
                     // A combined unit would publish them before `inline`
                     // can inspect the finish flag.
                     for units in [event.eval_only.as_ref(), event.apply.as_ref()] {
-                        g.inline_writers(
+                        g.inline_event_writers(
+                            event,
                             units.expect("derived domains have separate units"),
                             finish_exit,
                         );
                     }
                 } else {
-                    g.inline_writers(&event.eval_apply, finish_exit);
+                    g.inline_event_writers(event, &event.eval_apply, finish_exit);
                 }
             });
         }
@@ -390,7 +393,7 @@ impl Plan {
                     }
                     .expect("tracked events have their units (`Plan::new`)");
                     g.if_bit(mask, index, |g| {
-                        g.inline_writers(units, finish_exit);
+                        g.inline_event_writers(event, units, finish_exit);
                     });
                 }
             }

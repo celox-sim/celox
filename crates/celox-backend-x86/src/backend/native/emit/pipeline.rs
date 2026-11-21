@@ -446,6 +446,14 @@ fn allocate_prepared_eu_inner(
 }
 
 impl AllocatedFunction {
+    /// Use the allocator's non-tick vector inventory. The caller owns the
+    /// simulation state base and accounts for all allocatable GPR clobbers.
+    pub fn into_region(mut self) -> Self {
+        assert!(!self.tick_loop && self.function.frame_window.is_none());
+        self.function.region_entry = true;
+        self
+    }
+
     /// Emit using an arena above every generated callee's complete
     /// `required_state_size`, including its nested callees. Generated calls
     /// without a nonzero extent are rejected by the emitter.

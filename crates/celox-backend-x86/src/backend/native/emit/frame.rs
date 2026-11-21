@@ -130,6 +130,9 @@ pub(super) fn emit_epilogue(
         asm.xor(eax, eax)?;
     }
     asm.set_label(epilogue_label)?;
+    if context.align_region_calls {
+        asm.add(rsp, 8)?;
+    }
     if tick_loop {
         asm.movq(r10, xmm15)?;
         asm.mov(

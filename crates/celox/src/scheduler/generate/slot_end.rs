@@ -328,8 +328,8 @@ impl Plan {
                         g.settle_then(evaluate);
                         g.b.switch_to_block(evaluate);
                     }
-                    g.inline_writers(eval, finish_exit);
-                    g.inline_writers(apply, finish_exit);
+                    g.inline_event_writers(event, eval, finish_exit);
+                    g.inline_event_writers(event, apply, finish_exit);
                     g.b.seal_block(SIRTerminator::Jump(evaluated, Vec::new()));
                     g.b.switch_to_block(next);
                     continue;
@@ -349,7 +349,7 @@ impl Plan {
                             false_block: (clean, Vec::new()),
                         });
                         g.b.switch_to_block(clean);
-                        g.inline_writers(&event.eval_apply, finish_exit);
+                        g.inline_event_writers(event, &event.eval_apply, finish_exit);
                         g.b.seal_block(SIRTerminator::Jump(evaluated, Vec::new()));
                         g.b.switch_to_block(fused);
                         units
@@ -361,7 +361,7 @@ impl Plan {
                         &event.eval_apply
                     }
                 };
-                g.inline_writers(units, finish_exit);
+                g.inline_event_writers(event, units, finish_exit);
                 g.b.seal_block(SIRTerminator::Jump(evaluated, Vec::new()));
                 g.b.switch_to_block(next);
             }
@@ -400,7 +400,7 @@ impl Plan {
                             Phase::Apply => event.apply.as_ref(),
                         }
                         .expect("several edged events have their units (`Plan::new`)");
-                        g.inline_writers(units, finish_exit);
+                        g.inline_event_writers(event, units, finish_exit);
                         g.b.seal_block(SIRTerminator::Jump(next, Vec::new()));
                         g.b.switch_to_block(next);
                     }

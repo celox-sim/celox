@@ -1,6 +1,6 @@
 //! Native record allocation and FIFO operations. All pointers reference stable
 //! pages owned by the invocation's arena; allocation is the only host request.
-mod observations;
+pub(super) mod observations;
 mod sites;
 pub(super) mod writes;
 use super::*;

@@ -18,6 +18,8 @@
 //! ones anything but a combinational path reads or writes, and the ones
 //! that stay observable from outside.
 
+mod columns;
+
 use std::fmt::{Debug, Display};
 use std::hash::Hash;
 
@@ -277,6 +279,17 @@ pub fn inline_nets<A: Copy + Eq + Hash + Ord + Debug + Display>(
     arena: &mut SLTNodeArena<A>,
     pinned: &HashSet<A>,
 ) -> Result<NetInlineReport<A>, SLTNodeFactsError> {
+    inline_nets_with_arrays(paths, arena, pinned, &HashMap::default())
+}
+
+/// Unpacked arrays stay in state unless all their reads reduce a static
+/// transpose to words. Indices and ranges here use logical packed offsets.
+pub fn inline_nets_with_arrays<A: Copy + Eq + Hash + Ord + Debug + Display>(
+    paths: &mut Vec<LogicPath<A>>,
+    arena: &mut SLTNodeArena<A>,
+    pinned: &HashSet<A>,
+    element_widths: &HashMap<A, usize>,
+) -> Result<NetInlineReport<A>, SLTNodeFactsError> {
     let mut report = NetInlineReport {
         removed: Vec::new(),
         dead: 0,
@@ -393,6 +406,47 @@ pub fn inline_nets<A: Copy + Eq + Hash + Ord + Debug + Display>(
         }
     }
     let cyclic = cyclic_variables(&drivers, &reads);
+    let mut arrays: Vec<_> = element_widths.iter().collect();
+    arrays.sort_unstable_by_key(|(array, _)| **array);
+    for (&array, &rows) in arrays {
+        if pinned.contains(&array) || cyclic.contains(&array) {
+            pinned.insert(array);
+            continue;
+        }
+        let Some(plan) = columns::match_columns(
+            array,
+            rows,
+            paths,
+            arena,
+            &drivers,
+            &readers,
+            &ordered,
+            &plain,
+            element_widths,
+        ) else {
+            pinned.insert(array);
+            continue;
+        };
+        // The shortcut follows an existing acyclic dependency. Keep the
+        // reader and range indices in sync for ordinary inlining below.
+        let consumers = readers.remove(&array).unwrap();
+        let word = plan.reduce(arena)?;
+        let words = plan.words();
+        let source = plan.source;
+        read_ranges.extend(words.iter().map(|atom| (source, atom.access)));
+        for (index, lane) in plan.outputs {
+            let path = &mut paths[index];
+            path.expr = arena.alloc(SLTNode::Slice {
+                expr: word,
+                access: BitAccess::new(lane, lane),
+            })?;
+            path.sources.retain(|atom| atom.id != array);
+            path.sources.extend(words.iter().copied());
+            reads[index].remove(&array);
+            reads[index].insert(source);
+        }
+        readers.entry(source).or_default().extend(consumers);
+    }
     // The nets a substitution or a removal may take out of the program:
     // variables whose every driver is a plain path defining a range of its
     // own.

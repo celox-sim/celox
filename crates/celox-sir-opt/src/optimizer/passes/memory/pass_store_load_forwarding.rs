@@ -73,49 +73,33 @@ fn one_bit(register_map: &HashMap<RegisterId, RegisterType>, register: RegisterI
         .is_some_and(|ty| ty.width() == 1)
 }
 
-fn boolean_complements(
+/// The selector and arms of (s & a) | (!s & b), in either operand order.
+fn boolean_selection(
     definitions: &HashMap<RegisterId, BooleanExpression>,
     left: RegisterId,
     right: RegisterId,
-) -> bool {
-    let left = boolean_root(definitions, left);
-    let right = boolean_root(definitions, right);
-    matches!(
-        definitions.get(&left),
-        Some(BooleanExpression::Not(source))
-            if boolean_root(definitions, *source) == right
-    ) || matches!(
-        definitions.get(&right),
-        Some(BooleanExpression::Not(source))
-            if boolean_root(definitions, *source) == left
-    )
-}
-
-fn complemented_and_common_factor(
-    definitions: &HashMap<RegisterId, BooleanExpression>,
-    left: RegisterId,
-    right: RegisterId,
-) -> Option<RegisterId> {
-    let left = boolean_root(definitions, left);
-    let right = boolean_root(definitions, right);
-    let (
-        Some(BooleanExpression::And(left_a, left_b)),
-        Some(BooleanExpression::And(right_a, right_b)),
-    ) = (definitions.get(&left), definitions.get(&right))
-    else {
-        return None;
+) -> Option<(RegisterId, RegisterId, RegisterId)> {
+    let terms = |reg| match *definitions.get(&boolean_root(definitions, reg))? {
+        BooleanExpression::And(a, b) => Some([(a, b), (b, a)]),
+        _ => None,
     };
-    [
-        (*left_a, *left_b, *right_a, *right_b),
-        (*left_a, *left_b, *right_b, *right_a),
-        (*left_b, *left_a, *right_a, *right_b),
-        (*left_b, *left_a, *right_b, *right_a),
-    ]
-    .into_iter()
-    .find_map(|(common_left, other_left, common_right, other_right)| {
-        (common_left == common_right && boolean_complements(definitions, other_left, other_right))
-            .then_some(common_left)
-    })
+    let left = terms(left)?;
+    let right = terms(right)?;
+    for (select, yes) in left {
+        for (inverse, no) in right {
+            let negates = |x, y| {
+                matches!(definitions.get(&x),
+                Some(BooleanExpression::Not(source)) if boolean_root(definitions, *source) == y)
+            };
+            if negates(inverse, select) {
+                return Some((select, yes, no));
+            }
+            if negates(select, inverse) {
+                return Some((inverse, no, yes));
+            }
+        }
+    }
+    None
 }
 
 /// Per-block store-load forwarding + algebraic simplification.
@@ -255,15 +239,17 @@ fn forward_and_simplify(
                         BinaryOp::Or | BinaryOp::LogicOr => {
                             if lhs == rhs {
                                 aliases.insert(*dst, *lhs);
-                            } else if let Some(common) =
-                                complemented_and_common_factor(&boolean_definitions, *lhs, *rhs)
+                            } else if let Some((cond, yes, no)) =
+                                boolean_selection(&boolean_definitions, *lhs, *rhs)
                             {
-                                // (x & y) | (x & !y) == x
-                                if register_map.get(dst) == register_map.get(&common) {
-                                    aliases.insert(*dst, common);
+                                if yes != no {
+                                    *inst = SIRInstruction::Mux(*dst, cond, yes, no);
+                                    continue;
+                                }
+                                if register_map.get(dst) == register_map.get(&yes) {
+                                    aliases.insert(*dst, yes);
                                 } else {
-                                    boolean_definitions
-                                        .insert(*dst, BooleanExpression::Same(common));
+                                    boolean_definitions.insert(*dst, BooleanExpression::Same(yes));
                                 }
                             }
                         }
@@ -345,7 +331,7 @@ fn forward_and_simplify(
                     boolean_definitions.insert(*dst, BooleanExpression::Same(*src));
                 }
             }
-            SIRInstruction::Unary(dst, UnaryOp::LogicNot, src)
+            SIRInstruction::Unary(dst, UnaryOp::LogicNot | UnaryOp::BitNot, src)
                 if !four_state && one_bit(register_map, *dst) && one_bit(register_map, *src) =>
             {
                 if let Some(BooleanExpression::Not(inner)) = boolean_definitions.get(src) {
@@ -367,6 +353,24 @@ fn forward_and_simplify(
                     && register_map.get(dst) == register_map.get(then_value) =>
             {
                 aliases.insert(*dst, *then_value);
+            }
+            SIRInstruction::Mux(dst, cond, yes, no) if !four_state => {
+                // A condition only tests truth. Its signedness and the register
+                // kind chosen by a two-state conversion cannot affect the arms.
+                *cond = boolean_root(&boolean_definitions, *cond);
+                if let Some(BooleanExpression::Not(source)) = boolean_definitions.get(cond) {
+                    *cond = *source;
+                    std::mem::swap(yes, no);
+                }
+                if one_bit(register_map, *dst) && one_bit(register_map, *cond) {
+                    let yes_const = known_constants.get(yes).copied();
+                    let no_const = known_constants.get(no).copied();
+                    if yes_const == Some(1) {
+                        *inst = SIRInstruction::Binary(*dst, *cond, BinaryOp::Or, *no);
+                    } else if no_const == Some(0) {
+                        *inst = SIRInstruction::Binary(*dst, *cond, BinaryOp::And, *yes);
+                    }
+                }
             }
             SIRInstruction::Commit(_, dst_addr, _, _, _) => {
                 // A Commit is a write to its destination for every offset

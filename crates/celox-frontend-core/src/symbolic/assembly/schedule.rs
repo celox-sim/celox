@@ -272,7 +272,15 @@ pub fn schedule_symbolic_rtl_reporting_loops(
     let parallel_comb_blocks = parallel.enabled().then(|| logic.comb_blocks.clone());
     // The flag object of a partitioned settle is declared once the
     // partitions are known; reserve its address now.
-    let settle_flags = plan_settle_flags(parallel, &design, &logic, &units, &counted, &clock_nets);
+    let settle_flags = plan_settle_flags(
+        parallel,
+        &design,
+        &logic,
+        &units,
+        &counted,
+        &clock_nets,
+        &graph_clocks,
+    );
     let graph_ticks = if settle_flags.is_none()
         && counted.is_empty()
         && occurrence_probes.is_empty()
@@ -287,6 +295,17 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         FfUnits::default()
     };
     let sched_start = flatten_timing.then(std::time::Instant::now);
+    let grouping = if let Some(request) = settle_flags.clone() {
+        scheduler::CombGrouping::Partitioned(request)
+    } else if !parallel.enabled() && !units.eval_apply_ffs.is_empty() {
+        scheduler::CombGrouping::EventDomains(settle_write_domains(
+            &logic,
+            &units.eval_apply_ffs,
+            &graph_clocks,
+        ))
+    } else {
+        scheduler::CombGrouping::Whole
+    };
     let schedule = match scheduler::sort_with_unpacked_element_widths(
         logic.comb_blocks,
         &logic.global_arena,
@@ -296,7 +315,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         &var_widths,
         &design.unpacked_element_widths,
         units.next_runtime_error_code,
-        settle_flags.clone(),
+        grouping,
     ) {
         Ok(schedule) => schedule,
         Err(error) => {

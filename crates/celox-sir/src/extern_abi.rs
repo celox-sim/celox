@@ -31,12 +31,23 @@ pub const VALUE_CHANGE_ID: u32 = u32::MAX - 6;
 /// caller. The callee may read and write arbitrary simulation state.
 pub const NATIVE_KERNEL_CALL_TAG: u32 = 0x8000_0000;
 
+/// Image-local x86 region entered with the state base already installed.
+pub const NATIVE_REGION_CALL_TAG: u32 = 0xc000_0000;
+
+pub const fn native_region_index(function: u32) -> Option<u32> {
+    if function & 0xe000_0000 == NATIVE_REGION_CALL_TAG {
+        Some(function & 0x1fff_ffff)
+    } else {
+        None
+    }
+}
+
 /// Decode a native kernel call, excluding the heap and floating-point helpers.
 pub const fn native_kernel_index(function: u32) -> Option<u32> {
     if function & 0xc000_0000 == NATIVE_KERNEL_CALL_TAG {
         Some(function & 0x3fff_ffff)
     } else {
-        None
+        native_region_index(function)
     }
 }
 

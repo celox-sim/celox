@@ -253,6 +253,7 @@ pub(super) fn compile_lane_kernels(
                 false,
                 &options.optimize_options.diagnostics,
                 cancel,
+                false,
                 &mut |prepared| {
                     footprint = Some(Footprint::of_unit(prepared, layout, codegen));
                     tracing::trace!(target: "celox::parallel", event = "native_task_sir",

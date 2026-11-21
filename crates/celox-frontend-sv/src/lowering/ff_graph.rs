@@ -517,6 +517,39 @@ mod tests {
     }
 
     #[test]
+    fn split_clock_branches_once_for_a_bank_alongside_an_unconditional_write() {
+        let source =
+            "module Top(input bit clk, clk2, en, input bit [31:0] data, output bit observed,
+                         output bit [31:0] a,b,c, other);
+            always_ff @(posedge clk) if (en) a <= data;
+            always_ff @(posedge clk) if (en) b <= a;
+            always_ff @(posedge clk) if (en) c <= b;
+            always_ff @(posedge clk) other <= c;
+            always_ff @(posedge clk2) observed <= ^other;
+            endmodule";
+        let sir = schedule(source, true, DeadStorePolicy::Off);
+        let blocks = sir
+            .eval_only_ffs
+            .values()
+            .flatten()
+            .flat_map(|unit| unit.blocks.values())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            blocks
+                .iter()
+                .filter(|b| matches!(b.terminator, SIRTerminator::Branch { .. }))
+                .count(),
+            1
+        );
+        assert!(
+            !blocks
+                .iter()
+                .flat_map(|b| &b.instructions)
+                .any(|op| matches!(op, SIRInstruction::Mux(..)))
+        );
+    }
+
+    #[test]
     fn comb_driver_reaches_a_clocked_sink_in_a_testbench() {
         let source = r#"
             module Top(input bit clk, input bit [3:0] data, output bit [3:0] q);

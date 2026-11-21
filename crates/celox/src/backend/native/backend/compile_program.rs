@@ -2,6 +2,24 @@
 
 use super::*;
 
+pub(super) const NATIVE_REGIONS: bool = cfg!(any(
+    feature = "x86_64-codegen",
+    all(target_arch = "x86_64", not(feature = "arm64-codegen"))
+));
+
+pub(super) fn kernel_call(slot: usize, internal: bool) -> Result<u32, SimulatorError> {
+    let slot = u32::try_from(slot)
+        .ok()
+        .filter(|&slot| slot < crate::scheduler::CALLEE_PLACEHOLDER)
+        .ok_or_else(|| codegen_message("too many native extern functions"))?;
+    let tag = if internal && NATIVE_REGIONS {
+        celox_sir::extern_abi::NATIVE_REGION_CALL_TAG
+    } else {
+        celox_sir::extern_abi::NATIVE_KERNEL_CALL_TAG
+    };
+    Ok(tag | slot)
+}
+
 pub(super) fn compile_program(
     laid_out: &LaidOutProgram,
     options: &SimulatorOptions,
@@ -104,20 +122,20 @@ pub(super) fn compile_program_with_outlining_threshold(
         compile_scheduler_callees(sir, &settle_callees, layout, options, capture_trace, cancel)?;
     let kernel_slots = callee_base + callee_jits.len();
     let mut next_compiled = callee_base;
-    let callee_slots: Vec<usize> = settle_callees
+    let callee_calls: Vec<u32> = settle_callees
         .iter()
         .map(|settle| match settle {
-            Some(offset) => kernel_slots + offset,
+            Some(offset) => kernel_call(kernel_slots + offset, *offset != 0),
             None => {
                 next_compiled += 1;
-                next_compiled - 1
+                kernel_call(next_compiled - 1, true)
             }
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
     // The compiled scheduler calls them, and so does a testbench unit that
     // inlines it.
     let bound_callers: HashMap<usize, ExecutionUnit<RegionedAbsoluteAddr>> =
-        if callee_slots.is_empty() {
+        if callee_calls.is_empty() {
             HashMap::default()
         } else {
             sir.sir
@@ -125,7 +143,15 @@ pub(super) fn compile_program_with_outlining_threshold(
                 .iter()
                 .enumerate()
                 .filter(|(_, unit)| calls_scheduler_callees(unit))
-                .map(|(index, unit)| Ok((index, bind_scheduler_callees(unit, &callee_slots)?)))
+                .map(|(index, unit)| {
+                    let mut unit = unit.clone();
+                    bind_scheduler_callees(
+                        &mut unit,
+                        crate::scheduler::CALLEE_PLACEHOLDER,
+                        &callee_calls,
+                    )?;
+                    Ok((index, unit))
+                })
                 .collect::<Result<_, SimulatorError>>()?
         };
     let callee_sizes: Vec<usize> = callee_jits
@@ -453,7 +479,7 @@ fn compile_scheduler_callees(
         workers,
         || (),
         |_, index| {
-            compile_unit_refs(
+            compile_unit_refs_inspected(
                 &[callees[index]],
                 layout,
                 options.four_state,
@@ -464,6 +490,8 @@ fn compile_scheduler_callees(
                 capture_trace,
                 &options.optimize_options.diagnostics,
                 cancel,
+                NATIVE_REGIONS,
+                &mut |_| {},
             )
         },
     )
@@ -483,29 +511,28 @@ fn calls_scheduler_callees(unit: &ExecutionUnit<RegionedAbsoluteAddr>) -> bool {
         })
 }
 
-/// The compiled scheduler `unit` with its calls of callee `i`
-/// ([`crate::scheduler::CALLEE_PLACEHOLDER`]` + i`) bound to `slots[i]`.
-fn bind_scheduler_callees(
-    unit: &ExecutionUnit<RegionedAbsoluteAddr>,
-    slots: &[usize],
-) -> Result<ExecutionUnit<RegionedAbsoluteAddr>, SimulatorError> {
-    let mut bound = unit.clone();
-    for block in bound.blocks.values_mut() {
-        for instruction in &mut block.instructions {
-            if let SIRInstruction::ExternCall { func, .. } = instruction
-                && let Some(index) = celox_sir::extern_abi::native_kernel_index(*func)
-                && let Some(callee) = index.checked_sub(crate::scheduler::CALLEE_PLACEHOLDER)
-            {
-                let slot = slots
-                    .get(callee as usize)
-                    .and_then(|&slot| u32::try_from(slot).ok())
-                    .filter(|&slot| slot < crate::scheduler::CALLEE_PLACEHOLDER)
-                    .ok_or_else(|| codegen_message("too many native extern functions"))?;
-                *func = celox_sir::extern_abi::NATIVE_KERNEL_CALL_TAG | slot;
-            }
+/// Bind the scheduler's generated calls to their linked entries. A whole
+/// settle shared with the host uses its public entry; private regions do not.
+pub(super) fn bind_scheduler_callees(
+    unit: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    base: u32,
+    calls: &[u32],
+) -> Result<(), SimulatorError> {
+    for instruction in unit
+        .blocks
+        .values_mut()
+        .flat_map(|block| &mut block.instructions)
+    {
+        if let SIRInstruction::ExternCall { func, .. } = instruction
+            && let Some(index) = celox_sir::extern_abi::native_kernel_index(*func)
+            && let Some(callee) = index.checked_sub(base)
+        {
+            *func = *calls
+                .get(callee as usize)
+                .ok_or_else(|| codegen_message("unbound scheduler callee"))?;
         }
     }
-    Ok(bound)
+    Ok(())
 }
 
 /// Compile the function units of a program, in the order of their slots.
@@ -720,7 +747,7 @@ fn compile_split_comb(
                 cancel,
             )
         } else {
-            compile_unit_refs(
+            compile_unit_refs_inspected(
                 &[&sir.sir.eval_comb[index - ff_count]],
                 layout,
                 options.four_state,
@@ -731,6 +758,8 @@ fn compile_split_comb(
                 false,
                 &options.optimize_options.diagnostics,
                 cancel,
+                NATIVE_REGIONS,
+                &mut |_| {},
             )
         }
     })
@@ -746,13 +775,9 @@ fn compile_split_comb(
     let first_slot = kernel_slots + 1;
     let mut builder = celox_sir::SIRBuilder::new();
     for index in 0..comb_chunk_jits.len() {
-        let slot = u32::try_from(first_slot + index)
-            .ok()
-            .filter(|&slot| slot < 0x1000_0000)
-            .ok_or_else(|| codegen_message("too many native extern functions"))?;
         builder.emit(SIRInstruction::ExternCall {
             dst: None,
-            func: celox_sir::extern_abi::NATIVE_KERNEL_CALL_TAG | slot,
+            func: kernel_call(first_slot + index, true)?,
             args: Vec::new(),
         });
     }
