@@ -46,7 +46,7 @@ impl Generator<'_> {
         // Outlined native bodies support raw state words. Trace and four-state
         // layouts keep their typed writes and per-object observations.
         let pack = self.outlined.is_some() && !layout.four_state && layout.trace.is_none();
-        let eligible = |u: &Unit| pack && packed_commits::dense_commits(layout, u);
+        let eligible = |u: &Unit| pack && packed_commits::batchable_commits(layout, u);
         for batch in units.chunk_by(|a, b| eligible(a) && eligible(b)) {
             if eligible(&batch[0])
                 && let Some(body) = self.packed_publications(batch)

@@ -3431,6 +3431,13 @@ fn the_scheduler_calls_the_settle_unless_it_instruments_it() {
 #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
 #[test]
 fn packed_commit_words_preserve_each_readers_changes() {
+    check_packed_commit_words(19, false);
+    check_packed_commit_words(3, false);
+    check_packed_commit_words(19, true);
+}
+
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+fn check_packed_commit_words(lanes: usize, ram: bool) {
     use std::fmt::Write as _;
     let mut source = String::from(
         r#"`timescale 1ns/1ns
@@ -3444,10 +3451,30 @@ always @(posedge b) begin sampled <= y; bias <= ~bias; end
 integer hits; always @(y) hits = hits + 1;
 "#,
     );
-    for i in 0..19 {
-        writeln!(source, "bit [2:0] q{i}; always @(posedge a) q{i} <= d[{i}] ? 3'd5 : 3'd2; assign y[{i}] = ^(q{i} & 3'd4);").unwrap();
+    for i in 0..lanes {
+        if ram {
+            writeln!(
+                source,
+                "bit [2:0] mem{i}[128], q{i}; always @(posedge a) begin
+                 if (d[{i}]) begin mem{i}[d[6:0]] <= 5; q{i} <= 5; end
+                 else q{i} <= mem{i}[d[6:0]]; end"
+            )
+            .unwrap();
+        } else {
+            writeln!(
+                source,
+                "bit [2:0] q{i}; always @(posedge a) q{i} <= d[{i}] ? 3'd5 : 3'd2;"
+            )
+            .unwrap();
+        }
+        writeln!(source, "assign y[{i}] = ^(q{i} & 3'd4);").unwrap();
         if i % 2 == 0 {
             writeln!(source, "assign mixed[{}] = q{i}[1] ^ bias;", i / 2).unwrap();
+        }
+    }
+    if lanes < 19 {
+        for i in lanes..19 {
+            writeln!(source, "bit [2:0] keep{i} = 3; always @(posedge b) keep{i} <= ~keep{i}; assign y[{i}] = keep{i}[0];").unwrap();
         }
     }
     source.push_str("endmodule");
@@ -3473,19 +3500,31 @@ integer hits; always @(y) hits = hits + 1;
         .unwrap()
         .unit
         .unwrap();
-    let writes = std::iter::once(&program.sir.processes[main])
-        .chain(&program.scheduler_callees)
-        .flat_map(|unit| unit.blocks.values())
-        .flat_map(|block| &block.instructions)
-        .filter(|inst| {
-            matches!(inst, crate::ir::SIRInstruction::ExternCall {func,..}
-            if *func == celox_sir::native_memory::NativeMemoryOp::WriteState.function())
-        })
-        .count();
-    assert!(
-        writes > 0,
-        "expected adjacent registers to use word commits"
-    );
+    let blocks = || {
+        std::iter::once(&program.sir.processes[main])
+            .chain(&program.scheduler_callees)
+            .flat_map(|unit| unit.blocks.values())
+    };
+    use celox_sir::{BinaryOp, SIRInstruction};
+    if ram {
+        assert!(
+            blocks().any(|block| block.instructions.windows(2).any(|pair| pair
+                .iter()
+                .all(|inst| matches!(inst, SIRInstruction::Commit(src, ..)
+                    if src.region == celox_design::SPARSE_WORKING_REGION)))),
+            "independent RAM banks should drain pending writes together"
+        );
+    } else {
+        assert!(blocks().flat_map(|b| &b.instructions).any(|inst| matches!(inst,
+            SIRInstruction::ExternCall {func,..} if *func == celox_sir::native_memory::NativeMemoryOp::WriteState.function())),
+            "expected adjacent registers to use word commits");
+    }
+    if lanes == 3 {
+        assert!(blocks().any(|block| block.instructions.windows(3).any(|ops|
+                matches!(ops, [SIRInstruction::Imm(mask,_), SIRInstruction::Binary(bits,_,BinaryOp::And,m),
+                    SIRInstruction::Binary(_,_,BinaryOp::Xor,b)] if m==mask && b==bits))),
+                "expected a masked write that preserves the neighboring bytes");
+    }
     let mut compiled = builder()
         .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
         .build_native()
@@ -3497,10 +3536,12 @@ integer hits; always @(y) hits = hits + 1;
     for (step, time) in (2..=82).step_by(4).enumerate() {
         compiled.run_until(time).unwrap();
         reference.run_until(time).unwrap();
-        assert_eq!(
-            compiled.get(compiled.signal("y")),
-            (1u32 << (step % 19)).into()
-        );
+        if lanes == 19 && !ram {
+            assert_eq!(
+                compiled.get(compiled.signal("y")),
+                (1u32 << (step % 19)).into()
+            );
+        }
         for name in ["y", "mixed", "sampled"] {
             assert_eq!(
                 compiled.get(compiled.signal(name)),

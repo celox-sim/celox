@@ -30,11 +30,9 @@ use crate::{
     SLTNodeFactsError,
 };
 
-/// The most operators a net evaluated in several places may have, counting
-/// those of the nets copied into it: each place evaluates its own copy, in
-/// place of a load of the stored net. Reads, constants and bit selections
-/// are no operators: a copy of a net that only renames or selects bits
-/// costs its readers nothing.
+/// The cost limit for copying an expression into several readers. A plain
+/// wire or slice can replace a load for free. Gathering distinct state
+/// inputs into a word costs the additional reads in each copy.
 pub const DUPLICATED_NET_OPERATORS: usize = 2;
 
 /// What [`inline_nets`] did.
@@ -61,30 +59,28 @@ struct Piece {
 }
 
 /// A net the pass may take out of the program: the disjoint ranges plain
-/// paths define of one variable, lowest first, and the operators of their
+/// paths define of one variable, lowest first, and the cost of their
 /// expressions together.
 struct Candidate {
     pieces: Vec<Piece>,
-    operators: usize,
+    cost: usize,
 }
 
 impl Candidate {
-    /// Whether the pieces define every bit of `access`.
-    fn covers(&self, access: BitAccess) -> bool {
+    /// The consecutive pieces supplying this read, or None for a gap.
+    fn covering(&self, access: BitAccess) -> Option<&[Piece]> {
+        let start = self.pieces.partition_point(|p| p.target.msb < access.lsb);
         let mut next = access.lsb;
-        for piece in &self.pieces {
-            if piece.target.msb < next {
-                continue;
-            }
+        for (i, piece) in self.pieces[start..].iter().enumerate() {
             if piece.target.lsb > next {
-                return false;
+                break;
             }
             if piece.target.msb >= access.msb {
-                return true;
+                return Some(&self.pieces[start..=start + i]);
             }
             next = piece.target.msb + 1;
         }
-        false
+        None
     }
 }
 
@@ -146,11 +142,34 @@ fn has_unknown_constant<A: Clone + Eq + Hash>(root: NodeId, arena: &SLTNodeArena
     false
 }
 
-/// The operators in the expressions of `roots`, each shared node once:
-/// everything but reads, constants and bit selections.
-fn operators_of<A: Clone + Eq + Hash>(
+/// Assembling independent state inputs in a reader requires a load per
+/// distinct source, even when all the drivers are just wires. Charge the
+/// loads beyond the one needed to read an already assembled value.
+fn extra_input_loads<A: Copy + Eq + Hash>(
+    parts: impl ExactSizeIterator<Item = NodeId>,
+    arena: &SLTNodeArena<A>,
+    drivers: &HashMap<A, Vec<usize>>,
+) -> usize {
+    if parts.len() < 2 {
+        return 0;
+    }
+    let mut inputs = HashSet::default();
+    for part in parts {
+        match arena.get(part) {
+            SLTNode::Input { variable, .. } if !drivers.contains_key(variable) => {
+                inputs.insert(*variable);
+            }
+            _ => return 0,
+        }
+    }
+    inputs.len() - 1
+}
+
+/// Cost of evaluating the expressions of `roots`, counting shared nodes once.
+fn expression_cost<A: Copy + Eq + Hash>(
     roots: impl Iterator<Item = NodeId>,
     arena: &SLTNodeArena<A>,
+    drivers: &HashMap<A, Vec<usize>>,
 ) -> usize {
     let mut pending: Vec<NodeId> = roots.collect();
     let mut seen = HashSet::default();
@@ -160,12 +179,13 @@ fn operators_of<A: Clone + Eq + Hash>(
             continue;
         }
         let node = arena.get(node);
-        if !matches!(
-            node,
-            SLTNode::Input { .. } | SLTNode::Constant(..) | SLTNode::Slice { .. }
-        ) {
-            count += 1;
-        }
+        count += match node {
+            SLTNode::Input { .. } | SLTNode::Constant(..) | SLTNode::Slice { .. } => 0,
+            SLTNode::Concat(parts) => {
+                extra_input_loads(parts.iter().map(|p| p.0), arena, drivers).max(1)
+            }
+            _ => 1,
+        };
         operands(node, &mut pending);
     }
     count
@@ -489,16 +509,19 @@ pub fn inline_nets_with_arrays<A: Copy + Eq + Hash + Ord + Debug + Display>(
         {
             continue;
         }
-        let operators = operators_of(pieces.iter().map(|piece| piece.expr), arena);
-        eligible.insert(*var, Candidate { pieces, operators });
+        let cost = expression_cost(pieces.iter().map(|piece| piece.expr), arena, &drivers);
+        eligible.insert(*var, Candidate { pieces, cost });
     }
-    // Every read of such a net lies in the ranges its paths define.
-    for (variable, access) in &read_ranges {
-        if eligible
-            .get(variable)
-            .is_some_and(|candidate| !candidate.covers(*access))
-        {
-            eligible.remove(variable);
+    // Substitution introduces an implicit concat only over the pieces
+    // actually read. Slices of a wide net can still be forwarded cheaply.
+    for (variable, access) in read_ranges {
+        if let Some(candidate) = eligible.get_mut(&variable) {
+            if let Some(pieces) = candidate.covering(access) {
+                let loads = extra_input_loads(pieces.iter().map(|p| p.expr), arena, &drivers);
+                candidate.cost = candidate.cost.max(loads);
+            } else {
+                eligible.remove(&variable);
+            }
         }
     }
     // A net nothing reads is dead, and so is what only dead nets read.
@@ -585,7 +608,7 @@ pub fn inline_nets_with_arrays<A: Copy + Eq + Hash + Ord + Debug + Display>(
     // it reads ends there, evaluated once in its own place.
     let mut copy_cost: HashMap<A, usize> = HashMap::default();
     for var in &order {
-        let cost = candidates[var].operators
+        let cost = candidates[var].cost
             + sources(var)
                 .iter()
                 .map(|source| copy_cost[source])
@@ -867,7 +890,7 @@ mod tests {
     use celox_design::{BinaryOp, BitAccess, VarAtomBase};
     use num_bigint::BigUint;
 
-    use super::{DUPLICATED_NET_OPERATORS, inline_nets, operators_of};
+    use super::{DUPLICATED_NET_OPERATORS, expression_cost, inline_nets};
     use crate::{HashSet, LogicPath, LogicPathId, LogicPathTarget, NodeId, SLTNode, SLTNodeArena};
 
     fn input(arena: &mut SLTNodeArena<u32>, variable: u32, lsb: usize, msb: usize) -> NodeId {
@@ -971,14 +994,20 @@ mod tests {
         let a = input(&mut arena, 1, 0, 7);
         let b = input(&mut arena, 2, 0, 7);
         let small = and(&mut arena, a, b);
-        assert!(operators_of([small].into_iter(), &arena) <= DUPLICATED_NET_OPERATORS);
+        assert!(
+            expression_cost([small].into_iter(), &arena, &crate::HashMap::default())
+                <= DUPLICATED_NET_OPERATORS
+        );
         let mut large = small;
         for variable in 3..9 {
             let operand = input(&mut arena, variable, 0, 7);
             large = and(&mut arena, large, operand);
         }
         let large_sources: Vec<u32> = (1..9).collect();
-        assert!(operators_of([large].into_iter(), &arena) > DUPLICATED_NET_OPERATORS);
+        assert!(
+            expression_cost([large].into_iter(), &arena, &crate::HashMap::default())
+                > DUPLICATED_NET_OPERATORS
+        );
         let in30 = input(&mut arena, 30, 0, 7);
         let in31 = input(&mut arena, 31, 0, 7);
         let both = and(&mut arena, in30, in31);
@@ -1010,7 +1039,10 @@ mod tests {
             .copied()
             .reduce(|a, b| and(&mut arena, a, b))
             .unwrap();
-        assert!(operators_of([large].into_iter(), &arena) > DUPLICATED_NET_OPERATORS);
+        assert!(
+            expression_cost([large].into_iter(), &arena, &crate::HashMap::default())
+                > DUPLICATED_NET_OPERATORS
+        );
         let shared = input(&mut arena, 10, 0, 7);
         let left = and(&mut arena, shared, operands[0]);
         let right = and(&mut arena, shared, operands[1]);
@@ -1030,6 +1062,51 @@ mod tests {
         let right = and(&mut arena, large, operands[1]);
         assert_eq!(paths[0].expr, and(&mut arena, left, right));
         assert_eq!(sources(&paths[0]), vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn shared_concatenations_are_assembled_once() {
+        for explicit_concat in [false, true] {
+            let mut arena = SLTNodeArena::new();
+            let bits: Vec<_> = (0..8).map(|i| input(&mut arena, i, 0, 0)).collect();
+            let mut paths = if explicit_concat {
+                let parts = bits.iter().rev().map(|&bit| (bit, 1)).collect();
+                let word = arena.alloc(SLTNode::Concat(parts)).unwrap();
+                vec![path(10, 0, 7, word, &(0..8).collect::<Vec<_>>())]
+            } else {
+                bits.iter()
+                    .enumerate()
+                    .map(|(i, &bit)| path(10, i, i, bit, &[i as u32]))
+                    .collect()
+            };
+            let word = input(&mut arena, 10, 0, 7);
+            paths.extend([path(20, 0, 7, word, &[10]), path(21, 0, 7, word, &[10])]);
+            inline_nets(&mut paths, &mut arena, &pinned(&[20, 21])).unwrap();
+            for consumer in paths.iter().filter(|p| p.target.var().unwrap().id >= 20) {
+                assert_eq!(consumer.expr, word);
+                assert_eq!(sources(consumer), [10]);
+            }
+        }
+    }
+
+    #[test]
+    fn narrow_reads_of_separately_driven_pieces_still_inline() {
+        let mut arena = SLTNodeArena::new();
+        let mut paths = Vec::new();
+        for i in 0..8 {
+            let bit = input(&mut arena, i as u32, 0, 0);
+            paths.push(path(10, i, i, bit, &[i as u32]));
+        }
+        for (output, i) in [(20, 1), (21, 6)] {
+            let bit = input(&mut arena, 10, i, i);
+            let mut reader = path(output, 0, 0, bit, &[]);
+            reader.sources.insert(VarAtomBase::new(10, i, i));
+            paths.push(reader);
+        }
+        inline_nets(&mut paths, &mut arena, &pinned(&[20, 21])).unwrap();
+        assert_eq!(targets(&paths), [20, 21]);
+        assert_eq!(sources(&paths[0]), [1]);
+        assert_eq!(sources(&paths[1]), [6]);
     }
 
     /// A read of part of a net takes that part of its expression, by the
