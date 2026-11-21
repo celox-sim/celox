@@ -1,8 +1,8 @@
-//! Port glue between a module and its child instances.
+//! Elaborate a module and lower its instance port assignments into its SLT arena.
 
 use super::*;
 
-/// What the glue of each module reads of the waits of the whole design.
+/// What elaboration of each module reads of the waits of the whole design.
 pub(crate) struct DesignWaits {
     /// Whether a module waits.
     any: bool,
@@ -28,7 +28,7 @@ impl DesignWaits {
     }
 }
 
-pub(crate) fn attach_instance_glue(
+pub(crate) fn elaborate_instances(
     module: &mut SimModule,
     lowered: &LoweredSvModule,
     current_key: &LoweredSvModuleKey,
@@ -286,6 +286,47 @@ pub(crate) fn attach_instance_glue(
     module.comb_boundaries = comb_boundaries(&comb_blocks);
     module.comb_blocks = comb_blocks;
     module.arena = arena;
+    for id in created {
+        module
+            .variables
+            .insert(id, parent_variables[&id].to_symbolic_variable());
+    }
+    let interconnect_ids: HashSet<SourceVarId> = lowered
+        .interconnect_names
+        .iter()
+        .filter_map(|name| signal_names.get(name).copied())
+        .collect();
+    let port_start = module.comb_blocks.len();
+    for (instance, child_id, child, connections) in resolved_instances {
+        let name = &instance.instance_name;
+        let position = module.instances.get(name).map_or(0, Vec::len);
+        let index = module.instance_index(name, position);
+        module
+            .instances
+            .entry(name.clone())
+            .or_default()
+            .push(child_id);
+        let mut references = HashMap::default();
+        let mut child_ref = |id| {
+            *references
+                .entry(id)
+                .or_insert_with(|| module.instance_ports.bind(name, index, id))
+        };
+        lower_port_connections(
+            &mut module.arena,
+            &mut module.comb_blocks,
+            &mut child_ref,
+            &parent_variables,
+            &signal_names,
+            &lowered.constants,
+            &lowered.parameter_types,
+            child,
+            &connections,
+            four_state,
+            &interconnect_ids,
+        )?;
+    }
+    let port_paths = port_start..module.comb_blocks.len();
     if !module.next_state.forms.is_empty() && !four_state {
         let pm = procedural::ProcModule::new(
             &lowered.source,
@@ -297,12 +338,6 @@ pub(crate) fn attach_instance_glue(
             four_state,
             warnings,
         );
-        let mut connected = HashSet::default();
-        for (_, _, _, connections) in &resolved_instances {
-            for actual in connections.iter().filter_map(|c| c.actual_expr.as_ref()) {
-                procedural::expr_idents(actual, &mut connected);
-            }
-        }
         let wires = lowered
             .source
             .signals()
@@ -311,20 +346,20 @@ pub(crate) fn attach_instance_glue(
                 private_wires
                     && signal.is_net()
                     && signal.package_variable().is_none()
-                    && !connected.contains(signal.name())
                     && signal.hierarchical().is_none()
                     && !hierarchical_targets.contains(signal.name())
             })
             .filter_map(|signal| pm.id(signal.name()))
             .filter(|id| {
-                !pm.var(*id).kind.is_port()
+                !interconnect_ids.contains(id)
+                    && !pm.var(*id).kind.is_port()
                     && pm.force_controls(*id).is_none()
                     && !pm.force_holds.contains_key(id)
             })
             .collect();
         lowered
             .edge_schedule
-            .lower(&pm, module, &wires)
+            .finish(module, &wires)
             .map_err(|detail| ParserError::illegal_context("edge schedule", detail, None))?;
     }
     // Signals a kernel or an imperative combinational unit may store twice
@@ -352,6 +387,48 @@ pub(crate) fn attach_instance_glue(
             unit,
             |address| (address.region == WORKING_REGION).then_some(address.var_id),
         ));
+    }
+    for plan in module.next_state.evaluations.values() {
+        use celox_frontend_core::symbolic::artifact::EdgeEvaluation;
+        let mut written = HashSet::default();
+        for batch in plan {
+            match batch {
+                EdgeEvaluation::Graph(form) => {
+                    for target in form
+                        .roots
+                        .iter()
+                        .map(|r| r.target)
+                        .chain(form.ports.iter().map(|p| p.array))
+                    {
+                        if !written.insert(target) {
+                            candidates.push(target);
+                        }
+                    }
+                }
+                EdgeEvaluation::Procedure(unit) => {
+                    candidates.extend(celox_frontend_core::watch::multi_store_only_candidates(
+                        unit,
+                        |addr| (addr.region == WORKING_REGION).then_some(addr.var_id),
+                    ));
+                    let targets: HashSet<_> = unit
+                        .blocks
+                        .values()
+                        .flat_map(|b| &b.instructions)
+                        .filter_map(|i| match i {
+                            SIRInstruction::Store(addr, ..) if addr.region == WORKING_REGION => {
+                                Some(addr.var_id)
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    for target in targets {
+                        if !written.insert(target) {
+                            candidates.push(target);
+                        }
+                    }
+                }
+            }
+        }
     }
     // Combinational event sites follow the flip-flop ones, including the
     // events run-time loops emit.
@@ -401,11 +478,6 @@ pub(crate) fn attach_instance_glue(
             }
             site
         }));
-    for id in created {
-        module
-            .variables
-            .insert(id, parent_variables[&id].to_symbolic_variable());
-    }
     // Combinational processes may read the time too.
     module.time_slot = signal_names.get(TIME_SLOT).copied();
     let mut sample_shadows: Vec<_> = parent_variables
@@ -420,36 +492,10 @@ pub(crate) fn attach_instance_glue(
         .collect();
     initial_copies.sort_by_key(|&(variable, copy)| (variable.0, copy.0));
     module.initial_copies = initial_copies;
-    let interconnect_ids: HashSet<SourceVarId> = lowered
-        .interconnect_names
-        .iter()
-        .filter_map(|name| signal_names.get(name).copied())
-        .collect();
-    for (instance, child_id, child, connections) in resolved_instances {
-        let glue = build_instance_glue(
-            &parent_variables,
-            &signal_names,
-            &lowered.constants,
-            &lowered.parameter_types,
-            child,
-            &connections,
-            four_state,
-            &interconnect_ids,
-        )?;
-        module
-            .glue_blocks
-            .entry(instance.instance_name.clone())
-            .or_default()
-            .push(GlueBlock {
-                module_id: child_id,
-                input_ports: glue.0,
-                output_ports: glue.1,
-                arena: glue.2,
-            });
-    }
     add_forced_net_drivers(module, &parent_variables, &lowered.source)?;
     join_interconnect_drivers(
         module,
+        port_paths,
         lowered,
         &mut parent_variables,
         &signal_names,
@@ -530,12 +576,13 @@ pub(crate) fn attach_instance_glue(
 }
 
 /// Join the drivers that several instances drive on one interconnect
-/// net (23.3.3.7.1): each glue output path that targeted the net is
+/// net (23.3.3.7.1): each port output path that targeted the net is
 /// redirected to a hidden driver variable, and one joined path with
 /// the merged resolution (Table 23-1) drives the net itself, as
 /// `net_resolution::join` does for continuous assignments.
 fn join_interconnect_drivers(
     module: &mut SimModule,
+    port_paths: std::ops::Range<usize>,
     lowered: &LoweredSvModule,
     parent_variables: &mut HashMap<SourceVarId, SvVariable>,
     signal_names: &HashMap<String, SourceVarId>,
@@ -576,28 +623,26 @@ fn join_interconnect_drivers(
             }
         };
         let mut groups: Vec<(sv::ast::NetResolution, Vec<BitAccess>)> = Vec::new();
-        for block in module.glue_blocks.values().flatten() {
-            for (_, path) in &block.output_ports {
-                let LogicPathTarget::Var(target) = &path.target else {
-                    continue;
-                };
-                if target.id != GlueAddr::Parent(var_id) {
-                    continue;
-                }
-                let resolution = resolution_of(target.access);
-                if matches!(
-                    resolution,
-                    sv::ast::NetResolution::Single | sv::ast::NetResolution::Interconnect
-                ) {
-                    continue;
-                }
-                match groups
-                    .iter_mut()
-                    .find(|(group_resolution, _)| *group_resolution == resolution)
-                {
-                    Some((_, accesses)) => accesses.push(target.access),
-                    None => groups.push((resolution, vec![target.access])),
-                }
+        for path in &module.comb_blocks[port_paths.clone()] {
+            let LogicPathTarget::Var(target) = &path.target else {
+                continue;
+            };
+            if target.id != var_id {
+                continue;
+            }
+            let resolution = resolution_of(target.access);
+            if matches!(
+                resolution,
+                sv::ast::NetResolution::Single | sv::ast::NetResolution::Interconnect
+            ) {
+                continue;
+            }
+            match groups
+                .iter_mut()
+                .find(|(group_resolution, _)| *group_resolution == resolution)
+            {
+                Some((_, accesses)) => accesses.push(target.access),
+                None => groups.push((resolution, vec![target.access])),
             }
         }
         for (resolution, accesses) in groups {
@@ -606,58 +651,50 @@ fn join_interconnect_drivers(
             }
             let mut joined = Vec::new();
             let mut index = 0;
-            for block in module.glue_blocks.values_mut().flatten() {
-                for (_, path) in &mut block.output_ports {
-                    let LogicPathTarget::Var(target) = &path.target else {
-                        continue;
-                    };
-                    if target.id != GlueAddr::Parent(var_id)
-                        || !accesses.contains(&target.access)
-                        || resolution_of(target.access) != resolution
-                    {
-                        continue;
-                    }
-                    let access = target.access;
-                    let driver_id = SourceVarId(next_id);
-                    next_id += 1;
-                    let mut hidden = variable.clone();
-                    hidden.hidden = true;
-                    hidden.path =
-                        vec!["$interconnect".to_string(), name.clone(), index.to_string()];
-                    index += 1;
-                    parent_variables.insert(driver_id, hidden.clone());
-                    module
-                        .variables
-                        .insert(driver_id, hidden.to_symbolic_variable());
-                    path.target = LogicPathTarget::Var(VarAtomBase::new(
-                        GlueAddr::Parent(driver_id),
-                        access.lsb,
-                        access.msb,
-                    ));
-                    let input = module.arena.alloc(SLTNode::Input {
-                        variable: driver_id,
-                        signed: variable.signed,
-                        index: Vec::new(),
-                        access,
-                    })?;
-                    joined.push(LogicPath {
-                        target: LogicPathTarget::Var(VarAtomBase::new(
-                            var_id, access.lsb, access.msb,
-                        )),
-                        transparent_copy: false,
-                        expr: input,
-                        sources: [VarAtomBase::new(driver_id, access.lsb, access.msb)]
-                            .into_iter()
-                            .collect(),
-                        previous_sources: HashSet::default(),
-                        address_sources: HashSet::default(),
-                        local_inputs: Vec::new(),
-                        order_before: HashSet::default(),
-                        comb_capture_enable_sites: Vec::new(),
-                        comb_capture_enable_always: false,
-                        pre_lower_nodes: Vec::new(),
-                    });
+            for path in &mut module.comb_blocks[port_paths.clone()] {
+                let LogicPathTarget::Var(target) = &path.target else {
+                    continue;
+                };
+                if target.id != var_id
+                    || !accesses.contains(&target.access)
+                    || resolution_of(target.access) != resolution
+                {
+                    continue;
                 }
+                let access = target.access;
+                let driver_id = SourceVarId(next_id);
+                next_id += 1;
+                let mut hidden = variable.clone();
+                hidden.hidden = true;
+                hidden.path = vec!["$interconnect".to_string(), name.clone(), index.to_string()];
+                index += 1;
+                parent_variables.insert(driver_id, hidden.clone());
+                module
+                    .variables
+                    .insert(driver_id, hidden.to_symbolic_variable());
+                path.target =
+                    LogicPathTarget::Var(VarAtomBase::new(driver_id, access.lsb, access.msb));
+                let input = module.arena.alloc(SLTNode::Input {
+                    variable: driver_id,
+                    signed: variable.signed,
+                    index: Vec::new(),
+                    access,
+                })?;
+                joined.push(LogicPath {
+                    target: LogicPathTarget::Var(VarAtomBase::new(var_id, access.lsb, access.msb)),
+                    transparent_copy: false,
+                    expr: input,
+                    sources: [VarAtomBase::new(driver_id, access.lsb, access.msb)]
+                        .into_iter()
+                        .collect(),
+                    previous_sources: HashSet::default(),
+                    address_sources: HashSet::default(),
+                    local_inputs: Vec::new(),
+                    order_before: HashSet::default(),
+                    comb_capture_enable_sites: Vec::new(),
+                    comb_capture_enable_always: false,
+                    pre_lower_nodes: Vec::new(),
+                });
             }
             let joined = net_resolution::join(
                 &mut module.arena,
@@ -856,12 +893,6 @@ fn check_inout_port_actual(
     Ok(())
 }
 
-type SvGlue = (
-    Vec<(Vec<SourceVarId>, LogicPath<GlueAddr>)>,
-    Vec<(Vec<SourceVarId>, LogicPath<GlueAddr>)>,
-    SLTNodeArena<GlueAddr>,
-);
-
 /// The type of `variable` when it is an unpacked array.
 fn unpacked_array_type(variable: &SvVariable) -> Option<sv::typecheck::UnpackedArrayType> {
     let element_width = unpacked_element_width(variable)?;
@@ -945,7 +976,10 @@ fn reads_interconnect(
     }
 }
 
-fn build_instance_glue(
+fn lower_port_connections(
+    arena: &mut SLTNodeArena<SourceVarId>,
+    paths: &mut Vec<LogicPath<SourceVarId>>,
+    child_ref: &mut impl FnMut(SourceVarId) -> SourceVarId,
     parent_variables: &HashMap<SourceVarId, SvVariable>,
     parent_signal_names: &HashMap<String, SourceVarId>,
     parent_constants: &HashMap<String, i128>,
@@ -954,11 +988,7 @@ fn build_instance_glue(
     connections: &[LoweredSvPortConnection],
     four_state: bool,
     interconnect_ids: &HashSet<SourceVarId>,
-) -> Result<SvGlue, ParserError> {
-    let mut input_ports = Vec::new();
-    let mut output_ports = Vec::new();
-    let mut arena = SLTNodeArena::<GlueAddr>::new();
-
+) -> Result<(), ParserError> {
     let mut connected_formals = HashSet::default();
     for connection in connections {
         let matches = child
@@ -994,7 +1024,7 @@ fn build_instance_glue(
                     && connection
                         .and_then(|item| item.actual_expr.as_ref())
                         .is_some_and(expr_is_unknown_literal);
-                let (mut expr, sources, source_ids) = if let Some(actual_expr) =
+                let (mut expr, sources) = if let Some(actual_expr) =
                     connection.and_then(|item| item.actual_expr.as_ref())
                 {
                     let actual_expr = expr_for_state_mode(actual_expr, four_state);
@@ -1008,19 +1038,19 @@ fn build_instance_glue(
                     } else {
                         floating::precision(&actual_expr, parent_variables, parent_signal_names)
                     };
-                    let (expr, sources, source_ids) = lower_glue_parent_expr(
+                    let (expr, sources) = lower_expr_with_context(
                         &actual_expr,
                         parent_variables,
                         parent_signal_names,
                         parent_constants,
                         parent_parameter_types,
-                        &mut arena,
+                        arena,
                         if from.is_some() || to.is_some() {
                             None
                         } else {
                             Some(width)
                         },
-                        Some(sv_glue_expr_is_signed(
+                        Some(sv_expr_is_signed_with_parameters(
                             &actual_expr,
                             parent_variables,
                             parent_signal_names,
@@ -1036,14 +1066,14 @@ fn build_instance_glue(
                             None,
                         )
                     })?;
-                    let source_signed = sv_glue_expr_is_signed(
+                    let source_signed = sv_expr_is_signed_with_parameters(
                         &actual_expr,
                         parent_variables,
                         parent_signal_names,
                         parent_parameter_types,
                     );
                     let expr = floating::convert(
-                        &mut arena,
+                        arena,
                         expr,
                         from,
                         to,
@@ -1065,17 +1095,17 @@ fn build_instance_glue(
                         )
                     })?;
                     let expr = coerce_node_width(
-                        &mut arena,
+                        arena,
                         expr,
                         Some(width),
-                        sv_glue_expr_is_signed(
+                        sv_expr_is_signed_with_parameters(
                             &actual_expr,
                             parent_variables,
                             parent_signal_names,
                             parent_parameter_types,
                         ),
                     )?;
-                    (expr, sources, source_ids)
+                    (expr, sources)
                 } else if let Some(default) = child
                     .source
                     .ports()
@@ -1107,7 +1137,6 @@ fn build_instance_glue(
                             child_var.signed,
                         ))?,
                         HashSet::default(),
-                        Vec::new(),
                     )
                 } else {
                     let unknown_mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
@@ -1119,7 +1148,6 @@ fn build_instance_glue(
                             false,
                         ))?,
                         HashSet::default(),
-                        Vec::new(),
                     )
                 };
                 if !child_var.is_4state || collapse_unknown_literal {
@@ -1129,35 +1157,31 @@ fn build_instance_glue(
                 if let Some(controls) = procedural_force_controls(&child.variables, *child_port_id)
                 {
                     expr = force_select(
-                        &mut arena,
+                        arena,
                         &mut sources,
-                        controls,
-                        GlueAddr::Child,
+                        (child_ref(controls.0), child_ref(controls.1)),
                         BitAccess::new(0, width - 1),
                         expr,
                         child_var.is_4state && !collapse_unknown_literal,
                     )?;
                 }
-                input_ports.push((
-                    source_ids,
-                    LogicPath {
-                        transparent_copy: false,
-                        target: LogicPathTarget::Var(VarAtomBase::new(
-                            GlueAddr::Child(*child_port_id),
-                            0,
-                            width - 1,
-                        )),
-                        expr,
-                        sources,
-                        address_sources: HashSet::default(),
-                        previous_sources: HashSet::default(),
-                        local_inputs: Vec::new(),
-                        order_before: HashSet::default(),
-                        comb_capture_enable_sites: Vec::new(),
-                        comb_capture_enable_always: false,
-                        pre_lower_nodes: Vec::new(),
-                    },
-                ));
+                paths.push(LogicPath {
+                    transparent_copy: true,
+                    target: LogicPathTarget::Var(VarAtomBase::new(
+                        child_ref(*child_port_id),
+                        0,
+                        width - 1,
+                    )),
+                    expr,
+                    sources,
+                    address_sources: HashSet::default(),
+                    previous_sources: HashSet::default(),
+                    local_inputs: Vec::new(),
+                    order_before: HashSet::default(),
+                    comb_capture_enable_sites: Vec::new(),
+                    comb_capture_enable_always: false,
+                    pre_lower_nodes: Vec::new(),
+                });
             }
             VariableKind::Output => {
                 let Some(connection) = connection else {
@@ -1197,7 +1221,7 @@ fn build_instance_glue(
                     ));
                 };
                 let child_input = arena.alloc(SLTNode::Input {
-                    variable: GlueAddr::Child(*child_port_id),
+                    variable: child_ref(*child_port_id),
                     signed: child_var.signed,
                     index: Vec::new(),
                     access: BitAccess::new(0, width - 1),
@@ -1228,7 +1252,7 @@ fn build_instance_glue(
                     child_var.signed
                 };
                 let child_input = floating::convert(
-                    &mut arena,
+                    arena,
                     child_input,
                     child_var.float,
                     target_float,
@@ -1249,12 +1273,8 @@ fn build_instance_glue(
                         None,
                     )
                 })?;
-                let child_node = coerce_node_width(
-                    &mut arena,
-                    child_input,
-                    Some(target_width),
-                    child_var.signed,
-                )?;
+                let child_node =
+                    coerce_node_width(arena, child_input, Some(target_width), child_var.signed)?;
                 let mut child_lsb = target_width;
                 for OutputLvalueAccess {
                     signal: parent_signal_id,
@@ -1273,61 +1293,49 @@ fn build_instance_glue(
                             access: BitAccess::new(child_lsb, child_lsb + part_width - 1),
                         })?
                     };
-                    let mut expr = coerce_node_width(
-                        &mut arena,
-                        child_expr,
-                        Some(part_width),
-                        child_var.signed,
-                    )?;
+                    let mut expr =
+                        coerce_node_width(arena, child_expr, Some(part_width), child_var.signed)?;
                     if is_2state || !parent_var.is_4state {
                         expr = arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, expr))?;
                     }
                     let mut sources = HashSet::default();
-                    sources.insert(VarAtomBase::new(
-                        GlueAddr::Child(*child_port_id),
-                        0,
-                        width - 1,
-                    ));
+                    sources.insert(VarAtomBase::new(child_ref(*child_port_id), 0, width - 1));
                     if let Some(controls) =
                         procedural_force_controls(parent_variables, parent_signal_id)
                     {
                         expr = force_select(
-                            &mut arena,
+                            arena,
                             &mut sources,
                             controls,
-                            GlueAddr::Parent,
                             access,
                             expr,
                             parent_var.is_4state && !is_2state,
                         )?;
                     }
-                    output_ports.push((
-                        vec![parent_signal_id],
-                        LogicPath {
-                            transparent_copy: false,
-                            target: LogicPathTarget::Var(VarAtomBase::new(
-                                GlueAddr::Parent(parent_signal_id),
-                                access.lsb,
-                                access.msb,
-                            )),
-                            expr,
-                            sources,
-                            address_sources: HashSet::default(),
-                            previous_sources: HashSet::default(),
-                            local_inputs: Vec::new(),
-                            order_before: HashSet::default(),
-                            comb_capture_enable_sites: Vec::new(),
-                            comb_capture_enable_always: false,
-                            pre_lower_nodes: Vec::new(),
-                        },
-                    ));
+                    paths.push(LogicPath {
+                        transparent_copy: true,
+                        target: LogicPathTarget::Var(VarAtomBase::new(
+                            parent_signal_id,
+                            access.lsb,
+                            access.msb,
+                        )),
+                        expr,
+                        sources,
+                        address_sources: HashSet::default(),
+                        previous_sources: HashSet::default(),
+                        local_inputs: Vec::new(),
+                        order_before: HashSet::default(),
+                        comb_capture_enable_sites: Vec::new(),
+                        comb_capture_enable_always: false,
+                        pre_lower_nodes: Vec::new(),
+                    });
                 }
             }
             _ => {}
         }
     }
 
-    Ok((input_ports, output_ports, arena))
+    Ok(())
 }
 
 /// Give a procedurally forced target that a force does not store into,
@@ -1369,14 +1377,6 @@ fn add_forced_net_drivers(
             .filter_map(|path| path.target.var())
             .filter(|var| var.id == target)
             .map(|var| var.access)
-            .chain(module.glue_blocks.values().flatten().flat_map(|block| {
-                block.output_ports.iter().filter_map(|(_, path)| {
-                    path.target
-                        .var()
-                        .filter(|var| var.id == GlueAddr::Parent(target))
-                        .map(|var| var.access)
-                })
-            }))
             .collect();
         driven.sort_by_key(|access| access.lsb);
         let mut undriven = Vec::new();
@@ -1466,17 +1466,16 @@ fn procedural_force_controls(
 /// driver of the variable the force overrides, and drives it again when
 /// the force is released.
 fn force_select(
-    arena: &mut SLTNodeArena<GlueAddr>,
-    sources: &mut HashSet<VarAtomBase<GlueAddr>>,
+    arena: &mut SLTNodeArena<SourceVarId>,
+    sources: &mut HashSet<VarAtomBase<SourceVarId>>,
     (enabled, forced): (SourceVarId, SourceVarId),
-    address: fn(SourceVarId) -> GlueAddr,
     access: BitAccess,
     value: NodeId,
     four_state: bool,
 ) -> Result<NodeId, ParserError> {
-    let input = |arena: &mut SLTNodeArena<GlueAddr>, variable| {
+    let input = |arena: &mut SLTNodeArena<SourceVarId>, variable| {
         arena.alloc(SLTNode::Input {
-            variable: address(variable),
+            variable,
             signed: false,
             index: Vec::new(),
             access,
@@ -1485,7 +1484,7 @@ fn force_select(
     let mask = input(arena, enabled)?;
     let replacement = input(arena, forced)?;
     for control in [enabled, forced] {
-        sources.insert(VarAtomBase::new(address(control), access.lsb, access.msb));
+        sources.insert(VarAtomBase::new(control, access.lsb, access.msb));
     }
     Ok(super::masked::select_masked(
         arena,

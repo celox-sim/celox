@@ -311,7 +311,6 @@ pub(super) fn lower_ff_processes(
             }
         }
     }
-    let mut procedural_triggers = HashSet::default();
     let mut graph = ff_graph::FfGraph::default();
     let measure_forms = next_state_options.report.is_some()
         || (next_state_options.forms
@@ -336,7 +335,7 @@ pub(super) fn lower_ff_processes(
         }
         let sites_before = pm.runtime.event_sites.len();
         let extern_calls_before = pm.externs.calls;
-        let mut lower_procedural = |pm: &mut procedural::ProcModule<'_>| {
+        let mut lower_procedural = |pm: &mut procedural::ProcModule<'_>, body: &[sv::ir::Stmt]| {
             let clock = inferred_clock(pm, process);
             let units = ff::Ff::new(pm, random_seeds[&(0, index)])
                 .with_sparse_memories(shared_memories)
@@ -344,11 +343,11 @@ pub(super) fn lower_ff_processes(
                 .with_sparse_candidates(&edge_memories)
                 .with_window_writes(&window_writes)
                 .with_inferred_clock(clock)
-                .lower_process(process.body())?;
+                .lower_process(body)?;
             if let Some(report) = &mut next_state {
                 report.attempt(
                     pm,
-                    process.body(),
+                    body,
                     &trigger_set,
                     ff_next_state::ImperativeUnits {
                         eval: &units.eval,
@@ -361,18 +360,30 @@ pub(super) fn lower_ff_processes(
         };
         if graph_first
             && graph
-                .try_add(pm, &trigger_set, process.body(), &excluded_graph_targets)
+                .try_add(
+                    pm,
+                    &trigger_set,
+                    process.body(),
+                    &excluded_graph_targets,
+                    &HashSet::default(),
+                )
                 .is_some()
         {
             if measure_forms {
                 // The diagnostic checks the graph against a separate lowering.
                 let checkpoint = pm.checkpoint();
-                lower_procedural(pm)?;
+                lower_procedural(pm, process.body())?;
                 pm.rollback(checkpoint);
             }
             continue;
         }
-        procedural_triggers.insert(trigger_set.clone());
+        let remainder = graph_first
+            .then(|| graph.extract(pm, &trigger_set, process.body(), &excluded_graph_targets))
+            .flatten();
+        let body = remainder.as_deref().unwrap_or_else(|| process.body());
+        if body.is_empty() {
+            continue;
+        }
         graph.flush(
             pm,
             &trigger_set,
@@ -389,7 +400,7 @@ pub(super) fn lower_ff_processes(
             targets,
             staged,
             delayed_sites,
-        } = lower_procedural(pm)?;
+        } = lower_procedural(pm, body)?;
         all_delayed_sites.extend(delayed_sites);
         repeated_writes.extend(repeated_ff_writes(&eval_only, &staged));
         // A process without writes still runs for what it hands to the host:
@@ -418,9 +429,6 @@ pub(super) fn lower_ff_processes(
         insert_or_merge_ff_unit(&mut nba_ff_blocks, trigger_set, nba);
     }
     for trigger in graph.pending.keys().cloned().collect::<Vec<_>>() {
-        if !procedural_triggers.contains(&trigger) {
-            graph.forms.complete.insert(trigger.clone());
-        }
         graph.flush(
             pm,
             &trigger,

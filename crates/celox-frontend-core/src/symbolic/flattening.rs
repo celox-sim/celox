@@ -3,9 +3,7 @@ use std::{collections::BTreeSet, hash::Hash};
 
 use crate::{
     HashMap, InstancePath, SourceAddr as AbsoluteAddr, SourceVarId,
-    symbolic::artifact::{
-        RelocationModule, SimModule, SymbolicGlueAddr as GlueAddr, SymbolicGlueBlock as GlueBlock,
-    },
+    symbolic::artifact::{RelocationModule, SimModule},
 };
 use celox_design::{BinaryOp, BitAccess, InstanceId, UnaryOp, VarAtomBase};
 use celox_slt::{
@@ -255,10 +253,10 @@ pub fn flatten_module(
     let cv = &|id: &SourceVarId| locate(instance_id, *id);
 
     let mut comb_cache = HashMap::default();
-    let mut comb_blocks: Vec<_> = module
+    let comb_blocks: Vec<_> = module
         .comb_blocks
         .iter()
-        .map(|e| convert_logic_path(e, &module.arena, arena, &mut comb_cache, &cv))
+        .map(|e| e.map_addr(&module.arena, arena, &mut comb_cache, cv))
         .collect::<Result<_, _>>()?;
     let mut observer_cache = HashMap::default();
     let comb_observers: Vec<_> = module
@@ -268,26 +266,6 @@ pub fn flatten_module(
             convert_comb_observer(observer, &module.arena, arena, &mut observer_cache, &cv)
         })
         .collect::<Result<_, _>>()?;
-    for (child_instance_name, gbs) in &module.glue_blocks {
-        for (idx, gb) in gbs.iter().enumerate() {
-            let mut glue_cache = HashMap::default();
-            let mut child_path = path.0.clone();
-            child_path.push((
-                child_instance_name.clone(),
-                module.instance_index(child_instance_name, idx),
-            ));
-            let child_id = instance_ids[&InstancePath(child_path)];
-            comb_blocks.extend(convert_glue_block(
-                gb,
-                instance_id,
-                child_id,
-                locate,
-                &gb.arena,
-                arena,
-                &mut glue_cache,
-            )?);
-        }
-    }
     // Atomize logic paths
     let atomized_comb_blocks = atomize_logic_paths(
         &comb_blocks,
@@ -1023,19 +1001,6 @@ fn carried_states_cover_atom<A: Hash + Eq + Clone>(
     }
     false
 }
-fn convert_logic_path<
-    A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display,
-    B: Hash + Eq + Clone,
->(
-    lp: &LogicPath<A>,
-    arena: &SLTNodeArena<A>,
-    target_arena: &mut SLTNodeArena<B>,
-    cache: &mut HashMap<NodeId, NodeId>,
-    f: &impl Fn(&A) -> B,
-) -> Result<LogicPath<B>, SLTNodeFactsError> {
-    lp.map_addr(arena, target_arena, cache, f)
-}
-
 fn convert_comb_observer<
     A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display,
     B: Hash + Eq + Clone,
@@ -1117,39 +1082,6 @@ fn convert_comb_observer<
         written_inputs: observer.written_inputs.iter().map(f).collect(),
         captured_in_loop: observer.captured_in_loop,
     })
-}
-
-fn convert_glue_block(
-    gb: &GlueBlock,
-    parent_id: InstanceId,
-    child_id: InstanceId,
-    locate: &dyn Fn(InstanceId, SourceVarId) -> AbsoluteAddr,
-    arena: &SLTNodeArena<GlueAddr>,
-    target_arena: &mut SLTNodeArena<AbsoluteAddr>,
-    cache: &mut HashMap<NodeId, NodeId>,
-) -> Result<Vec<LogicPath<AbsoluteAddr>>, SLTNodeFactsError> {
-    let GlueBlock {
-        module_id: _,
-        input_ports,
-        output_ports,
-        arena: _,
-    } = gb;
-    let cv = &|addr: &GlueAddr| match addr {
-        GlueAddr::Parent(v) => locate(parent_id, *v),
-        GlueAddr::Child(v) => locate(child_id, *v),
-    };
-    let mut res = Vec::new();
-
-    for (_ports, abb) in input_ports {
-        res.push(convert_logic_path(abb, arena, target_arena, cache, cv)?);
-    }
-    for (_ports, abb) in output_ports {
-        res.push(convert_logic_path(abb, arena, target_arena, cache, cv)?);
-    }
-    for path in &mut res {
-        path.transparent_copy = true;
-    }
-    Ok(res)
 }
 
 #[cfg(test)]

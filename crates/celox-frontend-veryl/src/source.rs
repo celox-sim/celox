@@ -11,8 +11,6 @@ use crate::{
 pub type RegionedVarAddr = celox_design::RegionedVarAddrBase<VarId>;
 pub type AbsoluteAddr = celox_design::AbsoluteAddrBase<VarId>;
 pub type RegionedAbsoluteAddr = celox_design::RegionedAbsoluteAddrBase<VarId>;
-pub type GlueAddr = celox_slt::GlueAddrBase<VarId>;
-pub type GlueBlock = celox_slt::GlueBlockBase<VarId>;
 pub type ModuleInitialMemoryValue = celox_design::InitialStateValue<VarId>;
 
 pub(crate) fn function_call_arg<'a, T>(args: &'a [(VarPath, T)], path: &VarPath) -> Option<&'a T> {

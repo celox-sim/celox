@@ -16,7 +16,9 @@
 //! order, so a later port overrides an earlier root of the same bits; a
 //! constant-index write of a memory after one of its ports is not taken.
 //!
-//! A process this form does not take keeps its imperative units alone.
+//! Blocking assignments update the symbolic store in statement order. Their
+//! roots publish in Active. Independent destinations can still use the graph
+//! when a sibling needs procedural execution.
 
 use super::assign::{Offset, Target};
 use super::*;
@@ -146,6 +148,7 @@ impl Comb<'_, '_> {
     pub(in crate::lowering) fn lower_next_state(
         &mut self,
         body: &[sv::ir::Stmt],
+        blocking: &HashSet<SourceVarId>,
     ) -> Result<NextState, sv::AnalyzerError> {
         self.allow_nonblocking = true;
         self.hold_latches = true;
@@ -155,12 +158,14 @@ impl Comb<'_, '_> {
             return Err(unsupported("runtime events in the next-state form"));
         }
         let Form { shadows, ports } = self.next_state.take().unwrap_or_default();
-        let targets: HashMap<SourceVarId, SourceVarId> = shadows
+        let mut targets: HashMap<SourceVarId, SourceVarId> = shadows
             .iter()
             .map(|(&target, &shadow)| (shadow, target))
             .collect();
-        // A blocking write to a variable others see is visible at once, in
-        // the Active region: it is no next state.
+        // A private blocking destination uses its ordinary symbolic store:
+        // later statements read that expression. Its root publishes in Active
+        // and a nonblocking shadow publishes in NBA.
+        targets.extend(blocking.iter().map(|&id| (id, id)));
         if store
             .keys()
             .any(|id| !targets.contains_key(id) && !self.m.is_hidden(*id))

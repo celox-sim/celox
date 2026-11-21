@@ -264,18 +264,8 @@ pub(super) fn lower_bits_with_context(
                 sv::typecheck::eval_const_expr_with_types(msb, constants, parameter_types)?;
             let lsb_value =
                 sv::typecheck::eval_const_expr_with_types(lsb, constants, parameter_types)?;
-            let (msb, lsb) = if let sv::ir::Expr::Ident(name) = &**expr {
-                let variable = name_to_id.get(name).and_then(|id| variables.get(id))?;
-                (
-                    packed_index_offset(variable, msb_value)?,
-                    packed_index_offset(variable, lsb_value)?,
-                )
-            } else {
-                (
-                    usize::try_from(msb_value).ok()?,
-                    usize::try_from(lsb_value).ok()?,
-                )
-            };
+            let (msb, lsb) =
+                packed_expr_select_offsets(expr, msb_value, lsb_value, variables, name_to_id)?;
             let access = BitAccess::new(msb.min(lsb), msb.max(lsb));
             let node = arena
                 .alloc(SLTNode::Slice {

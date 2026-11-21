@@ -196,6 +196,30 @@ macro_rules! four_state_scheduler {
                 assert_eq!(value(&mut sim, "hits"), (10, 0));
             }
 
+            /// Wake bits in both ready words must survive the same scan. A
+            /// change during the delay must not leak into the rearmed wait.
+            #[test]
+            fn short_change_waits_publish_across_ready_words() {
+                let mut body = String::from("; logic [3:0] a = 0, b = 0;\n");
+                for i in 0..65 {
+                    let delay = if i % 2 == 0 { 3 } else { 7 };
+                    body += &format!(
+                        "int hits{i} = 0; always @(a or b) begin hits{i}++; #{delay}; end\n"
+                    );
+                }
+                body += "initial begin #2 a = 1; #1 b = 'x; #4 b = 'z; #4 a = 2; end";
+                let mut sim = simulation(&body);
+                run(&mut sim, 16);
+                for i in 0..65 {
+                    let expected = if i % 2 == 0 { 3 } else { 2 };
+                    assert_eq!(
+                        value(&mut sim, &format!("hits{i}")),
+                        (expected, 0),
+                        "waiter {i}"
+                    );
+                }
+            }
+
             /// Clocks computed from a clock and an enable that is x or z
             /// for a while, and a clock divided by a flip-flop that starts
             /// at x.

@@ -58,44 +58,25 @@ fn boundary_edges(
             });
         }
     };
-    for (path, id) in expanded {
-        let module_id = &instance_modules[id];
-        let sim_module = &modules[module_id];
-        for (inst_name, glue_blocks) in &sim_module.glue_blocks {
-            for (idx, glue_block) in glue_blocks.iter().enumerate() {
-                let mut child_path = path.0.clone();
-                child_path.push((inst_name.clone(), sim_module.instance_index(inst_name, idx)));
-                let child_id = expanded[&InstancePath(child_path)];
-
-                // Input ports.
-                for (parent_vars, child_addr) in &glue_block.input_ports {
-                    if let Some(target) = child_addr.target.var()
-                        && let GlueAddr::Child(child_var_id) = target.id
-                    {
-                        let child_abs = bindings.locate(child_id, child_var_id);
-                        // Parent -> child: the boundaries of every parent
-                        // variable connected to the port.
-                        for parent_var in parent_vars {
-                            push(
-                                bindings.locate(*id, *parent_var),
-                                child_abs,
-                                BoundaryMap::All,
-                            );
-                        }
-                        // Child -> parent: where the child reads the port in
-                        // parts, the connected range of a parent variable is
-                        // read in the same parts, as in `a = {x[7:4], ...}`
-                        // within one module. Only a connection of one range
-                        // as wide as the port maps bit for bit.
-                        let mut sources = child_addr.sources.iter();
-                        if let (Some(source), None) = (sources.next(), sources.next())
-                            && let GlueAddr::Parent(parent_var) = source.id
+    for &id in expanded.values() {
+        let module = &modules[&instance_modules[&id]];
+        for path in &module.comb_blocks {
+            let Some(target) = path.target.var() else {
+                continue;
+            };
+            let to = bindings.locate(id, target.id);
+            if module.instance_ports.get(target.id).is_some() {
+                for source in &path.sources {
+                    if module.instance_ports.get(source.id).is_none() {
+                        let from = bindings.locate(id, source.id);
+                        push(from, to, BoundaryMap::All);
+                        if path.sources.len() == 1
                             && source.access.msb - source.access.lsb
                                 == target.access.msb - target.access.lsb
                         {
                             push(
-                                child_abs,
-                                bindings.locate(*id, parent_var),
+                                to,
+                                from,
                                 BoundaryMap::Shifted {
                                     source: target.access,
                                     target: source.access,
@@ -104,23 +85,12 @@ fn boundary_edges(
                         }
                     }
                 }
-
-                // Output ports: the target is the parent, the sources are
-                // the child.
-                for (parent_vars, logic_path) in &glue_block.output_ports {
-                    for source in &logic_path.sources {
-                        if let GlueAddr::Child(child_var_id) = source.id {
-                            let child_abs = bindings.locate(child_id, child_var_id);
-                            for parent_var in parent_vars {
-                                let parent_abs = bindings.locate(*id, *parent_var);
-                                // Child -> parent.
-                                push(child_abs, parent_abs, BoundaryMap::All);
-                                // Parent -> child: where the parent wire is
-                                // used in slices, the child output port
-                                // drives the same parts.
-                                push(parent_abs, child_abs, BoundaryMap::All);
-                            }
-                        }
+            } else {
+                for source in &path.sources {
+                    if module.instance_ports.get(source.id).is_some() {
+                        let from = bindings.locate(id, source.id);
+                        push(from, to, BoundaryMap::All);
+                        push(to, from, BoundaryMap::All);
                     }
                 }
             }

@@ -846,7 +846,7 @@ pub(super) fn eval_for_with_effects(
         // The fold body reads loop-carried values, but their initial values
         // may come from external state which is absent from every body update
         // source after carried-state filtering.  Keep those dependencies so
-        // hierarchy glue and preceding procedural writes are scheduled before
+        // port assignments and preceding procedural writes are scheduled before
         // the fold.
         all_sources.extend(
             initial_sources

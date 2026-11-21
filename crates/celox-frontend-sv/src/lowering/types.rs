@@ -158,67 +158,6 @@ pub(super) fn signal_type_from_sv(
     })
 }
 
-pub(super) fn sv_glue_expr_is_signed(
-    expr: &sv::ir::Expr,
-    variables: &HashMap<SourceVarId, SvVariable>,
-    name_to_id: &HashMap<String, SourceVarId>,
-    parameter_types: &HashMap<String, (usize, bool)>,
-) -> bool {
-    match expr {
-        sv::ir::Expr::Ident(name) => name_to_id
-            .get(name)
-            .and_then(|id| variables.get(id))
-            .map(|variable| variable.signed)
-            .or_else(|| parameter_types.get(name).map(|(_, signed)| *signed))
-            .unwrap_or(false),
-        sv::ir::Expr::Literal(literal) => {
-            sv::typecheck::parse_integral_literal(literal).is_some_and(|literal| literal.signed)
-        }
-        sv::ir::Expr::Resize { signed, .. } => *signed,
-        sv::ir::Expr::Select { signed, .. } => *signed,
-        sv::ir::Expr::Inside { .. } => false,
-        sv::ir::Expr::Call { callee, .. } => callee.result_type().is_some_and(|(_, signed)| signed),
-        sv::ir::Expr::Concat(_) | sv::ir::Expr::RepeatConcat { .. } => false,
-        sv::ir::Expr::Unary { op, expr } => {
-            matches!(
-                op,
-                sv::ir::UnaryOp::Plus
-                    | sv::ir::UnaryOp::Minus
-                    | sv::ir::UnaryOp::BitNot
-                    | sv::ir::UnaryOp::ToTwoState
-            ) && sv_glue_expr_is_signed(expr, variables, name_to_id, parameter_types)
-        }
-        sv::ir::Expr::Binary { left, op, right } => match op {
-            sv::ir::BinaryOp::Pow
-            | sv::ir::BinaryOp::Shl
-            | sv::ir::BinaryOp::Shr
-            | sv::ir::BinaryOp::Sar => {
-                sv_glue_expr_is_signed(left, variables, name_to_id, parameter_types)
-            }
-            sv::ir::BinaryOp::Add
-            | sv::ir::BinaryOp::Sub
-            | sv::ir::BinaryOp::Mul
-            | sv::ir::BinaryOp::Div
-            | sv::ir::BinaryOp::Mod
-            | sv::ir::BinaryOp::BitAnd
-            | sv::ir::BinaryOp::BitOr
-            | sv::ir::BinaryOp::BitXor => {
-                sv_glue_expr_is_signed(left, variables, name_to_id, parameter_types)
-                    && sv_glue_expr_is_signed(right, variables, name_to_id, parameter_types)
-            }
-            _ => false,
-        },
-        sv::ir::Expr::Mux {
-            then_expr,
-            else_expr,
-            ..
-        } => {
-            sv_glue_expr_is_signed(then_expr, variables, name_to_id, parameter_types)
-                && sv_glue_expr_is_signed(else_expr, variables, name_to_id, parameter_types)
-        }
-    }
-}
-
 pub(super) fn sv_expr_is_signed_with_parameters(
     expr: &sv::ir::Expr,
     variables: &HashMap<SourceVarId, SvVariable>,

@@ -11,7 +11,6 @@ mod comb_startup;
 pub mod flattening;
 pub mod parallel;
 pub mod pow;
-pub mod remap;
 pub mod settle_plan;
 pub mod width;
 

@@ -344,7 +344,7 @@ fn state_addresses(
         };
         source_to_state.insert(source, state);
     }
-    for (alias, target) in &bindings.targets {
+    for (alias, target) in &bindings.object_aliases {
         source_to_state.insert(*alias, source_to_state[target]);
     }
     // Frame slots are no state objects: each gets an address of its own in

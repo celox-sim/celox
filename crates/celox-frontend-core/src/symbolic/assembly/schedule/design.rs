@@ -213,7 +213,7 @@ pub(super) fn relocate_design(
     let (
         global_arena,
         eval_apply_ffs,
-        eval_only_ffs,
+        evaluations,
         apply_ffs,
         _ff_access_summaries,
         ff_runtime_relocations,
@@ -253,6 +253,7 @@ pub(super) fn relocate_design(
     let timing = relocate_timing(bindings, instance_modules, modules, &processes);
     Ok((
         StateGraph {
+            evaluations,
             transitions: BTreeMap::new(),
             global_arena,
             comb_blocks,
@@ -260,7 +261,7 @@ pub(super) fn relocate_design(
         },
         Units {
             eval_apply_ffs,
-            eval_only_ffs,
+            eval_only_ffs: Default::default(),
             apply_ffs,
             processes,
             functions,

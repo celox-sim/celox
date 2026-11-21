@@ -33,109 +33,24 @@ fn setup_to_flatting(
     let parsed =
         celox_frontend_veryl::parse_ir(&ir, &crate::parser::BuildConfig::default(), &top_id)
             .expect("hierarchy parse failed");
-    let top_module_id = parsed.symbolic.root_id;
-    let modules = parsed.symbolic.modules;
-
-    // Prepare for flatting
-    let instance_id = InstanceId(0);
-    let path = InstancePath(vec![]);
-    let mut instance_ids = HashMap::default();
-    instance_ids.insert(path.clone(), instance_id);
-
-    let sim_module = &modules[&top_module_id];
-
-    // Assign IDs to children (simple 1-level support for tests)
-    let mut glue_instance_map = HashMap::default(); // StrId -> InstanceId
-
-    for (next_instance_id, inst_name) in (1..).zip(sim_module.glue_blocks.keys()) {
-        let mut child_path = path.0.clone();
-        child_path.push((inst_name.clone(), 0));
-        let child_id = InstanceId(next_instance_id);
-        instance_ids.insert(InstancePath(child_path), child_id);
-        glue_instance_map.insert(inst_name.clone(), child_id);
-    }
-
-    // Calculate global boundaries for the top module
-    let mut global_boundaries = HashMap::default();
-
-    // 1. Local boundaries of Top
-    for (var_id, boundaries) in &sim_module.comb_boundaries {
-        let addr = SourceAddr {
-            instance_id,
-            var_id: *var_id,
-        };
-        global_boundaries.insert(addr, boundaries.clone());
-    }
-
-    // 2. Propagate to children (Input Ports)
-    let mut new_child_boundaries = HashMap::default();
-
-    for (inst_name, glues) in &sim_module.glue_blocks {
-        for glue in glues {
-            let child_id = glue_instance_map[inst_name];
-
-            for (_, logic_path) in &glue.input_ports {
-                // logic_path.target is GlueAddr::Child
-                let target_glue_addr = logic_path.target.var().unwrap().id;
-                let target_addr = if let celox_slt::GlueAddrBase::Child(v) = target_glue_addr {
-                    SourceAddr {
-                        instance_id: child_id,
-                        var_id: v,
-                    }
-                } else {
-                    continue;
-                };
-
-                for source in &logic_path.sources {
-                    // source.id is GlueAddr::Parent usually
-                    if let celox_slt::GlueAddrBase::Parent(parent_var) = source.id {
-                        let parent_addr = SourceAddr {
-                            instance_id,
-                            var_id: parent_var,
-                        };
-                        if let Some(bounds) = global_boundaries.get(&parent_addr) {
-                            use std::ops::Bound::*;
-                            // Check which bounds fall into source access
-                            // BitAccess::calculate_atoms uses range((Excluded(self.lsb), Included(self.msb)))
-                            for &bound in bounds
-                                .range((Excluded(source.access.lsb), Included(source.access.msb)))
-                            {
-                                let offset = bound - source.access.lsb;
-                                let target_bound =
-                                    logic_path.target.var().unwrap().access.lsb + offset;
-
-                                new_child_boundaries
-                                    .entry(target_addr)
-                                    .or_insert_with(std::collections::BTreeSet::new)
-                                    .insert(target_bound);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Merge new boundaries
-    for (addr, bounds) in new_child_boundaries {
-        global_boundaries.entry(addr).or_default().extend(bounds);
-    }
-
-    // Call flatting
-    let mut arena = SLTNodeArena::<SourceAddr>::new();
-    let r = celox_frontend_core::symbolic::flattening::flatten_module(
-        sim_module,
-        &path,
-        &instance_ids,
-        &global_boundaries,
-        &HashMap::default(),
-        &mut arena,
-        &|instance_id, var_id| SourceAddr {
-            instance_id,
-            var_id,
+    let mut trace = celox_frontend_core::FrontendTrace::default();
+    celox_frontend_veryl::schedule_symbolic_rtl(
+        parsed,
+        &crate::parser::BuildConfig::default(),
+        &[],
+        &[],
+        false,
+        &celox_frontend_core::ParallelScheduleOptions::default(),
+        &celox_frontend_core::FrontendTraceOptions {
+            sim_modules: true,
+            atomized_comb_blocks: true,
+            ..Default::default()
         },
-    );
-    (r.unwrap().relocation.comb_blocks, modules, arena)
+        Some(&mut trace),
+    )
+    .expect("hierarchy scheduling failed");
+    let (paths, arena) = trace.atomized_comb_blocks.unwrap();
+    (paths, trace.sim_modules.unwrap(), arena)
 }
 
 #[test]
@@ -433,7 +348,10 @@ fn test_boundary_propagation() {
 
     let b_targets: Vec<_> = comb_blocks
         .iter()
-        .filter(|path| path.target.var().unwrap().id.var_id == b_id)
+        .filter(|path| {
+            let addr = path.target.var().unwrap().id;
+            addr.instance_id != InstanceId(0) && addr.var_id == b_id
+        })
         .collect();
 
     // Check stores to c1.b (Input port, driven by Parent)

@@ -139,7 +139,8 @@ impl NextStateReport {
         units: ImperativeUnits<'_>,
     ) -> Option<(NextState, NextState, bool)> {
         pm.attempt_calls();
-        let lowered = comb::Comb::new(pm, &mut self.raw).lower_next_state(body);
+        let lowered =
+            comb::Comb::new(pm, &mut self.raw).lower_next_state(body, &HashSet::default());
         pm.end_attempt_calls(false);
         let form = match lowered {
             Ok(form) => form,

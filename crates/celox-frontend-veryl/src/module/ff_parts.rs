@@ -192,12 +192,3 @@ pub(super) fn remap_for_effect_site_ids<A: std::hash::Hash + Eq + Clone>(
             ParserError::illegal_context("ForFold runtime-event remap", error.to_string(), None)
         })
 }
-
-pub(super) fn collect_glue_sources(
-    expr: NodeId,
-    arena: &SLTNodeArena<GlueAddr>,
-) -> HashSet<VarAtomBase<GlueAddr>> {
-    let mut set = HashSet::default();
-    collect_glue_sources_with_window(expr, None, arena, &mut set);
-    set
-}

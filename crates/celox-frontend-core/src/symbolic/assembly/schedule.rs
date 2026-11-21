@@ -18,6 +18,7 @@ macro_rules! timed_sub {
 }
 
 mod comb;
+mod dependencies;
 mod design;
 mod flip_flops;
 mod instrument;
@@ -25,6 +26,7 @@ mod next_state;
 mod projection;
 mod state;
 use comb::*;
+use dependencies::StateDependencies;
 use design::*;
 use flip_flops::*;
 use instrument::*;
@@ -88,6 +90,7 @@ fn top_instances(
 /// Value definitions, observation paths and triggered updates refer to the
 /// same relocated SLT nodes throughout scheduling.
 struct StateGraph {
+    evaluations: EventEvaluations,
     transitions: BTreeMap<AbsoluteAddr, celox_slt::next_state::NextStateForm<AbsoluteAddr>>,
     global_arena: SLTNodeArena<AbsoluteAddr>,
     comb_blocks: Vec<LogicPath<AbsoluteAddr>>,
@@ -149,29 +152,19 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         expand_design(symbolic, flatten_timing, trace_opts, &mut trace)?;
     let (mut logic, mut units, mut parallel_ff_units, mut split_commits) =
         relocate_design(&design, parallel, flatten_timing, trace_opts, &mut trace)?;
-    let graph_clocks = if fused_ff_factory.is_none() && !four_state && !parallel.enabled() {
-        complete_graph_clocks(&design)
-    } else {
-        Default::default()
-    };
-    let measure_graphs = tracing::enabled!(target: "celox::next_state", tracing::Level::INFO);
-    if measure_graphs || !graph_clocks.is_empty() {
-        logic.transitions = relocate_next_state(
-            &design,
-            &mut logic.global_arena,
-            (!measure_graphs).then_some(&graph_clocks),
-        )?;
-    }
-    // Instrument the scheduled writes below, including graph publications that
-    // a testbench watches. Simultaneous edges keep their split evaluation.
-    for clock in &graph_clocks {
-        if let Some(form) = logic.transitions.get(clock) {
-            let unit = lower_clock(&logic.global_arena, form, &design.unpacked_element_widths)
-                .map_err(|e| ParserError::illegal_context("clock transition", e, None))?;
-            units.eval_apply_ffs.insert(*clock, vec![unit]);
-        }
-    }
     let variables = variable_shapes(&design);
+    let measure_graphs = tracing::enabled!(target: "celox::next_state", tracing::Level::INFO);
+    let (graph_clocks, write_domains) = logic.lower_events(
+        &design,
+        &mut units,
+        &instance_values,
+        &split_commits,
+        &variables,
+        parallel,
+        four_state,
+        fused_ff_factory.is_some(),
+        measure_graphs,
+    )?;
     let (counted, declaration_probes, occurrence_probes) = instrument_occurrences(
         &design,
         &mut logic,
@@ -279,7 +272,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         &units,
         &counted,
         &clock_nets,
-        &graph_clocks,
+        &write_domains,
     );
     let graph_ticks = if settle_flags.is_none()
         && counted.is_empty()
@@ -298,11 +291,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
     let grouping = if let Some(request) = settle_flags.clone() {
         scheduler::CombGrouping::Partitioned(request)
     } else if !parallel.enabled() && !units.eval_apply_ffs.is_empty() {
-        scheduler::CombGrouping::EventDomains(settle_write_domains(
-            &logic,
-            &units.eval_apply_ffs,
-            &graph_clocks,
-        ))
+        scheduler::CombGrouping::EventDomains(write_domains)
     } else {
         scheduler::CombGrouping::Whole
     };

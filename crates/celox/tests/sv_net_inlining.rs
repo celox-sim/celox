@@ -620,3 +620,143 @@ endmodule"#;
         }
     }
 }
+
+/// A producer register, the wire connecting two instances, and a RAM port
+/// participate in the same event graph, even with a procedure on that edge.
+#[test]
+fn clocked_consumers_follow_wires_across_instances() {
+    let source = r#"
+        module Producer(input clk, input [3:0] d, output wire [3:0] o);
+            reg [3:0] q;
+            always @(posedge clk) q <= d;
+            assign o = q;
+        endmodule
+        module Consumer(input clk, reset, input [3:0] i, input [1:0] a,
+                        output reg [3:0] scalar, stored, output reg [3:0] count);
+            reg [3:0] ram [0:3];
+            always @(posedge clk or posedge reset)
+                if (reset) scalar <= 0; else scalar <= i;
+            always @(posedge clk) begin
+                ram[a] <= i;
+                stored <= ram[a];
+            end
+            always @(posedge clk) count = count + 1;
+        endmodule
+        module Top(input clk, reset, input [3:0] d, input [1:0] a,
+                   output [3:0] scalar, stored, count);
+            wire [3:0] link;
+            Producer p(clk, d, link);
+            Consumer c(clk, reset, link, a, scalar, stored, count);
+        endmodule"#;
+    let builder = || {
+        Simulator::from_sv_sources(vec![(source, Path::new("graph.sv"))], "Top")
+            .four_state(false)
+            .opt_level(OptLevel::O2)
+    };
+    let plan = settle_plan(builder());
+    for net in [".link", "p.o", "c.i"] {
+        assert!(!stores(&plan, net), "{net} is still materialized:\n{plan}");
+    }
+    let mut sim = builder().build_interpreter().unwrap();
+    let clock = sim.event("clk");
+    let [d, a, scalar, stored, count] =
+        ["d", "a", "scalar", "stored", "count"].map(|name| sim.signal(name));
+    for (cycle, input, address, sample, old) in [
+        (1, 5, 2, 0, 0),
+        (2, 7, 2, 5, 0),
+        (3, 1, 1, 7, 0),
+        (4, 3, 2, 1, 5),
+    ] {
+        sim.modify(|io| {
+            io.set(d, input as u8);
+            io.set(a, address as u8);
+        })
+        .unwrap();
+        sim.tick(clock).unwrap();
+        for (signal, value) in [(scalar, sample), (stored, old), (count, cycle)] {
+            assert_eq!(sim.get(signal), (value as u8).into(), "cycle {cycle}");
+        }
+    }
+    let reset = sim.event("reset");
+    sim.tick(reset).unwrap();
+    assert_eq!(sim.get(scalar), 0u8.into());
+}
+
+#[test]
+fn a_procedure_samples_the_settled_copy_before_its_blocking_write_propagates() {
+    let source = r#"
+        module Top(input clk, input [7:0] d, output reg [7:0] sample);
+            reg [7:0] active;
+            wire [7:0] copy = active;
+            always @(posedge clk) begin
+                active = d;
+                sample <= copy;
+            end
+        endmodule"#;
+    let build = || {
+        Simulator::from_sv_sources(vec![(source, Path::new("blocking.sv"))], "Top")
+            .four_state(false)
+            .opt_level(OptLevel::O2)
+    };
+    let mut sim = build().build_interpreter().unwrap();
+    let clk = sim.event("clk");
+    let [d, sample] = ["d", "sample"].map(|name| sim.signal(name));
+    for (input, previous) in [(7u8, 0u8), (13, 7), (1, 13)] {
+        sim.modify(|io| io.set(d, input)).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(sample), previous.into());
+    }
+}
+
+#[test]
+fn per_destination_samples_keep_the_statement_order_and_case_priority() {
+    let source = r#"
+        module Top(input clk, input [1:0] sel, input [7:0] d,
+                   output reg [7:0] t,q,old,alt,copy,selected);
+            always @(posedge clk) begin
+                old <= t;
+                t = d*d;
+                casez (sel)
+                    2'b0?: q <= t;
+                    2'b?0: alt <= t;
+                    default: q <= t + 1;
+                endcase
+            end
+            always @(posedge clk) begin
+                copy = d;
+                casez (sel)
+                    2'b0?: copy = d + 1;
+                    2'b?0: selected <= d + 2;
+                    default: selected <= d + 3;
+                endcase
+            end
+        endmodule"#;
+    let build = || {
+        Simulator::from_sv_sources(vec![(source, Path::new("destinations.sv"))], "Top")
+            .four_state(false)
+            .opt_level(OptLevel::O2)
+    };
+    fn run<B: celox::SimBackend>(mut sim: Simulator<B>) {
+        let clk = sim.event("clk");
+        let [d, sel] = ["d", "sel"].map(|name| sim.signal(name));
+        let out = ["old", "t", "q", "alt", "copy", "selected"].map(|name| sim.signal(name));
+        for (input, selector, expected) in [
+            (2u8, 0u8, [0u8, 4, 4, 0, 3, 0]),
+            (3, 2, [4, 9, 4, 9, 3, 5]),
+            (5, 3, [9, 25, 26, 9, 5, 8]),
+            (7, 1, [25, 49, 49, 9, 8, 8]),
+        ] {
+            sim.modify(|io| {
+                io.set(d, input);
+                io.set(sel, selector);
+            })
+            .unwrap();
+            sim.tick(clk).unwrap();
+            for (signal, value) in out.into_iter().zip(expected) {
+                assert_eq!(sim.get(signal), value.into(), "d={input}, sel={selector}");
+            }
+        }
+    }
+    run(build().build_interpreter().unwrap());
+    run(build().build().unwrap());
+}

@@ -70,19 +70,10 @@ impl Generator<'_> {
         process: usize,
         delay: AbsoluteAddr,
         wait: &Wait,
-        waiting: RegisterId,
         settled: bool,
     ) -> RegisterId {
         let result = self.b.alloc_bit(1, false);
         let done = self.b.new_block_with(vec![result]);
-        let dispatch = self.b.new_block();
-        let zero = self.constant(0, 1);
-        self.b.seal_block(SIRTerminator::Branch {
-            cond: waiting,
-            true_block: (dispatch, Vec::new()),
-            false_block: (done, vec![zero]),
-        });
-        self.b.switch_to_block(dispatch);
         let site = self.load(delay, SCHEDULER_TIME_WIDTH);
         let targets: Vec<_> = wait
             .alternatives
@@ -98,7 +89,7 @@ impl Generator<'_> {
         self.dispatch_sites(site, &sites, invalid);
         for (alternative, block) in wait.alternatives.iter().zip(targets) {
             self.b.switch_to_block(block);
-            let occurred = self.check_raw_wait(process, alternative, waiting, settled);
+            let occurred = self.check_raw_wait(process, alternative, settled);
             self.b.seal_block(SIRTerminator::Jump(done, vec![occurred]));
         }
         self.b.switch_to_block(done);

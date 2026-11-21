@@ -5,7 +5,7 @@
 
 use std::collections::BTreeSet;
 
-use celox_design::{ModuleId, VarAtomBase};
+use celox_design::VarAtomBase;
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 pub mod canon;
@@ -71,43 +71,6 @@ pub struct CombObserver<A> {
     pub written_input_atoms: Vec<VarAtomBase<A>>,
     pub written_inputs: Vec<A>,
     pub captured_in_loop: bool,
-}
-
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
-)]
-pub enum GlueAddrBase<V> {
-    Parent(V),
-    Child(V),
-}
-
-impl<V: Copy> GlueAddrBase<V> {
-    pub fn var_id(&self) -> V {
-        match self {
-            GlueAddrBase::Parent(value) | GlueAddrBase::Child(value) => *value,
-        }
-    }
-}
-
-impl<V: std::fmt::Display> std::fmt::Display for GlueAddrBase<V> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            GlueAddrBase::Parent(value) => write!(f, "GlueAddr::Parent({value})"),
-            GlueAddrBase::Child(value) => write!(f, "GlueAddr::Child({value})"),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(bound(
-    serialize = "V: serde::Serialize",
-    deserialize = "V: serde::Deserialize<'de> + std::hash::Hash + Eq + Clone"
-))]
-pub struct GlueBlockBase<V: std::hash::Hash + Eq + Clone> {
-    pub module_id: ModuleId,
-    pub input_ports: Vec<(Vec<V>, LogicPath<GlueAddrBase<V>>)>,
-    pub output_ports: Vec<(Vec<V>, LogicPath<GlueAddrBase<V>>)>,
-    pub arena: SLTNodeArena<GlueAddrBase<V>>,
 }
 
 #[cfg(test)]

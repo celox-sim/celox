@@ -9,10 +9,10 @@ use veryl_parser::Parser;
 
 use super::SLTNodeArena;
 use super::{
-    collect_glue_sources, collect_parent_output_address_sources,
+    collect_parent_output_address_sources, collect_port_sources,
     uses_named_external_port_associations,
 };
-use crate::{GlueAddr, HashMap};
+use crate::HashMap;
 use celox_design::{BinaryOp, BitAccess, VarAtomBase};
 use celox_slt::{SLTForFoldGroupState, SLTNode};
 
@@ -206,18 +206,18 @@ module Top (
 }
 
 #[test]
-fn for_fold_group_glue_sources_keep_initial_but_hide_scoped_updates() {
+fn for_fold_group_port_sources_keep_initial_but_hide_scoped_updates() {
     let loop_id = VarId::default();
     let mut state_id = loop_id;
     state_id.inc();
     let mut external_id = state_id;
     external_id.inc();
-    let loop_addr = GlueAddr::Parent(loop_id);
-    let state_addr = GlueAddr::Parent(state_id);
-    let external_addr = GlueAddr::Parent(external_id);
+    let loop_addr = loop_id;
+    let state_addr = state_id;
+    let external_addr = external_id;
 
     let mut arena = SLTNodeArena::new();
-    let input = |arena: &mut SLTNodeArena<GlueAddr>, variable| {
+    let input = |arena: &mut SLTNodeArena<VarId>, variable| {
         arena
             .alloc(SLTNode::Input {
                 variable,
@@ -277,7 +277,7 @@ fn for_fold_group_glue_sources_keep_initial_but_hide_scoped_updates() {
         })
         .unwrap();
 
-    let sources = collect_glue_sources(group, &arena);
+    let sources = collect_port_sources(group, &arena);
 
     assert!(sources.contains(&VarAtomBase::new(state_addr, 0, 7)));
     assert!(sources.contains(&VarAtomBase::new(state_addr, 8, 15)));

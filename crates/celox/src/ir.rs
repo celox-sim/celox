@@ -1935,7 +1935,6 @@ fn comb_capture_enable_needs_unaliased_old_value<'a>(
 pub(crate) mod verify {
     pub(crate) use celox_sir::verify::*;
 }
-pub use celox_slt::{GlueAddrBase, GlueBlockBase};
 
 pub use celox_frontend_core::TraceSimModule as SimModule;
 #[cfg(all(
