@@ -6426,6 +6426,53 @@ fn native_indexed_ranges_preserve_declared_direction_for_dynamic_bases() {
 }
 
 #[test]
+fn escaped_format_conversions_consume_empty_arguments() {
+    // `\045d` is a `%d` (IEEE 1800-2023 5.9.1): the empty argument after it
+    // is the value it converts, not one written as a space.
+    let source = r#"module Top(input int value);
+        initial $display("v=\045d",, value);
+    endmodule"#;
+    let ir = analyze_source(source, Path::new("escaped_format.sv")).unwrap();
+    let body = ir.modules()[0].initial_processes()[0].body();
+    let crate::ir::Stmt::SystemTask { args, .. } = &body[0] else {
+        panic!("expected display");
+    };
+    assert!(
+        matches!(args[1], crate::ir::SystemTaskArg::Empty),
+        "{args:?}"
+    );
+}
+
+#[test]
+fn joined_display_literals_keep_their_own_escapes() {
+    // `"\0"` then `"45d"` is a NUL and the text `45d`, not the escape `\045`.
+    let source = r#"module Top(input int value);
+        initial begin
+            $display(value, "\0", "45d");
+            $display("%v",, value);
+        end
+    endmodule"#;
+    let ir = analyze_source(source, Path::new("joined_literals.sv")).unwrap();
+    let body = ir.modules()[0].initial_processes()[0].body();
+    let crate::ir::Stmt::SystemTask { args, .. } = &body[0] else {
+        panic!("expected display");
+    };
+    let crate::ir::SystemTaskArg::Str(template) = &args[0] else {
+        panic!("{args:?}");
+    };
+    let decoded = crate::typecheck::unescape_string_literal(template).unwrap();
+    assert!(decoded.ends_with(b"\x0045d"), "{template:?}");
+    // `%v` takes a value too: the empty argument is the one it converts.
+    let crate::ir::Stmt::SystemTask { args, .. } = &body[1] else {
+        panic!("expected display");
+    };
+    assert!(
+        matches!(args[1], crate::ir::SystemTaskArg::Empty),
+        "{args:?}"
+    );
+}
+
+#[test]
 fn native_system_task_arguments_preserve_strings_omissions_and_query_operands() {
     let source = r#"module Top(input int value);
         initial begin
