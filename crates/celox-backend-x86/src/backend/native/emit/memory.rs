@@ -913,15 +913,11 @@ pub(super) fn emit_sparse_commit(
         }
     } else {
         for summary_index in 0..*summary_word_count {
-            let summary_offset = *summary_words_offset + (summary_index * 8) as i32;
-            asm.mov(
-                rax,
-                qword_ptr(mem_operand(&context, BaseReg::SimState, summary_offset)),
-            )?;
-            asm.mov(
-                qword_ptr(mem_operand(&context, BaseReg::SimState, summary_offset)),
-                0i32,
-            )?;
+            let summary_word = qword_ptr(mem_operand(
+                &context,
+                BaseReg::SimState,
+                *summary_words_offset + (summary_index * 8) as i32,
+            ));
             let mut summary_loop = asm.create_label();
             let mut summary_next = asm.create_label();
             let final_summary = summary_index + 1 == *summary_word_count;
@@ -935,9 +931,11 @@ pub(super) fn emit_sparse_commit(
             } else {
                 local_summary_done
             };
-            asm.set_label(&mut summary_loop)?;
+            asm.mov(rax, summary_word)?;
             asm.test(rax, rax)?;
             asm.je(summary_done)?;
+            asm.mov(summary_word, 0i32)?;
+            asm.set_label(&mut summary_loop)?;
             asm.bsf(rcx, rax)?;
             asm.btr(rax, rcx)?;
             asm.mov(rdx, rcx)?;
@@ -949,7 +947,8 @@ pub(super) fn emit_sparse_commit(
 
             emit_sparse_dirty_word(asm, &dirty, summary_next)?;
             asm.set_label(&mut summary_next)?;
-            asm.jmp(summary_loop)?;
+            asm.test(rax, rax)?;
+            asm.jne(summary_loop)?;
             if use_continuation {
                 asm.set_label(
                     continuation_label
