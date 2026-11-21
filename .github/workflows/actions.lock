@@ -31,7 +31,7 @@ workflows:
         - 'actions/upload-artifact@v7'
         - 'cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086'
         - 'dtolnay/rust-toolchain@master'
-        - 'mergifyio/gha-mergify-ci@392d123d84a27960993927aec1f2cbb059fb95c1'
+        - 'mergifyio/gha-mergify-ci@9a7adba0627bb4ff8f170b0e9854171b5b3e6235'
         - 'pnpm/action-setup@v6'
         - 'swatinem/rust-cache@v2'
         - 'taiki-e/install-action@v2'
@@ -283,19 +283,14 @@ dependencies:
         commit: 'sha1-abea47f85e598557f500fa1fd2ab7464fcb39406'
         owner_id: 1006268
         repo_id: 212984112
-    'mergifyio/gha-mergify-ci@392d123d84a27960993927aec1f2cbb059fb95c1':
-        ref: 'v27'
-        commit: 'sha1-392d123d84a27960993927aec1f2cbb059fb95c1'
+    'mergifyio/gha-mergify-ci@9a7adba0627bb4ff8f170b0e9854171b5b3e6235':
+        ref: 'v29'
+        commit: 'sha1-9a7adba0627bb4ff8f170b0e9854171b5b3e6235'
         owner_id: 37838584
         repo_id: 827022088
         uses:
-            - 'mergifyio/setup-cli@dc99f07e699b94b39e5495c24596372813eadcbc'
+            - 'mergifyio/setup-cli@f4029a9e48b04e184138fdb17df2b27eb035d8bf'
             - 're-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35'
-    'mergifyio/setup-cli@dc99f07e699b94b39e5495c24596372813eadcbc':
-        ref: 'v1.3.0'
-        commit: 'sha1-dc99f07e699b94b39e5495c24596372813eadcbc'
-        owner_id: 37838584
-        repo_id: 1267289500
     'mergifyio/setup-cli@f4029a9e48b04e184138fdb17df2b27eb035d8bf':
         ref: 'v1.5.0'
         commit: 'sha1-f4029a9e48b04e184138fdb17df2b27eb035d8bf'
