@@ -35,6 +35,7 @@ mod domains;
 mod event_order;
 mod generate;
 mod generator;
+mod group_changes;
 pub(crate) mod host_inputs;
 mod inline;
 mod nba;
@@ -654,6 +655,11 @@ struct EventSchedule {
     publications: HashMap<AbsoluteAddr, u64>,
     /// First bit of the consumer word, after the clock and NBA event bits.
     publication_offset: usize,
+    /// Exact consumer masks indexed by clock or NBA event, when every
+    /// conditional group has its own bit in the publication word.
+    event_readers: Option<Vec<u64>>,
+    /// After a group runs, changes of these intermediate results enable later groups.
+    changed_outputs: HashMap<usize, Vec<(AbsoluteAddr, u64)>>,
     groups: Vec<(Activation, Vec<usize>)>,
 }
 

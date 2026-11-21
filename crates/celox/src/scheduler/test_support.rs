@@ -75,6 +75,7 @@ pub(crate) struct PlanSummary {
     /// settled state (`Lazy::kernels`).
     pub(crate) lazy: Option<Vec<bool>>,
     pub(crate) incremental: bool,
+    pub(crate) changed_outputs: Vec<AbsoluteAddr>,
     pub(crate) nba_groups: Vec<Vec<AbsoluteAddr>>,
     pub(crate) publications: HashMap<AbsoluteAddr, u64>,
     pub(crate) event_groups: Vec<Vec<AbsoluteAddr>>,
@@ -105,6 +106,13 @@ pub(crate) fn plan_for_test(program: &LaidOutProgram) -> Result<PlanSummary, Str
             .map(|&event| plan.events[event].signal)
             .collect(),
         incremental: plan.incremental.is_some(),
+        changed_outputs: plan
+            .incremental
+            .as_ref()
+            .and_then(|p| p.events.as_ref())
+            .into_iter()
+            .flat_map(|s| s.changed_outputs.values().flatten().map(|&(addr, _)| addr))
+            .collect(),
         nba_groups: plan
             .incremental
             .as_ref()

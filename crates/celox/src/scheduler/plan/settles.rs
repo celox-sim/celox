@@ -570,18 +570,31 @@ impl<'a> PlanBuilder<'a> {
         let mut groups = event_order::order(activations, &inputs, &outputs);
         let start = (events.len() + nba_targets.len()).next_multiple_of(64);
         let mut publications = HashMap::default();
+        let mut event_readers = None;
+        let mut changed_outputs: HashMap<_, Vec<_>> = HashMap::default();
         let count = groups.iter().filter(|(a, _)| !a.every_settle).count();
         if count > 0 && start + 64 <= program.layout().widths[&self.slots.settle_events] {
             // Publish a ready-to-use consumer mask. Even a wide clock
             // domain still requires only one word at the settle boundary.
             // Adjacent groups can share a bit if the schedule is larger.
-            let mut sinks = HashMap::default();
+            if count <= 63 {
+                event_readers = Some(vec![0; events.len() + nba_targets.len()]);
+            }
+            let mut sinks: HashMap<_, u64> = HashMap::default();
             for (i, (activation, members)) in groups
                 .iter_mut()
                 .filter(|(a, _)| !a.every_settle)
                 .enumerate()
             {
                 let bit = i * count.min(63) / count;
+                if let Some(readers) = &mut event_readers {
+                    for (word, mut mask) in activation.events.iter_u64_digits().enumerate() {
+                        while mask != 0 {
+                            readers[word * 64 + mask.trailing_zeros() as usize] |= 1u64 << bit;
+                            mask &= mask - 1;
+                        }
+                    }
+                }
                 activation.events.set_bit((start + bit) as u64, true);
                 for &unit in members.iter() {
                     for &addr in &outputs[unit] {
@@ -592,13 +605,31 @@ impl<'a> PlanBuilder<'a> {
             register_inputs.extend(
                 sir.processes
                     .iter()
+                    .take(schema.processes.len())
                     .flat_map(instructions)
                     .flat_map(written_storage)
                     .filter(|w| w.region == STABLE_REGION)
                     .map(|w| storage(w.absolute_addr()))
                     .filter(|a| reads.contains(a)),
             );
-            let readers = forward.reader_masks(sinks);
+            let boundaries = if event_readers.is_some() {
+                self.publication_boundaries(&groups, &inputs, &outputs, &sinks, &register_inputs)
+            } else {
+                HashMap::default()
+            };
+            let readers = forward.reader_masks(sinks, &boundaries);
+            for (addr, producer) in boundaries {
+                let later = readers[&addr] & !(producer | (producer - 1));
+                if later != 0 {
+                    let bit = producer.trailing_zeros() as usize;
+                    changed_outputs.entry(bit).or_default().push((addr, later));
+                }
+            }
+            for outputs in changed_outputs.values_mut() {
+                outputs.sort_unstable_by_key(|&(addr, readers)| {
+                    (readers, program.layout().offsets[&addr], addr)
+                });
+            }
             publications.extend(register_inputs.into_iter().map(|addr| {
                 // A change with only retained readers still needs a settle.
                 (addr, readers.get(&addr).copied().unwrap_or(1u64 << 63))
@@ -632,9 +663,96 @@ impl<'a> PlanBuilder<'a> {
                 nba_targets,
                 publications,
                 publication_offset: start,
+                event_readers,
+                changed_outputs,
                 groups,
             }),
             untracked: None,
         })
+    }
+
+    /// Stop eager propagation at results shared by many readers. A packed
+    /// input can also fan out through several units that each publish some of
+    /// its lanes. Include the smaller units fed by that same input.
+    fn publication_boundaries(
+        &self,
+        groups: &[(Activation, Vec<usize>)],
+        inputs: &[HashSet<AbsoluteAddr>],
+        outputs: &[HashSet<AbsoluteAddr>],
+        sinks: &HashMap<AbsoluteAddr, u64>,
+        register_inputs: &HashSet<AbsoluteAddr>,
+    ) -> HashMap<AbsoluteAddr, u64> {
+        const MIN_FANOUT: usize = 8;
+        let layout = self.program.layout();
+        let home = home(self.shared);
+        let mut excluded = self.found.retained.clone();
+        excluded.extend(register_inputs);
+        excluded.extend(self.schema.nba_sites.iter().map(|site| home(site.target)));
+        // A snapshot of the representative must cover every alias, including
+        // unknown bits. Unpacked aliases can have a different element stride.
+        for (alias, representative) in self.shared {
+            if layout.widths.get(alias) != layout.widths.get(representative)
+                || layout.is_4states.get(alias) != layout.is_4states.get(representative)
+                || layout.unpacked_arrays.contains_key(alias)
+            {
+                excluded.insert(*representative);
+            }
+        }
+
+        excluded.extend(
+            self.sir
+                .eval_comb
+                .iter()
+                .flat_map(instructions)
+                .flat_map(written_storage)
+                .filter(|w| w.region != STABLE_REGION)
+                .map(|w| home(w.absolute_addr())),
+        );
+        let mut uses = HashMap::default();
+        for (group, (a, members)) in groups.iter().enumerate() {
+            for &i in members {
+                if a.every_settle {
+                    excluded.extend(&outputs[i]);
+                }
+                for &addr in &inputs[i] {
+                    let (_, count) = uses.entry(addr).or_insert((group, 0usize));
+                    *count += 1;
+                }
+            }
+        }
+        let wide_fanout: HashSet<_> = inputs
+            .iter()
+            .zip(outputs)
+            .filter(|(reads, writes)| reads.len() == 1 && writes.len() >= MIN_FANOUT)
+            .flat_map(|(reads, _)| reads.iter().copied())
+            .collect();
+        let mut boundaries = HashMap::default();
+        for (group, (_, members)) in groups.iter().enumerate() {
+            for &i in members {
+                let distributed = inputs[i].len() == 1 && !inputs[i].is_disjoint(&wide_fanout);
+                for addr in &outputs[i] {
+                    // One producer group must finish every write before the
+                    // first reader. Opaque or independently writable storage
+                    // cannot use a comparison around this group.
+                    let Some(&bit) = sinks.get(addr) else {
+                        continue;
+                    };
+                    if bit.is_power_of_two()
+                        && uses.get(addr).is_some_and(|&(first, n)| {
+                            first > group && (n >= MIN_FANOUT || distributed)
+                        })
+                        && !excluded.contains(addr)
+                        && layout
+                            .widths
+                            .get(addr)
+                            .is_some_and(|w| (1..=256).contains(w))
+                        && !layout.unpacked_arrays.contains_key(addr)
+                    {
+                        boundaries.insert(*addr, bit);
+                    }
+                }
+            }
+        }
+        boundaries
     }
 }

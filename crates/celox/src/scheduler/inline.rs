@@ -198,6 +198,20 @@ impl Generator<'_> {
             if width > MAX_BITS {
                 return None;
             }
+            // Partial stores of one scalar share a snapshot. Counting each
+            // bit separately can exhaust the range budget on a single word.
+            let addr = target.absolute_addr();
+            let layout = self.program.layout();
+            let (start, width) = match layout.widths.get(&addr) {
+                Some(&bits)
+                    if bits <= 64
+                        && !layout.unpacked_arrays.contains_key(&addr)
+                        && start.checked_add(width).is_some_and(|end| end <= bits) =>
+                {
+                    (0, bits)
+                }
+                _ => (*start, width),
+            };
             let mut offset = 0;
             while offset < width {
                 let width = (width - offset).min(64);
