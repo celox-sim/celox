@@ -85,8 +85,10 @@ fn top_instances(
         .collect()
 }
 
-/// The combinational logic of the relocated design while it is symbolic.
-struct CombLogic {
+/// Value definitions, observation paths and triggered updates refer to the
+/// same relocated SLT nodes throughout scheduling.
+struct StateGraph {
+    transitions: BTreeMap<AbsoluteAddr, celox_slt::next_state::NextStateForm<AbsoluteAddr>>,
     global_arena: SLTNodeArena<AbsoluteAddr>,
     comb_blocks: Vec<LogicPath<AbsoluteAddr>>,
     comb_observers: Vec<CombObserver<AbsoluteAddr>>,
@@ -147,22 +149,28 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         expand_design(symbolic, flatten_timing, trace_opts, &mut trace)?;
     let (mut logic, mut units, mut parallel_ff_units, mut split_commits) =
         relocate_design(&design, parallel, flatten_timing, trace_opts, &mut trace)?;
-    let graph_clocks = if fused_ff_factory.is_none()
-        && !four_state
-        && !parallel.enabled()
-        && units.processes.is_empty()
-        && units.eval_apply_ffs.len() <= MERGED_COMB_APPLY_EVENTS
-    {
+    let graph_clocks = if fused_ff_factory.is_none() && !four_state && !parallel.enabled() {
         complete_graph_clocks(&design)
     } else {
         Default::default()
     };
     let measure_graphs = tracing::enabled!(target: "celox::next_state", tracing::Level::INFO);
-    let next_state_forms = if measure_graphs || !graph_clocks.is_empty() {
-        relocate_next_state(&design, &mut logic.global_arena)?
-    } else {
-        BTreeMap::new()
-    };
+    if measure_graphs || !graph_clocks.is_empty() {
+        logic.transitions = relocate_next_state(
+            &design,
+            &mut logic.global_arena,
+            (!measure_graphs).then_some(&graph_clocks),
+        )?;
+    }
+    // Instrument the scheduled writes below, including graph publications that
+    // a testbench watches. Simultaneous edges keep their split evaluation.
+    for clock in &graph_clocks {
+        if let Some(form) = logic.transitions.get(clock) {
+            let unit = lower_clock(&logic.global_arena, form, &design.unpacked_element_widths)
+                .map_err(|e| ParserError::illegal_context("clock transition", e, None))?;
+            units.eval_apply_ffs.insert(*clock, vec![unit]);
+        }
+    }
     let variables = variable_shapes(&design);
     let (counted, declaration_probes, occurrence_probes) = instrument_occurrences(
         &design,
@@ -259,7 +267,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
     )?;
     // Release the diagnostic DAGs before scheduling the combinational paths.
     if measure_graphs {
-        drop(next_state_dags(&next_state_forms, &logic));
+        drop(next_state_dags(&logic.transitions, &logic));
     }
     let parallel_comb_blocks = parallel.enabled().then(|| logic.comb_blocks.clone());
     // The flag object of a partitioned settle is declared once the
@@ -274,14 +282,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         && ignored_loops.is_empty()
         && true_loops.is_empty()
     {
-        fused_graph_ticks(
-            &graph_clocks,
-            &next_state_forms,
-            &logic,
-            &var_widths,
-            &design.unpacked_element_widths,
-            &units.apply_ffs,
-        )
+        logic.tick_programs(&graph_clocks, &clock_nets, &design.unpacked_element_widths)
     } else {
         FfUnits::default()
     };
@@ -337,9 +338,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         &var_widths,
         four_state,
     )?;
-    // The comb schedule no longer refers to SLT nodes. Release its arena before
-    // constructing the clock-fused schedules, whose arena already owns its
-    // remapped nodes.
+    // All graph programs now own their sampled instructions.
     drop(logic.global_arena);
     if let Some(s) = sched_start {
         tracing::debug!("[flatten] scheduler::sort: {:?}", s.elapsed());

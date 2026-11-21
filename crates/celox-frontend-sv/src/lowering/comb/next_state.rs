@@ -22,7 +22,7 @@ use super::assign::{Offset, Target};
 use super::*;
 
 /// One bit range of a target and its next value.
-pub(in crate::lowering) type NextStateRoot = celox_slt::next_state::FlopRoot<SourceVarId>;
+pub(in crate::lowering) type NextStateRoot = celox_slt::next_state::ValueRoot<SourceVarId>;
 
 /// A nonblocking write of an unpacked-array element at a run-time index.
 pub(in crate::lowering) type RamWritePort = celox_slt::next_state::RamWritePort<SourceVarId>;

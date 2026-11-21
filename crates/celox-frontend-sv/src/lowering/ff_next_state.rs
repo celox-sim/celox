@@ -190,8 +190,8 @@ impl NextStateReport {
         (
             self.dag,
             celox_frontend_core::symbolic::artifact::NextStateForms {
-                complete: Default::default(),
                 forms: self.forms,
+                ..Default::default()
             },
         )
     }
@@ -259,7 +259,7 @@ fn check(
     units: &ImperativeUnits<'_>,
     seed: u64,
 ) -> Check {
-    let unit = match next_state_unit(pm, dag, form, STABLE_REGION) {
+    let unit = match next_state_unit(pm, dag, form, celox_slt::next_state::Publication::Direct) {
         Ok(unit) => unit,
         Err(reason) => return Check::Mismatch(format!("form not lowered: {reason}")),
     };

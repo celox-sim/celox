@@ -8,7 +8,7 @@ use super::*;
 /// the declaration startup and once for the runtime.
 pub(super) fn instrument_occurrences(
     design: &Design,
-    logic: &mut CombLogic,
+    logic: &mut StateGraph,
     units: &mut Units,
     parallel_ff_units: &mut FfParts,
     split_commits: &mut SplitCommits,
@@ -27,10 +27,11 @@ pub(super) fn instrument_occurrences(
         unpacked_element_widths,
         ..
     } = design;
-    let CombLogic {
+    let StateGraph {
         global_arena,
         comb_blocks,
         comb_observers,
+        ..
     } = logic;
     let Units {
         eval_apply_ffs,

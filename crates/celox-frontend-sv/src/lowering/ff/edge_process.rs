@@ -419,7 +419,7 @@ impl Ff<'_, '_> {
 
 /// Reuse the sparse next-state protocol used by the Veryl frontend: no whole
 /// memory seed, and publication touches only the dirty ranges.
-pub(super) fn emit_sparse_memory_commits(
+pub(in crate::lowering) fn emit_sparse_memory_commits(
     builder: &mut SIRBuilder<Addr>,
     targets: &[VarAtomBase<SourceVarId>],
     sparse: &HashSet<SourceVarId>,

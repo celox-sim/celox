@@ -185,11 +185,22 @@ pub struct SimModule {
     pub next_state: NextStateForms,
 }
 
+/// A contiguous sequence of sampled updates, or a procedure that must run
+/// at this point in the active region. Graphs on either side sample separately.
+#[derive(Clone, Debug)]
+pub enum EdgeEvaluation<A, B> {
+    Graph(celox_slt::next_state::NextStateForm<A>),
+    Procedure(ExecutionUnit<B>),
+}
+
 /// The next-state forms (`celox_slt::next_state`) of the edge-triggered
 /// processes a frontend lowered into one: each with its trigger set, its
 /// nodes in the same `SimModule::arena` as all combinational paths.
 #[derive(Clone, Debug, Default)]
 pub struct NextStateForms {
+    /// Executable evaluations in source order, including procedural boundaries.
+    pub evaluations:
+        HashMap<TriggerSet<SourceVarId>, Vec<EdgeEvaluation<SourceVarId, SymbolicRegionedAddr>>>,
     /// Trigger groups whose forms account for every executable process.
     /// Assembly may schedule these roots with the combinational producers.
     pub complete: HashSet<TriggerSet<SourceVarId>>,

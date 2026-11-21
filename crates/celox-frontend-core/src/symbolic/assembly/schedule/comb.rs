@@ -7,7 +7,7 @@ use super::*;
 /// verify the result. Returns the width of every variable.
 pub(super) fn prepare_comb_logic(
     design: &Design,
-    logic: &mut CombLogic,
+    logic: &mut StateGraph,
     units: &mut Units,
     trace_opts: &FrontendTraceOptions,
     trace: &mut Option<&mut FrontendTrace>,
@@ -19,10 +19,11 @@ pub(super) fn prepare_comb_logic(
         unpacked_element_widths,
         ..
     } = design;
-    let CombLogic {
+    let StateGraph {
         global_arena,
         comb_blocks,
         comb_observers,
+        ..
     } = logic;
     let Units {
         runtime_errors,
@@ -114,7 +115,7 @@ pub(super) type FusedInputs = (
 pub(super) fn fused_ff_inputs(
     fused_ff_factory: Option<&dyn FusedFfLoweringFactory>,
     design: &Design,
-    logic: &CombLogic,
+    logic: &StateGraph,
     ff_runtime_relocations: &HashMap<InstanceId, FfRuntimeRelocation>,
     var_widths: &HashMap<AbsoluteAddr, usize>,
     ignored_loops: &HashSet<(AbsoluteAddr, AbsoluteAddr)>,
@@ -128,7 +129,7 @@ pub(super) fn fused_ff_inputs(
         unpacked_element_widths,
         ..
     } = design;
-    let CombLogic {
+    let StateGraph {
         global_arena,
         comb_blocks,
         ..
@@ -231,14 +232,14 @@ pub(super) fn event_nets(
 /// the startup of every wildcard process by the object that marks it
 /// initialized.
 pub(super) fn comb_process_state(
-    logic: &CombLogic,
+    logic: &StateGraph,
     variables: &HashMap<AbsoluteAddr, (usize, bool)>,
     four_state: bool,
 ) -> (
     HashSet<AbsoluteAddr>,
     BTreeMap<AbsoluteAddr, celox_slt::CombStartup<AbsoluteAddr>>,
 ) {
-    let CombLogic {
+    let StateGraph {
         global_arena,
         comb_blocks,
         ..
@@ -329,7 +330,7 @@ pub(super) fn inline_unobserved_nets(
     fused_ff_factory: Option<&dyn FusedFfLoweringFactory>,
     four_state: bool,
     design: &Design,
-    logic: &mut CombLogic,
+    logic: &mut StateGraph,
     units: &Units,
     parallel_ff_units: &FfParts,
     split_commits: &SplitCommits,
@@ -347,10 +348,11 @@ pub(super) fn inline_unobserved_nets(
         unpacked_element_widths,
         ..
     } = design;
-    let CombLogic {
+    let StateGraph {
         global_arena,
         comb_blocks,
         comb_observers,
+        ..
     } = logic;
     let Units {
         eval_apply_ffs,
@@ -443,7 +445,7 @@ pub(super) fn inline_unobserved_nets(
 pub(super) fn plan_settle_flags(
     parallel: &ParallelScheduleOptions,
     design: &Design,
-    logic: &CombLogic,
+    logic: &StateGraph,
     units: &Units,
     counted: &BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>>,
     clock_nets: &HashSet<AbsoluteAddr>,
@@ -453,7 +455,7 @@ pub(super) fn plan_settle_flags(
     } = design;
     let root_id = design.root_id;
     let process_count = design.process_count;
-    let CombLogic {
+    let StateGraph {
         global_arena,
         comb_blocks,
         ..

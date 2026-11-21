@@ -135,7 +135,8 @@ impl<Addr> SIRBuilder<Addr> {
         id
     }
 
-    fn normalize_branch_condition(&mut self, cond: RegisterId) -> RegisterId {
+    /// Materialize the unsigned one-bit predicate used by a SIR branch.
+    pub fn normalize_branch_condition(&mut self, cond: RegisterId) -> RegisterId {
         let cond_type = self.register(&cond).clone();
         if matches!(
             cond_type,
