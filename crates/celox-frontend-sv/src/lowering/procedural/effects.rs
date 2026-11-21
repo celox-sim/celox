@@ -193,19 +193,25 @@ impl ProcModule<'_> {
         false
     }
 
-    /// Whether `body` has no effect but its writes: no system task, no
-    /// subroutine call, no system function that reads the simulation.
+    /// Whether the statement tree computes blocking assignments from
+    /// its inputs without timing controls or other observable effects.
     pub(super) fn is_pure(&self, body: &[sv::ir::Stmt]) -> bool {
         let mut pure = true;
         let mut calls = Vec::new();
         for stmt in body {
             stmt.walk(&mut |stmt| {
-                pure &= !matches!(
+                use sv::ir::Stmt;
+                pure &= matches!(
                     stmt,
-                    sv::ir::Stmt::SystemTask { .. }
-                        | sv::ir::Stmt::Eval(_)
-                        | sv::ir::Stmt::Call { .. }
-                        | sv::ir::Stmt::Return(_)
+                    Stmt::Assign {
+                        nonblocking: false,
+                        ..
+                    } | Stmt::AssignConcat {
+                        nonblocking: false,
+                        ..
+                    } | Stmt::Local { .. }
+                        | Stmt::If { .. }
+                        | Stmt::Case { .. }
                 );
                 stmt_calls(stmt, &mut calls);
             });
