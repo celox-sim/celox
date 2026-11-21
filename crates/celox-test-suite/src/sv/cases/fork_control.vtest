@@ -773,3 +773,30 @@ program Consumer(output int checks, ended_state);
 endprogram"#)
  (top Top) (run_until 9)
  (assert_eq late 0) (assert_eq checks 3) (assert_eq ended_state 0))
+
+; IEEE 1800-2023 9.6.2: a `disable` from another process ends the named
+; block it names; the process of the block continues after it, and an
+; `always` procedure starts again.
+(case disable_ends_named_blocks_of_other_processes
+  (source "external_disable.sv" #"
+module Top(output int count, output int resumed, output int hits);
+  initial begin
+    begin : work
+      forever begin
+        #2 count++;
+        // A loop of the block's own may end early.
+        for (int k = 0; k < 4; k++) if (k == 1) break;
+      end
+    end
+    resumed = count + 100;
+  end
+  initial #5 disable work;
+  always begin : again
+    #4 hits++;
+  end
+  initial #2 disable again;
+endmodule
+"#)
+  (top Top)
+  (run_until 9)
+  (assert_eq count 2) (assert_eq resumed 102) (assert_eq hits 1))

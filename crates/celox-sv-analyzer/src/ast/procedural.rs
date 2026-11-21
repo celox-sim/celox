@@ -14,6 +14,7 @@ mod class_methods;
 mod control;
 mod display_formats;
 mod effects;
+pub(super) mod external_disables;
 mod final_procedures;
 mod foreach;
 mod initial_processes;
@@ -100,6 +101,8 @@ pub(super) struct BodyState<'a> {
     /// `timed_tasks::classify` checks against IEEE 1800-2023 16.6 once
     /// every subroutine of the scope is known.
     pub assertion_callees: Vec<String>,
+    /// The named blocks a `disable` ends from outside them (9.6.2).
+    pub disables: external_disables::ExternalDisables,
 }
 
 /// The methods of the classes of a scope that a pass over its subroutines

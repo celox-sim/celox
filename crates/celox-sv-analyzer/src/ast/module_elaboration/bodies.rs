@@ -26,6 +26,7 @@ impl ScopeElaboration<'_> {
             static_initializers: Vec::new(),
             constant_evaluation: false,
             assertion_callees: Vec::new(),
+            disables: Default::default(),
         };
         (
             self.subroutines,
@@ -97,6 +98,25 @@ impl ScopeElaboration<'_> {
             )?);
             (subroutines, comb_processes, ff_processes, initial_processes)
         };
+        // The blocks a `disable` ends from outside them keep their process
+        // in variables of the scope (IEEE 1800-2023 9.6.2); a `disable` of
+        // any other name outside its block stays unsupported.
+        let disables = std::mem::take(&mut body_state.disables);
+        if disables
+            .targets
+            .iter()
+            .any(|target| disables.ambiguous.contains(target) || !disables.blocks.contains(target))
+        {
+            return Err(unsupported("disable statement"));
+        }
+        let mut blocks: Vec<_> = disables.blocks.into_iter().collect();
+        blocks.sort_unstable();
+        for label in blocks {
+            self.signals.extend(procedural::external_disables::signals(
+                &label,
+                &mut session.types,
+            ));
+        }
         net_delays::lower(
             syntax_tree,
             &session.types,

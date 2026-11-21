@@ -1165,17 +1165,19 @@ impl BodyBuilder<'_, '_, '_> {
                 Job::EndScope => self.pop_scope(),
                 Job::EndScopeName(previous) => self.dims.scope_name = previous,
                 Job::BlockEnd { id, start } => {
-                    let Some((_, registered, targeted)) = self.named_blocks.pop() else {
+                    let Some((label, registered, targeted)) = self.named_blocks.pop() else {
                         return Err(disagreement());
                     };
                     debug_assert_eq!(registered, id);
                     // A block no `disable` names is ordinary sequential
                     // code: keeping it flat leaves every analysis of the
                     // enclosing statement list as it is without the label.
+                    let mut body = output.split_off(start);
                     if targeted {
-                        let body = output.split_off(start);
-                        output.push(Stmt::Block { id, body });
+                        body = vec![Stmt::Block { id, body }];
                     }
+                    // A `disable` elsewhere may end it too (9.6.2).
+                    output.extend(self.external_disable_block(label, body));
                 }
                 Job::ImplicitEvent { start, sensitivity } => {
                     let wait = timing::implicit_event(
@@ -2965,7 +2967,7 @@ mod tests {
     #[test]
     fn native_scope_jobs_restore_bindings_after_a_typed_leaf_error() {
         let session = &mut Session::default();
-        let tree=crate::source_tree::parse_source("module M;initial begin automatic int outer_value=1;begin automatic int inner_value=2;disable target;end end endmodule",std::path::Path::new("scope-error.sv")).unwrap();
+        let tree=crate::source_tree::parse_source("module M;initial begin automatic int outer_value=1;begin automatic int inner_value=2;disable target.inner;end end endmodule",std::path::Path::new("scope-error.sv")).unwrap();
         let tree = AnalysisContext::unspecialized(&tree);
         let mut locals = Vec::new();
         let mut counter = 0;
@@ -2983,6 +2985,7 @@ mod tests {
             static_initializers: Vec::new(),
             constant_evaluation: false,
             assertion_callees: Vec::new(),
+            disables: Default::default(),
         };
         let mut builder = BodyBuilder::new(
             &tree,
