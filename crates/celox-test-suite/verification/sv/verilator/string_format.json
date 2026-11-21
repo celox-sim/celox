@@ -2,6 +2,17 @@
   "cases": [
     {
       "category": "Types",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:11:19: syntax error, unexpected ')', expecting IDENTIFIER-for-type\n   11 |         $display(,);\n      |                   ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.054 for more assistance.\n%Error: Exiting due to 1 error(s)\n",
+      "expectation": "Simulation",
+      "name": "string_format::display_empty_arguments_and_later_formats",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "string_format::formatted_strings_into_integral_outputs at 521:3: assert_eq d: expected 0x5a, got 0x58",
       "expectation": "Simulation",
       "name": "string_format::formatted_strings_into_integral_outputs",

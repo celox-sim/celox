@@ -1393,6 +1393,10 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "execute",
                             "native testbench exited without reaching $finish",
                         ),
+                        (
+                            "verilator",
+                            "string_format::display_empty_arguments_and_later_formats",
+                        ) => ("compile_error", "compile", "syntax error, unexpected ')'"),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

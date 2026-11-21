@@ -27,18 +27,45 @@ impl BodyBuilder<'_, '_, '_> {
         let Some(start) = template_index(task, args) else {
             return;
         };
+        // An empty argument that no conversion consumes produces a single
+        // space (IEEE 1800-2023 21.2.1.1), as a string literal of one space
+        // does.
+        let mut pending = 0;
+        for arg in args.iter_mut().skip(start) {
+            match arg {
+                SystemTaskArg::Str(literal) if pending == 0 => {
+                    pending = spelled_conversions(literal).len();
+                }
+                _ if pending > 0 => pending -= 1,
+                SystemTaskArg::Empty => *arg = SystemTaskArg::Str(" ".to_string()),
+                SystemTaskArg::Expr(_) | SystemTaskArg::Str(_) => {}
+            }
+        }
+        // Every string literal argument may hold formats for the values
+        // after it, not only the first argument (21.2.1). Values before the
+        // first literal take their default conversions in a format that
+        // starts empty.
+        if !matches!(args.get(start), Some(SystemTaskArg::Str(_)))
+            && args
+                .iter()
+                .skip(start)
+                .any(|arg| matches!(arg, SystemTaskArg::Str(_)))
+        {
+            args.insert(start, SystemTaskArg::Str(String::new()));
+            ids.insert(start, None);
+        }
         let Some(SystemTaskArg::Str(first)) = args.get(start) else {
             return;
         };
-        let mut text = first.clone();
-        let mut pending = format_conversions(&text).len();
+        let mut text = self_contained_spelling(first);
+        let mut pending = spelled_conversions(first).len();
         let mut later_format = false;
         for arg in &args[start + 1..] {
             match arg {
                 SystemTaskArg::Str(literal) if pending == 0 => {
                     later_format = true;
-                    pending = format_conversions(literal).len();
-                    text.push_str(literal);
+                    pending = spelled_conversions(literal).len();
+                    text.push_str(&self_contained_spelling(literal));
                 }
                 _ if pending > 0 => pending -= 1,
                 SystemTaskArg::Expr(value) => text.push_str(&default_conversion(
@@ -55,13 +82,13 @@ impl BodyBuilder<'_, '_, '_> {
         }
         // The values keep their places; the further formats are folded into
         // the first one.
-        let mut pending = format_conversions(first).len();
+        let mut pending = spelled_conversions(first).len();
         let mut kept = vec![SystemTaskArg::Str(text)];
         let mut kept_ids = vec![ids.get(start).copied().flatten()];
         for (position, arg) in args.iter().enumerate().skip(start + 1) {
             match arg {
                 SystemTaskArg::Str(literal) if pending == 0 => {
-                    pending = format_conversions(literal).len();
+                    pending = spelled_conversions(literal).len();
                 }
                 arg => {
                     pending = pending.saturating_sub(1);
@@ -397,6 +424,35 @@ pub(super) fn swrite_radix(name: &str) -> Option<system_functions::Radix> {
     })
 }
 
+/// [`format_conversions`] of the string literal spelled `spelling`, whose
+/// formats are in its text after its escape sequences: `\045d` is a `%d`
+/// (IEEE 1800-2023 5.9.1, 21.2.1).
+fn spelled_conversions(spelling: &str) -> Vec<char> {
+    match typecheck::unescape_string_literal(spelling) {
+        Some(bytes) => format_conversions(&String::from_utf8_lossy(&bytes)),
+        None => format_conversions(spelling),
+    }
+}
+
+/// The spelling of the text of string literal `spelling` whose escape
+/// sequences end within it, so that literals joined into one format keep
+/// their own text: three-digit octal escapes for all but printable ASCII.
+fn self_contained_spelling(spelling: &str) -> String {
+    let Some(bytes) = typecheck::unescape_string_literal(spelling) else {
+        return spelling.to_string();
+    };
+    let mut text = String::with_capacity(bytes.len());
+    for byte in bytes {
+        match byte {
+            b'\\' => text.push_str("\\\\"),
+            b'"' => text.push_str("\\\""),
+            b' '..=b'~' => text.push(byte as char),
+            _ => text.push_str(&format!("\\{byte:03o}")),
+        }
+    }
+    text
+}
+
 /// The conversions of a format, in the order they take arguments
 /// (IEEE 1800-2023 21.2.1.2): flags, a width and a precision may precede
 /// each.
@@ -416,7 +472,7 @@ pub(super) fn format_conversions(text: &str) -> Vec<char> {
             while chars.next_if(char::is_ascii_digit).is_some() {}
         }
         if let Some(spec) = chars.next()
-            && "bBoOhHxXdDiIcCsStTeEfFgGpP".contains(spec)
+            && "bBoOhHxXdDiIcCsStTeEfFgGpPvVuUzZ".contains(spec)
         {
             conversions.push(spec);
         }
@@ -444,7 +500,7 @@ pub(super) fn scale_time_conversions(
     let Some(SystemTaskArg::Str(text)) = args.get(template) else {
         return Ok(());
     };
-    for (offset, spec) in format_conversions(text).into_iter().enumerate() {
+    for (offset, spec) in spelled_conversions(text).into_iter().enumerate() {
         if !matches!(spec, 't' | 'T') {
             continue;
         }
