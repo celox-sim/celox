@@ -288,6 +288,18 @@ pub(super) fn lower_ff_processes(
     let mut excluded_graph_targets = HashSet::default();
     if graph_first {
         excluded_graph_targets.extend(window_writes.union(shared_variables).cloned());
+        // The graph publishes private, single-writer memories with the same
+        // dirty-element protocol as procedural edge updates.
+        excluded_graph_targets.extend(
+            module
+                .signals()
+                .iter()
+                .filter(|signal| {
+                    !signal.r#type().unpacked_ranges().is_empty()
+                        && !edge_memories.contains(signal.name())
+                })
+                .map(|signal| signal.name().to_owned()),
+        );
         // A held value is a root too. Preserve the publication order where
         // several processes can write slices of the same object.
         for (name, writes) in &drivers.writes {

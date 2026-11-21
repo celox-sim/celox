@@ -15,13 +15,14 @@
 use super::*;
 use celox_slt::SLTNode;
 use celox_slt::canon::{intern, reachable, same_op_bit_runs};
-use celox_slt::next_state::NextStateForm;
+use celox_slt::next_state::{NextStateForm, Publication, ValueRoot, lower_transition};
 
 /// The forms of the design's instances, relocated into `arena`, one per
 /// canonical clock: the forms of a clock's processes, in instance order.
 pub(super) fn relocate_next_state(
     design: &Design,
     arena: &mut SLTNodeArena<AbsoluteAddr>,
+    clocks: Option<&HashSet<AbsoluteAddr>>,
 ) -> Result<BTreeMap<AbsoluteAddr, NextStateForm<AbsoluteAddr>>, ParserError> {
     let mut instances: Vec<_> = design.instance_modules.iter().collect();
     instances.sort_unstable_by_key(|(instance, _)| instance.0);
@@ -32,6 +33,9 @@ pub(super) fn relocate_next_state(
         for (trigger, form) in &module.next_state.forms {
             let clock = locate(&trigger.clock);
             let clock = design.clock_domains.get(&clock).copied().unwrap_or(clock);
+            if clocks.is_some_and(|clocks| !clocks.contains(&clock)) {
+                continue;
+            }
             let relocated = form
                 .relocate(&module.arena, arena, &locate)
                 .map_err(|error| {
@@ -70,147 +74,99 @@ pub(super) fn complete_graph_clocks(design: &Design) -> HashSet<AbsoluteAddr> {
     complete
 }
 
-/// Schedule the D inputs and the combinational paths that drive them in a
-/// single SLT arena. D is a working-region definition, so a Q feedback edge
-/// reads stable state and cannot form a same-cycle dependency. The original
-/// commit phase publishes every sampled D after the last such read.
-pub(super) fn fused_graph_ticks(
-    clocks: &HashSet<AbsoluteAddr>,
-    forms: &BTreeMap<AbsoluteAddr, NextStateForm<AbsoluteAddr>>,
-    logic: &CombLogic,
-    widths: &HashMap<AbsoluteAddr, usize>,
-    element_widths: &HashMap<AbsoluteAddr, usize>,
-    applications: &FfUnits,
-) -> FfUnits {
-    let mut fused = FfUnits::default();
-    if clocks.is_empty()
-        || logic.comb_blocks.iter().any(|path| {
-            !matches!(path.target, LogicPathTarget::Var(_))
-                || !path.previous_sources.is_empty()
+/// Lower a sampled clock domain in the address space of the relocated design.
+pub(super) fn lower_clock(
+    arena: &SLTNodeArena<AbsoluteAddr>,
+    form: &NextStateForm<AbsoluteAddr>,
+    elements: &HashMap<AbsoluteAddr, usize>,
+) -> Result<ExecutionUnit<RegionedAbsoluteAddr>, String> {
+    lower_transition(
+        arena,
+        form,
+        Publication::Direct,
+        false,
+        |addr, region| RegionedAbsoluteAddr::from_absolute_addr(region, addr),
+        elements,
+    )
+}
+
+impl StateGraph {
+    /// Select the writes and event signals needed by this edge. The runtime
+    /// settles observable outputs after publication, so the tick only needs
+    /// their drivers when a sampled value depends on them.
+    pub(super) fn tick_programs(
+        &self,
+        clocks: &HashSet<AbsoluteAddr>,
+        event_nets: &HashSet<AbsoluteAddr>,
+        elements: &HashMap<AbsoluteAddr, usize>,
+    ) -> FfUnits {
+        if clocks.is_empty() {
+            return Default::default();
+        }
+        let mut event_roots = Vec::new();
+        let mut driven = HashMap::<AbsoluteAddr, Vec<BitAccess>>::default();
+        for path in &self.comb_blocks {
+            let LogicPathTarget::Var(target) = &path.target else {
+                return Default::default();
+            };
+            if !path.previous_sources.is_empty()
+                || !path.order_before.is_empty()
                 || !path.comb_capture_enable_sites.is_empty()
                 || !path.pre_lower_nodes.is_empty()
                 || !path.local_inputs.is_empty()
-        })
-    {
-        return fused;
-    }
-    let stable =
-        |addr: &AbsoluteAddr| RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, *addr);
-    let working = |addr| RegionedAbsoluteAddr::from_absolute_addr(WORKING_REGION, addr);
-    let mut arena = SLTNodeArena::new();
-    let mut cache = HashMap::default();
-    let paths: Result<Vec<_>, _> = logic
-        .comb_blocks
-        .iter()
-        .map(|path| path.map_addr(&logic.global_arena, &mut arena, &mut cache, &stable))
-        .collect();
-    let Ok(paths) = paths else { return fused };
-    let mut region_widths: HashMap<_, _> =
-        widths.iter().map(|(addr, w)| (stable(addr), *w)).collect();
-    let elements = element_widths
-        .iter()
-        .map(|(addr, w)| (stable(addr), *w))
-        .collect();
-    for clock in clocks {
-        let (Some(form), Some(apply)) = (forms.get(clock), applications.get(clock)) else {
-            continue;
-        };
-        if !form.ports.is_empty() {
-            continue;
-        }
-        let mut tick = paths.clone();
-        let roots = form.roots.iter().try_for_each(|root| {
-            let value = logic
-                .global_arena
-                .get(root.value)
-                .map_addr(
-                    root.value,
-                    &logic.global_arena,
-                    &mut arena,
-                    &mut cache,
-                    &stable,
-                )
-                .ok()?;
-            let mut sources = HashSet::default();
-            for node in reachable(&arena, [value]) {
-                if let SLTNode::Input {
-                    variable,
-                    access,
-                    index,
-                    ..
-                } = arena.get(node)
-                {
-                    // The addressed element has no fixed dependency range.
-                    if !index.is_empty() {
-                        return None;
-                    }
-                    sources.insert(VarAtomBase {
-                        id: *variable,
-                        access: *access,
-                    });
-                }
+                || elements.contains_key(&target.id)
+                || self.global_arena.node_width(path.expr)
+                    != Some(target.access.msb - target.access.lsb + 1)
+            {
+                return Default::default();
             }
-            let target = working(root.target);
-            region_widths.insert(target, *widths.get(&root.target)?);
-            tick.push(LogicPath {
-                target: LogicPathTarget::Var(VarAtomBase {
-                    id: target,
-                    access: root.access,
-                }),
-                sources,
-                expr: value,
-                transparent_copy: false,
-                previous_sources: Default::default(),
-                address_sources: Default::default(),
-                local_inputs: Vec::new(),
-                order_before: Default::default(),
-                comb_capture_enable_sites: Vec::new(),
-                comb_capture_enable_always: false,
-                pre_lower_nodes: Vec::new(),
-            });
-            Some(())
-        });
-        if roots.is_none() {
-            continue;
+            driven.entry(target.id).or_default().push(target.access);
+            if event_nets.contains(&target.id) {
+                event_roots.push(ValueRoot {
+                    target: target.id,
+                    access: target.access,
+                    value: path.expr,
+                });
+            }
         }
-        // Source arenas intern by operand order. Re-intern both the D roots
-        // and their producers together so commuted expressions use one node.
-        let mut canonical = SLTNodeArena::new();
-        let mut copier = celox_slt::canon::Reinterner::new(&arena);
-        if tick
-            .iter_mut()
-            .try_for_each(|path| {
-                path.expr = copier.copy(&mut canonical, path.expr)?;
-                Ok::<_, celox_slt::canon::ReinternError>(())
-            })
-            .is_err()
-        {
-            continue;
+        for ranges in driven.values_mut() {
+            ranges.sort_unstable_by_key(|r| r.lsb);
+            if ranges.windows(2).any(|w| w[0].msb >= w[1].lsb) {
+                return Default::default();
+            }
         }
-        let Ok(schedule) = scheduler::sort_with_unpacked_element_widths(
-            tick,
-            &canonical,
-            &Default::default(),
-            &Default::default(),
-            false,
-            &region_widths,
-            &elements,
-            0,
-            None,
-        ) else {
-            continue;
-        };
-        if !schedule.runtime_errors.is_empty()
-            || !schedule
-                .stateful_targets
-                .is_some_and(|targets| targets.is_empty())
-        {
-            continue;
+        let drivers = Drivers::new(&self.global_arena, &self.comb_blocks);
+        if drivers.nets.len() != driven.len() {
+            return Default::default();
         }
-        let phases: Vec<_> = schedule.execution_units.iter().chain(apply).collect();
-        fused.insert(*clock, vec![celox_sir::merge_sir_eu_refs(&phases).0]);
+        let mut ticks = FfUnits::default();
+        for clock in clocks {
+            let Some(edge) = self.transitions.get(clock) else {
+                continue;
+            };
+            if edge.roots.iter().any(|r| driven.contains_key(&r.target))
+                || edge.ports.iter().any(|p| driven.contains_key(&p.array))
+            {
+                continue;
+            }
+            let mut form = edge.clone();
+            form.roots.extend_from_slice(&event_roots);
+            let Ok(dag) = domain_dag(&drivers, &form) else {
+                continue;
+            };
+            // A read still referring to a driven wire may need the current
+            // settle to finish first (e.g. a signed read or partial driver).
+            if dag.arena.iter().any(
+                |node| matches!(node,SLTNode::Input{variable,..} if driven.contains_key(variable)),
+            ) {
+                continue;
+            }
+            if let Ok(unit) = lower_clock(&dag.arena, &dag.form, elements) {
+                ticks.insert(*clock, vec![unit]);
+            }
+        }
+        ticks
     }
-    fused
 }
 
 /// The next-state DAG of one clock domain.
@@ -570,7 +526,7 @@ fn domain_dag(
 /// program keeps are known; each reported on the `celox::next_state` target.
 pub(super) fn next_state_dags(
     forms: &BTreeMap<AbsoluteAddr, NextStateForm<AbsoluteAddr>>,
-    logic: &CombLogic,
+    logic: &StateGraph,
 ) -> BTreeMap<AbsoluteAddr, Result<DomainDag, String>> {
     if forms.is_empty() {
         return BTreeMap::new();
@@ -683,7 +639,7 @@ mod tests {
         let read = input(&mut arena, 11, 0, 7);
         let drivers = Drivers::new(&arena, &paths);
         let form = NextStateForm {
-            roots: vec![celox_slt::next_state::FlopRoot {
+            roots: vec![ValueRoot {
                 target: addr(3),
                 access: BitAccess::new(0, 7),
                 value: read,

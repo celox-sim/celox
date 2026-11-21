@@ -21,8 +21,24 @@ pub fn merge_sir_eus<A: Clone>(units: &[ExecutionUnit<A>]) -> (ExecutionUnit<A>,
 /// execution unit has a nonzero entry ID or sparse block IDs.
 #[derive(Debug, Clone)]
 pub struct SirMergeProvenance {
+    register_offsets: Vec<usize>,
     pub unit_entries: Vec<BlockId>,
     pub block_units: HashMap<BlockId, usize>,
+}
+
+impl SirMergeProvenance {
+    /// Place a sampled value or its store in the merged register namespace.
+    pub fn register(&self, unit: usize, register: RegisterId) -> RegisterId {
+        RegisterId(register.0 + self.register_offsets[unit])
+    }
+
+    pub fn instruction<A: Clone>(
+        &self,
+        unit: usize,
+        inst: &SIRInstruction<A>,
+    ) -> SIRInstruction<A> {
+        renumber_sir_inst(inst, self.register_offsets[unit], 0)
+    }
 }
 
 /// Reference-based variant of [`merge_sir_eus`] used when one compilation
@@ -41,6 +57,7 @@ pub fn merge_sir_eu_refs_with_provenance<A: Clone>(
         return (
             (*units[0]).clone(),
             SirMergeProvenance {
+                register_offsets: vec![0],
                 unit_entries: vec![units[0].entry_block_id],
                 block_units: units[0]
                     .blocks
@@ -171,6 +188,7 @@ pub fn merge_sir_eu_refs_with_provenance<A: Clone>(
             register_map: merged_regs,
         },
         SirMergeProvenance {
+            register_offsets: reg_offsets,
             unit_entries: entry_blocks,
             block_units,
         },

@@ -358,3 +358,222 @@ endmodule
     #[cfg(target_arch = "x86_64")]
     check!(builder().build_native().unwrap(), "native");
 }
+
+/// The read address, write address, enable and data all sample the old state.
+/// The second clock forces split evaluation and publication when both fire.
+#[test]
+fn graph_memory_samples_before_publication() {
+    let source = r#"
+        module Top(input bit clk, other, en, input bit [3:0] addr,
+                   input bit [7:0] data, output bit [7:0] bypass, old, other_q);
+            bit [7:0] mem[0:8];
+            bit [3:0] sampled_addr;
+            always @(posedge clk) begin
+                sampled_addr <= addr;
+                if (en) mem[sampled_addr] <= data;
+                bypass <= en ? data : mem[addr];
+                old <= mem[addr];
+            end
+            always @(posedge other) other_q <= mem[addr];
+        endmodule
+    "#;
+    let builder = || {
+        Simulator::from_sv_sources(vec![(source, Path::new("ram.sv"))], "Top")
+            .four_state(false)
+            .opt_level(OptLevel::O2)
+            .enable_pass(SirPass::NextStateDag)
+    };
+    fn run<B: celox::SimBackend>(mut sim: Simulator<B>) {
+        let clk = sim.event("clk");
+        let other = sim.event("other");
+        let addr = sim.signal("addr");
+        let en = sim.signal("en");
+        let data = sim.signal("data");
+        let old = sim.signal("old");
+        let bypass = sim.signal("bypass");
+        let other_q = sim.signal("other_q");
+        let mut mem = [0u8; 9];
+        let mut sampled_addr = 0;
+        for (i, (a, w, d)) in [
+            (1, 1, 42),
+            (8, 1, 19),
+            (1, 0, 5),
+            (1, 1, 77),
+            (8, 0, 0),
+            (9, 1, 12),
+            (0, 1, 31),
+            (1, 0, 0),
+            (1, 1, 0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            sim.set(addr, a as u8);
+            sim.set(en, w as u8);
+            sim.set(data, d);
+            let before = mem.get(a).copied().unwrap_or_default();
+            if i % 2 == 0 {
+                sim.tick_events(&[clk, other]).unwrap();
+                assert_eq!(sim.get(other_q), before.into());
+            } else {
+                sim.tick(clk).unwrap();
+            }
+            assert_eq!(sim.get(old), before.into(), "address {a}");
+            assert_eq!(sim.get(bypass), if w == 1 { d } else { before }.into());
+            if w == 1
+                && let Some(word) = mem.get_mut(sampled_addr)
+            {
+                *word = d;
+            }
+            sampled_addr = a;
+        }
+    }
+    run(builder().build().unwrap());
+    run(builder().build_interpreter().unwrap());
+    #[cfg(feature = "cranelift")]
+    run(builder().build_cranelift().unwrap());
+    #[cfg(feature = "wasm-runtime")]
+    run(builder().build_wasm().unwrap());
+}
+
+#[test]
+fn mixed_clock_samples_graph_and_procedural_writes_before_publication() {
+    let source = r#"
+        module Stage(input wire clk, input wire [7:0] d, output bit [7:0] q);
+            always @(posedge clk) q <= d;
+        endmodule
+        module Top(input wire clk, other, input wire [7:0] d,
+                   output wire [7:0] first, last, output bit [7:0] tmp, middle, seen, old);
+            bit [7:0] mem[0:2];
+            always @(posedge clk) begin
+                if (d[7]) mem[d[1:0]] <= middle;
+                old <= mem[d[1:0]];
+            end
+            Stage a(clk, d, first);
+            always @(posedge clk) begin
+                tmp = first * 8'd3;
+                middle <= tmp + 8'd1;
+            end
+            Stage b(clk, middle, last);
+            always @(posedge other) seen <= last;
+        endmodule
+    "#;
+    let builder = || {
+        Simulator::from_sv_sources(vec![(source, Path::new("stages.sv"))], "Top")
+            .four_state(false)
+            .opt_level(OptLevel::O2)
+    };
+    fn run<B: celox::SimBackend>(mut sim: Simulator<B>) {
+        let clk = sim.event("clk");
+        let other = sim.event("other");
+        let d = sim.signal("d");
+        let outputs = ["first", "tmp", "middle", "last", "seen"].map(|s| sim.signal(s));
+        let mut expected = [0u8; 5];
+        let old = sim.signal("old");
+        let mut memory = [0u8; 3];
+        for (index, value) in [13u8, 97, 0, 168, 255, 4, 33, 136, 8]
+            .into_iter()
+            .enumerate()
+        {
+            sim.set(d, value);
+            let [first, _, middle, last, seen] = expected;
+            let sampled = first.wrapping_mul(3);
+            let together = index % 2 == 1;
+            if together {
+                sim.tick_events(&[other, clk]).unwrap();
+            } else {
+                sim.tick(clk).unwrap();
+            }
+            let addr = usize::from(value & 3);
+            assert_eq!(
+                sim.get(old),
+                memory.get(addr).copied().unwrap_or(0).into(),
+                "RAM on edge {index}"
+            );
+            if value & 128 != 0
+                && let Some(word) = memory.get_mut(addr)
+            {
+                *word = middle;
+            }
+            expected = [
+                value,
+                sampled,
+                sampled.wrapping_add(1),
+                middle,
+                if together { last } else { seen },
+            ];
+            for (signal, value) in outputs.iter().zip(expected) {
+                assert_eq!(sim.get(*signal), value.into(), "edge {index}");
+            }
+        }
+    }
+    run(builder()
+        .disable_pass(SirPass::NextStateDag)
+        .build()
+        .unwrap());
+    let graph = || builder().enable_pass(SirPass::NextStateDag);
+    run(graph().build().unwrap());
+    run(graph().build_interpreter().unwrap());
+    #[cfg(feature = "cranelift")]
+    run(graph().build_cranelift().unwrap());
+    #[cfg(feature = "wasm-runtime")]
+    run(graph().build_wasm().unwrap());
+}
+
+#[test]
+fn a_timed_wait_observes_mixed_clock_publication() {
+    let source = r#"
+        `timescale 1ns/1ns
+        module Top(output bit [7:0] q, sampled, wakes);
+            bit clk;
+            bit [7:0] d, temp;
+            wire [7:0] value = d + 8'd1;
+            always @(posedge clk) q <= value;
+            always @(posedge clk) begin
+                temp = q * 8'd3;
+                sampled <= temp;
+            end
+            initial begin
+                #1; d = 2;
+                #1; clk = 1;
+                #1; clk = 0; d = 3;
+                #1; clk = 1;
+                #1; clk = 0; d = 4;
+                #1; clk = 1;
+            end
+            initial forever begin
+                @(posedge q[0]);
+                wakes = wakes + 8'd1;
+            end
+        endmodule
+    "#;
+    let builder = || {
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("wait.sv"))], "Top")
+            .four_state(false)
+            .opt_level(OptLevel::O2)
+    };
+    macro_rules! check {
+        ($sim:expr) => {{
+            let mut sim = $sim.unwrap();
+            let signals = ["q", "sampled", "wakes"].map(|name| sim.signal(name));
+            for (time, values) in [(3, [3u8, 0, 1]), (5, [4, 9, 1]), (7, [5, 12, 2])] {
+                sim.run_until(time).unwrap();
+                for (&signal, value) in signals.iter().zip(values) {
+                    assert_eq!(sim.get(signal), value.into(), "time {time}");
+                }
+            }
+        }};
+    }
+    check!(
+        builder()
+            .disable_pass(SirPass::NextStateDag)
+            .build_interpreter()
+    );
+    let graph = || builder().enable_pass(SirPass::NextStateDag);
+    check!(graph().build());
+    check!(graph().build_interpreter());
+    #[cfg(feature = "cranelift")]
+    check!(graph().build_cranelift());
+    #[cfg(feature = "wasm-runtime")]
+    check!(graph().build_wasm());
+}

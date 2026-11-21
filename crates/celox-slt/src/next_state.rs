@@ -8,15 +8,18 @@
 //! code. The roots of a form are computed before any of them is written
 //! (IEEE 1800-2023 10.4.2); the ports apply after the roots, in order.
 
+mod lower;
+pub use lower::{Publication, SampledStore, lower_transition, sample_transition};
+
 use std::hash::Hash;
 
 use celox_design::BitAccess;
 
 use crate::{HashMap, NodeId, SLTNode, SLTNodeArena, SLTNodeFactsError};
 
-/// One bit range of a register and its value at the edge.
+/// A value to publish for a register or observable wire at the sampled edge.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FlopRoot<A> {
+pub struct ValueRoot<A> {
     pub target: A,
     pub access: BitAccess,
     pub value: NodeId,
@@ -40,7 +43,7 @@ pub struct RamWritePort<A> {
 /// The next-state form of one process, or of the processes of a domain.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NextStateForm<A> {
-    pub roots: Vec<FlopRoot<A>>,
+    pub roots: Vec<ValueRoot<A>>,
     pub ports: Vec<RamWritePort<A>>,
 }
 
@@ -71,7 +74,7 @@ impl<A> NextStateForm<A> {
     ) -> Result<NextStateForm<B>, E> {
         let mut mapped = NextStateForm::default();
         for root in &self.roots {
-            mapped.roots.push(FlopRoot {
+            mapped.roots.push(ValueRoot {
                 target: var(&root.target),
                 access: root.access,
                 value: node(root.value)?,
