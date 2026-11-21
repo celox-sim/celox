@@ -16,6 +16,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MANIFEST_PATH = ROOT / 'benchmarks/rtlmeter/manifest.json'
+CODSPEED_MANIFEST_PATH = ROOT / 'benchmarks/rtlmeter/codspeed_manifest.json'
 MANIFEST = json.loads(DEFAULT_MANIFEST_PATH.read_text())
 ENGINES = ('celox', 'verilator', 'xezim')
 STATES = ('two-state', 'four-state')
@@ -401,12 +402,104 @@ def check_case(case_name, source, celox, states=('two-state',), timeout=300, out
     return results
 
 
+def codspeed_specification(name, source, manifest):
+    """A case of the CodSpeed manifest, merged as RTLMeter merges a
+    descriptor: the configuration's compile inputs and every execute level's
+    files and arguments (common, then test)."""
+    import yaml
+    case = manifest['cases'][name]
+    design = source / 'designs' / case['design']
+    descriptor = yaml.safe_load((design / 'descriptor.yaml').read_text())
+    configurations = descriptor.get('configurations') or {}
+    configuration = configurations.get(case.get('configuration', 'default')) or {}
+    compile_root, compile_config = descriptor['compile'], configuration.get('compile') or {}
+    execute_root, execute_config = descriptor.get('execute') or {}, configuration.get('execute') or {}
+    test = case['test']
+    executes = [execute_root.get('common') or {}, (execute_root.get('tests') or {}).get(test) or {},
+                execute_config.get('common') or {}, (execute_config.get('tests') or {}).get(test) or {}]
+    if test not in (execute_root.get('tests') or {}) and test not in (execute_config.get('tests') or {}):
+        raise ValueError(f'{name}: {case["design"]} has no test {test}')
+    if compile_root.get('prepHook') or any(level.get('prepHook') for level in executes):
+        raise ValueError(f'{name}: prepare hooks are not supported')
+
+    def listed(key, *levels):
+        return [entry for level in levels for entry in (level.get(key) or [])]
+
+    defines = {**(compile_root.get('verilogDefines') or {}), **(compile_config.get('verilogDefines') or {}),
+               '__RTLMETER_MAIN_CLOCK': compile_config.get('mainClock') or compile_root['mainClock']}
+    verilator = [str(arg) for arg in listed('verilatorArgs', compile_root, compile_config)]
+    # Verilator's parameter overrides and time scale belong to the design's
+    # build; its other options (lint waivers, --autoflush) do not.
+    options = [arg for arg in verilator if arg.startswith('-G')]
+    if '--timescale' in verilator:
+        options += ['--timescale', verilator[verilator.index('--timescale') + 1]]
+    return {
+        'top': compile_config.get('topModule') or compile_root['topModule'],
+        'sources': [design / p for p in listed('verilogSourceFiles', compile_root, compile_config)]
+                   + [source / 'rtl/__rtlmeter_utils.sv'],
+        'includeFiles': [design / p for p in listed('verilogIncludeFiles', compile_root, compile_config)],
+        'files': [design / p for p in listed('files', *executes)],
+        'defines': defines,
+        'options': options,
+        'args': [str(arg) for arg in listed('args', *executes)],
+        'diagnostics': case.get('diagnostics', []),
+    }
+
+
+def codspeed_layout(source, output, manifest, names, window=None):
+    """Lay out each case for `crates/celox/benches/rtlmeter.rs`: the source
+    list, RTLMeter's flat include directory, the test's input files and the
+    `celox` arguments of one fixed simulation window."""
+    verify_source(source, manifest)
+    output.mkdir(parents=True, exist_ok=False)
+    for name in names:
+        case = manifest['cases'][name]
+        spec = codspeed_specification(name, source, manifest)
+        # Criterion's walltime analysis rejects a benchmark with one sample.
+        if case['rounds'] < 2:
+            raise ValueError(f'{name}: a case needs at least 2 rounds')
+        directory = output / name
+        includes = directory / 'include'
+        run_directory = directory / 'run'
+        includes.mkdir(parents=True)
+        run_directory.mkdir()
+        for path in spec['includeFiles']:
+            link = includes / path.name
+            if link.exists():
+                raise ValueError(f'{name}: include files share the name {path.name}')
+            link.symlink_to(path)
+        for path in spec['files']:
+            shutil.copyfile(path, run_directory / path.name)
+        files = directory / 'sources.f'
+        files.write_text(''.join(json.dumps(str(p)) + '\n' for p in spec['sources']))
+        cycles = window or case['window']
+        includes_in_order = [includes, source / 'rtl', source / 'designs' / case['design'] / 'src']
+        command = commands('celox', 'two-state', {**spec, 'includes': includes_in_order}, files, directory,
+                           {'celox': 'celox'}, [*spec['options'], *spec['args'], f'+max_cycles={cycles}'],
+                           'rtlmeter-steady-state-v1')[0][1:]
+        (directory / 'case.json').write_text(json.dumps({
+            'name': name, 'design': case['design'], 'rtlmeterRevision': manifest['revision'],
+            'window': cycles, 'rounds': case['rounds'], 'args': [str(arg) for arg in command],
+        }, indent=2) + '\n')
+        print(f'LAYOUT {name}: {directory}', flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
     prepare_parser = sub.add_parser('prepare')
     prepare_parser.add_argument('destination', type=Path)
     prepare_parser.add_argument('--manifest', type=Path, default=DEFAULT_MANIFEST_PATH)
+    layout = sub.add_parser('codspeed-layout', help='lay out cases for the CodSpeed RTLMeter benchmark')
+    layout.add_argument('source', type=Path)
+    layout.add_argument('output', type=Path)
+    layout.add_argument('--manifest', type=Path, default=CODSPEED_MANIFEST_PATH)
+    layout.add_argument('--case', action='append', dest='cases',
+                        help='case to lay out (repeatable; default: every case not marked optional)')
+    layout.add_argument('--optional', action='store_true',
+                        help='also lay out the cases marked optional when no --case is given')
+    layout.add_argument('--window', type=int, default=None,
+                        help='simulated cycles of every case instead of the manifest windows (local checks)')
     check = sub.add_parser('check')
     check.add_argument('case', choices=[*MANIFEST['cases'], 'all'])
     check.add_argument('source', type=Path)
@@ -431,6 +524,15 @@ def main():
     manifest = json.loads(args.manifest.read_text()) if hasattr(args, 'manifest') else MANIFEST
     if args.command == 'prepare':
         prepare(args.destination, manifest)
+    elif args.command == 'codspeed-layout':
+        names = args.cases or [name for name, case in manifest['cases'].items()
+                               if args.optional or not case.get('optional')]
+        unknown = [name for name in names if name not in manifest['cases']]
+        if unknown:
+            parser.error(f'unknown cases {unknown}, expected some of {list(manifest["cases"])}')
+        if args.window is not None and args.window <= 0:
+            parser.error('window must be positive')
+        codspeed_layout(args.source.resolve(), args.output.resolve(), manifest, names, args.window)
     elif args.command == 'check':
         states = [s.strip() for s in args.states.split(',') if s.strip()]
         for s in states:
