@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795229323429,
+  "lastUpdate": 1795229829387,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -461625,6 +461625,37 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-veryl-cc-aarch64/heliodor_suite_71_linux_boot_execution",
             "unit": "ms",
             "value": 191738.814025
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "1932566285e6d49a203b3cd54859c34423993dc6",
+          "message": "fix(sir-opt): fold an XOR chain over all bits of a wide source (#4412)",
+          "timestamp": "2026-11-19T10:17:39Z",
+          "url": "https://github.com/celox-sim/celox/commit/1932566285e6d49a203b3cd54859c34423993dc6"
+        },
+        "date": 1795229829387,
+        "cpu": "Neoverse-N2",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-native-aarch64/heliodor_suite_71_linux_boot_compilation",
+            "unit": "ms",
+            "value": 48518.20265
+          },
+          {
+            "name": "heliodor-native-aarch64/heliodor_suite_71_linux_boot_execution",
+            "unit": "ms",
+            "value": 434308.631321
           }
         ]
       }
