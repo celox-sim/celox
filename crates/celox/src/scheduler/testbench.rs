@@ -607,6 +607,8 @@ fn generate(
         .filter(|observers| !observers.groups.is_empty());
     let mut g = Generator {
         inlined_instructions: 0,
+        constant_block: None,
+        constants: HashMap::default(),
         program,
         nbas: None,
         observers: observers.as_ref(),

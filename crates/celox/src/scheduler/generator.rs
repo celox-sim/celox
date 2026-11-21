@@ -9,10 +9,20 @@ impl Generator<'_> {
     }
 
     pub(super) fn wide_constant(&mut self, value: BigUint, width: usize) -> RegisterId {
-        let register = self.b.alloc_bit(width, false);
-        self.b
-            .emit(SIRInstruction::Imm(register, SIRValue::new(value)));
-        register
+        let block = self.b.current_block();
+        if self.constant_block != Some(block) {
+            self.constants.clear();
+            self.constant_block = Some(block);
+        }
+        *self
+            .constants
+            .entry((width, value))
+            .or_insert_with_key(|(_, value)| {
+                let register = self.b.alloc_bit(width, false);
+                self.b
+                    .emit(SIRInstruction::Imm(register, SIRValue::new(value.clone())));
+                register
+            })
     }
 
     /// The `width`-bit value with only bit `bit` set.
@@ -319,10 +329,12 @@ impl Generator<'_> {
     /// Whether bit `bit` of `mask` is set.
     pub(super) fn mask_bit(&mut self, mask: RegisterId, bit: usize) -> RegisterId {
         let width = self.b.register(&mask).width();
-        let selector = self.single(bit, width);
-        let selected = self.binary(width, mask, BinaryOp::And, selector);
-        let zero = self.constant(0, width);
-        self.binary(1, selected, BinaryOp::Ne, zero)
+        if bit >= width {
+            return self.constant(0, 1);
+        }
+        let selected = self.b.alloc_bit(1, false);
+        self.b.emit(SIRInstruction::Slice(selected, mask, bit, 1));
+        selected
     }
 
     /// The edge level of `event`'s signal, as the runtime reads it: whether
@@ -338,6 +350,9 @@ impl Generator<'_> {
     pub(super) fn level_at(&mut self, address: AbsoluteAddr, width: usize) -> RegisterId {
         if self.four_state.is_none() {
             let value = self.load(address, width);
+            if width == 1 {
+                return value;
+            }
             let zero = self.constant(0, width);
             return self.binary(1, value, BinaryOp::Ne, zero);
         }

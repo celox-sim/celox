@@ -566,7 +566,7 @@ impl<'a> PlanBuilder<'a> {
         let written = written_events(&self.found.event_storage, storage);
         tracing::debug!(target: "celox::scheduler",
                 incremental_instructions = plan.incremental.as_ref().map(|cone| cone.units.iter().flat_map(instructions).count()),
-                incremental_source = ?plan.incremental.as_ref().map(|cone| program.get_path(&cone.source)),
+                incremental_source = ?plan.incremental.as_ref().and_then(|cone| cone.source.as_ref()).map(|source| program.get_path(source)),
                 deferred_settles = plan.lazy.is_some(),
                 skips_unchanged_settles = plan.settle_reads.is_some(),
                 comb_effects = effects,

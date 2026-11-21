@@ -488,6 +488,38 @@ fn folds_complemented_boolean_partition() {
 }
 
 #[test]
+fn mux_uses_the_original_one_bit_selector_in_two_state_mode() {
+    let r = RegisterId;
+    let logic = RegisterType::Logic { width: 1 };
+    let registers = (0..8)
+        .map(|i| (r(i), if i == 4 { bit(1) } else { logic.clone() }))
+        .collect();
+    let original = vec![
+        SIRInstruction::Unary(r(3), UnaryOp::BitNot, r(0)),
+        SIRInstruction::Unary(r(4), UnaryOp::ToTwoState, r(3)),
+        SIRInstruction::Binary(r(5), r(1), BinaryOp::LogicAnd, r(4)),
+        SIRInstruction::Binary(r(6), r(0), BinaryOp::And, r(2)),
+        SIRInstruction::Binary(r(7), r(5), BinaryOp::LogicOr, r(6)),
+    ];
+    let mut two_state = original.clone();
+    forward_and_simplify(&mut two_state, &registers, false);
+    assert_eq!(two_state[3], original[3]);
+    assert_eq!(two_state[4], SIRInstruction::Mux(r(7), r(0), r(2), r(1)));
+
+    let mut four_state = original.clone();
+    forward_and_simplify(&mut four_state, &registers, true);
+    assert_eq!(four_state, original);
+
+    let mut mux = vec![
+        original[0].clone(),
+        original[1].clone(),
+        SIRInstruction::Mux(r(7), r(4), r(1), r(2)),
+    ];
+    forward_and_simplify(&mut mux, &registers, false);
+    assert_eq!(mux[2], SIRInstruction::Mux(r(7), r(0), r(2), r(1)));
+}
+
+#[test]
 fn applies_boolean_aliases_to_dominated_blocks_before_dce() {
     let register_map = (0..=2)
         .map(|register| (RegisterId(register), bit(1)))

@@ -1,9 +1,8 @@
-//! Calls of extern functions through the platform C ABI.
+//! Calls to image-local regions and host ABI entries.
 //!
-//! Generated code keeps no stack frame, except a function unit's arena, and,
-//! in segment-base mode, owns the FS or GS base. A call hands the caller's segment base back to C code (which
-//! may use it for thread-local storage), aligns the stack, and restores the
-//! base afterwards.
+//! Regions share the owning entry's state base and pinned XMM registers.
+//! An ABI call restores the host segment base for thread-local storage,
+//! aligns the stack, and reinstalls the simulation state on return.
 //!
 //! `CallExtern` clobbers the C caller-saved GPRs and RBX, which holds the state
 //! pointer during the call, so the allocator keeps values live across the call
@@ -92,6 +91,55 @@ pub(super) fn emit_extern_result(
     asm.mov(dst, qword_ptr(call_slot(&context, CALL_AREA_RESULT / 8)))
 }
 
+/// Enter a region without re-establishing the state base or stashing host
+/// registers. The return address is the continuation, RAX is the exit status.
+pub(super) fn emit_region_call(asm: &mut EmitAssembler, slot: u32) -> Result<(), IcedError> {
+    let context = asm.context;
+    let tick_segment = match context.caller_segment {
+        CallerSegment::Arena(offset) => Some(offset),
+        _ => None,
+    };
+    if let Some(offset) = tick_segment {
+        asm.movq(
+            qword_ptr(call_slot(&context, CALL_AREA_XMM_SAVE / 8 + 15)),
+            xmm15,
+        )?;
+        asm.movq(
+            xmm15,
+            qword_ptr(mem_operand(&context, BaseReg::SimState, offset)),
+        )?;
+    }
+    if let Some((_, frame)) = context.frame {
+        asm.mov(
+            qword_ptr(call_slot(&context, CALL_AREA_XMM_SAVE / 8)),
+            frame,
+        )?;
+    }
+    asm.mov(
+        rax,
+        qword_ptr(mem_operand(
+            &context,
+            BaseReg::SimState,
+            celox_state_layout::STATE_HEADER_EXTERN_FUNCTIONS_ADDR_OFFSET as i32,
+        )),
+    )?;
+    let displacement = i32::try_from(u64::from(slot) * 8).expect("region table index");
+    asm.call(qword_ptr(rax + displacement))?;
+    if tick_segment.is_some() {
+        asm.movq(
+            xmm15,
+            qword_ptr(call_slot(&context, CALL_AREA_XMM_SAVE / 8 + 15)),
+        )?;
+    }
+    if let Some((_, frame)) = context.frame {
+        asm.mov(
+            frame,
+            qword_ptr(call_slot(&context, CALL_AREA_XMM_SAVE / 8)),
+        )?;
+    }
+    Ok(())
+}
+
 pub(super) fn emit_call_extern(
     asm: &mut EmitAssembler,
     func: u32,
@@ -147,11 +195,13 @@ pub(super) fn emit_call_extern(
     let leading = usize::from(heap || kernel.is_some());
     let arg_count = usize::from(arg_count) + leading;
     let stack_args = arg_count.saturating_sub(registers.len()) as i32;
-    // Code other than a function unit is entered with RSP = 8 (mod 16) and
-    // never moves it; a function unit keeps RSP a multiple of 16 below its
-    // arena. The frame brings RSP to a multiple of 16 at the `call`, so the
-    // callee is entered with RSP = 8 (mod 16), as the ABI requires.
-    let misalignment = if stack_area { 0 } else { 8 };
+    // Entries with a stack arena or outgoing region calls already aligned RSP.
+    // All other entries still have RSP = 8 (mod 16) from their caller.
+    let misalignment = if stack_area || context.align_region_calls {
+        0
+    } else {
+        8
+    };
     let frame = ((shadow + 8 * stack_args + 15) & !15) + misalignment;
     if frame != 0 {
         asm.sub(rsp, frame)?;

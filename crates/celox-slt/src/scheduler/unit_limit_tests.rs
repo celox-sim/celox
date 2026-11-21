@@ -164,6 +164,7 @@ fn chain_settle(length: u32, limits: Option<UnitLimits>) -> Vec<ExecutionUnit<u3
             target_cost: 1,
             external_readers: crate::HashMap::default(),
             clock_nets: crate::HashSet::default(),
+            write_domains: Default::default(),
             profile: None,
         }),
         limits.unwrap_or(UnitLimits::DEFAULT),

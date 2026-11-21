@@ -25,7 +25,7 @@ impl PreparedHotspotScheduler {
         inline_budget: Option<usize>,
     ) -> Result<Self, SimulatorError> {
         let crate::scheduler::HotspotScheduler {
-            unit,
+            mut unit,
             callees: outlined,
             budgeted,
         } = crate::scheduler::hotspot_scheduler(&program, inline_budget, Some(cancel)).map_err(
@@ -37,6 +37,17 @@ impl PreparedHotspotScheduler {
                 }
             },
         )?;
+        let base = program.runtime().runtime_schema.extern_functions.len();
+        let shared: Vec<_> = outlined
+            .iter()
+            .map(|unit| matches!(&program.sir.eval_comb[..], [comb] if unit == comb))
+            .collect();
+        let calls = shared
+            .iter()
+            .enumerate()
+            .map(|(i, shared)| kernel_call(base + i, !shared))
+            .collect::<Result<Vec<_>, _>>()?;
+        bind_scheduler_callees(&mut unit, base as u32, &calls)?;
         HotspotCode::validate_units(std::slice::from_ref(&unit))?;
         let mut native = options.x86_options.clone();
         native.baseline = false;
@@ -78,18 +89,19 @@ impl PreparedHotspotScheduler {
         )
         .map_err(hotspot_pipeline_error)?;
         let mut callees = Vec::with_capacity(outlined.len());
-        for body in outlined {
+        for (body, shared) in outlined.into_iter().zip(shared) {
             if cancel.is_cancelled() {
                 return Err(crate::backend::compile_cancel::cancelled_error());
             }
-            let code = if program.sir.eval_comb.len() == 1 && body == program.sir.eval_comb[0] {
+            let code = if shared {
                 None
             } else {
-                Some(Arc::new(HotspotCode::compile(
+                Some(Arc::new(HotspotCode::compile_entry(
                     &[body],
                     program.layout(),
                     options,
                     cancel,
+                    NATIVE_REGIONS,
                 )?))
             };
             callees.push(code);
@@ -132,12 +144,22 @@ impl HotspotCode {
         options: &SimulatorOptions,
         cancel: &CompileCancel,
     ) -> Result<Self, SimulatorError> {
+        Self::compile_entry(units, layout, options, cancel, false)
+    }
+
+    fn compile_entry(
+        units: &[ExecutionUnit<RegionedAbsoluteAddr>],
+        layout: &MemoryLayout,
+        options: &SimulatorOptions,
+        cancel: &CompileCancel,
+        region_entry: bool,
+    ) -> Result<Self, SimulatorError> {
         Self::validate_units(units)?;
         let mut native = options.x86_options.clone();
         native.baseline = false;
         native.native_tick_loop = false;
         let refs = units.iter().collect::<Vec<_>>();
-        let compiled = compile_unit_refs(
+        let compiled = compile_unit_refs_inspected(
             &refs,
             layout,
             options.four_state,
@@ -148,6 +170,8 @@ impl HotspotCode {
             false,
             &options.optimize_options.diagnostics,
             Some(cancel),
+            region_entry,
+            &mut |_| {},
         )?;
         Self::from_compiled(compiled, native.diagnostics.perf_map)
     }

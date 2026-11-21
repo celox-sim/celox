@@ -375,7 +375,6 @@ fn covering_wide_load_does_not_disable_word_load_coalescing() {
         &mut instructions,
         &mut register_map,
         &mut reg_counter,
-        false,
         &HashMap::default(),
     );
 
@@ -417,7 +416,6 @@ fn scalar_partial_load_coalescing_stays_within_the_accessed_span() {
         &mut instructions,
         &mut register_map,
         &mut reg_counter,
-        false,
         &HashMap::default(),
     );
 
@@ -447,7 +445,6 @@ fn unpacked_array_load_coalescing_uses_explicit_packed_elements() {
         &mut instructions,
         &mut register_map,
         &mut reg_counter,
-        false,
         &[(7u32, 12usize)].into_iter().collect(),
     );
 
@@ -471,7 +468,7 @@ fn unpacked_array_load_coalescing_uses_explicit_packed_elements() {
 }
 
 #[test]
-fn four_state_load_coalescing_extracts_with_slices() {
+fn scalar_load_coalescing_extracts_with_slices() {
     let mut instructions = vec![
         SIRInstruction::Load(RegisterId(0), 7u32, SIROffset::Static(0), 5),
         SIRInstruction::Load(RegisterId(1), 7, SIROffset::Static(4), 1),
@@ -485,7 +482,6 @@ fn four_state_load_coalescing_extracts_with_slices() {
         &mut instructions,
         &mut register_map,
         &mut reg_counter,
-        true,
         &HashMap::default(),
     );
 
@@ -520,7 +516,6 @@ fn naturally_aligned_native_loads_skip_coalescing() {
         &mut instructions,
         &mut register_map,
         &mut reg_counter,
-        false,
         &HashMap::default(),
     );
 
@@ -959,7 +954,6 @@ fn optimize_block_pipeline_applies_subsumption_and_remains_valid() {
         &mut replacements,
         &mut reg_counter,
         true,
-        false,
         &HashMap::default(),
     );
 
@@ -1003,7 +997,6 @@ fn exact_load_alias_requires_full_register_type_match() {
         &mut replacements,
         &mut reg_counter,
         true,
-        false,
         &HashMap::default(),
     );
 
@@ -1042,7 +1035,6 @@ fn commit_forwarding_rejects_bit_source_but_accepts_logic_source() {
             &mut replacements,
             &mut reg_counter,
             true,
-            false,
             &HashMap::default(),
         );
         verify(block.instructions.clone(), register_map);

@@ -525,6 +525,95 @@ pub(crate) fn uninitialized_working_observations(
     hazards
 }
 
+/// Place pending writes after the last static read of the object's old value
+/// in a straight-line sequence. The complete-event hazard analysis can then
+/// forward the write to its stable slot if no other observer needs the old
+/// value. Working reads, dynamic accesses and observable effects are barriers.
+pub(crate) fn schedule_pending_writes(units: &mut [ExecutionUnit<RegionedAbsoluteAddr>]) {
+    // A forwarded store no longer updates its working slot. Its only readers
+    // across the whole event must be plain publications of that same object.
+    let mut observed = crate::HashSet::default();
+    for inst in units
+        .iter()
+        .flat_map(|u| u.blocks.values())
+        .flat_map(|b| &b.instructions)
+    {
+        if plain_publication(inst).is_some() {
+            continue;
+        }
+        let Some(reads) = inst.state_reads().objects() else {
+            return;
+        };
+        observed.extend(
+            reads
+                .filter(|a| a.region == WORKING_REGION)
+                .map(|a| a.absolute_addr()),
+        );
+    }
+    for block in units.iter_mut().flat_map(|u| u.blocks.values_mut()) {
+        let mut publications = crate::HashSet::default();
+        let mut last_read = HashMap::default();
+        let mut moved = HashMap::default();
+        for (index, inst) in block.instructions.iter().enumerate().rev() {
+            if let Some(target) = plain_publication(inst) {
+                if !observed.contains(&target) {
+                    publications.insert(target);
+                }
+                last_read.remove(&target);
+                continue;
+            }
+            match inst {
+                SIRInstruction::Load(_, addr, SIROffset::Static(_), _)
+                    if addr.region == STABLE_REGION =>
+                {
+                    let target = addr.absolute_addr();
+                    if publications.contains(&target) {
+                        last_read.entry(target).or_insert(index);
+                    }
+                }
+                SIRInstruction::Store(addr, SIROffset::Static(_), _, _, triggers, sites)
+                    if addr.region == WORKING_REGION && triggers.is_empty() && sites.is_empty() =>
+                {
+                    if let Some(&last) = last_read.get(&addr.absolute_addr()) {
+                        moved.insert(index, last);
+                    }
+                }
+                _ if inst.is_pure() => {}
+                _ => {
+                    last_read.clear();
+                    publications.clear();
+                }
+            }
+        }
+        if !moved.is_empty() {
+            let mut ordered: Vec<_> = std::mem::take(&mut block.instructions)
+                .into_iter()
+                .enumerate()
+                .collect();
+            // Stable sorting preserves overlapping pending writes' source order.
+            ordered.sort_by_key(|(index, _)| match moved.get(index) {
+                Some(&last) => (last, true),
+                None => (*index, false),
+            });
+            block.instructions = ordered.into_iter().map(|(_, inst)| inst).collect();
+        }
+    }
+}
+
+fn plain_publication(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Option<AbsoluteAddr> {
+    match inst {
+        SIRInstruction::Commit(src, dst, SIROffset::Static(_), _, triggers)
+            if src.region == WORKING_REGION
+                && dst.region == STABLE_REGION
+                && src.absolute_addr() == dst.absolute_addr()
+                && triggers.is_empty() =>
+        {
+            Some(src.absolute_addr())
+        }
+        _ => None,
+    }
+}
+
 /// Bit ranges for which replacing a WORKING/SPARSE write with an immediate
 /// STABLE write could change an observation in this complete event CFG.
 ///

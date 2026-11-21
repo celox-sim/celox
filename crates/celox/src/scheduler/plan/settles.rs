@@ -322,7 +322,6 @@ impl<'a> PlanBuilder<'a> {
         let events = &self.found.events;
         let kernels = &self.found.kernels;
         let settle_reads = &self.found.settle_reads;
-        let retained = &self.found.retained;
         let lazy = &self.found.lazy;
         let storage = home(shared);
         // A cone leaves out the captures of the processes outside it.
@@ -386,60 +385,256 @@ impl<'a> PlanBuilder<'a> {
                     size(&sir.eval_comb)
                 );
                 (size(&units) * 4 < size(&sir.eval_comb) * 3).then_some(Incremental {
-                    source,
+                    source: Some(source),
+                    events: None,
                     sources,
                     units,
                     untracked: Some((partitioning.flags, settle.partitions)),
                 })
             };
             partition_cone().or_else(|| {
-                kernels
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, kernel)| kernel.as_ref().map(|kernel| (index, kernel)))
-                    .find(|(_, kernel)| kernel.delays && kernel.writes.len() == 1)
-                    .and_then(|(index, kernel)| {
-                        let source = storage(events[kernel.writes[0]].signal);
-                        if !settle_reads.as_ref()?.contains(&source) {
-                            return None;
-                        }
-                        let sources: HashSet<_> = instructions(&sir.processes[index])
-                            .flat_map(written_storage)
-                            .filter(|write| write.region == STABLE_REGION)
-                            .map(|write| storage(write.absolute_addr()))
-                            .filter(|address| settle_reads.as_ref().unwrap().contains(address))
-                            .collect();
-                        // Read-before-write activations retain their existing
-                        // per-settle semantics, including their downstream effects.
-                        let stateful: Vec<_> = sir.eval_comb_stateful.as_ref().map_or_else(
-                            || retained.iter().copied().collect(),
-                            |targets| {
-                                targets
-                                    .iter()
-                                    .map(|target| storage(target.absolute_addr()))
-                                    .filter(|target| retained.contains(target))
-                                    .collect()
-                            },
-                        );
-                        let slicer = comb_slicer.get();
-                        let inputs = sources
-                            .iter()
-                            .copied()
-                            .chain(schema.time_slots.iter().copied().map(&storage))
-                            .chain(stateful);
-                        let units = slicer.affected_slice(inputs);
-                        let size = |units: &[Unit]| units.iter().flat_map(instructions).count();
-                        (size(&units) * 4 < size(&sir.eval_comb) * 3).then_some(Incremental {
-                            source,
-                            sources,
-                            units,
-                            untracked: None,
-                        })
-                    })
+                if schema.settle_partitions.is_some() {
+                    return None;
+                }
+                self.event_schedule(comb_slicer.get())
             })
         } else {
             None
         };
         self.found.incremental = incremental;
+    }
+
+    /// Assign each unit the union of its driving register events after SIR
+    /// optimization and storage aliasing. Clock inputs and retained state
+    /// have their own activation conditions.
+    fn event_schedule(&self, slicer: &CombSlicer<'_>) -> Option<Incremental> {
+        let program = self.program;
+        let sir = self.sir;
+        let schema = self.schema;
+        let kernels = &self.found.kernels;
+        let events = &self.found.events;
+        let storage = home(self.shared);
+        let retained = &self.found.retained;
+        let reads = self.found.settle_reads.as_ref()?;
+        let mut sources: HashSet<_> = self
+            .found
+            .clocks
+            .iter()
+            .map(|&event| storage(events[event].signal))
+            .filter(|addr| reads.contains(addr))
+            .collect();
+        // A periodic kernel can update data together with the clock.
+        // Its writes belong to the same input activation.
+        for (index, kernel) in kernels.iter().enumerate() {
+            if kernel
+                .as_ref()
+                .is_some_and(|kernel| kernel.delays && !kernel.writes.is_empty())
+            {
+                sources.extend(
+                    instructions(&sir.processes[index])
+                        .flat_map(written_storage)
+                        .filter(|write| write.region == STABLE_REGION)
+                        .map(|write| storage(write.absolute_addr()))
+                        .filter(|addr| reads.contains(addr)),
+                );
+            }
+        }
+
+        let forward = slicer.forward_dependencies();
+        let clock = forward.affected_storage(
+            sources
+                .iter()
+                .copied()
+                .chain(schema.time_slots.iter().copied().map(&storage)),
+        );
+        let retained: Vec<_> = match &sir.eval_comb_stateful {
+            None => retained.iter().copied().collect(),
+            Some(targets) => targets
+                .iter()
+                .map(|target| storage(target.absolute_addr()))
+                .filter(|target| retained.contains(target))
+                .collect(),
+        };
+        let stateful = forward.affected_storage(retained.iter().copied());
+        let outputs: Vec<HashSet<_>> = sir
+            .eval_comb
+            .iter()
+            .map(|unit| {
+                instructions(unit)
+                    .flat_map(written_storage)
+                    .map(|w| storage(w.absolute_addr()))
+                    .collect()
+            })
+            .collect();
+        let mut activations: Vec<_> = outputs
+            .iter()
+            .map(|writes| Activation {
+                clock_inputs: !writes.is_disjoint(&clock),
+                every_settle: !writes.is_disjoint(&stateful),
+                ..Activation::default()
+            })
+            .collect();
+        let mut register_inputs = HashSet::default();
+        let mut writers = HashMap::default();
+        for (index, event) in events.iter().enumerate() {
+            let mut inputs = HashSet::default();
+            let precise = event
+                .eval_apply
+                .iter()
+                .chain(event.eval_only.iter().flatten())
+                .chain(event.apply.iter().flatten())
+                .flat_map(instructions)
+                .all(|inst| {
+                    if makes_opaque_calls(inst, &schema.extern_functions)
+                        || inst.state_writes().objects().is_none()
+                    {
+                        return false;
+                    }
+                    inputs.extend(
+                        written_storage(inst)
+                            .filter(|write| write.region == STABLE_REGION)
+                            .map(|write| storage(write.absolute_addr()))
+                            .filter(|address| reads.contains(address)),
+                    );
+                    true
+                });
+            if !precise || inputs.is_empty() {
+                continue;
+            }
+            writers.insert(event.signal, index);
+            register_inputs.extend(inputs.iter().copied());
+            let affected = forward.affected_storage(inputs);
+            for (writes, activation) in outputs.iter().zip(&mut activations) {
+                if !writes.is_disjoint(&affected) {
+                    activation.events.set_bit(index as u64, true);
+                }
+            }
+        }
+        // A queued NBA publishes at its due time, independently of the clock
+        // that issued it. Its destination and occurrence counters are the
+        // roots of that publication, including for indexed memory writes.
+        let mut targets: Vec<_> = schema
+            .nba_sites
+            .iter()
+            .map(|site| storage(site.target))
+            .collect();
+        targets.sort_unstable();
+        targets.dedup();
+        let observations =
+            nba::observations::Observations::for_targets(program, self.shared, &targets);
+        let mut nba_targets = HashMap::default();
+        for (target, observed) in targets.into_iter().zip(observations) {
+            let inputs = std::iter::once(target)
+                .chain(observed.counter_addresses().map(&storage))
+                .filter(|address| reads.contains(address));
+            let affected = forward.affected_storage(inputs);
+            if affected.is_empty() {
+                continue;
+            }
+            let index = events.len() + nba_targets.len();
+            if index >= program.layout().widths[&self.slots.settle_events] {
+                return None;
+            }
+            nba_targets.insert(target, index);
+            for (writes, activation) in outputs.iter().zip(&mut activations) {
+                if !writes.is_disjoint(&affected) {
+                    activation.events.set_bit(index as u64, true);
+                }
+            }
+        }
+        if writers.is_empty() && nba_targets.is_empty() {
+            // Opaque clocked writers must invalidate the whole design. A
+            // change of the clock level alone can still have a small cone.
+            let source = sources.iter().min().copied()?;
+            let affected = clock.union(&stateful).copied().collect();
+            let units = slicer.slice_affected(&affected);
+            let size = |units: &[Unit]| units.iter().flat_map(instructions).count();
+            return (size(&units) * 4 < size(&sir.eval_comb) * 3).then_some(Incremental {
+                source: Some(source),
+                sources,
+                units,
+                events: None,
+                untracked: None,
+            });
+        }
+        let inputs: Vec<HashSet<_>> = sir
+            .eval_comb
+            .iter()
+            .map(|unit| {
+                instructions(unit)
+                    .flat_map(read_storage)
+                    .map(|r| storage(r.absolute_addr()))
+                    .collect()
+            })
+            .collect();
+        let mut groups = event_order::order(activations, &inputs, &outputs);
+        let start = (events.len() + nba_targets.len()).next_multiple_of(64);
+        let mut publications = HashMap::default();
+        let count = groups.iter().filter(|(a, _)| !a.every_settle).count();
+        if count > 0 && start + 64 <= program.layout().widths[&self.slots.settle_events] {
+            // Publish a ready-to-use consumer mask. Even a wide clock
+            // domain still requires only one word at the settle boundary.
+            // Adjacent groups can share a bit if the schedule is larger.
+            let mut sinks = HashMap::default();
+            for (i, (activation, members)) in groups
+                .iter_mut()
+                .filter(|(a, _)| !a.every_settle)
+                .enumerate()
+            {
+                let bit = i * count.min(63) / count;
+                activation.events.set_bit((start + bit) as u64, true);
+                for &unit in members.iter() {
+                    for &addr in &outputs[unit] {
+                        *sinks.entry(addr).or_default() |= 1u64 << bit;
+                    }
+                }
+            }
+            register_inputs.extend(
+                sir.processes
+                    .iter()
+                    .flat_map(instructions)
+                    .flat_map(written_storage)
+                    .filter(|w| w.region == STABLE_REGION)
+                    .map(|w| storage(w.absolute_addr()))
+                    .filter(|a| reads.contains(a)),
+            );
+            let readers = forward.reader_masks(sinks);
+            publications.extend(register_inputs.into_iter().map(|addr| {
+                // A change with only retained readers still needs a settle.
+                (addr, readers.get(&addr).copied().unwrap_or(1u64 << 63))
+            }));
+        }
+        if tracing::enabled!(target: "celox::scheduler", tracing::Level::DEBUG) {
+            let sizes: Vec<_> = sir
+                .eval_comb
+                .iter()
+                .map(|unit| instructions(unit).count())
+                .collect();
+            let active = |index: usize| {
+                groups
+                    .iter()
+                    .filter(|(a, _)| a.every_settle || a.events.bit(index as u64))
+                    .map(|(_, r)| r.iter().map(|&unit| sizes[unit]).sum::<usize>())
+                    .sum::<usize>()
+            };
+            tracing::debug!(target: "celox::scheduler", groups=groups.len(), units=sizes.len(),
+                        full=sizes.iter().sum::<usize>(),
+                        events=?events.iter().enumerate().filter(|(_, event)| writers.contains_key(&event.signal))
+                            .map(|(i,event)| (program.get_path(&event.signal),active(i))).collect::<Vec<_>>(),
+                        "static event schedule");
+        }
+        Some(Incremental {
+            source: sources.iter().copied().min(),
+            sources,
+            units: Vec::new(),
+            events: Some(EventSchedule {
+                writers,
+                nba_targets,
+                publications,
+                publication_offset: start,
+                groups,
+            }),
+            untracked: None,
+        })
     }
 }

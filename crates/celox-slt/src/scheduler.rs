@@ -250,6 +250,8 @@ pub struct SettlePartitioning<Addr> {
     /// changes on every edge, so such paths get partitions of their own: the
     /// logic sharing a partition with them would run on every edge too.
     pub clock_nets: HashSet<Addr>,
+    /// Event domains which publish each stable input of the settle.
+    pub write_domains: HashMap<Addr, Vec<Addr>>,
     /// Whether the settle counts its work in run counters after the flags
     /// (`celox_design::settle_profile_offset`); `waits` is the number of
     /// wait flags, which the counters follow.
@@ -341,6 +343,19 @@ enum ScheduledWork {
     Ff(usize),
 }
 
+/// Choose the boundaries at which combinational work can be invoked.
+pub enum CombGrouping<A> {
+    Whole,
+    EventDomains(HashMap<A, Vec<A>>),
+    Partitioned(SettlePartitioning<A>),
+}
+
+impl<A> From<Option<SettlePartitioning<A>>> for CombGrouping<A> {
+    fn from(request: Option<SettlePartitioning<A>>) -> Self {
+        request.map_or(Self::Whole, Self::Partitioned)
+    }
+}
+
 /// Schedules and transforms LogicPaths into Simulation Intermediate Representation (SIR).
 ///
 /// This process performs:
@@ -360,7 +375,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
     unpacked_element_widths: &HashMap<Addr, usize>,
     first_runtime_error_code: i64,
     mut ff: Option<&mut dyn ClockFfLowering<Addr, Error = E>>,
-    partitioning: Option<SettlePartitioning<Addr>>,
+    grouping: CombGrouping<Addr>,
     unit_limits: UnitLimits,
 ) -> Result<ScheduleResult<Addr>, ClockSortError<Addr, E>> {
     let prepared = prepare_schedule(
@@ -428,6 +443,11 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
     }
     let mut runtime_errors: HashMap<i64, RuntimeErrorInfo<Addr>> = HashMap::default();
     let mut next_runtime_error_code = first_runtime_error_code;
+    let (partitioning, write_domains) = match grouping {
+        CombGrouping::Whole => (None, None),
+        CombGrouping::EventDomains(domains) => (None, Some(domains)),
+        CombGrouping::Partitioned(request) => (Some(request), None),
+    };
     lowering.settle_profile_waits = partitioning
         .as_ref()
         .filter(|_| ff.is_none())
@@ -443,7 +463,53 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
                 partitioning,
             )
         });
+    // End a unit when its driving clock domains change. This is only a
+    // lowering boundary; the timed scheduler computes activation from the
+    // optimized units and canonical storage. No runtime flags are emitted.
+    let boundaries = write_domains.map(|mut domains| {
+        let held = partitions::held_work(&prepared, arena);
+        let mut previous = Vec::new();
+        prepared
+            .scheduled_work
+            .iter()
+            .enumerate()
+            .map(|(index, work)| {
+                let paths = work_paths(work);
+                let mut causes = Vec::new();
+                for &id in paths {
+                    let path = &prepared.input[id];
+                    for read in path
+                        .sources
+                        .iter()
+                        .chain(&path.address_sources)
+                        .chain(&path.previous_sources)
+                    {
+                        if let Some(inputs) = domains.get(&read.id) {
+                            causes.extend_from_slice(inputs);
+                        }
+                    }
+                }
+                causes.sort_unstable();
+                causes.dedup();
+                for &id in paths {
+                    if let Some(target) = prepared.input[id].target.var() {
+                        let entry = domains.entry(target.id).or_default();
+                        entry.extend_from_slice(&causes);
+                        entry.sort_unstable();
+                        entry.dedup();
+                    }
+                }
+                let boundary = index > 0 && !held[index] && previous != causes;
+                previous = causes;
+                boundary
+            })
+            .collect::<Vec<_>>()
+    });
     for (index, work) in prepared.scheduled_work.iter().enumerate() {
+        if boundaries.as_ref().is_some_and(|cuts| cuts[index]) {
+            lowering.flush_pending_folds();
+            lowering.flush_unit();
+        }
         if let Some((plan, flags)) = &plan {
             if let Some(partition) = plan.first_work.iter().position(|&first| first == index) {
                 if partition > 0 {
@@ -556,7 +622,7 @@ pub fn sort_with_unpacked_element_widths<Addr: Clone + Eq + Ord + Hash + Debug +
     var_widths: &HashMap<Addr, usize>,
     unpacked_element_widths: &HashMap<Addr, usize>,
     first_runtime_error_code: i64,
-    partitioning: Option<SettlePartitioning<Addr>>,
+    grouping: impl Into<CombGrouping<Addr>>,
 ) -> Result<ScheduleResult<Addr>, SchedulerError<Addr>> {
     sort_with_unit_limits(
         input,
@@ -567,7 +633,7 @@ pub fn sort_with_unpacked_element_widths<Addr: Clone + Eq + Ord + Hash + Debug +
         var_widths,
         unpacked_element_widths,
         first_runtime_error_code,
-        partitioning,
+        grouping,
         UnitLimits::DEFAULT,
     )
 }
@@ -582,7 +648,7 @@ fn sort_with_unit_limits<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>
     var_widths: &HashMap<Addr, usize>,
     unpacked_element_widths: &HashMap<Addr, usize>,
     first_runtime_error_code: i64,
-    partitioning: Option<SettlePartitioning<Addr>>,
+    grouping: impl Into<CombGrouping<Addr>>,
     unit_limits: UnitLimits,
 ) -> Result<ScheduleResult<Addr>, SchedulerError<Addr>> {
     match sort_impl::<Addr, std::convert::Infallible>(
@@ -595,7 +661,7 @@ fn sort_with_unit_limits<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>
         unpacked_element_widths,
         first_runtime_error_code,
         None,
-        partitioning,
+        grouping.into(),
         unit_limits,
     ) {
         Ok(result) => Ok(result),
@@ -627,7 +693,7 @@ pub fn sort_clock<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
         unpacked_element_widths,
         first_runtime_error_code,
         Some(ff),
-        None,
+        CombGrouping::Whole,
         UnitLimits::DEFAULT,
     )
 }

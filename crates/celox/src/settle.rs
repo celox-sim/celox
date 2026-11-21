@@ -134,19 +134,10 @@ pub(crate) fn run_checked<B, E>(
     Ok(())
 }
 
-/// A kernel write of a data home takes the clock cone when the partitions
-/// it dirties, closed over publishing, are at most this share of all.
-const CONE_SOURCE_SHARE: usize = 8;
-
-/// The state homes whose writes by a kernel dirty only the clock cone of a
-/// partitioned settle ([`crate::settle::clock_cone`]): the event signals,
-/// the time slots, and the settle objects the kernels store to whose
-/// readers' closure under publishing is small ([`CONE_SOURCE_SHARE`]). The
-/// marks of such a write set the scheduler's dirty byte to 2, "only cone
-/// sources changed" (ORed, so that a write of anything else in the same
-/// pass keeps the whole settle); the scheduler's plan seeds the cone with
-/// the readers of the same homes. Computed once the settle is final and
-/// kept in [`LaidOutProgram::cone_homes`].
+/// Homes whose kernel writes can use the event/time settle cone. A data
+/// input qualifies when all its readers already belong to that cone.
+/// Including every individually cheap data input can make their union
+/// expensive on every clock edge, even when only the clock changed.
 pub(crate) fn cone_source_homes(program: &LaidOutProgram) -> crate::HashSet<usize> {
     let layout = program.layout();
     let schema = &program.runtime.runtime_schema;
@@ -175,35 +166,21 @@ pub(crate) fn cone_source_homes(program: &LaidOutProgram) -> crate::HashSet<usiz
     ) else {
         return homes;
     };
-    let mut written: Vec<usize> = Vec::new();
-    for unit in program.sir.processes.iter().take(schema.processes.len()) {
-        for instruction in unit.blocks.values().flat_map(|block| &block.instructions) {
-            for write in instruction.state_writes().objects().into_iter().flatten() {
-                if write.region == STABLE_REGION
-                    && let Some(home) = home(&write.absolute_addr())
-                    && !homes.contains(&home)
-                {
-                    written.push(home);
-                }
-            }
-        }
-    }
-    written.sort_unstable();
-    written.dedup();
-    for home in written {
-        let Ok(index) = settle
-            .objects
-            .binary_search_by_key(&home, |object| object.start)
-        else {
-            continue;
-        };
-        let seeds = settle.objects[index].partitions.iter().map(|&p| p as usize);
-        let reached = cone::closure(&marks, seeds)
+    let seeds = settle
+        .objects
+        .iter()
+        .filter(|object| homes.contains(&object.start))
+        .flat_map(|object| object.partitions.iter().map(|&p| p as usize));
+    let event_cone = cone::closure(&marks, seeds);
+    for object in &settle.objects {
+        // The trailing bytes wake waiting processes. They are marked on
+        // either path and do not add any combinational work to the cone.
+        if object
+            .partitions
             .iter()
-            .filter(|&&reached| reached)
-            .count();
-        if reached * CONE_SOURCE_SHARE <= settle.partitions {
-            homes.insert(home);
+            .all(|&p| event_cone.get(p as usize).copied().unwrap_or(true))
+        {
+            homes.insert(object.start);
         }
     }
     homes
@@ -447,6 +424,50 @@ pub(crate) fn without_shadow_commits(
     std::borrow::Cow::Owned(stripped)
 }
 
+/// A whole, triggerless scalar copy between the working and stable regions.
+/// In a two-state layout its bytes can be copied together with adjacent copies.
+pub(crate) struct CommitRange {
+    pub(crate) destination: RegionedAbsoluteAddr,
+    pub(crate) stable: usize,
+    pub(crate) working: usize,
+    pub(crate) width: usize,
+}
+
+impl CommitRange {
+    pub(crate) fn of(
+        layout: &crate::backend::MemoryLayout,
+        instruction: &SIRInstruction<RegionedAbsoluteAddr>,
+    ) -> Option<Self> {
+        let SIRInstruction::Commit(source, destination, SIROffset::Static(0), width, triggers) =
+            instruction
+        else {
+            return None;
+        };
+        let address = destination.absolute_addr();
+        if !triggers.is_empty()
+            || source.region != WORKING_REGION
+            || destination.region != STABLE_REGION
+            || source.absolute_addr() != address
+            || *width == 0
+            || layout.widths.get(&address) != Some(width)
+            || layout.unpacked_arrays.contains_key(&address)
+            || layout.sparse_offsets.contains_key(&address)
+        {
+            return None;
+        }
+        Some(Self {
+            destination: *destination,
+            stable: *layout.offsets.get(&address)?,
+            working: layout.working_base_offset + layout.working_offsets.get(&address)?,
+            width: *width,
+        })
+    }
+
+    pub(crate) fn bytes(&self) -> usize {
+        celox_state_layout::get_byte_size(self.width)
+    }
+}
+
 /// Mark only stores introduced by the compiled scheduler itself. Inlined
 /// kernel/FF units were already instrumented; the settle manages its own flags.
 #[cfg(feature = "host-runtime")]
@@ -467,7 +488,14 @@ pub(crate) fn instrument_unit(
     program: &LaidOutProgram,
     unit: &mut ExecutionUnit<RegionedAbsoluteAddr>,
 ) {
-    if let Some(marker) = Marker::new(program.layout(), program.runtime()) {
+    if let Some(mut marker) = Marker::new(program.layout(), program.runtime()) {
+        // Use the same cone membership as the original process pass. A
+        // deferred entry was empty when the rest of the kernels were marked.
+        if let Some(homes) = &program.cone_homes {
+            marker.clock_homes.extend(homes);
+        } else {
+            marker.clock_homes.extend(cone_source_homes(program));
+        }
         marker.instrument(unit);
     }
 }
@@ -999,11 +1027,8 @@ impl<'a> Marker<'a> {
         }
         let one = segment.one(unit, alloc);
         let dirty_value = self.dirty_mark(unit, alloc, segment, &address);
-        if width > MAX_COMPARED_WIDTH || self.spans_padded_elements(&address, &offset, width) {
-            segment.instructions.push(instruction);
-            self.mark_unconditionally(&mut segment.instructions, one, dirty_value, readers);
-            return;
-        }
+        let comparable =
+            width <= MAX_COMPARED_WIDTH && !self.spans_padded_elements(&address, &offset, width);
         // A commit of a copy-on-write (sparse) memory publishes only the
         // chunks its writers touched, which its dirty summary words list:
         // when none did, it changes nothing, and the whole memory need not
@@ -1011,8 +1036,9 @@ impl<'a> Marker<'a> {
         if let SIRInstruction::Commit(source, ..) = &instruction
             && source.region == SPARSE_WORKING_REGION
             && self.wide
-            && let Some(sparse) = self.layout.sparse_layouts.get(&address.absolute_addr())
+            && let Some(sparse) = self.layout.sparse_layouts.get(&source.absolute_addr())
             && sparse.summary_word_count > 0
+            && (comparable || sparse.summary_word_count <= 8)
         {
             let mut written = None;
             for word in 0..sparse.summary_word_count {
@@ -1050,6 +1076,18 @@ impl<'a> Marker<'a> {
             segment
                 .instructions
                 .push(SIRInstruction::Binary(any, written, BinaryOp::Ne, zero));
+            if !comparable {
+                // The wide value is expensive to compare, but an empty write
+                // set cannot have changed any reader. Sample it before the
+                // commit consumes the dirty words.
+                segment.instructions.push(instruction);
+                let mark = alloc.block();
+                let rest = segment.split(unit, alloc, any, mark);
+                let mut marks = Vec::new();
+                self.mark_unconditionally(&mut marks, one, dirty_value, readers);
+                insert_block(unit, mark, marks, SIRTerminator::Jump(rest, Vec::new()));
+                return;
+            }
             let compare = alloc.block();
             segment.split(unit, alloc, any, compare);
             segment.instructions.push(instruction.clone());
@@ -1078,6 +1116,11 @@ impl<'a> Marker<'a> {
             let mut marks = Vec::new();
             self.mark_unconditionally(&mut marks, one, dirty_value, readers);
             insert_block(unit, mark, marks, SIRTerminator::Jump(join, Vec::new()));
+            return;
+        }
+        if !comparable {
+            segment.instructions.push(instruction);
+            self.mark_unconditionally(&mut segment.instructions, one, dirty_value, readers);
             return;
         }
         // Set the readers' flags only when the store changes the state, both
@@ -1124,36 +1167,10 @@ impl<'a> Marker<'a> {
     fn wide_run(&self, instructions: &[SIRInstruction<RegionedAbsoluteAddr>]) -> Vec<WideObject> {
         let mut run: Vec<WideObject> = Vec::new();
         for instruction in instructions {
-            let SIRInstruction::Commit(source, destination, SIROffset::Static(0), width, triggers) =
-                instruction
-            else {
+            let Some(range) = CommitRange::of(self.layout, instruction) else {
                 break;
             };
-            if !triggers.is_empty()
-                || source.region != WORKING_REGION
-                || destination.region != STABLE_REGION
-                || source.absolute_addr() != destination.absolute_addr()
-            {
-                break;
-            }
-            let address = destination.absolute_addr();
-            if self.layout.widths.get(&address) != Some(width)
-                || self.layout.unpacked_arrays.contains_key(&address)
-                || self.layout.sparse_offsets.contains_key(&address)
-            {
-                break;
-            }
-            let (Some(&stable), Some(&working)) = (
-                self.layout.offsets.get(&address),
-                self.layout.working_offsets.get(&address),
-            ) else {
-                break;
-            };
-            let working = self.layout.working_base_offset + working;
-            let bytes = self.layout.plane_size(&address);
-            if bytes == 0 {
-                break;
-            }
+            let (stable, working) = (range.stable, range.working);
             if let Some(first) = run.first()
                 && working.wrapping_sub(stable) != first.working.wrapping_sub(first.stable)
             {
@@ -1163,8 +1180,8 @@ impl<'a> Marker<'a> {
                 commit: instruction.clone(),
                 stable,
                 working,
-                bytes,
-                readers: self.readers(destination),
+                bytes: range.bytes(),
+                readers: self.readers(&range.destination),
             });
         }
         run

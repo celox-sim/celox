@@ -233,6 +233,7 @@ pub(in crate::backend::native) fn compile_unit_refs(
         capture_trace,
         diagnostics,
         cancel,
+        false,
         &mut |_| {},
     )
 }
@@ -252,11 +253,13 @@ pub(in crate::backend::native) fn compile_unit_refs_inspected(
     capture_trace: bool,
     diagnostics: &crate::optimizer::SirDiagnostics,
     cancel: Option<&CompileCancel>,
+    region_entry: bool,
     inspect_prepared: &mut dyn FnMut(&crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>),
 ) -> Result<CompiledNativeFunction, SimulatorError> {
     if cancelled(cancel) {
         return Err(cancelled_error());
     }
+    debug_assert!(!region_entry || (NATIVE_REGIONS && !units.is_empty()));
     let timing = x86_options.diagnostics.phase_timing;
     if units.is_empty() {
         // Empty function: just return 0
@@ -367,7 +370,7 @@ pub(in crate::backend::native) fn compile_unit_refs_inspected(
         feature = "x86_64-codegen",
         all(target_arch = "x86_64", not(feature = "arm64-codegen"))
     ))]
-    let emit_result = emit::emit_owned_prepared_eu(
+    let emit_result = emit::allocate_owned_prepared_eu(
         sir_eu,
         layout,
         four_state,
@@ -376,6 +379,14 @@ pub(in crate::backend::native) fn compile_unit_refs_inspected(
         trace.as_mut(),
         || cancelled(cancel),
     )
+    .and_then(|allocated| {
+        let allocated = if region_entry {
+            allocated.into_region()
+        } else {
+            allocated
+        };
+        allocated.emit(x86_options.arena_base, trace.as_mut(), || cancelled(cancel))
+    })
     .map_err(|source| {
         if matches!(source, emit::ChainedEmitError::Cancelled) {
             codegen_err(CodegenError::Cancelled)

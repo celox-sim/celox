@@ -16,6 +16,9 @@ fn optimize_unified_commit_groups(
         if units.is_empty() {
             continue;
         }
+        if forward {
+            commit_ops::schedule_pending_writes(units);
+        }
         // Hazard analysis must see the complete event order, not an individual
         // always_ff/module EU.  The actual rewrites remain local to each EU.
         let hazards = if units.len() == 1 {

@@ -479,6 +479,7 @@ struct EmissionContext {
     call_area: Option<i32>,
     caller_segment: extern_call::CallerSegment,
     pinned_xmms: u16,
+    align_region_calls: bool,
     /// A function unit's frame window and the register holding its frame's
     /// address. Its arena (spills, scratch, call area) is then on the
     /// machine stack at RSP, one per activation, instead of in the state.
@@ -498,6 +499,7 @@ impl EmitAssembler {
                 call_area: None,
                 caller_segment: extern_call::CallerSegment::None,
                 pinned_xmms: 0,
+                align_region_calls: false,
                 frame: None,
                 call_stack: None,
             },
@@ -1351,13 +1353,29 @@ fn emit_planned_with_callees(
                 arena.loop_segment_save.expect("loop segment save"),
             ),
         },
-        pinned_xmms,
+        // A region inherits these registers from the surrounding host entry.
+        // Its own arithmetic uses XMM0..8. Only an actual ABI call can destroy them.
+        if func.region_entry {
+            0xfe00
+        } else {
+            pinned_xmms
+        },
     );
     asm.context.state_base = state_base;
     asm.context.frame = func
         .frame_window
         .zip(frame_register)
         .map(|(window, register)| (window, preg_to_reg64(register)));
+    // Align a stackless caller once, independently of how many regions it visits.
+    asm.context.align_region_calls = frame_register.is_none()
+        && func
+            .blocks
+            .iter()
+            .flat_map(|block| &block.insts)
+            .any(|inst| {
+                matches!(inst, MInst::CallExtern { func, .. }
+                if celox_sir::extern_abi::native_region_index(*func).is_some())
+            });
     asm.context.call_stack = func.call_stack;
     let context = asm.context;
     // Every guard of a function call that fails traps here.
@@ -1373,15 +1391,21 @@ fn emit_planned_with_callees(
         .transpose()?;
 
     // ── Prologue ──
-    emit_prologue(
-        &mut asm,
-        &arena,
-        context,
-        state_base,
-        stack_arena,
-        tick_loop,
-        check_runtime_events,
-    )?;
+    if !func.region_entry {
+        emit_prologue(
+            &mut asm,
+            &arena,
+            context,
+            state_base,
+            stack_arena,
+            tick_loop,
+            check_runtime_events,
+        )?;
+    }
+
+    if context.align_region_calls {
+        asm.sub(rsp, 8)?;
+    }
 
     // ── Blocks ──
     let mut previous_canonical_label = None;
@@ -1457,7 +1481,11 @@ fn emit_planned_with_callees(
                     if celox_sir::extern_abi::native_kernel_index(*func).is_some()
                         || celox_sir::extern_abi::native_function_slot(*func).is_some() =>
                 {
-                    extern_call::emit_call_extern(&mut asm, *func, *arg_count)?;
+                    if let Some(slot) = celox_sir::extern_abi::native_region_index(*func) {
+                        extern_call::emit_region_call(&mut asm, slot)?;
+                    } else {
+                        extern_call::emit_call_extern(&mut asm, *func, *arg_count)?;
+                    }
                     if celox_sir::extern_abi::native_function_slot(*func).is_some() {
                         // The callee left the depth where its guard put it,
                         // whatever its status.
@@ -1632,16 +1660,24 @@ fn emit_planned_with_callees(
     }
 
     // ── Epilogue ──
-    emit_epilogue(
-        &mut asm,
-        &arena,
-        context,
-        state_base,
-        stack_arena,
-        tick_loop,
-        &mut tick_loop_success_label,
-        &mut epilogue_label,
-    )?;
+    if func.region_entry {
+        asm.set_label(&mut epilogue_label)?;
+        if context.align_region_calls {
+            asm.add(rsp, 8)?;
+        }
+        asm.ret()?;
+    } else {
+        emit_epilogue(
+            &mut asm,
+            &arena,
+            context,
+            state_base,
+            stack_arena,
+            tick_loop,
+            &mut tick_loop_success_label,
+            &mut epilogue_label,
+        )?;
+    }
     if call_trap_used {
         // A broken call-stack contract is a defect of the producer, not a
         // simulation error: stop as Cranelift's trap does.

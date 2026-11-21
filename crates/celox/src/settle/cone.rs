@@ -36,28 +36,53 @@ pub(crate) fn clock_cone(
     let marks = publish_marks(units, flags, partitions, offsets)?;
     let cone = closure(&marks, seeds);
     let mut restricted = Vec::with_capacity(units.len());
+    let untracked = celox_design::settle_untracked_flag(partitions);
+    let mut tracked = true;
     for unit in units {
+        tracked &= !unit
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .any(|inst| inst.state_writes().overlaps(flags, untracked * 8, 8));
         let analysis = Analysis::new(unit, flags, partitions, offsets);
         let mut copy = unit.clone();
         for (&id, block) in &unit.blocks {
             let SIRTerminator::Branch {
                 cond,
-                true_block: _,
-                false_block: (skip, skip_args),
+                true_block,
+                false_block,
             } = &block.terminator
             else {
                 continue;
             };
-            let skipped = if let Some((partition, _, _)) = analysis.guard(id) {
-                !cone[partition]
-            } else if let Some((first, count)) = group_test(&analysis, *cond) {
-                (first..(first + count).min(partitions)).all(|partition| !cone[partition])
+            let target = if let Some((partition, _, _)) = analysis.guard(id) {
+                (!cone[partition]).then_some(false_block)
+            } else if let Some((first, count)) = flag_test(&analysis, *cond) {
+                // The caller has already tested this byte before entering the
+                // clock-only schedule. Drop the full-settle initialization
+                // (one store per flag word) from the specialized entry.
+                if count == 1 {
+                    (tracked && first == untracked).then_some(false_block)
+                } else {
+                    let live = cone[first.min(partitions)..(first + count).min(partitions)]
+                        .iter()
+                        .filter(|&&live| live)
+                        .take(2)
+                        .count();
+                    match live {
+                        0 => Some(false_block),
+                        // The remaining partition tests its own flag. Entering
+                        // the group directly drops a redundant flag-word load.
+                        1 => Some(true_block),
+                        _ => None,
+                    }
+                }
             } else {
-                false
+                None
             };
-            if skipped {
+            if let Some((target, args)) = target {
                 copy.blocks.get_mut(&id).expect("a copied block").terminator =
-                    SIRTerminator::Jump(*skip, skip_args.clone());
+                    SIRTerminator::Jump(*target, args.clone());
             }
         }
         remove_unreachable_blocks(&mut copy);
@@ -145,9 +170,8 @@ fn marked_by(analysis: &Analysis<'_>, block: BlockId) -> Option<Vec<usize>> {
 }
 
 #[cfg(feature = "host-runtime")]
-/// The first partition and the partition count of the group a test of
-/// `cond` covers (`Load flag word; Ne 0`).
-fn group_test(analysis: &Analysis<'_>, cond: celox_sir::RegisterId) -> Option<(usize, usize)> {
+/// The first byte and byte count covered by a nonzero test of the flags.
+fn flag_test(analysis: &Analysis<'_>, cond: celox_sir::RegisterId) -> Option<(usize, usize)> {
     let SIRInstruction::Binary(_, lhs, BinaryOp::Ne, rhs) = analysis.defs.get(&cond)? else {
         return None;
     };
@@ -156,7 +180,7 @@ fn group_test(analysis: &Analysis<'_>, cond: celox_sir::RegisterId) -> Option<(u
             if address == analysis.flags
                 && offset.is_multiple_of(8)
                 && width.is_multiple_of(8)
-                && *width > 8 =>
+                && *width >= 8 =>
         {
             Some((offset / 8, width / 8))
         }
@@ -202,4 +226,84 @@ fn remove_unreachable_blocks(unit: &mut Unit) {
         }
     }
     unit.blocks.retain(|id, _| reachable.contains(id));
+}
+
+#[cfg(all(test, feature = "host-runtime"))]
+mod tests {
+    use super::*;
+    use celox_sir::{SIRBuilder, SIRValue};
+
+    #[test]
+    fn tracked_entry_skips_the_full_flag_fill_only_in_the_specialized_copy() {
+        let flags = RegionedAbsoluteAddr::from_absolute_addr(
+            celox_design::STABLE_REGION,
+            AbsoluteAddr {
+                instance_id: celox_design::InstanceId(0),
+                var_id: celox_design::StateObjectId(1),
+            },
+        );
+        let mut b = SIRBuilder::new();
+        let raw = b.alloc_bit(8, false);
+        let zero = b.alloc_bit(8, false);
+        let test = b.alloc_bit(1, false);
+        let fill = b.new_block();
+        let start = b.new_block();
+        b.emit(SIRInstruction::Load(
+            raw,
+            flags,
+            SIROffset::Static(celox_design::settle_untracked_flag(8) * 8),
+            8,
+        ));
+        b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u32)));
+        b.emit(SIRInstruction::Binary(test, raw, BinaryOp::Ne, zero));
+        b.seal_block(SIRTerminator::Branch {
+            cond: test,
+            true_block: (fill, vec![]),
+            false_block: (start, vec![]),
+        });
+        b.switch_to_block(fill);
+        b.emit(SIRInstruction::Store(
+            flags,
+            SIROffset::Static(0),
+            8,
+            raw,
+            vec![],
+            vec![],
+        ));
+        b.seal_block(SIRTerminator::Jump(start, vec![]));
+        b.switch_to_block(start);
+        let unit = b.flush_eu().unwrap();
+        let (tracked, _) = clock_cone(
+            std::slice::from_ref(&unit),
+            &flags,
+            8,
+            &Default::default(),
+            [0],
+        )
+        .unwrap();
+        assert!(!tracked[0].blocks.contains_key(&fill));
+        assert!(unit.blocks.contains_key(&fill));
+
+        // A preceding unit can invalidate the entry assumption.
+        let mut writer = SIRBuilder::new();
+        let one = writer.alloc_bit(8, false);
+        writer.emit(SIRInstruction::Imm(one, SIRValue::new(1u32)));
+        writer.emit(SIRInstruction::Store(
+            flags,
+            SIROffset::Static(celox_design::settle_untracked_flag(8) * 8),
+            8,
+            one,
+            vec![],
+            vec![],
+        ));
+        let (restricted, _) = clock_cone(
+            &[writer.flush_eu().unwrap(), unit],
+            &flags,
+            8,
+            &Default::default(),
+            [0],
+        )
+        .unwrap();
+        assert!(restricted[1].blocks.contains_key(&fill));
+    }
 }

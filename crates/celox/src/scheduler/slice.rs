@@ -100,6 +100,77 @@ pub(crate) struct CombSlicer<'a> {
     stores: HashMap<AbsoluteAddr, Vec<(usize, BlockId, usize)>>,
 }
 
+/// Forward edges shared by the reachability queries of one event schedule.
+pub(super) struct ForwardDependencies<'s, 'a> {
+    slicer: &'s CombSlicer<'a>,
+    users: HashMap<Need, Vec<Need>>,
+}
+
+impl ForwardDependencies<'_, '_> {
+    /// For each state object, the groups that consume it through data or
+    /// control dependencies. Propagate group bits backwards over the same
+    /// graph used to build clock cones; a cycle stops when no mask grows.
+    pub(super) fn reader_masks(
+        &self,
+        outputs: HashMap<AbsoluteAddr, u64>,
+    ) -> HashMap<AbsoluteAddr, u64> {
+        let mut inputs: HashMap<Need, Vec<Need>> = HashMap::default();
+        for (&source, users) in &self.users {
+            for &user in users {
+                inputs.entry(user).or_default().push(source);
+            }
+        }
+        let mut masks: HashMap<_, _> = outputs
+            .into_iter()
+            .map(|(addr, mask)| (Need::Storage(addr), mask))
+            .collect();
+        let mut work: std::collections::VecDeque<_> = masks.keys().copied().collect();
+        while let Some(user) = work.pop_front() {
+            let mask = masks[&user];
+            for &input in inputs.get(&user).into_iter().flatten() {
+                let current = masks.entry(input).or_default();
+                if *current & mask != mask {
+                    *current |= mask;
+                    work.push_back(input);
+                }
+            }
+        }
+        masks
+            .into_iter()
+            .filter_map(|(node, mask)| match node {
+                Need::Storage(addr) => Some((addr, mask)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Storage which can change after the supplied inputs change, through
+    /// both data and control dependencies, including block-argument choices.
+    pub(super) fn affected_storage(
+        &self,
+        inputs: impl IntoIterator<Item = AbsoluteAddr>,
+    ) -> HashSet<AbsoluteAddr> {
+        let mut work: Vec<_> = inputs
+            .into_iter()
+            .map(|address| Need::Storage(self.slicer.representative(address)))
+            .collect();
+        let mut seen = HashSet::default();
+        while let Some(need) = work.pop() {
+            if seen.insert(need) {
+                work.extend(self.users.get(&need).into_iter().flatten().copied());
+            }
+        }
+        seen.into_iter()
+            .filter_map(|need| match need {
+                Need::Storage(address) if self.slicer.stores.contains_key(&address) => {
+                    Some(address)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+}
+
 fn successors(terminator: &SIRTerminator) -> Vec<(BlockId, &[RegisterId])> {
     match terminator {
         SIRTerminator::Jump(target, arguments) => vec![(*target, arguments.as_slice())],
@@ -312,12 +383,7 @@ impl<'a> CombSlicer<'a> {
         self.stores.contains_key(&self.representative(address))
     }
 
-    /// Storage which can change after the supplied inputs change, through
-    /// both data and control dependencies, including block-argument choices.
-    pub(crate) fn affected_storage(
-        &self,
-        inputs: impl IntoIterator<Item = AbsoluteAddr>,
-    ) -> HashSet<AbsoluteAddr> {
+    fn index_users(&self) -> HashMap<Need, Vec<Need>> {
         let mut users: HashMap<Need, Vec<Need>> = HashMap::default();
         let mut edge = |source, target| users.entry(source).or_default().push(target);
         for (unit, body) in self.units.iter().enumerate() {
@@ -375,32 +441,33 @@ impl<'a> CombSlicer<'a> {
                 }
             }
         }
-        let mut work: Vec<_> = inputs
-            .into_iter()
-            .map(|address| Need::Storage(self.representative(address)))
-            .collect();
-        let mut seen = HashSet::default();
-        while let Some(need) = work.pop() {
-            if seen.insert(need) {
-                work.extend(users.get(&need).into_iter().flatten().copied());
-            }
+        users
+    }
+
+    pub(super) fn forward_dependencies(&self) -> ForwardDependencies<'_, 'a> {
+        ForwardDependencies {
+            slicer: self,
+            users: self.index_users(),
         }
-        seen.into_iter()
-            .filter_map(|need| match need {
-                Need::Storage(address) if self.stores.contains_key(&address) => Some(address),
-                _ => None,
-            })
-            .collect()
+    }
+
+    #[cfg(test)]
+    fn affected_storage(
+        &self,
+        inputs: impl IntoIterator<Item = AbsoluteAddr>,
+    ) -> HashSet<AbsoluteAddr> {
+        self.forward_dependencies().affected_storage(inputs)
     }
 
     /// Re-evaluate changed inputs and stateful activations, reading cached
     /// values of unaffected intermediate storage instead of recomputing it.
-    pub(crate) fn affected_slice(
-        &self,
-        inputs: impl IntoIterator<Item = AbsoluteAddr>,
-    ) -> Vec<Unit> {
-        let affected = self.affected_storage(inputs);
-        self.slice_selected(affected.iter().copied(), true, Some(&affected))
+    #[cfg(test)]
+    fn affected_slice(&self, inputs: impl IntoIterator<Item = AbsoluteAddr>) -> Vec<Unit> {
+        self.slice_affected(&self.affected_storage(inputs))
+    }
+
+    pub(super) fn slice_affected(&self, affected: &HashSet<AbsoluteAddr>) -> Vec<Unit> {
+        self.slice_selected(affected.iter().copied(), true, Some(affected))
             .into_iter()
             .map(Selection::materialize)
             .collect()

@@ -383,8 +383,27 @@ fn compile_generated(
     .unwrap()
 }
 
+fn call_regions(function: &mut MFunction) {
+    for inst in &mut function.blocks[0].insts {
+        if let MInst::CallExtern { func, .. } = inst
+            && let Some(slot) = celox_sir::extern_abi::native_kernel_index(*func)
+        {
+            *func = celox_sir::extern_abi::NATIVE_REGION_CALL_TAG | slot;
+        }
+    }
+}
+
 #[test]
 fn nested_generated_kernels_have_disjoint_arenas_and_propagate_status() {
+    nested_kernels(false);
+}
+
+#[test]
+fn private_regions_propagate_status_and_preserve_live_values() {
+    nested_kernels(true);
+}
+
+fn nested_kernels(regions: bool) {
     const STATE_SIZE: usize = 4096;
     const COMPLETED: usize = 2048;
     let mut strategies = vec![StateBaseStrategy::R15];
@@ -395,12 +414,17 @@ fn nested_generated_kernels_have_disjoint_arenas_and_propagate_status() {
         for tick_loop in [false, true] {
             for status in [0i64, 7, -0x1234_5678_9abc] {
                 let mut leaf = generated_kernel(strategy, 1024, None);
+                leaf.region_entry = regions;
                 if status != 0 {
                     *leaf.blocks[0].insts.last_mut().unwrap() = MInst::ReturnError { code: status };
                 }
                 let leaf_code = compile_generated(leaf, STATE_SIZE, &[], false);
                 let leaf_jit = JitCode::new(&leaf_code.code).unwrap();
-                let middle = generated_kernel(strategy, 512, Some(0));
+                let mut middle = generated_kernel(strategy, 512, Some(0));
+                if regions {
+                    middle.region_entry = true;
+                    call_regions(&mut middle);
+                }
                 let middle_code = compile_generated(
                     middle,
                     STATE_SIZE,
@@ -409,6 +433,9 @@ fn nested_generated_kernels_have_disjoint_arenas_and_propagate_status() {
                 );
                 let middle_jit = JitCode::new(&middle_code.code).unwrap();
                 let mut caller = generated_kernel(strategy, BASE, Some(1));
+                if regions {
+                    call_regions(&mut caller);
+                }
                 let marker = caller.vregs.alloc();
                 caller.spill_descs.push(SpillDesc::remat(0x51));
                 let instructions = &mut caller.blocks[0].insts;
@@ -462,6 +489,47 @@ fn nested_generated_kernels_have_disjoint_arenas_and_propagate_status() {
                 }
             }
         }
+    }
+}
+
+#[test]
+fn region_crosses_the_host_abi_only_for_an_actual_extern() {
+    for tick_loop in [false, true] {
+        let strategy = X86Features::detect().state_base();
+        let mut region = live_across_calls(strategy);
+        region.region_entry = true;
+        let child = compile_generated(region, 4096, &[], false);
+        let child_jit = JitCode::new(&child.code).unwrap();
+        let mut caller = generated_kernel(strategy, 1024, Some(1));
+        for inst in &mut caller.blocks[0].insts {
+            if let MInst::Store { offset, .. } = inst {
+                *offset += 1024 - BASE as i32;
+            }
+        }
+        call_regions(&mut caller);
+        let parent = compile_generated(
+            caller,
+            4096,
+            &[child.required_state_size as usize],
+            tick_loop,
+        );
+        let jit = JitCode::new(&parent.code).unwrap();
+        let table = [
+            trashing_weighted_sum as *const () as usize,
+            child_jit.fn_ptr as usize,
+        ];
+        let mut state = vec![0u64; parent.required_state_size as usize / 8 + 1];
+        state[celox_state_layout::STATE_HEADER_EXTERN_FUNCTIONS_ADDR_OFFSET / 8] =
+            table.as_ptr() as u64;
+        state[STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET / 8] = 1;
+        let mut calls = [0u64; 2];
+        let mut values = (1..=LIVE as u64).collect::<Vec<_>>();
+        values[0] = &raw mut calls[0] as u64;
+        values[ARGS] = &raw mut calls[1] as u64;
+        state[BASE / 8..BASE / 8 + LIVE].copy_from_slice(&values);
+        assert_eq!(unsafe { (jit.fn_ptr)(state.as_mut_ptr().cast()) }, 0);
+        assert_eq!(calls, [2, 2]);
+        assert_eq!(&state[BASE / 8 + LIVE..BASE / 8 + 2 * LIVE], &values);
     }
 }
 

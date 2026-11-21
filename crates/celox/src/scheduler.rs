@@ -32,6 +32,7 @@
 //! reference loop.
 
 mod domains;
+mod event_order;
 mod generate;
 mod generator;
 pub(crate) mod host_inputs;
@@ -39,7 +40,9 @@ mod inline;
 mod nba;
 mod observers;
 mod ordered;
+mod packed_commits;
 mod plan;
+mod publications;
 mod regions;
 mod settle;
 mod slice;
@@ -632,8 +635,31 @@ struct Staged {
     width: usize,
 }
 
+/// Consecutive combinational units with the same activation condition.
+#[derive(Clone, Default, PartialEq, Eq, Hash)]
+struct Activation {
+    events: BigUint,
+    clock_inputs: bool,
+    every_settle: bool,
+}
+
+/// Dirty flag used when settle predicates can read the pending publication bits.
+const PUBLISHED: u64 = 4;
+
+struct EventSchedule {
+    writers: HashMap<AbsoluteAddr, usize>,
+    /// Activation bit of each NBA destination with combinational consumers.
+    nba_targets: HashMap<AbsoluteAddr, usize>,
+    /// Stable storage home to its transitive consumer groups.
+    publications: HashMap<AbsoluteAddr, u64>,
+    /// First bit of the consumer word, after the clock and NBA event bits.
+    publication_offset: usize,
+    groups: Vec<(Activation, Vec<usize>)>,
+}
+
 struct Incremental {
-    source: AbsoluteAddr,
+    source: Option<AbsoluteAddr>,
+    events: Option<EventSchedule>,
     sources: HashSet<AbsoluteAddr>,
     units: Vec<Unit>,
     /// The flags of a partitioned settle and its partition count: the cone
@@ -766,6 +792,9 @@ struct Generator<'a> {
     outlined: Option<&'a mut Outlines>,
     outline_base: u32,
     b: Builder,
+    /// Constants shared by the straight-line scheduler code currently being built.
+    constant_block: Option<celox_sir::BlockId>,
+    constants: HashMap<(usize, BigUint), RegisterId>,
     slots: &'a SchedulerSlots<AbsoluteAddr>,
     finish_sites: &'a HashSet<u32>,
     /// Exit blocks not yet emitted.
