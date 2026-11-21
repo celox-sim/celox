@@ -9,7 +9,7 @@ use crate::symbolic::{read_objects, written_objects};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Update {
-    Continuous,
+    Expression { root: NodeId, continuous: bool },
     Sample(AbsoluteAddr),
     Publication(AbsoluteAddr),
     Procedure(Option<AbsoluteAddr>),
@@ -23,11 +23,29 @@ struct Producer {
 #[derive(Default)]
 pub(super) struct StateDependencies {
     producers: Vec<Producer>,
+    feedback: HashSet<AbsoluteAddr>,
     writers: HashMap<RegionedAbsoluteAddr, Vec<usize>>,
 }
 
 fn stable(addr: AbsoluteAddr) -> RegionedAbsoluteAddr {
     RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, addr)
+}
+
+/// A register used only as the fallback value of an enabled write does not
+/// control the calculation. Keep its enable cone in the settle graph where
+/// several registers may share it.
+fn selects_on(arena: &SLTNodeArena<AbsoluteAddr>, root: NodeId, state: AbsoluteAddr) -> bool {
+    use celox_slt::{SLTNode, canon::reachable};
+    let conditions =
+        reachable(arena, [root])
+            .into_iter()
+            .filter_map(|node| match arena.get(node) {
+                SLTNode::Mux { cond, .. } => Some(*cond),
+                _ => None,
+            });
+    reachable(arena, conditions).into_iter().any(
+        |node| matches!(arena.get(node), SLTNode::Input { variable, .. } if *variable == state),
+    )
 }
 
 impl StateDependencies {
@@ -86,15 +104,11 @@ impl StateDependencies {
                             .chain(&path.previous_sources)
                             .map(|s| stable(s.id)),
                     );
-                    deps.insert(
-                        if path.transparent_copy {
-                            Update::Continuous
-                        } else {
-                            Update::Procedure(None)
-                        },
-                        reads,
-                        [stable(target.id)],
-                    );
+                    let update = Update::Expression {
+                        root: path.expr,
+                        continuous: path.transparent_copy,
+                    };
+                    deps.insert(update, reads, [stable(target.id)]);
                 }
                 LogicPathTarget::Process { unit, .. } => {
                     deps.kernel(Update::Procedure(None), unit, |a| stable(*a))
@@ -120,9 +134,22 @@ impl StateDependencies {
                 match batch {
                     EdgeEvaluation::Graph(form) => {
                         for r in &form.roots {
+                            let reads = inputs(&[r.value]);
+                            let current = stable(r.target);
+                            for &net in &reads {
+                                // Moving a next-state function to its register's own
+                                // sample avoids materializing it between edges.
+                                if deps.writers(net).any(|p| {
+                                    matches!(p.update, Update::Expression { root, .. }
+                                        if p.inputs.contains(&current)
+                                            && selects_on(&graph.global_arena, root, r.target))
+                                }) {
+                                    deps.feedback.insert(net.absolute_addr());
+                                }
+                            }
                             deps.insert(
                                 Update::Sample(event),
-                                inputs(&[r.value]),
+                                reads,
                                 [RegionedAbsoluteAddr::from_absolute_addr(
                                     WORKING_REGION,
                                     r.target,
@@ -260,6 +287,14 @@ impl StateDependencies {
             .map(|&id| &self.producers[id])
     }
 
+    pub(super) fn is_feedback(&self, net: AbsoluteAddr) -> bool {
+        self.feedback.contains(&net)
+    }
+
+    fn sampled_expression(&self, update: Update, net: AbsoluteAddr) -> bool {
+        matches!(update, Update::Expression { continuous, .. } if continuous || self.is_feedback(net))
+    }
+
     /// Walk upstream from every sampling operation and edge procedure. A
     /// stable register or a procedural writer ends combinational expansion.
     pub(super) fn sampled_wires(&self) -> HashSet<AbsoluteAddr> {
@@ -274,7 +309,7 @@ impl StateDependencies {
             if addr.region == STABLE_REGION && seen.insert(addr.absolute_addr()) {
                 for writer in self
                     .writers(addr)
-                    .filter(|p| p.update == Update::Continuous)
+                    .filter(|p| self.sampled_expression(p.update, addr.absolute_addr()))
                 {
                     work.extend_from_slice(&writer.inputs);
                 }
@@ -303,23 +338,32 @@ impl StateDependencies {
 
     /// Recreating a calculation in an event would duplicate it if settle
     /// or a process also needs its stored result. Wiring has no such cost.
-    pub(super) fn settled_reads(&self) -> HashSet<AbsoluteAddr> {
-        self.producers
+    pub(super) fn settled_read_counts(&self) -> HashMap<AbsoluteAddr, usize> {
+        let mut counts = HashMap::default();
+        for addr in self
+            .producers
             .iter()
-            .filter(|p| matches!(p.update, Update::Continuous | Update::Procedure(None)))
+            .filter(|p| {
+                matches!(
+                    p.update,
+                    Update::Expression { .. } | Update::Procedure(None)
+                )
+            })
             .flat_map(|p| &p.inputs)
             .filter(|a| a.region == STABLE_REGION)
-            .map(|a| a.absolute_addr())
-            .collect()
+        {
+            *counts.entry(addr.absolute_addr()).or_default() += 1;
+        }
+        counts
     }
 
-    pub(super) fn continuous_inputs(
+    pub(super) fn expression_inputs(
         &self,
         net: AbsoluteAddr,
     ) -> Option<impl Iterator<Item = AbsoluteAddr> + '_> {
         let mut writers = self.writers(stable(net));
         let producer = writers.next()?;
-        (producer.update == Update::Continuous && writers.next().is_none())
+        (self.sampled_expression(producer.update, net) && writers.next().is_none())
             .then(|| producer.inputs.iter().map(|a| a.absolute_addr()))
     }
 

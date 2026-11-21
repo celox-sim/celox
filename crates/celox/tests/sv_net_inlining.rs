@@ -683,6 +683,72 @@ fn clocked_consumers_follow_wires_across_instances() {
 }
 
 #[test]
+fn clock_samples_a_procedural_case_without_materializing_its_result() {
+    let source = r#"
+        module Gate(input en, hold, output gate);
+            assign gate = en & ~hold;
+        endmodule
+        module Top(input clk, advance, output [1:0] value, output inverted, parity, toggle, pending);
+            reg [1:0] state, next_state;
+            reg enable, bit_state, next_bit, held, next_held;
+            reg hold;
+            wire gate;
+            Gate g(enable, hold, gate);
+            always @(posedge clk) begin
+                enable <= advance;
+                hold <= state == 2'd1;
+                state <= next_state;
+                bit_state <= next_bit;
+                held <= next_held;
+            end
+            always_comb begin
+                case (state)
+                    2'd0: next_state = gate ? 2'd3 : 2'd0;
+                    2'd3: next_state = 2'd1;
+                    2'd1: next_state = 2'd2;
+                    default: next_state = 2'd0;
+                endcase
+                next_bit = bit_state == 1'b0 ? 1'b1 : 1'b0;
+                if (enable) next_held = 1'b1;
+                else if (state == 2'd2) next_held = 1'b0;
+                else next_held = held;
+            end
+            assign pending = held;
+            assign toggle = bit_state;
+            assign value = state;
+            assign parity = ^state;
+            assign inverted = ~advance;
+        endmodule"#;
+    let builder = || {
+        Simulator::from_sv_sources(vec![(source, Path::new("sample-case.sv"))], "Top")
+            .four_state(false)
+            .opt_level(OptLevel::O2)
+    };
+    let plan = settle_plan(builder());
+    for net in [".next_state", ".gate", "g.gate"] {
+        assert!(!stores(&plan, net), "{net} remains in {plan}");
+    }
+    // next_bit powers up nonzero as an expression. The held bit only
+    // supplies a fallback value to its driver. Both keep their settle stores.
+    assert!(stores(&plan, ".next_bit"), "{plan}");
+    assert!(stores(&plan, ".next_held"), "{plan}");
+    let kept = settle_plan(builder().dead_store_policy(DeadStorePolicy::Off));
+    assert!(stores(&kept, ".next_state"), "{kept}");
+
+    let mut sim = builder().build_interpreter().unwrap();
+    let clk = sim.event("clk");
+    let [advance, value, toggle] = ["advance", "value", "toggle"].map(|name| sim.signal(name));
+    let mut expected_bit = 0u8;
+    for (input, expected) in [(1u8, 0u8), (0, 3), (0, 1), (0, 2), (0, 0), (0, 0)] {
+        sim.modify(|io| io.set(advance, input)).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(value), expected.into());
+        expected_bit ^= 1;
+        assert_eq!(sim.get(toggle), expected_bit.into());
+    }
+}
+
+#[test]
 fn a_procedure_samples_the_settled_copy_before_its_blocking_write_propagates() {
     let source = r#"
         module Top(input clk, input [7:0] d, output reg [7:0] sample);

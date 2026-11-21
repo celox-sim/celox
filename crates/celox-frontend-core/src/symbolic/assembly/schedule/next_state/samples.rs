@@ -74,7 +74,7 @@ impl StateGraph {
         // produced it ultimately depends on a host input or a procedure.
         let arena = &self.global_arena;
         let sampled = dependencies.sampled_wires();
-        let settled_reads = dependencies.settled_reads();
+        let mut settled_reads = dependencies.settled_read_counts();
         drivers.nets.retain(|target, ranges| {
             let [(range, expr)] = ranges.as_slice() else {
                 return false;
@@ -84,13 +84,24 @@ impl StateGraph {
                 && range.lsb == 0
                 && shapes.get(target).map(|s| s.0) == Some(range.msb + 1)
                 && arena.node_width(*expr) == Some(range.msb + 1)
-                && dependencies.continuous_inputs(*target).is_some()
+                && dependencies.expression_inputs(*target).is_some()
         });
         available.extend(drivers.nets.keys().copied());
         available.retain(|net| !blocked.contains(net));
+        drivers.nets.retain(|target, _| {
+            dependencies
+                .expression_inputs(*target)
+                .expect("indexed expression output")
+                .all(|input| available.contains(&input))
+        });
+
+        let moved = feedback_producers(&drivers, dependencies, &mut settled_reads);
         drivers.nets.retain(|target, ranges| {
             let (_, expr) = ranges[0];
-            if settled_reads.contains(target)
+            if moved.contains(target) {
+                return true;
+            }
+            if settled_reads.contains_key(target)
                 && !matches!(
                     arena.get(expr),
                     SLTNode::Input { .. }
@@ -98,13 +109,6 @@ impl StateGraph {
                         | SLTNode::Unary(UnaryOp::Ident | UnaryOp::ToTwoState, _)
                         | SLTNode::Constant(..)
                 )
-            {
-                return false;
-            }
-            if !dependencies
-                .continuous_inputs(*target)
-                .expect("indexed continuous output")
-                .all(|input| available.contains(&input))
             {
                 return false;
             }
@@ -210,4 +214,125 @@ impl StateGraph {
         tracing::debug!(target: "celox::edge_graph", substituted, "connected relocated sample inputs");
         Ok(())
     }
+}
+
+/// Follow a register's state transitions back through their exclusive inputs.
+/// An operand can move with the last settle reader of its stored value.
+fn feedback_producers(
+    drivers: &Drivers<'_>,
+    dependencies: &StateDependencies,
+    settled_reads: &mut HashMap<AbsoluteAddr, usize>,
+) -> HashSet<AbsoluteAddr> {
+    let mut startup = None;
+    let mut starts_at_zero = |root: NodeId| {
+        startup.get_or_insert_with(|| initial_values(drivers.arena))[root.0] == Some(0)
+    };
+    let mut pending: Vec<_> = drivers
+        .nets
+        .iter()
+        .filter(|(net, ranges)| {
+            dependencies.is_feedback(**net)
+                && !settled_reads.contains_key(net)
+                && starts_at_zero(ranges[0].1)
+        })
+        .map(|(net, _)| *net)
+        .collect();
+    let mut moved = HashSet::default();
+    while let Some(net) = pending.pop() {
+        moved.insert(net);
+        for input in dependencies
+            .expression_inputs(net)
+            .expect("indexed expression output")
+        {
+            let count = settled_reads
+                .get_mut(&input)
+                .expect("settle reader counted");
+            *count -= 1;
+            if *count == 0
+                && let Some(ranges) = drivers.nets.get(&input)
+                && starts_at_zero(ranges[0].1)
+            {
+                pending.push(input);
+            }
+        }
+    }
+    moved
+}
+
+/// The value of a pure expression before the first settle, assuming its
+/// stable inputs still have their default zero. A missing value also rules
+/// out substitution when the expression can introduce unknown bits. Both
+/// arms of a mux must qualify, even if only one is selected at startup.
+fn initial_values(arena: &SLTNodeArena<AbsoluteAddr>) -> Vec<Option<u64>> {
+    let mut values: Vec<Option<u64>> = Vec::with_capacity(arena.len());
+    for node in arena.iter() {
+        let evaluate = || match node {
+            SLTNode::Input { index, .. } if index.is_empty() => Some(0),
+            SLTNode::Constant(value, mask, width, _)
+                if mask.bits() == 0 && value.bits() <= *width as u64 =>
+            {
+                u64::try_from(value).ok()
+            }
+            SLTNode::Unary(UnaryOp::Ident | UnaryOp::ToTwoState, arg) => values[arg.0],
+            SLTNode::Unary(UnaryOp::Or, arg) => Some(u64::from(values[arg.0]? != 0)),
+            SLTNode::Unary(UnaryOp::LogicNot, arg) => Some(u64::from(values[arg.0]? == 0)),
+            SLTNode::Unary(UnaryOp::BitNot, arg) => {
+                let width = arena.node_width(*arg)?;
+                let value = values[arg.0]?;
+                (1..=64)
+                    .contains(&width)
+                    .then(|| !value & (u64::MAX >> (64 - width)))
+            }
+            SLTNode::Binary(lhs, op, rhs) => {
+                let (left, right) = (values[lhs.0]?, values[rhs.0]?);
+                match op {
+                    BinaryOp::Eq | BinaryOp::EqCase | BinaryOp::Ne | BinaryOp::NeCase
+                        if arena.node_width(*lhs) == arena.node_width(*rhs) =>
+                    {
+                        Some(u64::from(
+                            (left == right) == matches!(op, BinaryOp::Eq | BinaryOp::EqCase),
+                        ))
+                    }
+                    BinaryOp::And if left == 0 || right == 0 => Some(0),
+                    BinaryOp::LogicAnd => Some(u64::from(left != 0 && right != 0)),
+                    BinaryOp::LogicOr => Some(u64::from(left != 0 || right != 0)),
+                    BinaryOp::Or
+                    | BinaryOp::Xor
+                    | BinaryOp::Add
+                    | BinaryOp::Sub
+                    | BinaryOp::Mul
+                        if left == 0 && right == 0 =>
+                    {
+                        Some(0)
+                    }
+                    _ => None,
+                }
+            }
+            SLTNode::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                let (a, b) = (values[then_expr.0]?, values[else_expr.0]?);
+                let selected = if values[cond.0]? != 0 { a } else { b };
+                (selected == 0 || arena.node_width(*then_expr) == arena.node_width(*else_expr))
+                    .then_some(selected)
+            }
+            SLTNode::Slice { expr, access } => {
+                let value = values[expr.0]?;
+                let width = access.msb - access.lsb + 1;
+                Some(if access.lsb >= 64 {
+                    0
+                } else {
+                    (value >> access.lsb) & (u64::MAX >> (64 - width.min(64)))
+                })
+            }
+            SLTNode::Concat(parts) if parts.iter().all(|(part, _)| values[part.0] == Some(0)) => {
+                Some(0)
+            }
+            _ => None,
+        };
+        values.push(evaluate());
+    }
+    values
 }
