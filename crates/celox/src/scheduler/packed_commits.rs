@@ -60,7 +60,7 @@ fn binary(b: &mut Builder, left: RegisterId, op: BinaryOp, right: RegisterId) ->
     dst
 }
 
-fn read(b: &mut Builder, offset: RegisterId) -> RegisterId {
+pub(super) fn read(b: &mut Builder, offset: RegisterId) -> RegisterId {
     let dst = b.alloc_bit(64, false);
     b.emit(SIRInstruction::ExternCall {
         dst: Some(dst),

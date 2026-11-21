@@ -23,8 +23,23 @@ impl Generator<'_> {
     /// without downstream units can require retained logic to run.
     pub(super) fn mark_publication(&mut self, index: Option<usize>) {
         if let Some(index) = index {
-            let one = self.constant(1, 1);
-            self.store_at(self.slots.settle_events, index, 1, one);
+            let schedule = self
+                .incremental
+                .and_then(|plan| plan.events.as_ref())
+                .unwrap();
+            if let Some(readers) = &schedule.event_readers {
+                let mask = readers[index];
+                if mask != 0 {
+                    let offset = schedule.publication_offset;
+                    let pending = self.load_at(self.slots.settle_events, offset, 64);
+                    let bits = self.constant(mask, 64);
+                    let pending = self.binary(64, pending, BinaryOp::Or, bits);
+                    self.store_at(self.slots.settle_events, offset, 64, pending);
+                }
+            } else {
+                let one = self.constant(1, 1);
+                self.store_at(self.slots.settle_events, index, 1, one);
+            }
         }
         let pending = self.load(self.slots.dirty, SCHEDULER_FLAG_WIDTH);
         let bit = self.constant(PUBLISHED, SCHEDULER_FLAG_WIDTH);
@@ -213,6 +228,67 @@ impl Generator<'_> {
     }
 
     fn emit_event_schedule(&mut self, schedule: &EventSchedule, units: &[Unit], dirty: RegisterId) {
+        let conditional = schedule.groups.iter().filter(|(a, _)| !a.every_settle);
+        let mut guards = if schedule.event_readers.is_some() {
+            // Producers already use the group's bit. Fold clock-only and full
+            // invalidations into that same word before running any consumers.
+            let offset = schedule.publication_offset;
+            let zero = self.constant(0, 64);
+            let pending = self.load_at(self.slots.settle_events, offset, 64);
+            self.store_at(self.slots.settle_events, offset, 64, zero);
+            let mut active = pending;
+            let clock_mask = conditional
+                .clone()
+                .enumerate()
+                .fold(0, |mask, (i, (a, _))| {
+                    mask | (u64::from(a.clock_inputs) << i)
+                });
+            for (index, mask) in [(1, clock_mask), (0, u64::MAX)] {
+                if mask != 0 {
+                    let condition = self.mask_bit(dirty, index);
+                    let bits = self.constant(mask, 64);
+                    let set = if mask == u64::MAX {
+                        bits
+                    } else {
+                        self.binary(64, active, BinaryOp::Or, bits)
+                    };
+                    let selected = self.b.alloc_bit(64, false);
+                    self.b
+                        .emit(SIRInstruction::Mux(selected, condition, set, active));
+                    active = selected;
+                }
+            }
+            (0..conditional.count()).map(|i| (active, i)).collect()
+        } else {
+            self.event_predicates(schedule, dirty)
+        }
+        .into_iter();
+        let mut updated = None;
+        for (a, members) in &schedule.groups {
+            let run = |g: &mut Self| {
+                for &index in members {
+                    g.inline_with_exit(&units[index], None);
+                }
+            };
+            if a.every_settle {
+                run(self);
+            } else {
+                let (mask, bit) = guards.next().unwrap();
+                let mask = updated.unwrap_or(mask);
+                if let Some(outputs) = schedule.changed_outputs.get(&bit) {
+                    updated = Some(self.run_publishing_group(mask, bit, outputs, run));
+                } else {
+                    self.if_bit(mask, bit, run);
+                }
+            }
+        }
+    }
+
+    fn event_predicates(
+        &mut self,
+        schedule: &EventSchedule,
+        dirty: RegisterId,
+    ) -> Vec<(RegisterId, usize)> {
         // Masks can span many words in designs with procedural NBA sites.
         // Read only words used by a predicate, and share their masked tests.
         let mut words = HashMap::default();
@@ -255,18 +331,12 @@ impl Generator<'_> {
                     });
             }
         }
-        for (a, r) in &schedule.groups {
-            let run = |g: &mut Self| {
-                for &index in r {
-                    g.inline_with_exit(&units[index], None);
-                }
-            };
-            if a.every_settle {
-                run(self);
-            } else {
-                self.if_bit(predicates[&(&a.events, a.clock_inputs)], 0, run);
-            }
-        }
+        schedule
+            .groups
+            .iter()
+            .filter(|(a, _)| !a.every_settle)
+            .map(|(a, _)| (predicates[&(&a.events, a.clock_inputs)], 0))
+            .collect()
     }
 
     /// SIR switches have byte-sized selectors. Dispatch larger continuation

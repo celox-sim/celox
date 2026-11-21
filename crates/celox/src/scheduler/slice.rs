@@ -113,6 +113,7 @@ impl ForwardDependencies<'_, '_> {
     pub(super) fn reader_masks(
         &self,
         outputs: HashMap<AbsoluteAddr, u64>,
+        boundaries: &HashMap<AbsoluteAddr, u64>,
     ) -> HashMap<AbsoluteAddr, u64> {
         let mut inputs: HashMap<Need, Vec<Need>> = HashMap::default();
         for (&source, users) in &self.users {
@@ -126,7 +127,14 @@ impl ForwardDependencies<'_, '_> {
             .collect();
         let mut work: std::collections::VecDeque<_> = masks.keys().copied().collect();
         while let Some(user) = work.pop_front() {
-            let mask = masks[&user];
+            // Producers of a sampled output need to run themselves. Their
+            // consumers are enabled by the actual value at the boundary.
+            let mask = match user {
+                Need::Storage(addr) => boundaries
+                    .get(&addr)
+                    .map_or(masks[&user], |&bit| masks[&user] & (bit | (bit - 1))),
+                _ => masks[&user],
+            };
             for &input in inputs.get(&user).into_iter().flatten() {
                 let current = masks.entry(input).or_default();
                 if *current & mask != mask {

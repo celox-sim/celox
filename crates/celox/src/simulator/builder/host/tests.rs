@@ -2866,6 +2866,27 @@ endmodule"#;
         let q = program.get_addr(&[], &["q"]).unwrap();
         let r = program.get_addr(&[], &["r"]).unwrap();
         assert_ne!(plan.publications[&q], plan.publications[&r]);
+        // Both clocks publish into the same consumer word. The scheduler
+        // should never need to read back the individual clock event bits.
+        let scheduler = program.runtime.runtime_schema.scheduler.as_ref().unwrap();
+        let words: crate::HashSet<_> = program.sir.processes[scheduler.unit.unwrap()]
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .filter_map(|inst| match inst {
+                crate::ir::SIRInstruction::Load(
+                    _,
+                    addr,
+                    crate::ir::SIROffset::Static(bit),
+                    width,
+                ) if addr.absolute_addr() == scheduler.slots.settle_events => {
+                    assert_eq!(*width, 64);
+                    Some(*bit)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(words.len(), 1, "{words:?}");
         assert!(
             plan.event_groups
                 .iter()
@@ -2896,6 +2917,86 @@ endmodule"#;
                     "{name} at {time}"
                 );
             }
+        }
+        assert!(compiled.scheduler_stats().checked_steps > 0);
+    }
+}
+
+/// Changes to the shared decode reach the banks between their clock edges.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[test]
+fn changed_fanout_reaches_consumers_between_their_clock_edges() {
+    let ports = (0..32)
+        .map(|i| format!("output wire bank{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let banks = (0..32)
+        .map(|i| {
+            format!(
+                "bit clk{i}; always #{} clk{i} = ~clk{i};
+             bit [7:0] q{i}; always @(posedge clk{i}) q{i} <= q{i} + 8'd{};
+             assign bank{i} = decoded[{i}] ^ q{i}[{}];
+             assign y[{i}] = bank{i};",
+                3 + i % 12,
+                i + 1,
+                i % 8
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let source = format!(
+        r#"`timescale 1ns/1ns
+module Top(output wire [31:0] y, output wire [31:0] decoded, {ports});
+bit a; always #2 a = ~a;
+bit [5:0] phase; always @(posedge a) phase <= phase + 1;
+logic [4:0] idx;
+always @(posedge a) case (phase[2:0])
+  0: idx <= 'x;
+  1: idx <= 'z;
+  default: idx <= phase[4:0];
+endcase
+assign decoded = 32'b1 << idx;
+{banks}
+integer changes; always @(y) changes++;
+endmodule"#
+    );
+    for four_state in [false, true] {
+        let builder = || {
+            crate::Simulation::from_sv_sources(
+                vec![(&source, std::path::Path::new("changed-fanout.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+            .opt_level(crate::OptLevel::O2)
+        };
+        let (program, ..) = builder()
+            .emit_triggers()
+            .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, true, false)
+            .unwrap();
+        let plan = crate::scheduler::plan_for_test(&program).unwrap();
+        assert!(plan.incremental);
+        assert!(
+            plan.changed_outputs
+                .iter()
+                .any(|a| program.get_path(a) == "decoded"),
+            "missing decode boundary in four_state={four_state}"
+        );
+        let mut compiled = builder()
+            .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+            .build_native()
+            .unwrap();
+        let mut reference = builder()
+            .scheduler_mode(crate::SchedulerMode::Reference)
+            .build_native()
+            .unwrap();
+        for time in 1..=72 {
+            compiled.run_until(time).unwrap();
+            reference.run_until(time).unwrap();
+            assert_eq!(
+                compiled.get_four_state(compiled.signal("y")),
+                reference.get_four_state(reference.signal("y")),
+                "time {time}, four_state={four_state}"
+            );
         }
         assert!(compiled.scheduler_stats().checked_steps > 0);
     }
