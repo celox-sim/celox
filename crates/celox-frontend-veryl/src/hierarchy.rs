@@ -162,15 +162,12 @@ fn parse_external_hierarchy<'a>(
     for (&local_id, external_module) in &external.modules {
         let global_id = external_ids[&local_id];
         let mut external_module = external_module.clone();
-        for blocks in external_module.sim_module.glue_blocks.values_mut() {
+        for blocks in external_module.sim_module.instances.values_mut() {
             for block in blocks {
-                block.module_id = *external_ids.get(&block.module_id).ok_or_else(|| {
+                *block = *external_ids.get(block).ok_or_else(|| {
                     ParserError::illegal_context(
                         "external module hierarchy",
-                        format!(
-                            "module {} references unknown child {}",
-                            local_id, block.module_id
-                        ),
+                        format!("module {} references unknown child {}", local_id, *block),
                         None,
                     )
                 })?;
@@ -456,8 +453,8 @@ fn parse_external_hierarchy<'a>(
                 None,
             ));
         }
-        for block in modules[&id].glue_blocks.values().flatten() {
-            check_cycles(block.module_id, modules, active, done)?;
+        for block in modules[&id].instances.values().flatten() {
+            check_cycles(*block, modules, active, done)?;
         }
         active.remove(&id);
         done.insert(id);
@@ -518,9 +515,9 @@ fn validate_external_module_graph(
             source_location: None,
         });
     }
-    for blocks in module.sim_module.glue_blocks.values() {
+    for blocks in module.sim_module.instances.values() {
         for block in blocks {
-            validate_external_module_graph(block.module_id, external, active, complete)?;
+            validate_external_module_graph(*block, external, active, complete)?;
         }
     }
     active.remove(&module_id);

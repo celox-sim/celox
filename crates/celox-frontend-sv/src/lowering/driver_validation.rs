@@ -302,7 +302,7 @@ pub(super) fn validate_specialized_instance_net_drivers(
             let child_driver_ranges = child_output_driver_ranges(module, &children, signal_name);
             // A generic interconnect that merged into a resolved net
             // (23.3.3.7.1) takes its drivers from every connected port;
-            // the glue joins them with the merged resolution, which
+            // elaboration joins the drivers with the merged resolution, which
             // each array element may merge separately (6.6.8).
             let resolved_kind = |resolution: &sv::ast::NetResolution| {
                 !matches!(

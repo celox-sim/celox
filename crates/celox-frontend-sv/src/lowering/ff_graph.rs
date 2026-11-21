@@ -1,6 +1,8 @@
-//! Graph-first lowering of register and memory updates. Processes with one
-//! nonblocking write per destination along a path share their trigger's next-state DAG.
-//! A procedural evaluation ends a batch because it may change stable state.
+//! Clocked destinations share a next-state DAG for their trigger. Blocking
+//! writes update the symbolic store at their source position, and nonblocking
+//! writes retain the value sampled there until the NBA region.
+mod destinations;
+
 use super::*;
 use celox_frontend_core::symbolic::artifact::{EdgeEvaluation, NextStateForms};
 use celox_slt::canon::Reinterner;
@@ -12,6 +14,7 @@ pub(super) struct FfGraph {
     pub forms: NextStateForms,
     pub arena: SLTNodeArena<SourceVarId>,
     pub schedule: EdgeSchedule,
+    active_targets: HashMap<TriggerSet<SourceVarId>, HashSet<SourceVarId>>,
     pub pending: HashMap<TriggerSet<SourceVarId>, NextState>,
 }
 
@@ -22,8 +25,29 @@ impl FfGraph {
         trigger: &TriggerSet<SourceVarId>,
         body: &[sv::ir::Stmt],
         excluded: &HashSet<String>,
+        active: &HashSet<SourceVarId>,
     ) -> Option<()> {
         if !register_updates(pm, body, excluded, &mut HashSet::default()) {
+            return None;
+        }
+        let mut blocking = HashSet::default();
+        let mut nba = HashSet::default();
+        for stmt in body {
+            stmt.walk(&mut |s| {
+                if let sv::ir::Stmt::Assign {
+                    lhs, nonblocking, ..
+                } = s
+                {
+                    let id = pm.id(lhs.name()).expect("validated target");
+                    if *nonblocking {
+                        nba.insert(id);
+                    } else {
+                        blocking.insert(id);
+                    }
+                }
+            });
+        }
+        if !blocking.is_disjoint(&nba) {
             return None;
         }
         // The symbolic store uses scratch variables for next values. Only
@@ -31,16 +55,16 @@ impl FfGraph {
         let checkpoint = pm.checkpoint();
         let first_temp = pm.next_id;
         let mut raw = SLTNodeArena::new();
-        let form = comb::Comb::new(pm, &mut raw).lower_next_state(body);
+        let form = comb::Comb::new(pm, &mut raw).lower_next_state(body, &blocking);
         pm.rollback(checkpoint);
         let form = form.ok()?;
-        let reads_temporary = celox_slt::canon::reachable(&raw, form.nodes()).into_iter().any(|node| {
-            matches!(raw.get(node), SLTNode::Input { variable, .. } if variable.0 >= first_temp.0)
+        let unavailable_input = celox_slt::canon::reachable(&raw, form.nodes()).into_iter().any(|node| {
+            matches!(raw.get(node), SLTNode::Input { variable, .. } if variable.0 >= first_temp.0 || active.contains(variable))
         });
         // Constant-index writes can appear as wide packed roots. Use the sparse
         // protocol only for element-addressed memory writes.
         if (form.ports.is_empty() && form.roots.is_empty())
-            || reads_temporary
+            || unavailable_input
             || form
                 .roots
                 .iter()
@@ -49,6 +73,10 @@ impl FfGraph {
             return None;
         }
         let form = canonical_copy(&raw, &mut self.arena, &form).ok()?;
+        self.active_targets
+            .entry(trigger.clone())
+            .or_default()
+            .extend(blocking);
         let batch = self.pending.entry(trigger.clone()).or_default();
         batch.roots.extend(form.roots.iter().cloned());
         batch.ports.extend(form.ports.iter().cloned());
@@ -89,11 +117,25 @@ impl FfGraph {
             let commit = seal_builder(commit);
             segments.push(EdgeBatch::Graph(form));
             ff_processes::insert_or_merge_ff_unit(applications, trigger.clone(), commit.clone());
-            // All the writes in this batch publish in the NBA phase.
-            active
-                .entry(trigger.clone())
-                .or_insert_with(|| seal_builder(SIRBuilder::new()));
-            ff_processes::insert_or_merge_ff_unit(nba, trigger.clone(), commit);
+            let blocking = self.active_targets.remove(trigger).unwrap_or_default();
+            if blocking.is_empty() {
+                active
+                    .entry(trigger.clone())
+                    .or_insert_with(|| seal_builder(SIRBuilder::new()));
+                ff_processes::insert_or_merge_ff_unit(nba, trigger.clone(), commit);
+            } else {
+                let (early, late): (Vec<_>, Vec<_>) =
+                    targets.into_iter().partition(|t| blocking.contains(&t.id));
+                for (phase, targets) in [(active, early), (nba, late)] {
+                    let mut builder = SIRBuilder::new();
+                    ff::emit_sparse_memory_commits(&mut builder, &targets, &memories, pm);
+                    ff_processes::insert_or_merge_ff_unit(
+                        phase,
+                        trigger.clone(),
+                        seal_builder(builder),
+                    );
+                }
+            }
         }
     }
 }
@@ -110,11 +152,10 @@ impl EdgeSchedule {
         self.batches.contains_key(trigger)
     }
 
-    /// Emit edge evaluations only once their combinational producers are in
-    /// the module graph. A procedural batch forms an ordering boundary.
-    pub fn lower(
+    /// Keep symbolic batches and procedural barriers together until all of
+    /// their instance inputs have producers in the design graph.
+    pub fn finish(
         &self,
-        pm: &procedural::ProcModule<'_>,
         module: &mut SimModule,
         wires: &HashSet<SourceVarId>,
     ) -> Result<(), String> {
@@ -138,34 +179,7 @@ impl EdgeSchedule {
                     .remove(trigger)
                     .map(EdgeBatch::Procedure),
             );
-            let mut evals = plan
-                .iter()
-                .map(|batch| match batch {
-                    EdgeBatch::Procedure(unit) => Ok(unit.clone()),
-                    EdgeBatch::Graph(form) => {
-                        next_state_unit(pm, &module.arena, form, Publication::Deferred)
-                    }
-                })
-                .collect::<Result<Vec<_>, String>>()?;
-            let mut eval = if evals.len() == 1 {
-                evals.pop().unwrap()
-            } else {
-                merge_sir_eus(&evals).0
-            };
-            ff::prune_unreachable_blocks(&mut eval);
-            let direct = if let [EdgeBatch::Graph(form)] = plan.as_slice()
-                && module.next_state.complete.contains(trigger)
-            {
-                next_state_unit(pm, &module.arena, form, Publication::Direct)?
-            } else {
-                let mut combined =
-                    celox_sir::merge_sir_eu_refs(&[&eval, &module.apply_ff_blocks[trigger]]).0;
-                ff::prune_unreachable_blocks(&mut combined);
-                combined
-            };
             module.next_state.evaluations.insert(trigger.clone(), plan);
-            module.eval_only_ff_blocks.insert(trigger.clone(), eval);
-            module.eval_apply_ff_blocks.insert(trigger.clone(), direct);
         }
         Ok(())
     }
@@ -232,7 +246,7 @@ fn register_updates(
         sv::ir::Stmt::Assign {
             lhs,
             rhs,
-            nonblocking: true,
+            nonblocking,
         } => {
             let name = lhs.name();
             let Some(id) = pm.id(name) else { return false };
@@ -252,6 +266,11 @@ fn register_updates(
                 }),
             };
             supported_target
+                && (*nonblocking
+                    || (var.array_dims.is_empty()
+                        && pm.force_controls(id).is_none()
+                        && !pm.force_holds.contains_key(&id)
+                        && !pm.procedurally_forced.contains(&id)))
                 && !var.hidden
                 && var.float.is_none()
                 && var.value_kind == celox_design::ValueKind::Bits
@@ -405,12 +424,14 @@ mod tests {
     fn independent_samples_cross_a_procedure_on_the_same_clock() {
         let source = r#"
             module Top(input bit clk, other, input bit [7:0] a,b,
-                       output bit [7:0] q0,q1,q2,q3,temp,p,watch);
-                always @(posedge clk) q0 <= a+b;
-                always @(posedge clk) q1 <= b+a;
+                       output bit [7:0] q0,q1,q2,q3,temp,p,watch,copy);
                 always @(posedge clk) begin
+                    copy = a+b;
+                    q0 <= copy;
                     temp = a*b;
                     p <= temp;
+                    temp = p;
+                    q1 <= b+a;
                 end
                 always @(posedge clk) q2 <= a+b;
                 always @(posedge clk) q3 <= b+a;
@@ -432,6 +453,94 @@ mod tests {
         };
         assert_eq!(operations(&units[0], BinaryOp::Mul), 1);
         assert_eq!(operations(&units[1], BinaryOp::Add), 1);
+    }
+
+    #[test]
+    fn blocking_and_nonblocking_destinations_share_a_value_and_publish_in_their_regions() {
+        let source = r#"
+            module Top(input bit clk, en, input bit [7:0] d,
+                       output bit [7:0] t,q,old,alt);
+                always @(posedge clk) begin
+                    old <= t;
+                    t = d * d;
+                    case (en)
+                        1'b1: q <= t;
+                        default: alt <= t;
+                    endcase
+                end
+            endmodule
+        "#;
+        let mut trace = FrontendTrace::default();
+        let out = schedule_sources_with_options(
+            &[(source, std::path::Path::new("destinations.sv"))],
+            "Top",
+            &[],
+            &[],
+            &[],
+            false,
+            &Default::default(),
+            &FrontendTraceOptions {
+                sim_modules: true,
+                ..Default::default()
+            },
+            Some(&mut trace),
+            &mut Vec::new(),
+            sv::AnalysisOptions {
+                ff_next_state: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let modules = trace.sim_modules.unwrap();
+        let top = modules.values().find(|m| m.name == "Top").unwrap();
+        let (trigger, plan) = top.next_state.evaluations.iter().next().unwrap();
+        let [EdgeEvaluation::Graph(form)] = &plan[..] else {
+            panic!("expected a symbolic edge: {plan:?}")
+        };
+        let name = |id| top.variables[&id].path.join(".");
+        let names: std::collections::BTreeSet<_> =
+            form.roots.iter().map(|r| name(r.target)).collect();
+        assert_eq!(
+            names.into_iter().collect::<Vec<_>>(),
+            ["alt", "old", "q", "t"]
+        );
+        let writes = |unit: &ExecutionUnit<RegionedVarAddr>| {
+            unit.blocks
+                .values()
+                .flat_map(|b| &b.instructions)
+                .filter_map(|i| match i {
+                    SIRInstruction::Commit(_, dst, ..) if dst.region == STABLE_REGION => {
+                        Some(name(dst.var_id))
+                    }
+                    _ => None,
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+        };
+        let split = &top.split_commit_ff_blocks[trigger];
+        assert_eq!(writes(&split.active), ["t"]);
+        assert_eq!(writes(&split.nba), ["alt", "old", "q"]);
+        let operations = |sir: &celox_sir::SirProgram<StateAddr, RegionedStateAddr>| {
+            let mut staging_copies = 0;
+            let mut multiplies = 0;
+            for op in sir
+                .eval_apply_ffs
+                .values()
+                .flatten()
+                .flat_map(|u| u.blocks.values())
+                .flat_map(|b| &b.instructions)
+            {
+                match op {
+                    SIRInstruction::Commit(..) => staging_copies += 1,
+                    SIRInstruction::Binary(_, _, BinaryOp::Mul, _) => multiplies += 1,
+                    _ => {}
+                }
+            }
+            (multiplies, staging_copies)
+        };
+        assert!(operations(&schedule(source, false, DeadStorePolicy::Off)).1 > 0);
+        assert_eq!(operations(&out.scheduled.sir), (1, 0));
     }
 
     #[test]

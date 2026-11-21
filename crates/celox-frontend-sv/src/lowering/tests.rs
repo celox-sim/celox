@@ -787,11 +787,6 @@ fn power_signedness_follows_base_with_self_determined_exponent() {
             right: Box::new(sv::ir::Expr::Literal(exponent.into())),
         };
         assert_eq!(
-            sv_glue_expr_is_signed(&expression, &variables, &names, &parameters),
-            signed,
-            "port connection: {base} ** {exponent}"
-        );
-        assert_eq!(
             sv_expr_is_signed_with_parameters(&expression, &variables, &names, &parameters),
             signed,
             "expression: {base} ** {exponent}"

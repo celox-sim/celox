@@ -112,23 +112,23 @@ pub(super) fn expand(
     instance_id: &mut usize,
 ) {
     let module = &modules[target];
-    for (inst_name, gbs) in &module.glue_blocks {
+    for (inst_name, children) in &module.instances {
         // Generate loops can elaborate several scalar declarations under the
         // same flattened name. Keep those scopes distinct until generate
         // hierarchy segments become part of InstancePath.
-        let indexed = module.indexed_instance_names.contains(inst_name) || gbs.len() > 1;
-        for (idx, gb) in gbs.iter().enumerate() {
+        let indexed = module.indexed_instance_names.contains(inst_name) || children.len() > 1;
+        for (idx, child) in children.iter().enumerate() {
             let mut path = path.clone();
             path.push((inst_name.clone(), module.instance_index(inst_name, idx)));
             let id = InstanceId(*instance_id);
             expanded.insert(InstancePath(path.clone()), id);
-            instance_modules.insert(id, gb.module_id);
+            instance_modules.insert(id, *child);
             if indexed {
                 indexed_instances.insert(id);
             }
             *instance_id += 1;
             expand(
-                &gb.module_id,
+                child,
                 path,
                 modules,
                 expanded,

@@ -12,67 +12,13 @@
 //! - nets read at a run-time index;
 //! - nets read as signed values.
 
+mod samples;
+
 use super::*;
+use crate::symbolic::artifact::EdgeEvaluation;
 use celox_slt::SLTNode;
 use celox_slt::canon::{intern, reachable, same_op_bit_runs};
 use celox_slt::next_state::{NextStateForm, Publication, ValueRoot, lower_transition};
-
-/// The forms of the design's instances, relocated into `arena`, one per
-/// canonical clock: the forms of a clock's processes, in instance order.
-pub(super) fn relocate_next_state(
-    design: &Design,
-    arena: &mut SLTNodeArena<AbsoluteAddr>,
-    clocks: Option<&HashSet<AbsoluteAddr>>,
-) -> Result<BTreeMap<AbsoluteAddr, NextStateForm<AbsoluteAddr>>, ParserError> {
-    let mut instances: Vec<_> = design.instance_modules.iter().collect();
-    instances.sort_unstable_by_key(|(instance, _)| instance.0);
-    let mut domains: BTreeMap<AbsoluteAddr, NextStateForm<AbsoluteAddr>> = BTreeMap::new();
-    for (&instance, module_id) in instances {
-        let module = &design.modules[module_id];
-        let locate = |var: &SourceVarId| design.bindings.locate(instance, *var);
-        for (trigger, form) in &module.next_state.forms {
-            let clock = locate(&trigger.clock);
-            let clock = design.clock_domains.get(&clock).copied().unwrap_or(clock);
-            if clocks.is_some_and(|clocks| !clocks.contains(&clock)) {
-                continue;
-            }
-            let relocated = form
-                .relocate(&module.arena, arena, &locate)
-                .map_err(|error| {
-                    ParserError::illegal_context("next-state form", error.to_string(), None)
-                })?;
-            let domain = domains.entry(clock).or_default();
-            domain.roots.extend(relocated.roots);
-            domain.ports.extend(relocated.ports);
-        }
-    }
-    Ok(domains)
-}
-
-/// Every trigger group on a clock has to supply its roots. A reset event
-/// also runs another group's units, which are keyed by its clock here.
-pub(super) fn complete_graph_clocks(design: &Design) -> HashSet<AbsoluteAddr> {
-    let mut complete = HashSet::default();
-    let mut excluded = HashSet::default();
-    for (&instance, module) in &design.instance_modules {
-        let module = &design.modules[module];
-        let event = |id| {
-            let addr = design.bindings.locate(instance, id);
-            design.clock_domains.get(&addr).copied().unwrap_or(addr)
-        };
-        for trigger in module.eval_apply_ff_blocks.keys() {
-            let clock = event(trigger.clock);
-            if module.next_state.complete.contains(trigger) {
-                complete.insert(clock);
-            } else {
-                excluded.insert(clock);
-            }
-            excluded.extend(trigger.resets.iter().copied().map(event));
-        }
-    }
-    complete.retain(|event| !excluded.contains(event));
-    complete
-}
 
 /// Lower a sampled clock domain in the address space of the relocated design.
 pub(super) fn lower_clock(
@@ -91,6 +37,118 @@ pub(super) fn lower_clock(
 }
 
 impl StateGraph {
+    /// Resolve samples against the whole design before choosing executable
+    /// kernels. Pure events can publish directly; every event also has a
+    /// staged evaluation for simultaneous edges.
+    pub(super) fn lower_events(
+        &mut self,
+        design: &Design,
+        units: &mut Units,
+        initial: &[crate::symbolic::artifact::InstanceValue],
+        split_commits: &SplitCommits,
+        shapes: &HashMap<AbsoluteAddr, (usize, bool)>,
+        parallel: &ParallelScheduleOptions,
+        four_state: bool,
+        fused: bool,
+        measure_graphs: bool,
+    ) -> Result<
+        (
+            HashSet<AbsoluteAddr>,
+            HashMap<AbsoluteAddr, Vec<AbsoluteAddr>>,
+        ),
+        ParserError,
+    > {
+        let active_writes: HashMap<_, HashSet<_>> = split_commits
+            .iter()
+            .map(|(&event, groups)| {
+                let writes = groups
+                    .iter()
+                    .flatten()
+                    .flat_map(|s| s.active.blocks.values())
+                    .flat_map(|b| &b.instructions)
+                    .flat_map(crate::symbolic::written_objects)
+                    .filter(|a| a.region == STABLE_REGION)
+                    .map(|a| a.absolute_addr())
+                    .collect();
+                (event, writes)
+            })
+            .collect();
+        let graph_clocks = if !fused && !four_state && !parallel.enabled() {
+            self.evaluations
+                .iter()
+                .filter_map(|(&event, plan)| {
+                    (!plan.is_empty()
+                        && active_writes.get(&event).is_none_or(HashSet::is_empty)
+                        && !units.eval_apply_ffs.contains_key(&event)
+                        && plan
+                            .iter()
+                            .all(|batch| matches!(batch, EdgeEvaluation::Graph(_))))
+                    .then_some(event)
+                })
+                .collect::<HashSet<_>>()
+        } else {
+            Default::default()
+        };
+        let dependencies = StateDependencies::new(self, units);
+        self.connect_samples(
+            &dependencies,
+            design,
+            units,
+            initial,
+            shapes,
+            &active_writes,
+            parallel,
+            four_state,
+        )?;
+        for (&event, plan) in &self.evaluations {
+            if graph_clocks.contains(&event) || measure_graphs {
+                let form = self.transitions.entry(event).or_default();
+                for batch in plan {
+                    if let EdgeEvaluation::Graph(graph) = batch {
+                        form.roots.extend_from_slice(&graph.roots);
+                        form.ports.extend_from_slice(&graph.ports);
+                    }
+                }
+            }
+        }
+        units.eval_only_ffs = lower_event_evaluations(
+            std::mem::take(&mut self.evaluations),
+            &self.global_arena,
+            &design.unpacked_element_widths,
+            &units.apply_ffs,
+            &graph_clocks,
+            &mut units.eval_apply_ffs,
+        )?;
+        if measure_graphs {
+            // A frontend may also provide non-executable forms to compare its
+            // procedural or parallel lowering with a symbolic implementation.
+            for (&instance, module) in &design.instance_modules {
+                let module = &design.modules[module];
+                for (trigger, form) in &module.next_state.forms {
+                    if module.next_state.evaluations.contains_key(trigger) {
+                        continue;
+                    }
+                    let locate = |id: &SourceVarId| design.bindings.locate(instance, *id);
+                    let clock = locate(&trigger.clock);
+                    let clock = design.clock_domains.get(&clock).copied().unwrap_or(clock);
+                    let graph = form
+                        .relocate(&module.arena, &mut self.global_arena, &locate)
+                        .map_err(|e| {
+                            ParserError::illegal_context(
+                                "diagnostic next-state form",
+                                e.to_string(),
+                                None,
+                            )
+                        })?;
+                    let domain = self.transitions.entry(clock).or_default();
+                    domain.roots.extend(graph.roots);
+                    domain.ports.extend(graph.ports);
+                }
+            }
+        }
+        Ok((graph_clocks, dependencies.write_domains()))
+    }
+
     /// Select the writes and event signals needed by this edge. The runtime
     /// settles observable outputs after publication, so the tick only needs
     /// their drivers when a sampled value depends on them.
@@ -226,16 +284,20 @@ impl<'a> Drivers<'a> {
                         .entry(atom.id)
                         .or_default()
                         .extend(path.sources.iter().map(|source| source.id));
-                    if folded[path.expr.0] {
+                    if folded[path.expr.0]
+                        || !path.previous_sources.is_empty()
+                        || !path.local_inputs.is_empty()
+                        || !path.pre_lower_nodes.is_empty()
+                        || !path.order_before.is_empty()
+                        || !path.comb_capture_enable_sites.is_empty()
+                    {
                         opaque.insert(atom.id);
                     }
                 }
                 LogicPathTarget::Process { unit, .. } => {
                     for block in unit.blocks.values() {
                         for instruction in &block.instructions {
-                            if let SIRInstruction::Store(address, ..) = instruction {
-                                opaque.insert(*address);
-                            }
+                            opaque.extend(crate::symbolic::written_objects(instruction).copied());
                         }
                     }
                 }
@@ -333,6 +395,28 @@ fn domain_dag(
     drivers: &Drivers<'_>,
     form: &NextStateForm<AbsoluteAddr>,
 ) -> Result<DomainDag, String> {
+    let (arena, copies, substituted, opaque_nets) = copy_roots(drivers, form.nodes())?;
+    let form = form.map(|var| *var, |node| Ok::<_, String>(copies[&node]))?;
+    Ok(DomainDag {
+        arena,
+        form,
+        substituted,
+        opaque_nets,
+    })
+}
+
+fn copy_roots(
+    drivers: &Drivers<'_>,
+    roots: impl IntoIterator<Item = NodeId>,
+) -> Result<
+    (
+        SLTNodeArena<AbsoluteAddr>,
+        HashMap<NodeId, NodeId>,
+        usize,
+        usize,
+    ),
+    String,
+> {
     let source = drivers.arena;
     let mut dag = SLTNodeArena::new();
     let mut copies: HashMap<NodeId, NodeId> = HashMap::default();
@@ -416,7 +500,7 @@ fn domain_dag(
     let intern = |dag: &mut SLTNodeArena<AbsoluteAddr>, node: SLTNode<AbsoluteAddr>| {
         intern(dag, node).map_err(|error| error.to_string())
     };
-    for root in form.nodes() {
+    for root in roots {
         let mut stack = vec![(root, false)];
         while let Some((node, expanded)) = stack.pop() {
             if copies.contains_key(&node) {
@@ -513,13 +597,7 @@ fn domain_dag(
             copies.insert(node, id);
         }
     }
-    let form = form.map(|var| *var, |node| Ok::<_, String>(copies[&node]))?;
-    Ok(DomainDag {
-        arena: dag,
-        form,
-        substituted,
-        opaque_nets: opaque_nets.len(),
-    })
+    Ok((dag, copies, substituted, opaque_nets.len()))
 }
 
 /// The DAG of each domain with a form, after the combinational nets the

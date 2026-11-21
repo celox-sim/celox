@@ -5,9 +5,7 @@ use celox_design::{
     RuntimeEventSite, TriggerSet, VarAtomBase, VariableMetadata,
 };
 use celox_sir::{BasicBlock, ExecutionUnit};
-use celox_slt::{
-    CombObserver, FfAccessSummary, GlueBlockBase, LogicPath, NodeId, SLTNodeArena, SymbolicStore,
-};
+use celox_slt::{CombObserver, FfAccessSummary, LogicPath, NodeId, SLTNodeArena, SymbolicStore};
 use veryl_analyzer::ir::{VarId, VarPath, Variable};
 use veryl_analyzer::symbol::Affiliation;
 use veryl_metadata::{ClockType, ResetType};
@@ -19,7 +17,15 @@ use crate::{
 };
 
 type RegionedVarAddr = RegionedVarAddrBase<VarId>;
-type GlueBlock = GlueBlockBase<VarId>;
+#[derive(Clone, Debug)]
+pub struct PortRef {
+    pub operand: VarId,
+    pub name: StrId,
+    pub index: usize,
+    pub variable: VarId,
+    pub width: usize,
+    pub signed: bool,
+}
 
 /// Veryl-owned sidecar retained only until source identities and testbench AST
 /// nodes have been projected into the source-neutral symbolic core.
@@ -107,7 +113,8 @@ pub fn external_signatures_named(
             apply_ff_blocks: HashMap::default(),
             eval_apply_ff_blocks: HashMap::default(),
             parallel_ff_parts: HashMap::default(),
-            glue_blocks: HashMap::default(),
+            instances: Default::default(),
+            port_refs: Vec::new(),
             indexed_instance_names: crate::HashSet::default(),
             comb_blocks: Vec::new(),
             comb_process_ranges: Vec::new(),
@@ -172,7 +179,8 @@ pub struct VerylSimModule {
     /// for lane-partitioned builds.
     pub parallel_ff_parts:
         HashMap<TriggerSet<VarId>, Vec<crate::symbolic::artifact::FfPart<RegionedVarAddr>>>,
-    pub glue_blocks: HashMap<StrId, Vec<GlueBlock>>,
+    pub instances: HashMap<StrId, Vec<celox_design::ModuleId>>,
+    pub port_refs: Vec<PortRef>,
     /// Source instance declarations that explicitly have an array dimension.
     pub indexed_instance_names: crate::HashSet<StrId>,
     pub comb_blocks: Vec<LogicPath<VarId>>,
@@ -201,7 +209,7 @@ impl fmt::Debug for VerylSimModule {
             .field("eval_only_ff_blocks", &self.eval_only_ff_blocks)
             .field("apply_ff_blocks", &self.apply_ff_blocks)
             .field("eval_apply_ff_blocks", &self.eval_apply_ff_blocks)
-            .field("glue_blocks", &self.glue_blocks)
+            .field("instances", &self.instances)
             .field("indexed_instance_names", &self.indexed_instance_names)
             .field("comb_blocks", &self.comb_blocks)
             .field("comb_boundaries", &self.comb_boundaries)
@@ -503,7 +511,18 @@ pub(crate) fn project_module_with_ids(
 
     let mut arena = SLTNodeArena::new();
     let mut cache = HashMap::default();
-    let map_id = |id: &VarId| ids[id];
+    let mut instance_ports = crate::symbolic::artifact::InstancePorts::default();
+    let mut operands = HashMap::default();
+    for port in &module.port_refs {
+        let name = veryl_parser::resource_table::get_str_value(port.name).unwrap_or_default();
+        let child = module.instances[&port.name][port.index];
+        let child_id = child_ids.get(&child).unwrap_or(&ids)[&port.variable];
+        operands.insert(
+            port.operand,
+            instance_ports.bind(&name, port.index, child_id),
+        );
+    }
+    let map_id = |id: &VarId| operands.get(id).copied().unwrap_or_else(|| ids[id]);
     let mut comb_blocks: Vec<_> = module
         .comb_blocks
         .iter()
@@ -614,22 +633,17 @@ pub(crate) fn project_module_with_ids(
                     )
                 })
                 .collect(),
-            glue_blocks: module
-                .glue_blocks
+            instances: module
+                .instances
                 .iter()
-                .map(|(name, blocks)| {
-                    let name =
-                        veryl_parser::resource_table::get_str_value(*name).unwrap_or_default();
-                    let blocks = blocks
-                        .iter()
-                        .map(|block| {
-                            let child = child_ids.get(&block.module_id).unwrap_or(&ids);
-                            crate::symbolic::remap::glue_block(block, &ids, child)
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    Ok((name, blocks))
+                .map(|(name, children)| {
+                    (
+                        veryl_parser::resource_table::get_str_value(*name).unwrap_or_default(),
+                        children.clone(),
+                    )
                 })
-                .collect::<Result<_, celox_slt::SLTNodeFactsError>>()?,
+                .collect(),
+            instance_ports,
             indexed_instance_names: module
                 .indexed_instance_names
                 .iter()

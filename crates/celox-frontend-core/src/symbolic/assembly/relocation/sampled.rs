@@ -205,6 +205,59 @@ mod tests {
     use celox_slt::next_state::{RamWritePort, ValueRoot};
 
     #[test]
+    fn a_procedure_orders_only_the_affected_roots_and_ram() {
+        let addr = |n| AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: SourceVarId(n),
+        };
+        let stable = |id| RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, id);
+        let mut arena = SLTNodeArena::new();
+        let access = BitAccess::new(0, 0);
+        let mut input = |n| {
+            arena
+                .alloc(celox_slt::SLTNode::Input {
+                    variable: addr(n),
+                    signed: false,
+                    index: vec![],
+                    access,
+                })
+                .unwrap()
+        };
+        let x = input(0);
+        let y = input(1);
+        let root = |n, value| ValueRoot {
+            target: addr(n),
+            access,
+            value,
+        };
+        let port = |index| RamWritePort {
+            array: addr(4),
+            index,
+            guard: y,
+            value: y,
+            element_width: 1,
+            access,
+        };
+        let mut form = NextStateForm {
+            roots: vec![root(2, x), root(3, y)],
+            ports: vec![port(y), port(x)],
+        };
+        let mut b = SIRBuilder::new();
+        b.emit(SIRInstruction::Commit(
+            stable(addr(1)),
+            stable(addr(0)),
+            SIROffset::Static(0),
+            1,
+            Vec::new(),
+        ));
+        let early = take_conflicting_samples(&mut form, &arena, &b.flush_eu().unwrap(), true);
+        assert_eq!(early.roots, [root(2, x)]);
+        assert_eq!(early.ports, [port(y), port(x)]);
+        assert_eq!(form.roots, [root(3, y)]);
+        assert!(form.ports.is_empty());
+    }
+
+    #[test]
     fn a_shared_sparse_slot_cannot_be_replaced_by_one_port() {
         let array = AbsoluteAddr {
             instance_id: InstanceId(0),

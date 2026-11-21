@@ -15,26 +15,18 @@ pub(super) fn unify_clock_domains(
     // wiring.
     let mut wires: HashMap<AbsoluteAddr, Vec<Wire<'_>>> = HashMap::default();
 
-    for (path, id) in expanded {
+    for id in expanded.values() {
         let module_id = &instance_modules[id];
         let sim_module = &modules[module_id];
 
-        let width = |module: &SimModule, var: SourceVarId| {
-            module
+        let metadata = |var| {
+            let addr = bindings.locate(*id, var);
+            modules[&instance_modules[&addr.instance_id]]
                 .variables
-                .get(&var)
-                .map(|variable| variable.metadata.width)
+                .get(&addr.var_id)
+                .map(|v| &v.metadata)
         };
-        let mut record_polarity = |module: &SimModule, instance: InstanceId, var: SourceVarId| {
-            let polarity = module
-                .variables
-                .get(&var)
-                .and_then(|variable| celox_design::edges::polarity(variable.metadata.kind));
-            if let Some(polarity) = polarity {
-                polarities.insert(bindings.locate(instance, var), polarity);
-            }
-        };
-
+        let width = |var| metadata(var).map(|m| m.width);
         for logic_path in &sim_module.comb_blocks {
             // A definition reading a value from before its process ran
             // is not a wire: `g = v[0]; v = {2{clk}};` makes `g` the old
@@ -49,7 +41,8 @@ pub(super) fn unify_clock_domains(
                     .push(Wire {
                         access: target.access,
                         expr: logic_path.expr,
-                        arena: WireArena::Comb(&sim_module.arena, *id),
+                        arena: &sim_module.arena,
+                        instance: *id,
                     });
             }
         }
@@ -58,81 +51,20 @@ pub(super) fn unify_clock_domains(
             // Only unify whole-variable copies. Gated clocks and part-selects
             // such as `let divided = counter[0];` are clocks of their own: the
             // runtime edge-senses the canonical variable as a whole.
-            if let Some((target, source)) = whole_variable_copy(
-                &sim_module.arena,
-                logic_path,
-                |target| width(sim_module, target),
-                |source| width(sim_module, source),
-            ) {
-                record_polarity(sim_module, *id, target);
-                record_polarity(sim_module, *id, source);
+            if let Some((target, source)) =
+                whole_variable_copy(&sim_module.arena, logic_path, width, width)
+            {
+                for var in [target, source] {
+                    if let Some(polarity) =
+                        metadata(var).and_then(|m| celox_design::edges::polarity(m.kind))
+                    {
+                        polarities.insert(bindings.locate(*id, var), polarity);
+                    }
+                }
                 drive_graph
                     .entry(bindings.locate(*id, source))
                     .or_default()
                     .push(bindings.locate(*id, target));
-            }
-        }
-        for (inst_name, glue_blocks) in &sim_module.glue_blocks {
-            for (idx, glue_block) in glue_blocks.iter().enumerate() {
-                let mut child_path = path.0.clone();
-                child_path.push((inst_name.clone(), sim_module.instance_index(inst_name, idx)));
-                let child_id = expanded[&InstancePath(child_path)];
-                let child_module = &modules[&glue_block.module_id];
-                let glue_width = |var: GlueAddr| match var {
-                    GlueAddr::Parent(var) => width(sim_module, var),
-                    GlueAddr::Child(var) => width(child_module, var),
-                };
-                for (_, logic_path) in glue_block
-                    .input_ports
-                    .iter()
-                    .chain(&glue_block.output_ports)
-                {
-                    if let Some(target) = logic_path.target.var() {
-                        let located = match target.id {
-                            GlueAddr::Parent(var) => bindings.locate(*id, var),
-                            GlueAddr::Child(var) => bindings.locate(child_id, var),
-                        };
-                        wires.entry(located).or_default().push(Wire {
-                            access: target.access,
-                            expr: logic_path.expr,
-                            arena: WireArena::Glue(&glue_block.arena, *id, child_id),
-                        });
-                    }
-                }
-
-                // Inputs: Parent -> Child (Parent drives Child)
-                for (_, logic_path) in &glue_block.input_ports {
-                    if let Some((GlueAddr::Child(child_var), GlueAddr::Parent(parent_var))) =
-                        whole_variable_copy(&glue_block.arena, logic_path, glue_width, glue_width)
-                    {
-                        record_polarity(child_module, child_id, child_var);
-                        record_polarity(sim_module, *id, parent_var);
-                        drive_graph
-                            .entry(bindings.locate(*id, parent_var))
-                            .or_default()
-                            .push(bindings.locate(child_id, child_var));
-                    }
-                }
-                // Outputs: Child -> Parent (Child drives Parent)
-                for (parent_vars, logic_path) in &glue_block.output_ports {
-                    let [parent_var] = parent_vars.as_slice() else {
-                        continue;
-                    };
-                    let parent_width = width(sim_module, *parent_var);
-                    if let Some((_, GlueAddr::Child(child_var))) = whole_variable_copy(
-                        &glue_block.arena,
-                        logic_path,
-                        |_| parent_width,
-                        glue_width,
-                    ) {
-                        record_polarity(child_module, child_id, child_var);
-                        record_polarity(sim_module, *id, *parent_var);
-                        drive_graph
-                            .entry(bindings.locate(child_id, child_var))
-                            .or_default()
-                            .push(bindings.locate(*id, *parent_var));
-                    }
-                }
             }
         }
     }
@@ -156,16 +88,8 @@ pub(super) fn unify_clock_domains(
             .iter()
             .find(|wire| wire.access.lsb <= bit && bit <= wire.access.msb)?;
         let bit = bit - wire.access.lsb;
-        match wire.arena {
-            WireArena::Comb(arena, instance) => wired_bit(arena, wire.expr, bit)
-                .map(|(var, bit)| (bindings.locate(instance, var), bit)),
-            WireArena::Glue(arena, parent, child) => {
-                wired_bit(arena, wire.expr, bit).map(|(var, bit)| match var {
-                    GlueAddr::Parent(var) => (bindings.locate(parent, var), bit),
-                    GlueAddr::Child(var) => (bindings.locate(child, var), bit),
-                })
-            }
-        }
+        wired_bit(wire.arena, wire.expr, bit)
+            .map(|(var, bit)| (bindings.locate(wire.instance, var), bit))
     };
     let mut targets = wires
         .keys()
@@ -370,20 +294,12 @@ fn share_opposite_edge_copies(
 /// The most wiring hops followed from a one-bit variable to its source.
 pub(super) const MAX_WIRED_BIT_STEPS: usize = 64;
 
-/// The node arena of a range definition, with the instances its
-/// addresses resolve in.
-#[derive(Clone, Copy)]
-pub(super) enum WireArena<'a> {
-    Comb(&'a SLTNodeArena<SourceVarId>, InstanceId),
-    /// A port connection: the parent's and the child's instance.
-    Glue(&'a SLTNodeArena<GlueAddr>, InstanceId, InstanceId),
-}
-
 /// One range definition of a variable: `access` of the target takes `expr`.
 pub(super) struct Wire<'a> {
     pub(super) access: BitAccess,
     pub(super) expr: NodeId,
-    pub(super) arena: WireArena<'a>,
+    pub(super) arena: &'a SLTNodeArena<SourceVarId>,
+    pub(super) instance: InstanceId,
 }
 
 /// The variable bit that bit `bit` of `node` is wired to: a read of a

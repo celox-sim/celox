@@ -58,19 +58,6 @@ fn test_absoluteaddr_display() {
 }
 
 #[test]
-fn test_glueaddr_display() {
-    let parent_addr = celox_frontend_veryl::GlueAddr::Parent(veryl_analyzer::ir::VarId::default());
-    let parent_display = format!("{}", parent_addr);
-    assert!(parent_display.contains("GlueAddr::Parent"));
-    assert!(parent_display.contains("var0"));
-
-    let child_addr = celox_frontend_veryl::GlueAddr::Child(veryl_analyzer::ir::VarId::default());
-    let child_display = format!("{}", child_addr);
-    assert!(child_display.contains("GlueAddr::Child"));
-    assert!(child_display.contains("var0"));
-}
-
-#[test]
 fn test_instanceid_display() {
     let id = InstanceId(42);
     let display = format!("{}", id);

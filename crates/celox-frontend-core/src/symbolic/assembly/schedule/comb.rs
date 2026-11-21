@@ -454,7 +454,7 @@ pub(super) fn plan_settle_flags(
     units: &Units,
     counted: &BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>>,
     clock_nets: &HashSet<AbsoluteAddr>,
-    graph_clocks: &HashSet<AbsoluteAddr>,
+    write_domains: &HashMap<AbsoluteAddr, Vec<AbsoluteAddr>>,
 ) -> Option<scheduler::SettlePartitioning<AbsoluteAddr>> {
     let Design {
         expanded, modules, ..
@@ -512,7 +512,7 @@ pub(super) fn plan_settle_flags(
                 target_cost,
                 external_readers,
                 clock_nets: clock_nets.clone(),
-                write_domains: settle_write_domains(logic, eval_apply_ffs, graph_clocks),
+                write_domains: write_domains.clone(),
                 profile: parallel.settle_profile.then_some(process_count),
             }
         },
@@ -822,43 +822,4 @@ pub(super) fn stable_comb_units(
         })
         .unwrap_or_default();
     (eval_comb_stateful, eval_comb, parallel_eval_comb)
-}
-
-/// Graph roots and RAM ports identify the objects each event can publish.
-/// For a procedural clock use its declared state effects. An opaque write
-/// can activate every domain, so retain ordinary cuts for that design.
-pub(super) fn settle_write_domains(
-    graph: &StateGraph,
-    clocks: &FfUnits,
-    graph_clocks: &HashSet<AbsoluteAddr>,
-) -> HashMap<AbsoluteAddr, Vec<AbsoluteAddr>> {
-    let mut domains: HashMap<_, Vec<_>> = HashMap::default();
-    for (&clock, units) in clocks {
-        let mut targets = HashSet::default();
-        if graph_clocks.contains(&clock)
-            && let Some(form) = graph.transitions.get(&clock)
-        {
-            targets.extend(form.roots.iter().map(|root| root.target));
-            targets.extend(form.ports.iter().map(|port| port.array));
-        } else {
-            for inst in units
-                .iter()
-                .flat_map(|unit| unit.blocks.values())
-                .flat_map(|b| &b.instructions)
-            {
-                let Some(writes) = inst.state_writes().objects() else {
-                    return HashMap::default();
-                };
-                targets.extend(
-                    writes
-                        .filter(|addr| addr.region == STABLE_REGION)
-                        .map(|addr| addr.absolute_addr()),
-                );
-            }
-        }
-        for target in targets {
-            domains.entry(target).or_default().push(clock);
-        }
-    }
-    domains
 }

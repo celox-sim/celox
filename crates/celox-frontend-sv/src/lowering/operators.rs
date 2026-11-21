@@ -1,4 +1,4 @@
-//! Operator and call lowering shared by the cell and glue expression lowerings.
+//! Operator and call lowering for SystemVerilog expressions.
 
 use super::*;
 

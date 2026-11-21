@@ -2,8 +2,7 @@ use num_bigint::BigUint;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::symbolic::artifact::{
-    FfPart, HierarchicalStart, NbaSwitch, RelocationModule, SimModule, SplitCommit,
-    SymbolicGlueAddr as GlueAddr, SymbolicRtl,
+    FfPart, HierarchicalStart, NbaSwitch, RelocationModule, SimModule, SplitCommit, SymbolicRtl,
 };
 use crate::{
     FrontendLookup, FrontendTrace, FrontendTraceOptions, FusedSirOptimizationHints, HashMap,
