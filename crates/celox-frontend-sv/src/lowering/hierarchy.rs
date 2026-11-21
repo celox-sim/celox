@@ -1371,7 +1371,7 @@ fn find_instance<'a>(
 ) -> Option<((String, usize), &'a LoweredSvInstance)> {
     let mut positions: HashMap<&str, usize> = HashMap::default();
     for instance in &module.instances {
-        // Glue blocks, and so hierarchy indices, follow listing order.
+        // Hierarchy indices follow listing order.
         let position = positions.entry(&instance.instance_name).or_default();
         let index = instance.array_index_base + *position;
         *position += 1;

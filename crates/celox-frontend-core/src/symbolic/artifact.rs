@@ -6,13 +6,45 @@ use celox_design::{
     VarAtomBase, VariableMetadata, WaitSite,
 };
 use celox_sir::ExecutionUnit;
-use celox_slt::{CombObserver, FfAccessSummary, GlueBlockBase, LogicPath, SLTNodeArena};
+use celox_slt::{CombObserver, FfAccessSummary, LogicPath, SLTNodeArena};
 
 use crate::{HashMap, HashSet, SourceLocation, SourceVarId, VariableKind};
 
 pub type SymbolicRegionedAddr = RegionedVarAddrBase<SourceVarId>;
-pub type SymbolicGlueAddr = celox_slt::GlueAddrBase<SourceVarId>;
-pub type SymbolicGlueBlock = GlueBlockBase<SourceVarId>;
+/// A child variable referenced by a node in the enclosing module's arena.
+#[derive(Clone, Debug)]
+pub struct InstancePort {
+    pub name: String,
+    pub index: usize,
+    pub variable: SourceVarId,
+}
+
+/// Module-local graph operands for child variables. References grow down from
+/// the end of the ID space. Assembly checks disjointness with declared variables.
+#[derive(Clone, Debug, Default)]
+pub struct InstancePorts(Vec<InstancePort>);
+
+impl InstancePorts {
+    pub fn bind(&mut self, name: &str, index: usize, variable: SourceVarId) -> SourceVarId {
+        let slot = u32::try_from(self.0.len()).expect("too many instance port references");
+        self.0.push(InstancePort {
+            name: name.to_owned(),
+            index,
+            variable,
+        });
+        SourceVarId(!slot)
+    }
+
+    pub fn get(&self, id: SourceVarId) -> Option<&InstancePort> {
+        self.0.get((!id.0) as usize)
+    }
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (SourceVarId, &InstancePort)> {
+        self.0
+            .iter()
+            .enumerate()
+            .map(|(i, port)| (SourceVarId(!(i as u32)), port))
+    }
+}
 
 /// Source-independent variable metadata consumed by symbolic assembly.
 #[derive(Clone, Debug)]
@@ -110,9 +142,10 @@ pub struct SimModule {
     /// `apply_ff_blocks`: a trigger group split into parts which may be
     /// evaluated concurrently. Empty unless several lanes were requested.
     pub parallel_ff_parts: HashMap<TriggerSet<SourceVarId>, Vec<FfPart<SymbolicRegionedAddr>>>,
-    pub glue_blocks: HashMap<String, Vec<SymbolicGlueBlock>>,
+    pub instances: HashMap<String, Vec<ModuleId>>,
+    pub instance_ports: InstancePorts,
     pub indexed_instance_names: HashSet<String>,
-    /// The index of the first glue block of an instance name, when it is not
+    /// The index of the first element of an instance name, when it is not
     /// 0: the lower bound of a SystemVerilog instance array such as `u[3:2]`.
     pub instance_index_bases: HashMap<String, usize>,
     pub comb_blocks: Vec<LogicPath<SourceVarId>>,
@@ -201,9 +234,6 @@ pub struct NextStateForms {
     /// Executable evaluations in source order, including procedural boundaries.
     pub evaluations:
         HashMap<TriggerSet<SourceVarId>, Vec<EdgeEvaluation<SourceVarId, SymbolicRegionedAddr>>>,
-    /// Trigger groups whose forms account for every executable process.
-    /// Assembly may schedule these roots with the combinational producers.
-    pub complete: HashSet<TriggerSet<SourceVarId>>,
     pub forms: Vec<(
         TriggerSet<SourceVarId>,
         celox_slt::next_state::NextStateForm<SourceVarId>,
@@ -282,7 +312,7 @@ pub struct PackageBinding {
 }
 
 impl SimModule {
-    /// The hierarchy index of glue block `position` of instance `name`.
+    /// The hierarchy index of element `position` of instance `name`.
     pub fn instance_index(&self, name: &str, position: usize) -> usize {
         self.instance_index_bases.get(name).copied().unwrap_or(0) + position
     }
@@ -367,7 +397,8 @@ impl fmt::Debug for SimModule {
             .field("eval_only_ff_blocks", &self.eval_only_ff_blocks)
             .field("apply_ff_blocks", &self.apply_ff_blocks)
             .field("eval_apply_ff_blocks", &self.eval_apply_ff_blocks)
-            .field("glue_blocks", &self.glue_blocks)
+            .field("instances", &self.instances)
+            .field("instance_ports", &self.instance_ports)
             .field("indexed_instance_names", &self.indexed_instance_names)
             .field("instance_index_bases", &self.instance_index_bases)
             .field("comb_blocks", &self.comb_blocks)

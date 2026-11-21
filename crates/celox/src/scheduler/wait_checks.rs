@@ -1,5 +1,23 @@
 //! Registering the waits of the kernels and checking them for their edges.
 use super::*;
+use celox_design::schedule::{CompiledWaitLayout, CompiledWaitTerm};
+
+/// A scalar on its own can use a narrower encoding than the same scalar in
+/// an event list. Only share samples with the same representation.
+type WaitSamples = HashMap<(AbsoluteAddr, usize, bool), RegisterId>;
+
+impl Wait {
+    fn change_list(&self) -> Option<&CompiledWaitLayout> {
+        self.raw.as_ref().filter(|_| {
+            self.counters.iter().all(Option::is_none)
+                && self.gates.iter().all(Option::is_none)
+                && self
+                    .terms
+                    .iter()
+                    .all(|(_, kind)| *kind == CounterKind::Changes)
+        })
+    }
+}
 
 /// The waits of the waiting kernels of `kernels`.
 pub(super) fn waits_of<'a>(
@@ -194,21 +212,19 @@ impl Generator<'_> {
             let zero = self.constant(0, SCHEDULER_FLAG_WIDTH);
             self.binary(1, byte, BinaryOp::Ne, zero)
         });
-        let mut woken = self.constant(0, self.ready_bits);
         // The flagged checks, by the word of up to eight flag bytes holding
         // theirs: one load tells whether any of them is set, and a clear
         // word skips its checks together.
         let mut words: BTreeMap<usize, Vec<&WaitCheck>> = BTreeMap::new();
+        // An ordinary scan writes only private scheduler slots. Samples taken
+        // before a wake branch dominate the following checks in this scan.
+        let mut samples = WaitSamples::default();
         for check in waits {
             match gate {
                 Some((_, _, waits)) if check.index < waits => {
                     words.entry(check.index / 8).or_default().push(check);
                 }
-                _ => {
-                    let wake = self.check_wait(check, settled);
-                    let bit = self.bit(wake, check.ordinal);
-                    woken = self.binary(self.ready_bits, woken, BinaryOp::Or, bit);
-                }
+                _ => self.check_wait(check, settled, &mut samples),
             }
         }
         if let (Some((flags, partitions, waits)), Some(untracked)) = (gate, untracked) {
@@ -224,72 +240,71 @@ impl Generator<'_> {
                 let zero = self.constant(0, width);
                 let any = self.binary(1, bytes, BinaryOp::Ne, zero);
                 let dirty = self.binary(1, any, BinaryOp::Or, untracked);
-                let group = self.b.alloc_bit(self.ready_bits, false);
-                let join = self.b.new_block_with(vec![group]);
-                let run = self.b.new_block();
-                let none = self.constant(0, self.ready_bits);
-                self.b.seal_block(SIRTerminator::Branch {
-                    cond: dirty,
-                    true_block: (run, Vec::new()),
-                    false_block: (join, vec![none]),
+                self.if_bit(dirty, 0, |g| {
+                    for check in checks {
+                        let offset = celox_design::settle_wait_flag(partitions, check.index) * 8;
+                        let byte = g.b.alloc_bit(SCHEDULER_FLAG_WIDTH, false);
+                        g.b.emit(SIRInstruction::Slice(
+                            byte,
+                            bytes,
+                            (check.index - first) * SCHEDULER_FLAG_WIDTH,
+                            SCHEDULER_FLAG_WIDTH,
+                        ));
+                        let zero = g.constant(0, SCHEDULER_FLAG_WIDTH);
+                        let dirty = g.binary(1, byte, BinaryOp::Ne, zero);
+                        let dirty = g.binary(1, dirty, BinaryOp::Or, untracked);
+                        g.if_bit(dirty, 0, |g| {
+                            g.store_at(flags, offset, SCHEDULER_FLAG_WIDTH, zero);
+                            g.check_wait(check, settled, &mut WaitSamples::default());
+                        });
+                    }
                 });
-                self.b.switch_to_block(run);
-                let mut partial = self.constant(0, self.ready_bits);
-                for check in checks {
-                    let offset = celox_design::settle_wait_flag(partitions, check.index) * 8;
-                    let byte = self.b.alloc_bit(SCHEDULER_FLAG_WIDTH, false);
-                    self.b.emit(SIRInstruction::Slice(
-                        byte,
-                        bytes,
-                        (check.index - first) * SCHEDULER_FLAG_WIDTH,
-                        SCHEDULER_FLAG_WIDTH,
-                    ));
-                    let zero = self.constant(0, SCHEDULER_FLAG_WIDTH);
-                    let dirty = self.binary(1, byte, BinaryOp::Ne, zero);
-                    let dirty = self.binary(1, dirty, BinaryOp::Or, untracked);
-                    let wake = self.b.alloc_bit(1, false);
-                    let join = self.b.new_block_with(vec![wake]);
-                    let run = self.b.new_block();
-                    let clean = self.constant(0, 1);
-                    self.b.seal_block(SIRTerminator::Branch {
-                        cond: dirty,
-                        true_block: (run, Vec::new()),
-                        false_block: (join, vec![clean]),
-                    });
-                    self.b.switch_to_block(run);
-                    self.store_at(flags, offset, SCHEDULER_FLAG_WIDTH, zero);
-                    let woke = self.check_wait(check, settled);
-                    self.b.seal_block(SIRTerminator::Jump(join, vec![woke]));
-                    self.b.switch_to_block(join);
-                    let bit = self.bit(wake, check.ordinal);
-                    partial = self.binary(self.ready_bits, partial, BinaryOp::Or, bit);
-                }
-                self.b.seal_block(SIRTerminator::Jump(join, vec![partial]));
-                self.b.switch_to_block(join);
-                woken = self.binary(self.ready_bits, woken, BinaryOp::Or, group);
             }
         }
-        let ready = self.load(self.slots.ready, self.ready_bits);
-        let ready = self.binary(self.ready_bits, ready, BinaryOp::Or, woken);
-        self.store(self.slots.ready, self.ready_bits, ready);
     }
 
-    /// Check the wait of `check`, advance its baseline and clear its waiting
-    /// flag when it woke; whether it woke.
-    fn check_wait(&mut self, check: &WaitCheck, settled: bool) -> RegisterId {
-        let wait = check.wait;
-        let flag = self.waiting(check.index);
-        let mut waiting = flag;
+    fn waiting_for_edge(&mut self, check: &WaitCheck) -> RegisterId {
+        let mut waiting = self.waiting(check.index);
         if let Some(status) = check.status {
             let edge = self.equals_at(status, ProcessStatus::Wait);
             let pending = self.equals_at(status, ProcessStatus::Pending);
             let edge = self.binary(1, edge, BinaryOp::Or, pending);
             waiting = self.binary(1, waiting, BinaryOp::And, edge);
         }
-        let wake = if !wait.alternatives.is_empty() {
-            self.check_wait_site(check.index, check.delay, wait, waiting, settled)
+        waiting
+    }
+
+    fn check_wait(&mut self, check: &WaitCheck, settled: bool, samples: &mut WaitSamples) {
+        let wait = check.wait;
+        // An unqualified change consumes the whole wait. Its snapshot stays
+        // valid until rearm, so unchanged inputs need no process-state reads.
+        let short = wait.change_list().filter(|raw| raw.terms.len() <= 4);
+        let test = if let Some(raw) = short {
+            self.changed_terms(check.index, &wait.terms, &raw.terms, samples)
+        } else {
+            self.waiting_for_edge(check)
+        };
+        self.if_bit(test, 0, |g| {
+            let wake = if short.is_some() {
+                g.waiting_for_edge(check)
+            } else {
+                g.observe_wait(check, settled)
+            };
+            g.if_bit(wake, 0, |g| {
+                let idle = g.constant(0, SCHEDULER_FLAG_WIDTH);
+                g.store(g.slots.waiting[check.index], SCHEDULER_FLAG_WIDTH, idle);
+                let one = g.constant(1, 1);
+                g.store_at(g.slots.ready, check.ordinal, 1, one);
+            });
+        });
+    }
+
+    fn observe_wait(&mut self, check: &WaitCheck, settled: bool) -> RegisterId {
+        let wait = check.wait;
+        if !wait.alternatives.is_empty() {
+            self.check_wait_site(check.index, check.delay, wait, settled)
         } else if wait.raw.is_some() {
-            self.check_raw_wait(check.index, wait, waiting, settled)
+            self.check_raw_wait(check.index, wait, settled)
         } else {
             let baseline = self.load(self.slots.baseline[check.index], SCHEDULER_FLAG_WIDTH);
             let level_width = if self.four_state.is_none() { 1 } else { 2 };
@@ -346,7 +361,6 @@ impl Generator<'_> {
                 current = Some(is);
             }
             let is = current.expect("a wait has an edge");
-            let wake = self.binary(1, occurred, BinaryOp::And, waiting);
             let mut level = self.baseline_byte(is);
             if term.is_some() {
                 // Keep the edge's index.
@@ -357,18 +371,13 @@ impl Generator<'_> {
                 let index = self.binary(SCHEDULER_FLAG_WIDTH, baseline, BinaryOp::And, mask);
                 level = self.binary(SCHEDULER_FLAG_WIDTH, level, BinaryOp::Or, index);
             }
-            let next = self.b.alloc_bit(SCHEDULER_FLAG_WIDTH, false);
-            self.b
-                .emit(SIRInstruction::Mux(next, waiting, level, baseline));
-            self.store(self.slots.baseline[check.index], SCHEDULER_FLAG_WIDTH, next);
-            wake
-        };
-        let one = self.constant(1, 1);
-        let stays = self.binary(1, wake, BinaryOp::Xor, one);
-        let still = self.binary(1, flag, BinaryOp::And, stays);
-        let flag = self.widen(still, SCHEDULER_FLAG_WIDTH);
-        self.store(self.slots.waiting[check.index], SCHEDULER_FLAG_WIDTH, flag);
-        wake
+            self.store(
+                self.slots.baseline[check.index],
+                SCHEDULER_FLAG_WIDTH,
+                level,
+            );
+            occurred
+        }
     }
 
     /// Whether the edge `kind` occurred from the level of the baseline byte
@@ -486,51 +495,51 @@ impl Generator<'_> {
         }
     }
 
+    fn changed_terms(
+        &mut self,
+        process: usize,
+        signals: &[(AbsoluteAddr, CounterKind)],
+        terms: &[CompiledWaitTerm],
+        samples: &mut WaitSamples,
+    ) -> RegisterId {
+        let mut differences = self.constant(0, 1);
+        let mut difference_width = 1;
+        for (&(signal, _), term) in signals.iter().zip(terms) {
+            let width = if term.mask_offset.is_some() {
+                term.plane_bits * 2
+            } else {
+                term.width
+            };
+            let previous = self.load_at(self.slots.baseline[process], term.value_offset, width);
+            let key = (signal, term.plane_bits, term.mask_offset.is_some());
+            let current = *samples
+                .entry(key)
+                .or_insert_with(|| self.raw_wait_planes(signal, term));
+            // These are raw, two-state planes. Merge differing bits
+            // before reducing to a boolean, instead of materializing a
+            // comparison result for every value and mask chunk.
+            let different = self.binary(width, previous, BinaryOp::Xor, current);
+            difference_width = difference_width.max(width);
+            differences = self.binary(difference_width, differences, BinaryOp::Or, different);
+        }
+        let no_difference = self.constant(0, difference_width);
+        self.binary(1, differences, BinaryOp::Ne, no_difference)
+    }
+
     /// A change-only OR wait can stop at its first changed expression.
     /// If none changed, its snapshot already equals the current state. If
     /// any changed, the wait is consumed and capture_raw_wait replaces the
     /// entire snapshot when the process next suspends. Edge-sensitive waits
     /// cannot do this: non-triggering changes must advance their baselines.
-    fn check_change_wait(
-        &mut self,
-        process: usize,
-        wait: &Wait,
-        waiting: RegisterId,
-    ) -> RegisterId {
+    fn check_change_wait(&mut self, process: usize, wait: &Wait) -> RegisterId {
         let zero = self.constant(0, 1);
         let one = self.constant(1, 1);
         let result = self.b.alloc_bit(1, false);
         let done = self.b.new_block_with(vec![result]);
-        let body = self.b.new_block();
-        self.b.seal_block(SIRTerminator::Branch {
-            cond: waiting,
-            true_block: (body, Vec::new()),
-            false_block: (done, vec![zero]),
-        });
-        self.b.switch_to_block(body);
         let raw = wait.raw.as_ref().unwrap();
-        // A small batch amortizes branches without extending the lifetime of
-        // every expression in a large sensitivity list.
+        let mut samples = WaitSamples::default();
         for (signals, terms) in wait.terms.chunks(4).zip(raw.terms.chunks(4)) {
-            let mut differences = zero;
-            let mut difference_width = 1;
-            for (&(signal, _), term) in signals.iter().zip(terms) {
-                let width = if term.mask_offset.is_some() {
-                    term.plane_bits * 2
-                } else {
-                    term.width
-                };
-                let previous = self.load_at(self.slots.baseline[process], term.value_offset, width);
-                let current = self.raw_wait_planes(signal, term);
-                // These are raw, two-state planes. Merge differing bits
-                // before reducing to a boolean, instead of materializing a
-                // comparison result for every value and mask chunk.
-                let different = self.binary(width, previous, BinaryOp::Xor, current);
-                difference_width = difference_width.max(width);
-                differences = self.binary(difference_width, differences, BinaryOp::Or, different);
-            }
-            let no_difference = self.constant(0, difference_width);
-            let changed = self.binary(1, differences, BinaryOp::Ne, no_difference);
+            let changed = self.changed_terms(process, signals, terms, &mut samples);
             let next = self.b.new_block();
             self.b.seal_block(SIRTerminator::Branch {
                 cond: changed,
@@ -550,18 +559,18 @@ impl Generator<'_> {
         &mut self,
         process: usize,
         wait: &Wait,
-        waiting: RegisterId,
         settled: bool,
     ) -> RegisterId {
-        if wait.terms.len() >= 4
-            && wait.counters.iter().all(Option::is_none)
-            && wait.gates.iter().all(Option::is_none)
-            && wait
-                .terms
-                .iter()
-                .all(|(_, kind)| *kind == CounterKind::Changes)
-        {
-            return self.check_change_wait(process, wait, waiting);
+        if let Some(raw) = wait.change_list() {
+            if raw.terms.len() <= 4 {
+                return self.changed_terms(
+                    process,
+                    &wait.terms,
+                    &raw.terms,
+                    &mut WaitSamples::default(),
+                );
+            }
+            return self.check_change_wait(process, wait);
         }
         let mut occurred = self.constant(0, 1);
         for (ordinal, ((&(signal, kind), term), counter)) in wait
@@ -610,10 +619,7 @@ impl Generator<'_> {
                 let seen = self.load_at(self.slots.baseline[process], offset, 32);
                 let current = self.load(*counter, 32);
                 let counted = self.binary(1, seen, BinaryOp::Ne, current);
-                let next = self.b.alloc_bit(32, false);
-                self.b
-                    .emit(SIRInstruction::Mux(next, waiting, current, seen));
-                self.store_at(self.slots.baseline[process], offset, 32, next);
+                self.store_at(self.slots.baseline[process], offset, 32, current);
                 if let Some(gated_offset) = term.gated_counter_offset {
                     let gated = gate.unwrap().counters.unwrap().gated;
                     let seen = self.load_at(self.slots.baseline[process], gated_offset, 32);
@@ -632,11 +638,13 @@ impl Generator<'_> {
                 gate_holds.map_or(edge, |gate| self.binary(1, edge, BinaryOp::And, gate))
             };
             occurred = self.binary(1, occurred, BinaryOp::Or, edge);
-            let next = self.b.alloc_bit(width, false);
-            self.b
-                .emit(SIRInstruction::Mux(next, waiting, current, previous));
-            self.store_at(self.slots.baseline[process], term.value_offset, width, next);
+            self.store_at(
+                self.slots.baseline[process],
+                term.value_offset,
+                width,
+                current,
+            );
         }
-        self.binary(1, occurred, BinaryOp::And, waiting)
+        occurred
     }
 }

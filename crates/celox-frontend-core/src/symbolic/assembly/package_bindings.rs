@@ -7,7 +7,9 @@ use super::*;
 /// the package's instance; every other variable belongs to its instance.
 #[derive(Default)]
 pub(crate) struct PackageBindings {
-    pub(super) targets: HashMap<AbsoluteAddr, AbsoluteAddr>,
+    /// Declared aliases have entries in the state lookup. Graph operands do not.
+    pub(super) object_aliases: Vec<(AbsoluteAddr, AbsoluteAddr)>,
+    targets: HashMap<AbsoluteAddr, AbsoluteAddr>,
 }
 
 impl PackageBindings {
@@ -163,7 +165,64 @@ impl PackageBindings {
                 targets.insert(source, target);
             }
         }
-        Ok(Self { targets })
+        let object_aliases = targets.iter().map(|(&a, &b)| (a, b)).collect();
+        for (path, &instance_id) in expanded {
+            let module = &modules[&instance_modules[&instance_id]];
+            let mut children = HashMap::default();
+            for (var_id, port) in module.instance_ports.iter() {
+                if module.variables.contains_key(&var_id) {
+                    return Err(ParserError::illegal_context(
+                        "instance port",
+                        "module variable and port reference overlap".to_owned(),
+                        None,
+                    ));
+                }
+                let child = match children.entry((&port.name, port.index)) {
+                    std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        let mut child_path = path.0.clone();
+                        child_path.push((port.name.clone(), port.index));
+                        let child = expanded.get(&InstancePath(child_path)).ok_or_else(|| {
+                            ParserError::illegal_context(
+                                "instance port",
+                                format!(
+                                    "unknown child {}[{}] of {}",
+                                    port.name, port.index, module.name
+                                ),
+                                None,
+                            )
+                        })?;
+                        *entry.insert(*child)
+                    }
+                };
+                let child_module = &modules[&instance_modules[&child]];
+                if !child_module.variables.contains_key(&port.variable) {
+                    return Err(ParserError::illegal_context(
+                        "instance port",
+                        format!(
+                            "unknown variable {} of {}",
+                            port.variable, child_module.name
+                        ),
+                        None,
+                    ));
+                }
+                let target = AbsoluteAddr {
+                    instance_id: child,
+                    var_id: port.variable,
+                };
+                targets.insert(
+                    AbsoluteAddr {
+                        instance_id,
+                        var_id,
+                    },
+                    targets.get(&target).copied().unwrap_or(target),
+                );
+            }
+        }
+        Ok(Self {
+            targets,
+            object_aliases,
+        })
     }
 
     /// The object variable `var_id` of instance `instance_id` denotes.
@@ -258,24 +317,46 @@ pub(super) fn check_package_variable_drivers(
     instances.sort_unstable_by_key(|(instance, _)| instance.0);
     for (&instance, module_id) in instances {
         let module = &modules[module_id];
-        let units = module.eval_apply_ff_blocks.iter().chain(
-            module
-                .eval_only_ff_blocks
-                .iter()
-                .filter(|(trigger, _)| !module.eval_apply_ff_blocks.contains_key(*trigger)),
-        );
-        for (group, (_, unit)) in units.enumerate() {
-            for block in unit.blocks.values() {
-                for instruction in &block.instructions {
-                    for (address, access) in written_bits(instruction) {
-                        let address = bindings.locate(instance, address.var_id);
-                        if !packages.contains(&address) {
-                            continue;
+        // Publication units also describe the destinations of symbolic edge
+        // plans, which only become executable after hierarchy expansion.
+        let triggers: BTreeSet<_> = module
+            .eval_apply_ff_blocks
+            .keys()
+            .chain(module.eval_only_ff_blocks.keys())
+            .chain(module.apply_ff_blocks.keys())
+            .collect();
+        for (group, trigger) in triggers.into_iter().enumerate() {
+            let legacy = module
+                .eval_apply_ff_blocks
+                .get(trigger)
+                .or_else(|| module.eval_only_ff_blocks.get(trigger));
+            let procedures = module
+                .next_state
+                .evaluations
+                .get(trigger)
+                .into_iter()
+                .flatten()
+                .filter_map(|batch| match batch {
+                    crate::symbolic::artifact::EdgeEvaluation::Procedure(unit) => Some(unit),
+                    _ => None,
+                });
+            for unit in legacy
+                .into_iter()
+                .chain(module.apply_ff_blocks.get(trigger))
+                .chain(procedures)
+            {
+                for block in unit.blocks.values() {
+                    for instruction in &block.instructions {
+                        for (address, access) in written_bits(instruction) {
+                            let address = bindings.locate(instance, address.var_id);
+                            if !packages.contains(&address) {
+                                continue;
+                            }
+                            let access = access.unwrap_or_else(|| {
+                                BitAccess::new(0, width(&address).saturating_sub(1))
+                            });
+                            ff_writes.push(((instance, group), address, access));
                         }
-                        let access = access.unwrap_or_else(|| {
-                            BitAccess::new(0, width(&address).saturating_sub(1))
-                        });
-                        ff_writes.push(((instance, group), address, access));
                     }
                 }
             }

@@ -1062,9 +1062,9 @@ fn schedule_sources_collecting(
         let mut modules = HashMap::default();
         let mut module_names = HashMap::default();
         // A combinational loop through level lists is scheduled again with
-        // them demoted, which lowers their modules again and glues every
+        // them demoted, which lowers their modules again and elaborates every
         // module anew. Without a list left to demote, a loop is final and
-        // nothing below runs again: the glued modules take the lowered
+        // nothing below runs again: the elaborated modules take the lowered
         // modules' symbolic modules and calls instead of copies, and the
         // lowering is released before scheduling builds the program, the
         // frontend's largest.
@@ -1096,7 +1096,7 @@ fn schedule_sources_collecting(
             if let Some(instances) = &virtual_instances {
                 instance_values.extend(instances.values(module_id, lowered));
             }
-            let glued = attach_instance_glue(
+            let elaborated = elaborate_instances(
                 &mut sim_module,
                 lowered,
                 key,
@@ -1121,10 +1121,8 @@ fn schedule_sources_collecting(
             {
                 recursion::append(&lowered.source, graph, path);
             }
-            glued?;
-            // The functions of every lowering of the module, its glue
-            // included: the glue lowered with the graph the module's
-            // processes left.
+            elaborated?;
+            // Port expressions and processes share the module's call graph.
             if let Some(functions) = calls.as_ref().and_then(|graph| graph.out_of_line.as_ref()) {
                 out_of_line::attach_functions(
                     &mut sim_module,
@@ -1136,7 +1134,7 @@ fn schedule_sources_collecting(
             modules.insert(module_id, sim_module);
         }
 
-        checkpoint!("instance_glue");
+        checkpoint!("elaborate_instances");
         for (key, id) in &module_ids {
             restore_interface_member_paths(modules.get_mut(id).unwrap(), &analyzed[&key.name]);
         }

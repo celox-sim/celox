@@ -19,7 +19,7 @@ use celox_design::{
 use celox_frontend_core::process::PROCESS_RESUME_WIDTH;
 use celox_frontend_core::symbolic::artifact::{
     CombAlternative, ExternalHierarchy, ExternalModule, NbaSwitch, PackageBinding, SimModule,
-    SymbolicGlueAddr as GlueAddr, SymbolicProcess, SymbolicRtl, SymbolicVariable,
+    SymbolicProcess, SymbolicRtl, SymbolicVariable,
 };
 use celox_frontend_core::{
     FrontendTrace, FrontendTraceOptions, LoweringPhase, ParserError, ScheduledRtlOutput,
@@ -30,8 +30,7 @@ use celox_sir::{
     merge_sir_eus,
 };
 use celox_slt::{
-    CombObserver, GlueBlockBase, LogicPath, LogicPathTarget, NodeId, SLTIndex, SLTIndexKind,
-    SLTNode, SLTNodeArena,
+    CombObserver, LogicPath, LogicPathTarget, NodeId, SLTIndex, SLTIndexKind, SLTNode, SLTNodeArena,
 };
 use celox_sv_analyzer as sv;
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
@@ -44,6 +43,7 @@ mod comb_retention;
 mod dataflow;
 mod driver_validation;
 mod drivers;
+mod elaboration;
 mod expr;
 mod external_hierarchy;
 mod ff;
@@ -51,8 +51,6 @@ mod ff_graph;
 mod ff_next_state;
 mod ff_processes;
 mod floating;
-mod glue;
-mod glue_expr;
 mod hierarchy;
 mod initial_processes;
 mod instances;
@@ -98,10 +96,9 @@ pub use schedule::{
 use comb_processes::*;
 use driver_validation::*;
 use drivers::*;
+use elaboration::*;
 use expr::*;
 use ff_processes::*;
-use glue::*;
-use glue_expr::*;
 use initial_processes::*;
 use instances::*;
 use interconnect::*;
@@ -117,7 +114,6 @@ use state_mode::*;
 use types::*;
 
 type RegionedVarAddr = RegionedVarAddrBase<SourceVarId>;
-type GlueBlock = GlueBlockBase<SourceVarId>;
 const MAX_SV_RECURSIVE_SPECIALIZATIONS: usize = 64;
 /// The name of a module's [`SimModule::time_slot`].
 const TIME_SLOT: &str = "$time";

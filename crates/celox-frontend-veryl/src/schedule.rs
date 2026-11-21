@@ -163,21 +163,17 @@ pub fn schedule_symbolic_rtl(
     for (path, &instance) in &lookup.instance_ids {
         let module = lookup.instance_module[&instance];
         for wire in reset_wires.get(&module).into_iter().flatten() {
-            let child = if let Some((name, index)) = &wire.child {
-                let mut child_path = path.0.clone();
-                child_path.push((name.clone(), *index));
-                let Some(child) = lookup.instance_ids.get(&crate::InstancePath(child_path)) else {
-                    continue;
+            let endpoint = |(child, var): &(Option<(String, usize)>, crate::SourceVarId)| {
+                let instance = if let Some(child) = child {
+                    let mut child_path = path.0.clone();
+                    child_path.push(child.clone());
+                    *lookup.instance_ids.get(&crate::InstancePath(child_path))?
+                } else {
+                    instance
                 };
-                *child
-            } else {
-                instance
+                lookup.instance_variable(instance, *var)
             };
-            let endpoint = |addr: celox_slt::GlueAddrBase<crate::SourceVarId>| match addr {
-                celox_slt::GlueAddrBase::Parent(id) => lookup.instance_variable(instance, id),
-                celox_slt::GlueAddrBase::Child(id) => lookup.instance_variable(child, id),
-            };
-            if let (Some((a, _)), Some((b, _))) = (endpoint(wire.a), endpoint(wire.b)) {
+            if let (Some((a, _)), Some((b, _))) = (endpoint(&wire.a), endpoint(&wire.b)) {
                 neighbors.entry(a).or_default().push(b);
                 neighbors.entry(b).or_default().push(a);
             }
@@ -407,24 +403,30 @@ fn configured_clock_periods(
     Ok(periods)
 }
 
+type ResetEndpoint = (Option<(String, usize)>, crate::SourceVarId);
 struct ResetWire {
-    child: Option<(String, usize)>,
-    a: celox_slt::GlueAddrBase<crate::SourceVarId>,
-    b: celox_slt::GlueAddrBase<crate::SourceVarId>,
+    a: ResetEndpoint,
+    b: ResetEndpoint,
 }
 
 fn reset_wires(
     source: &crate::symbolic::artifact::SymbolicRtl,
 ) -> crate::HashMap<celox_design::ModuleId, Vec<ResetWire>> {
-    use celox_slt::{GlueAddrBase as Addr, SLTNode};
+    use celox_slt::SLTNode;
     let mut result = crate::HashMap::default();
     for (&id, module) in &source.modules {
         let wires = result.entry(id).or_insert_with(Vec::new);
-        let one_bit = |id| {
-            module
-                .variables
-                .get(&id)
-                .is_some_and(|v| v.metadata.width == 1)
+        let endpoint = |id| {
+            if let Some(port) = module.instance_ports.get(id) {
+                let position = port
+                    .index
+                    .checked_sub(module.instance_index(&port.name, 0))?;
+                let child = &source.modules[&module.instances[&port.name][position]];
+                (child.variables.get(&port.variable)?.metadata.width == 1)
+                    .then(|| (Some((port.name.clone(), port.index)), port.variable))
+            } else {
+                (module.variables.get(&id)?.metadata.width == 1).then_some((None, id))
+            }
         };
         for path in &module.comb_blocks {
             let Some(target) = path.target.var() else {
@@ -436,56 +438,15 @@ fn reset_wires(
                 access,
                 ..
             } = module.arena.get(path.expr)
-                && one_bit(target.id)
-                && one_bit(*variable)
+                && let Some(a) = endpoint(target.id)
+                && let Some(b) = endpoint(*variable)
                 && target.access.lsb == 0
                 && target.access.msb == 0
                 && access.lsb == 0
                 && access.msb == 0
                 && index.is_empty()
             {
-                wires.push(ResetWire {
-                    child: None,
-                    a: Addr::Parent(target.id),
-                    b: Addr::Parent(*variable),
-                });
-            }
-        }
-        for (name, blocks) in &module.glue_blocks {
-            for (index, block) in blocks.iter().enumerate() {
-                let width = |addr| match addr {
-                    Addr::Parent(id) => module.variables[&id].metadata.width,
-                    Addr::Child(id) => {
-                        source.modules[&block.module_id].variables[&id]
-                            .metadata
-                            .width
-                    }
-                };
-                for (_, path) in block.input_ports.iter().chain(&block.output_ports) {
-                    let Some(target) = path.target.var() else {
-                        continue;
-                    };
-                    if let SLTNode::Input {
-                        variable,
-                        index: indices,
-                        access,
-                        ..
-                    } = block.arena.get(path.expr)
-                        && width(target.id) == 1
-                        && width(*variable) == 1
-                        && target.access.lsb == 0
-                        && target.access.msb == 0
-                        && access.lsb == 0
-                        && access.msb == 0
-                        && indices.is_empty()
-                    {
-                        wires.push(ResetWire {
-                            child: Some((name.clone(), module.instance_index(name, index))),
-                            a: target.id,
-                            b: *variable,
-                        });
-                    }
-                }
+                wires.push(ResetWire { a, b });
             }
         }
     }

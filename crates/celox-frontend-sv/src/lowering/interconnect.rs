@@ -8,7 +8,7 @@
 //! merges the types of all connected nets to a fixed point, rewrites
 //! each interconnect variable to the merged type, and records the
 //! merged driver resolution (Table 23-1) for driver validation and
-//! glue joining.
+//! driver resolution.
 use super::*;
 use sv::ast::NetResolution;
 
@@ -327,7 +327,7 @@ fn merge(
     let all = |pick: &dyn Fn(&NetType) -> bool| contributions.iter().all(|c| pick(&c.ty));
     // Only contributors that agree on a real precision make the merged
     // variable real; a mix of real and integral elements is transported
-    // as raw bits, which the glue passes through without conversion
+    // as raw bits, which port assignments pass through without conversion
     // (6.6.8: different elements may resolve to different net types).
     let float = if all(&|ty| ty.float == first.ty.float) {
         first.ty.float

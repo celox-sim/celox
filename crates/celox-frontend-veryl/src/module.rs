@@ -3,8 +3,8 @@ use std::collections::BTreeSet;
 
 use super::ExternalModule;
 use crate::{
-    BuildConfig, GlueAddr, GlueBlock, HashMap, HashSet, LoweringPhase, ModuleInitialMemoryValue,
-    ParserError, RegionedVarAddr, SimModule,
+    BuildConfig, HashMap, HashSet, LoweringPhase, ModuleInitialMemoryValue, ParserError,
+    RegionedVarAddr, SimModule,
     bitaccess::{
         eval_var_select, eval_var_select_with_geometry, is_static_access, select_geometry,
     },
@@ -27,9 +27,8 @@ use celox_design::{
 };
 use celox_sir::{BlockId, ExecutionUnit, SIRBuilder, SIRInstruction, SIROffset, SIRTerminator};
 use celox_slt::{
-    CombObserver, FfAccessSummary, LogicPath, LogicPathTarget, NodeId, RangeStore,
-    SLTForFoldGroupState, SLTLoopBound, SLTNode, SLTNodeArenaEditError, SLTNodeFacts,
-    SLTNodeFactsError,
+    CombObserver, FfAccessSummary, LogicPath, LogicPathTarget, NodeId, RangeStore, SLTNode,
+    SLTNodeArenaEditError,
 };
 use num_bigint::BigUint;
 use veryl_analyzer::ir::{
@@ -43,12 +42,12 @@ use veryl_parser::resource_table::StrId;
 
 mod external_ports;
 mod ff_parts;
-mod glue;
 mod initial_memory;
+mod ports;
 pub use external_ports::*;
 use ff_parts::*;
-use glue::*;
 pub(crate) use initial_memory::*;
+use ports::*;
 
 pub struct ModuleParser<'a> {
     module: &'a Module,
@@ -63,7 +62,9 @@ pub struct ModuleParser<'a> {
     comb_observers: Vec<CombObserver<VarId>>,
     comb_runtime_event_sites: Vec<RuntimeEventSite>,
     comb_boundaries: HashMap<VarId, BTreeSet<usize>>,
-    glue_blocks: HashMap<StrId, Vec<GlueBlock>>,
+    instances: HashMap<StrId, Vec<ModuleId>>,
+    port_refs: Vec<crate::artifact::PortRef>,
+    last_variable: VarId,
     initial_memory_values: Vec<ModuleInitialMemoryValue>,
     ff_parser: FfParser<'a>,
     arena: SLTNodeArena<VarId>,
@@ -71,7 +72,7 @@ pub struct ModuleParser<'a> {
     loop_candidates: Vec<LoopRecoveryCandidate>,
     external_modules: &'a HashMap<ModuleId, ExternalModule>,
     external_output_targets: Vec<(VarId, BitAccess)>,
-    native_child_ids: HashSet<ModuleId>,
+    native_outputs: Vec<VarAtomBase<VarId>>,
     /// Lanes requested for partitioned execution.
     parallel_lanes: u32,
 }
@@ -213,7 +214,9 @@ impl<'a> ModuleParser<'a> {
             comb_observers: Vec::new(),
             comb_runtime_event_sites: Vec::new(),
             comb_boundaries: HashMap::default(),
-            glue_blocks: HashMap::default(),
+            instances: Default::default(),
+            port_refs: Vec::new(),
+            last_variable: module.variables.keys().copied().max().unwrap_or_default(),
             initial_memory_values,
             ff_parser: FfParser::new(module, config.clone()),
             parallel_lanes: config.parallel_lanes,
@@ -226,7 +229,7 @@ impl<'a> ModuleParser<'a> {
             loop_candidates,
             external_modules,
             external_output_targets: Vec::new(),
-            native_child_ids: HashSet::default(),
+            native_outputs: Vec::new(),
         })
     }
 
@@ -374,6 +377,34 @@ impl<'a> ModuleParser<'a> {
         Ok(site_ids)
     }
 
+    fn add_instance(&mut self, name: StrId, module: ModuleId) -> usize {
+        let children = self.instances.entry(name).or_default();
+        let index = children.len();
+        children.push(module);
+        index
+    }
+
+    fn bind_port(
+        &mut self,
+        name: StrId,
+        index: usize,
+        variable: VarId,
+        width: usize,
+        signed: bool,
+    ) -> VarId {
+        self.last_variable.inc();
+        let operand = self.last_variable;
+        self.port_refs.push(crate::artifact::PortRef {
+            operand,
+            name,
+            index,
+            variable,
+            width,
+            signed,
+        });
+        operand
+    }
+
     fn parse_inst_declaration(
         &mut self,
         decl: &InstDeclaration,
@@ -383,8 +414,6 @@ impl<'a> ModuleParser<'a> {
             return self.parse_external_inst_declaration(decl, system_verilog.name, module_id);
         }
 
-        self.native_child_ids.insert(module_id);
-
         let child_module = match &*decl.component {
             Component::Module(m) => m,
             _ => unreachable!(),
@@ -393,7 +422,7 @@ impl<'a> ModuleParser<'a> {
         // 1. Inputs (Parent -> Child)
         let mut input_ports = Vec::new();
         let mut output_ports = Vec::new();
-        let mut glue_arena = SLTNodeArena::<GlueAddr>::new();
+        let index = self.add_instance(decl.name, module_id);
 
         // Parent variables are implicit inputs until a connection expression
         // writes them, so instance parsing only needs sparse, touched entries.
@@ -403,6 +432,13 @@ impl<'a> ModuleParser<'a> {
             let child_port_id = input.id;
             let ty = get_port_type(child_module, &child_port_id)?;
             let width = ty.width();
+            let operand = self.bind_port(
+                decl.name,
+                index,
+                child_port_id,
+                width,
+                child_module.variables[&child_port_id].r#type.signed,
+            );
             let expression = &input.expr;
             if width == 0 {
                 return Err(ParserError::illegal_context(
@@ -491,25 +527,11 @@ impl<'a> ModuleParser<'a> {
                 )?;
             }
 
-            // Map Parent VarId to GlueAddr::Parent
-            let mut cache = HashMap::default();
-            let mapped_node = self.arena.get(expr_node).map_addr(
-                expr_node,
-                &self.arena,
-                &mut glue_arena,
-                &mut cache,
-                &|id| GlueAddr::Parent(*id),
-            )?;
-
             let path = LogicPath {
-                transparent_copy: false,
-                target: LogicPathTarget::Var(VarAtomBase::new(
-                    GlueAddr::Child(child_port_id),
-                    0,
-                    width - 1,
-                )),
-                expr: mapped_node,
-                sources: collect_glue_sources(mapped_node, &glue_arena),
+                transparent_copy: true,
+                target: LogicPathTarget::Var(VarAtomBase::new(operand, 0, width - 1)),
+                expr: expr_node,
+                sources: collect_port_sources(expr_node, &self.arena),
                 previous_sources: HashSet::default(),
                 address_sources: HashSet::default(),
                 local_inputs: Vec::new(),
@@ -519,23 +541,20 @@ impl<'a> ModuleParser<'a> {
                 pre_lower_nodes: Vec::new(),
             };
 
-            let parent_vars: Vec<_> = expr_sources.iter().map(|s| s.id).collect();
-            input_ports.push((parent_vars, path));
-            output_ports.extend(build_parent_effect_glue(
+            input_ports.push(path);
+            output_ports.extend(parent_effect_paths(
                 &parent_store,
                 &connection_store,
                 &written_accesses,
                 &output_address_sources,
-                &self.arena,
-                &mut glue_arena,
-                None,
+                &mut self.arena,
             )?);
         }
 
         // 2. Outputs (Child -> Parent)
         for output in &decl.outputs {
             // The analyzer includes deliberately unconnected child outputs
-            // with an empty destination list. They produce no parent glue;
+            // with an empty destination list. They do not drive a parent variable;
             // width coverage applies only to connected destinations.
             if output.dst.is_empty() {
                 continue;
@@ -544,6 +563,13 @@ impl<'a> ModuleParser<'a> {
             let output_port_start = output_ports.len();
             let ty = get_port_type(child_module, &child_port_id)?;
             let width = ty.width();
+            let operand = self.bind_port(
+                decl.name,
+                index,
+                child_port_id,
+                width,
+                child_module.variables[&child_port_id].r#type.signed,
+            );
             if width == 0 {
                 return Err(ParserError::illegal_context(
                     "output port connection",
@@ -558,8 +584,8 @@ impl<'a> ModuleParser<'a> {
                     output.dst.first().map(|destination| &destination.token),
                 )
             })?;
-            let rhs_node = glue_arena.alloc(SLTNode::Input {
-                variable: GlueAddr::Child(child_port_id),
+            let rhs_node = self.arena.alloc(SLTNode::Input {
+                variable: operand,
                 signed: child_port.r#type.signed,
                 index: vec![],
                 access: BitAccess::new(0, width - 1),
@@ -569,7 +595,7 @@ impl<'a> ModuleParser<'a> {
             let mut destination_arena = SLTNodeArena::<VarId>::with_context_from(&self.arena);
             let mut destination_store = SymbolicStore::default();
             let preview_rhs_node = destination_arena.alloc(SLTNode::Input {
-                variable: child_port_id,
+                variable: operand,
                 signed: child_port.r#type.signed,
                 index: vec![],
                 access: BitAccess::new(0, width - 1),
@@ -657,11 +683,11 @@ impl<'a> ModuleParser<'a> {
                 let slice_access = BitAccess::new(current_offset, slice_end - 1);
 
                 let rhs_part = if slice_access.lsb == 0
-                    && slice_access.msb == get_width(rhs_node, &glue_arena) - 1
+                    && slice_access.msb == get_width(rhs_node, &self.arena) - 1
                 {
                     rhs_node
                 } else {
-                    glue_arena.alloc(SLTNode::Slice {
+                    self.arena.alloc(SLTNode::Slice {
                         expr: rhs_node,
                         access: slice_access,
                     })?
@@ -677,7 +703,7 @@ impl<'a> ModuleParser<'a> {
                     })?
                 };
                 let rhs_part = if let Some(op) = conversion {
-                    glue_arena.alloc(SLTNode::Unary(op, rhs_part))?
+                    self.arena.alloc(SLTNode::Unary(op, rhs_part))?
                 } else {
                     rhs_part
                 };
@@ -687,18 +713,14 @@ impl<'a> ModuleParser<'a> {
                     preview_rhs_part
                 };
                 let preview_rhs_sources: HashSet<_> = std::iter::once(VarAtomBase::new(
-                    child_port_id,
+                    operand,
                     slice_access.lsb,
                     slice_access.msb,
                 ))
                 .collect();
 
                 let mut sources = HashSet::default();
-                sources.insert(VarAtomBase::new(
-                    GlueAddr::Child(child_port_id),
-                    0,
-                    width - 1,
-                ));
+                sources.insert(VarAtomBase::new(operand, 0, width - 1));
                 let (expr, access, previous_sources, address_sources) = (
                     rhs_part,
                     prefix_access,
@@ -707,12 +729,8 @@ impl<'a> ModuleParser<'a> {
                 );
 
                 let path = LogicPath {
-                    transparent_copy: false,
-                    target: LogicPathTarget::Var(VarAtomBase::new(
-                        GlueAddr::Parent(dst.id),
-                        access.lsb,
-                        access.msb,
-                    )),
+                    transparent_copy: true,
+                    target: LogicPathTarget::Var(VarAtomBase::new(dst.id, access.lsb, access.msb)),
                     sources,
                     previous_sources,
                     address_sources,
@@ -723,7 +741,7 @@ impl<'a> ModuleParser<'a> {
                     pre_lower_nodes: Vec::new(),
                     expr,
                 };
-                output_ports.push((vec![dst.id], path));
+                output_ports.push(path);
 
                 {
                     let (next_store, _) = apply_assignment_destination(
@@ -742,7 +760,7 @@ impl<'a> ModuleParser<'a> {
                 // Runtime effects in a later destination execute after this
                 // child slice has been written. Model that statement position
                 // with a parent read: scheduling orders the observer after the
-                // corresponding glue path, and capture then sees the actual
+                // corresponding port assignment, and capture then sees the actual
                 // child-driven value without introducing a child VarId into
                 // the parent module arena.
                 let effect_preview = self.arena.alloc(SLTNode::Input {
@@ -781,22 +799,29 @@ impl<'a> ModuleParser<'a> {
                 process_sensitivity,
                 preserved_address_sources,
             )?;
-            for (_, path) in &mut output_ports[output_port_start..] {
+            for path in &mut output_ports[output_port_start..] {
                 path.comb_capture_enable_sites
                     .extend(output_effect_site_ids.iter().copied());
                 path.comb_capture_enable_always = !output_effect_site_ids.is_empty();
             }
             let mut remaining_written_accesses = destination_written_accesses.clone();
             subtract_composed_accesses(&mut remaining_written_accesses, &composed_output_accesses);
-            output_ports.extend(build_parent_effect_glue(
+            let effects = parent_effect_paths(
                 &parent_store,
                 &destination_store,
                 &remaining_written_accesses,
                 &destination_address_sources,
-                &destination_arena,
-                &mut glue_arena,
-                Some(child_port_id),
-            )?);
+                &mut destination_arena,
+            )?;
+            let mut cache = HashMap::default();
+            for effect in effects {
+                output_ports.push(effect.map_addr(
+                    &destination_arena,
+                    &mut self.arena,
+                    &mut cache,
+                    &|id| *id,
+                )?);
+            }
             if current_offset != width {
                 return Err(ParserError::illegal_context(
                     "output port destination",
@@ -808,30 +833,13 @@ impl<'a> ModuleParser<'a> {
             }
         }
 
-        // Construct GlueBlock
-        let block = GlueBlock {
-            module_id,
-            input_ports,
-            output_ports,
-            arena: glue_arena.into_inner(),
-        };
-
-        let mut glue_widths = HashMap::default();
-        for (id, variable) in &self.module.variables {
-            glue_widths.insert(
-                GlueAddr::Parent(*id),
-                resolve_total_width(self.module, variable)?,
-            );
-        }
-        for (id, variable) in &child_module.variables {
-            glue_widths.insert(
-                GlueAddr::Child(*id),
-                resolve_total_width(child_module, variable)?,
-            );
-        }
-        verify_glue_block(&block, &glue_widths)?;
-
-        self.glue_blocks.entry(decl.name).or_default().push(block);
+        self.native_outputs.extend(
+            output_ports
+                .iter()
+                .filter_map(|path| path.target.var().copied()),
+        );
+        self.comb_blocks.extend(input_ports);
+        self.comb_blocks.extend(output_ports);
         Ok(())
     }
 
@@ -868,7 +876,7 @@ impl<'a> ModuleParser<'a> {
 
         let mut input_ports = Vec::new();
         let mut output_ports = Vec::new();
-        let mut glue_arena = SLTNodeArena::<GlueAddr>::new();
+        let index = self.add_instance(decl.name, module_id);
         let (mut uses_named_associations, mut formal_names) = external_port_formal_names(decl)?;
         if interface_ports {
             let mut groups = Vec::new();
@@ -1000,50 +1008,51 @@ impl<'a> ModuleParser<'a> {
                 && parent_dst.select.is_empty()
                 && parent_dst.select.1.is_none();
 
-            let projected_child_id = VarId::from_raw(child_port_id.0);
+            let operand = self.bind_port(
+                decl.name,
+                index,
+                VarId::from_raw(child_port_id.0),
+                child_width,
+                child_var.signed,
+            );
             match child_var.kind {
                 crate::VariableKind::Input => {
-                    let parent_node = glue_arena.alloc(SLTNode::Input {
-                        variable: GlueAddr::Parent(parent_dst.id),
+                    let parent_node = self.arena.alloc(SLTNode::Input {
+                        variable: parent_dst.id,
                         signed: parent_expr_signed,
                         index: Vec::new(),
                         access: parent_access,
                     })?;
                     let mut expr = coerce_node_width(
-                        &mut glue_arena,
+                        &mut self.arena,
                         parent_node,
                         Some(child_width),
                         parent_expr_signed,
                     )?;
                     if !child_var.metadata.is_4state {
-                        expr = glue_arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, expr))?;
+                        expr = self
+                            .arena
+                            .alloc(SLTNode::Unary(UnaryOp::ToTwoState, expr))?;
                     }
                     let mut sources = HashSet::default();
                     sources.insert(VarAtomBase::new(
-                        GlueAddr::Parent(parent_dst.id),
+                        parent_dst.id,
                         parent_access.lsb,
                         parent_access.msb,
                     ));
-                    input_ports.push((
-                        vec![parent_dst.id],
-                        LogicPath {
-                            transparent_copy: false,
-                            target: LogicPathTarget::Var(VarAtomBase::new(
-                                GlueAddr::Child(projected_child_id),
-                                0,
-                                child_width - 1,
-                            )),
-                            expr,
-                            sources,
-                            previous_sources: HashSet::default(),
-                            address_sources: HashSet::default(),
-                            local_inputs: Vec::new(),
-                            order_before: HashSet::default(),
-                            comb_capture_enable_sites: Vec::new(),
-                            comb_capture_enable_always: false,
-                            pre_lower_nodes: Vec::new(),
-                        },
-                    ));
+                    input_ports.push(LogicPath {
+                        transparent_copy: true,
+                        target: LogicPathTarget::Var(VarAtomBase::new(operand, 0, child_width - 1)),
+                        expr,
+                        sources,
+                        previous_sources: HashSet::default(),
+                        address_sources: HashSet::default(),
+                        local_inputs: Vec::new(),
+                        order_before: HashSet::default(),
+                        comb_capture_enable_sites: Vec::new(),
+                        comb_capture_enable_always: false,
+                        pre_lower_nodes: Vec::new(),
+                    });
                 }
                 crate::VariableKind::Output => {
                     if parent_var.kind == veryl_analyzer::ir::VarKind::Input {
@@ -1069,47 +1078,42 @@ impl<'a> ModuleParser<'a> {
                     }
                     self.external_output_targets
                         .push((parent_dst.id, parent_access));
-                    let child_node = glue_arena.alloc(SLTNode::Input {
-                        variable: GlueAddr::Child(projected_child_id),
+                    let child_node = self.arena.alloc(SLTNode::Input {
+                        variable: operand,
                         signed: child_var.signed,
                         index: Vec::new(),
                         access: BitAccess::new(0, child_width - 1),
                     })?;
                     let mut expr = coerce_node_width(
-                        &mut glue_arena,
+                        &mut self.arena,
                         child_node,
                         Some(parent_width),
                         child_var.signed,
                     )?;
                     if parent_var.r#type.is_2state() {
-                        expr = glue_arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, expr))?;
+                        expr = self
+                            .arena
+                            .alloc(SLTNode::Unary(UnaryOp::ToTwoState, expr))?;
                     }
                     let mut sources = HashSet::default();
-                    sources.insert(VarAtomBase::new(
-                        GlueAddr::Child(projected_child_id),
-                        0,
-                        child_width - 1,
-                    ));
-                    output_ports.push((
-                        vec![parent_dst.id],
-                        LogicPath {
-                            transparent_copy: false,
-                            target: LogicPathTarget::Var(VarAtomBase::new(
-                                GlueAddr::Parent(parent_dst.id),
-                                parent_access.lsb,
-                                parent_access.msb,
-                            )),
-                            expr,
-                            sources,
-                            previous_sources: HashSet::default(),
-                            address_sources: HashSet::default(),
-                            local_inputs: Vec::new(),
-                            order_before: HashSet::default(),
-                            comb_capture_enable_sites: Vec::new(),
-                            comb_capture_enable_always: false,
-                            pre_lower_nodes: Vec::new(),
-                        },
-                    ));
+                    sources.insert(VarAtomBase::new(operand, 0, child_width - 1));
+                    output_ports.push(LogicPath {
+                        transparent_copy: true,
+                        target: LogicPathTarget::Var(VarAtomBase::new(
+                            parent_dst.id,
+                            parent_access.lsb,
+                            parent_access.msb,
+                        )),
+                        expr,
+                        sources,
+                        previous_sources: HashSet::default(),
+                        address_sources: HashSet::default(),
+                        local_inputs: Vec::new(),
+                        order_before: HashSet::default(),
+                        comb_capture_enable_sites: Vec::new(),
+                        comb_capture_enable_always: false,
+                        pre_lower_nodes: Vec::new(),
+                    });
                 }
                 crate::VariableKind::Inout => {
                     return Err(ParserError::unsupported(
@@ -1133,27 +1137,8 @@ impl<'a> ModuleParser<'a> {
             }
         }
 
-        let block = GlueBlock {
-            module_id,
-            input_ports,
-            output_ports,
-            arena: glue_arena.into_inner(),
-        };
-        let mut glue_widths = HashMap::default();
-        for (id, variable) in &self.module.variables {
-            glue_widths.insert(
-                GlueAddr::Parent(*id),
-                resolve_total_width(self.module, variable)?,
-            );
-        }
-        for (id, variable) in &child.sim_module.variables {
-            glue_widths.insert(
-                GlueAddr::Child(VarId::from_raw(id.0)),
-                variable.metadata.width,
-            );
-        }
-        verify_glue_block(&block, &glue_widths)?;
-        self.glue_blocks.entry(decl.name).or_default().push(block);
+        self.comb_blocks.extend(input_ports);
+        self.comb_blocks.extend(output_ports);
         Ok(())
     }
 
@@ -1367,11 +1352,15 @@ impl<'a> ModuleParser<'a> {
         }
 
         for (external_id, external_access) in &self.external_output_targets {
-            let overlaps_comb = self.comb_blocks.iter().any(|path| {
-                path.target.var().is_some_and(|target| {
-                    target.id == *external_id && target.access.overlaps(external_access)
-                })
-            });
+            let overlaps_comb = self
+                .comb_blocks
+                .iter()
+                .filter(|path| !path.transparent_copy)
+                .any(|path| {
+                    path.target.var().is_some_and(|target| {
+                        target.id == *external_id && target.access.overlaps(external_access)
+                    })
+                });
             let overlaps_ff = ff_access_summaries.values().any(|summary| {
                 summary.writes.iter().any(|target| {
                     target.id.var_id == *external_id && target.access.overlaps(external_access)
@@ -1381,17 +1370,9 @@ impl<'a> ModuleParser<'a> {
                     .any(|target| target.var_id == *external_id)
             });
             let overlaps_child_output = self
-                .glue_blocks
-                .values()
-                .flatten()
-                .filter(|block| self.native_child_ids.contains(&block.module_id))
-                .flat_map(|block| &block.output_ports)
-                .any(|(_, path)| {
-                    path.target.var().is_some_and(|target| {
-                        matches!(target.id, GlueAddr::Parent(id) if id == *external_id)
-                            && target.access.overlaps(external_access)
-                    })
-                });
+                .native_outputs
+                .iter()
+                .any(|target| target.id == *external_id && target.access.overlaps(external_access));
             if overlaps_comb || overlaps_ff || overlaps_child_output {
                 let variable = &self.module.variables[external_id];
                 let driver = if overlaps_child_output {
@@ -1429,6 +1410,10 @@ impl<'a> ModuleParser<'a> {
             variable_widths.insert(*id, resolve_total_width(self.module, variable)?);
             variable_signedness.insert(*id, variable.r#type.signed);
         }
+        for port in &self.port_refs {
+            variable_widths.insert(port.operand, port.width);
+            variable_signedness.insert(port.operand, port.signed);
+        }
         celox_slt::verify_symbolic_roots(
             &self.arena,
             &self.comb_blocks,
@@ -1443,7 +1428,8 @@ impl<'a> ModuleParser<'a> {
         Ok(SimModule {
             variables: self.module.variables.clone(),
             name: self.module.name,
-            glue_blocks: self.glue_blocks,
+            instances: self.instances,
+            port_refs: self.port_refs,
             indexed_instance_names: HashSet::default(),
             ff_access_summaries,
             eval_only_ff_blocks,

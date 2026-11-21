@@ -6,7 +6,7 @@ use super::*;
 use crate::symbolic::artifact::EdgeEvaluation;
 use celox_slt::next_state::{NextStateForm, Publication, lower_transition};
 
-type EventEvaluations =
+pub(super) type EventEvaluations =
     HashMap<AbsoluteAddr, Vec<EdgeEvaluation<AbsoluteAddr, RegionedAbsoluteAddr>>>;
 
 pub(super) fn elaborated_scope_name(
@@ -222,7 +222,7 @@ pub(super) fn relocate_units(
     (
         SLTNodeArena<AbsoluteAddr>,
         HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
-        HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+        EventEvaluations,
         HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
         HashMap<AbsoluteAddr, Vec<FfAccessSummary<RegionedAbsoluteAddr>>>,
         HashMap<InstanceId, FfRuntimeRelocation>,
@@ -357,39 +357,6 @@ pub(super) fn relocate_units(
 
         relocate_ff_applications(&instance, split_commits, &mut apply_ffs);
     }
-    let eval_only_ffs = lower_event_evaluations(
-        evaluations,
-        &global_arena,
-        unpacked_element_widths,
-        &apply_ffs,
-        &mut eval_apply_ffs,
-    )?;
-    // A canonical event may collect multiple reset groups or instances. The
-    // ordinary tick path must evaluate every group against pre-edge state
-    // before any group publishes its nonblocking assignments. Concatenating
-    // each module's eval+apply unit instead makes behavior depend on map order.
-    for (event, units) in &mut eval_apply_ffs {
-        if units.len() > 1 {
-            let evaluations = eval_only_ffs.get(event).ok_or_else(|| {
-                ParserError::illegal_context(
-                    "FF event assembly",
-                    "shared event has no evaluation phase",
-                    None,
-                )
-            })?;
-            let applications = apply_ffs.get(event).ok_or_else(|| {
-                ParserError::illegal_context(
-                    "FF event assembly",
-                    "shared event has no application phase",
-                    None,
-                )
-            })?;
-            let phases = evaluations.iter().chain(applications).collect::<Vec<_>>();
-            // Keep the staging stores and their commits in the same optimizer
-            // unit: WORKING-region stores are otherwise local dead stores.
-            *units = vec![celox_sir::merge_sir_eu_refs(&phases).0];
-        }
-    }
     if let Some(ready) = startup_ready.filter(|_| gated_startup) {
         comb_blocks.push(startup_ready_path(
             &mut global_arena,
@@ -400,7 +367,7 @@ pub(super) fn relocate_units(
     Ok((
         global_arena,
         eval_apply_ffs,
-        eval_only_ffs,
+        evaluations,
         apply_ffs,
         ff_access_summaries,
         ff_runtime_relocations,
@@ -826,6 +793,9 @@ fn relocate_ff_evaluations(
         clock_domains.get(&address).copied().unwrap_or(address)
     };
     for (trigger, unit) in &sim_module.eval_apply_ff_blocks {
+        if sim_module.next_state.evaluations.contains_key(trigger) {
+            continue;
+        }
         for event in std::iter::once(trigger.clock).chain(trigger.resets.iter().copied()) {
             eval_apply_ffs
                 .entry(canonical(event))
@@ -833,25 +803,7 @@ fn relocate_ff_evaluations(
                 .push(relocate(unit));
         }
     }
-    for (trigger, unit) in &sim_module.eval_only_ff_blocks {
-        let plan = if let Some(batches) = sim_module.next_state.evaluations.get(trigger) {
-            batches
-                .iter()
-                .map(|batch| match batch {
-                    EdgeEvaluation::Graph(form) => form
-                        .relocate(&sim_module.arena, arena, &|var| bindings.locate(*id, *var))
-                        .map(EdgeEvaluation::Graph)
-                        .map_err(|e| {
-                            ParserError::illegal_context("clock evaluation", e.to_string(), None)
-                        }),
-                    EdgeEvaluation::Procedure(unit) => {
-                        Ok(EdgeEvaluation::Procedure(relocate(unit)))
-                    }
-                })
-                .collect::<Result<Vec<_>, _>>()?
-        } else {
-            vec![EdgeEvaluation::Procedure(relocate(unit))]
-        };
+    let mut record = |trigger: &celox_design::TriggerSet<SourceVarId>, plan: Vec<_>| {
         for reset in &trigger.resets {
             evaluations
                 .entry(canonical(*reset))
@@ -862,6 +814,27 @@ fn relocate_ff_evaluations(
             .entry(canonical(trigger.clock))
             .or_default()
             .extend(plan);
+    };
+    for (trigger, batches) in &sim_module.next_state.evaluations {
+        let plan = batches
+            .iter()
+            .map(|batch| match batch {
+                EdgeEvaluation::Graph(form) => form
+                    .relocate(&sim_module.arena, arena, &|var| bindings.locate(*id, *var))
+                    .map(EdgeEvaluation::Graph)
+                    .map_err(|e| {
+                        ParserError::illegal_context("clock evaluation", e.to_string(), None)
+                    }),
+                EdgeEvaluation::Procedure(unit) => Ok(EdgeEvaluation::Procedure(relocate(unit))),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        record(trigger, plan);
+    }
+    for (trigger, unit) in &sim_module.eval_only_ff_blocks {
+        if sim_module.next_state.evaluations.contains_key(trigger) {
+            continue;
+        }
+        record(trigger, vec![EdgeEvaluation::Procedure(relocate(unit))]);
     }
     Ok(())
 }
@@ -889,20 +862,91 @@ fn can_delay_samples(
     })
 }
 
+/// Separate the destinations whose operands a procedure changes or whose
+/// staging slots it touches. All ports of one array travel together in their
+/// original order, since two dynamic indices may denote the same word.
+fn take_conflicting_samples(
+    form: &mut NextStateForm<AbsoluteAddr>,
+    arena: &SLTNodeArena<AbsoluteAddr>,
+    procedure: &ExecutionUnit<RegionedAbsoluteAddr>,
+    movable: bool,
+) -> NextStateForm<AbsoluteAddr> {
+    let mut changed = HashSet::default();
+    let mut touched = HashSet::default();
+    for block in procedure.blocks.values() {
+        if !movable || matches!(block.terminator, SIRTerminator::Error(_)) {
+            return std::mem::take(form);
+        }
+        for inst in &block.instructions {
+            if inst.may_fail() || inst.is_host_interaction() {
+                return std::mem::take(form);
+            }
+            let (Some(reads), Some(writes)) =
+                (inst.state_reads().objects(), inst.state_writes().objects())
+            else {
+                return std::mem::take(form);
+            };
+            touched.extend(reads.copied());
+            for addr in writes {
+                touched.insert(*addr);
+                if addr.region == STABLE_REGION {
+                    changed.insert(addr.absolute_addr());
+                }
+            }
+        }
+    }
+    let mut early = HashSet::default();
+    let mut check = |target, region, nodes: &[NodeId]| {
+        let slot = RegionedAbsoluteAddr::from_absolute_addr(region, target);
+        let reads_changed = |node| match arena.get(node) {
+            celox_slt::SLTNode::Input { variable, .. } => changed.contains(variable),
+            _ => false,
+        };
+        if touched.contains(&slot)
+            || (!changed.is_empty()
+                && celox_slt::canon::reachable(arena, nodes.iter().copied())
+                    .into_iter()
+                    .any(reads_changed))
+        {
+            early.insert(target);
+        }
+    };
+    for r in &form.roots {
+        check(r.target, WORKING_REGION, &[r.value]);
+    }
+    for p in &form.ports {
+        check(
+            p.array,
+            celox_design::SPARSE_WORKING_REGION,
+            &[p.guard, p.index, p.value],
+        );
+    }
+    let (roots, late) = std::mem::take(&mut form.roots)
+        .into_iter()
+        .partition(|r| early.contains(&r.target));
+    form.roots = late;
+    let (ports, late) = std::mem::take(&mut form.ports)
+        .into_iter()
+        .partition(|p| early.contains(&p.array));
+    form.ports = late;
+    NextStateForm { roots, ports }
+}
+
 /// Coalesce symbolic samples across instances until a procedure needs a staged
 /// write or may invalidate a sampled input. Publication keeps its original order.
-fn lower_event_evaluations(
+pub(super) fn lower_event_evaluations(
     events: EventEvaluations,
     arena: &SLTNodeArena<AbsoluteAddr>,
     elements: &HashMap<AbsoluteAddr, usize>,
     apply: &FfUnits,
+    direct_events: &HashSet<AbsoluteAddr>,
     combined: &mut FfUnits,
 ) -> Result<FfUnits, ParserError> {
-    let lower = |form: &NextStateForm<_>| {
+    let lower = |form: &NextStateForm<_>, publication| {
         lower_transition(
             arena,
             form,
-            Publication::Deferred,
+            publication,
             false,
             |addr, region| RegionedAbsoluteAddr::from_absolute_addr(region, addr),
             elements,
@@ -965,26 +1009,47 @@ fn lower_event_evaluations(
                     if !writes.is_empty()
                         && (!movable || !can_delay_samples(&unit, &reads, &writes))
                     {
-                        units.push(lower(&pending)?);
-                        pending = NextStateForm::default();
-                        reads.clear();
-                        writes.clear();
-                        movable = true;
+                        let early = take_conflicting_samples(&mut pending, arena, &unit, movable);
+                        if !early.roots.is_empty() || !early.ports.is_empty() {
+                            units.push(lower(&early, Publication::Deferred)?);
+                        }
+                        // The fast disjointness check may retain a superset
+                        // until the last pending destination has been emitted.
+                        if pending.roots.is_empty() && pending.ports.is_empty() {
+                            reads.clear();
+                            writes.clear();
+                            movable = true;
+                        }
                     }
                     procedures += 1;
                     units.push(unit);
                 }
             }
         }
+        let mut direct_unit = None;
         if !pending.roots.is_empty() || !pending.ports.is_empty() {
-            if procedures > 0
-                && let Some(applications) = apply.get(&event)
+            if direct_events.contains(&event) {
+                direct_unit = Some(lower(&pending, Publication::Direct)?);
+            } else if let Some(applications) = apply.get(&event)
                 && let Some(direct) =
                     sampled::combined(arena, &pending, elements, &units, applications)?
             {
-                combined.insert(event, vec![direct]);
+                direct_unit = Some(direct);
             }
-            units.push(lower(&pending)?);
+            units.push(lower(&pending, Publication::Deferred)?);
+        }
+        if let Some(direct) = direct_unit {
+            combined.insert(event, vec![direct]);
+        } else if roots + ports > 0 || combined.get(&event).is_some_and(|group| group.len() > 1) {
+            let publications = apply.get(&event).ok_or_else(|| {
+                ParserError::illegal_context(
+                    "event assembly",
+                    "event has no publication phase",
+                    None,
+                )
+            })?;
+            let phases = units.iter().chain(publications).collect::<Vec<_>>();
+            combined.insert(event, vec![celox_sir::merge_sir_eu_refs(&phases).0]);
         }
         tracing::debug!(target: "celox::edge_graph", ?event, roots, ports, procedures, graphs = units.len()-procedures, "scheduled edge evaluations");
         result.insert(event, units);

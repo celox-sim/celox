@@ -12,9 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::HashMap;
-use crate::ir::{
-    AbsoluteAddrBase, GlueAddrBase, GlueBlockBase, RegionedAbsoluteAddrBase, RegionedVarAddrBase,
-};
+use crate::ir::{AbsoluteAddrBase, RegionedAbsoluteAddrBase, RegionedVarAddrBase};
 
 // ---------------------------------------------------------------------------
 // StringTable — intern pool for variable/instance paths
@@ -195,12 +193,6 @@ pub type PortableAbsoluteAddr = AbsoluteAddrBase<StrIdx>;
 
 /// Regioned absolute address using portable `StrIdx`.
 pub type PortableRegionedAbsoluteAddr = RegionedAbsoluteAddrBase<StrIdx>;
-
-/// Glue address using portable `StrIdx`.
-pub type PortableGlueAddr = GlueAddrBase<StrIdx>;
-
-/// Glue block using portable `StrIdx`.
-pub type PortableGlueBlock = GlueBlockBase<StrIdx>;
 
 #[cfg(test)]
 mod tests {

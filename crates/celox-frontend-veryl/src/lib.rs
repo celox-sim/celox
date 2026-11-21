@@ -45,10 +45,9 @@ pub use module::external_port_formal_names;
 pub use portability_check::{check_array_literal_side_effects, check_function_output_aliases};
 pub use schedule::schedule_symbolic_rtl;
 pub use source::{
-    AbsoluteAddr, GlueAddr, GlueBlock, ModuleInitialMemoryValue, RegionedAbsoluteAddr,
-    RegionedVarAddr, VerylComponentBinding, VerylComponentConnectionBinding,
-    VerylComponentEventBinding, VerylComponentInputBinding, VerylIdMap, VerylScheduledRtlOutput,
-    VerylTestbenchSource,
+    AbsoluteAddr, ModuleInitialMemoryValue, RegionedAbsoluteAddr, RegionedVarAddr,
+    VerylComponentBinding, VerylComponentConnectionBinding, VerylComponentEventBinding,
+    VerylComponentInputBinding, VerylIdMap, VerylScheduledRtlOutput, VerylTestbenchSource,
 };
 pub use testbench::{collect_testbench_observability, compile_semantic_testbench};
 

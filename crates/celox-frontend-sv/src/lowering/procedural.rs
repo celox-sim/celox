@@ -460,44 +460,45 @@ impl<'a> ProcModule<'a> {
     }
 }
 
-/// The identifiers an expression reads.
-pub(super) fn expr_idents(expr: &sv::ir::Expr, names: &mut HashSet<String>) {
-    fn const_idents(expr: &sv::ir::ConstExpr, names: &mut HashSet<String>) {
-        match expr {
-            sv::ir::ConstExpr::Ident(name) => {
-                names.insert(name.clone());
-            }
-            sv::ir::ConstExpr::Literal(_) => {}
-            sv::ir::ConstExpr::SelectRange { expr, msb, lsb, .. } => {
-                const_idents(expr, names);
-                const_idents(msb, names);
-                const_idents(lsb, names);
-            }
-            sv::ir::ConstExpr::Select { expr, bit } => {
-                const_idents(expr, names);
-                const_idents(bit, names);
-            }
-            sv::ir::ConstExpr::Function { args, .. } => {
-                args.iter().for_each(|arg| const_idents(arg, names))
-            }
-            sv::ir::ConstExpr::Resize { expr, .. } | sv::ir::ConstExpr::Unary { expr, .. } => {
-                const_idents(expr, names)
-            }
-            sv::ir::ConstExpr::Binary { left, right, .. } => {
-                const_idents(left, names);
-                const_idents(right, names);
-            }
-            sv::ir::ConstExpr::Mux {
-                condition,
-                then_expr,
-                else_expr,
-            } => {
-                const_idents(condition, names);
-                const_idents(then_expr, names);
-                const_idents(else_expr, names);
-            }
+pub(super) fn const_idents(expr: &sv::ir::ConstExpr, names: &mut HashSet<String>) {
+    match expr {
+        sv::ir::ConstExpr::Ident(name) => {
+            names.insert(name.clone());
+        }
+        sv::ir::ConstExpr::Literal(_) => {}
+        sv::ir::ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+            const_idents(expr, names);
+            const_idents(msb, names);
+            const_idents(lsb, names);
+        }
+        sv::ir::ConstExpr::Select { expr, bit } => {
+            const_idents(expr, names);
+            const_idents(bit, names);
+        }
+        sv::ir::ConstExpr::Function { args, .. } => {
+            args.iter().for_each(|arg| const_idents(arg, names))
+        }
+        sv::ir::ConstExpr::Resize { expr, .. } | sv::ir::ConstExpr::Unary { expr, .. } => {
+            const_idents(expr, names)
+        }
+        sv::ir::ConstExpr::Binary { left, right, .. } => {
+            const_idents(left, names);
+            const_idents(right, names);
+        }
+        sv::ir::ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            const_idents(condition, names);
+            const_idents(then_expr, names);
+            const_idents(else_expr, names);
         }
     }
+}
+
+/// The identifiers an expression reads.
+pub(super) fn expr_idents(expr: &sv::ir::Expr, names: &mut HashSet<String>) {
     match expr {
         sv::ir::Expr::Ident(name) => {
             names.insert(name.clone());

@@ -536,7 +536,7 @@ fn prepare_external_hierarchy_collecting(
         resolved.instances.retain(|instance| {
             module_ids.contains_key(&LoweredSvModuleKey::instance_key(instance))
         });
-        attach_instance_glue(
+        elaborate_instances(
             &mut sim_module,
             &resolved,
             key,
