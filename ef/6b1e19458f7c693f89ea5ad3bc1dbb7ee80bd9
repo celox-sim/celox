@@ -1,0 +1,1 @@
+Preserve mux result width when lowering grouped register writes and extracted common enables. Reproduced both wrong-width failures and added regression coverage before applying the fix.
