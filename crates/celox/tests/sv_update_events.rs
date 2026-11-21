@@ -66,6 +66,35 @@ macro_rules! update_events {
             }
 
             #[test]
+            fn exact_one_hot_case_decodes_each_index_and_clears_on_unknown() {
+                let source = "module Top(input logic [1:0] idx, output logic [3:0] decoded);
+                    always_comb begin decoded = 0; case (idx)
+                        2'd2: decoded[2] = 1; 2'd0: decoded[0] = 1;
+                        2'd3: decoded[3] = 1; 2'd1: decoded[1] = 1;
+                    endcase end
+                endmodule";
+                for four_state in [false, true] {
+                    let mut sim = celox::Simulation::from_sv_sources(
+                        vec![(source, Path::new("one_hot.sv"))],
+                        "Top",
+                    )
+                    .four_state(four_state)
+                    .$backend()
+                    .unwrap();
+                    let idx = sim.signal("idx");
+                    for i in [3u8, 1, 0, 2] {
+                        sim.modify(|io| io.set(idx, i)).unwrap();
+                        assert_eq!(value(&mut sim, "decoded"), 1 << i);
+                    }
+                    if four_state {
+                        sim.modify(|io| io.set_four_state(idx, 1u8.into(), 1u8.into()))
+                            .unwrap();
+                        assert_eq!(value(&mut sim, "decoded"), 0);
+                    }
+                }
+            }
+
+            #[test]
             fn explicit_decoder_preserves_time_zero_in_both_state_modes() {
                 let source = "`timescale 1ns/1ns
                 module Top;
