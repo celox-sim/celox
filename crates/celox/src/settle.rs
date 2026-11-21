@@ -702,6 +702,65 @@ fn bit_type() -> RegisterType {
     }
 }
 
+/// Whether an access covers more than one element of an element-strided
+/// array whose elements are padded: a load of it would not gather the
+/// elements on every backend, so the store cannot be compared.
+pub(crate) fn spans_padded_elements(
+    layout: &crate::backend::MemoryLayout,
+    address: &RegionedAbsoluteAddr,
+    offset: &SIROffset,
+    width: usize,
+) -> bool {
+    let Some(array) = layout.unpacked_arrays.get(&address.absolute_addr()) else {
+        return false;
+    };
+    if array.element_stride * 8 == array.element_width {
+        return false;
+    }
+    match offset.constant_bit_offset() {
+        Some(start) => {
+            start / array.element_width != (start + width.max(1) - 1) / array.element_width
+        }
+        None => width > array.element_width,
+    }
+}
+
+/// Test a native sparse memory's write enable before its commit drains the summary.
+pub(crate) fn sparse_written(
+    out: &mut Vec<SIRInstruction<RegionedAbsoluteAddr>>,
+    sparse: &celox_state_layout::SparseWorkingLayout,
+    mut register: impl FnMut(usize) -> RegisterId,
+) -> RegisterId {
+    let mut written = None;
+    for word in 0..sparse.summary_word_count {
+        let at = register(64);
+        out.push(SIRInstruction::Imm(
+            at,
+            SIRValue::new((sparse.summary_words_offset + word * 8) as u64),
+        ));
+        let value = register(64);
+        out.push(SIRInstruction::ExternCall {
+            dst: Some(value),
+            func: NativeMemoryOp::ReadState.function(),
+            args: vec![at],
+        });
+        written = Some(match written {
+            None => value,
+            Some(before) => {
+                let both = register(64);
+                out.push(SIRInstruction::Binary(both, before, BinaryOp::Or, value));
+                both
+            }
+        });
+    }
+    let written = written.expect("a summary word");
+    let zero = register(64);
+    out.push(SIRInstruction::Imm(zero, SIRValue::new(0u64)));
+    let any = register(1);
+    out.push(SIRInstruction::Binary(any, written, BinaryOp::Ne, zero));
+    any
+}
+
 /// The mask of `bytes` bytes from byte `first` of a word.
 fn byte_mask(first: usize, bytes: usize) -> u64 {
     let mask = if bytes >= 8 {
@@ -821,29 +880,6 @@ impl<'a> Marker<'a> {
         match self.settle.objects.get(index) {
             Some(object) if object.start == start => object.partitions.clone(),
             _ => Vec::new(),
-        }
-    }
-
-    /// Whether an access covers more than one element of an element-strided
-    /// array whose elements are padded: a load of it would not gather the
-    /// elements on every backend, so the store cannot be compared.
-    fn spans_padded_elements(
-        &self,
-        address: &RegionedAbsoluteAddr,
-        offset: &SIROffset,
-        width: usize,
-    ) -> bool {
-        let Some(array) = self.layout.unpacked_arrays.get(&address.absolute_addr()) else {
-            return false;
-        };
-        if array.element_stride * 8 == array.element_width {
-            return false;
-        }
-        match offset.constant_bit_offset() {
-            Some(start) => {
-                start / array.element_width != (start + width.max(1) - 1) / array.element_width
-            }
-            None => width > array.element_width,
         }
     }
 
@@ -1027,8 +1063,8 @@ impl<'a> Marker<'a> {
         }
         let one = segment.one(unit, alloc);
         let dirty_value = self.dirty_mark(unit, alloc, segment, &address);
-        let comparable =
-            width <= MAX_COMPARED_WIDTH && !self.spans_padded_elements(&address, &offset, width);
+        let comparable = width <= MAX_COMPARED_WIDTH
+            && !spans_padded_elements(self.layout, &address, &offset, width);
         // A commit of a copy-on-write (sparse) memory publishes only the
         // chunks its writers touched, which its dirty summary words list:
         // when none did, it changes nothing, and the whole memory need not
@@ -1040,42 +1076,15 @@ impl<'a> Marker<'a> {
             && sparse.summary_word_count > 0
             && (comparable || sparse.summary_word_count <= 8)
         {
-            let mut written = None;
-            for word in 0..sparse.summary_word_count {
-                let at = alloc.register(unit, word_type());
-                segment.instructions.push(SIRInstruction::Imm(
-                    at,
-                    SIRValue::new((sparse.summary_words_offset + word * 8) as u64),
-                ));
-                let value = alloc.register(unit, word_type());
-                segment.instructions.push(SIRInstruction::ExternCall {
-                    dst: Some(value),
-                    func: NativeMemoryOp::ReadState.function(),
-                    args: vec![at],
-                });
-                written = Some(match written {
-                    None => value,
-                    Some(before) => {
-                        let both = alloc.register(unit, word_type());
-                        segment.instructions.push(SIRInstruction::Binary(
-                            both,
-                            before,
-                            BinaryOp::Or,
-                            value,
-                        ));
-                        both
-                    }
-                });
-            }
-            let written = written.expect("a summary word");
-            let zero = alloc.register(unit, word_type());
-            segment
-                .instructions
-                .push(SIRInstruction::Imm(zero, SIRValue::new(0u64)));
-            let any = alloc.register(unit, bit_type());
-            segment
-                .instructions
-                .push(SIRInstruction::Binary(any, written, BinaryOp::Ne, zero));
+            let any = sparse_written(&mut segment.instructions, sparse, |width| {
+                alloc.register(
+                    unit,
+                    RegisterType::Bit {
+                        width,
+                        signed: false,
+                    },
+                )
+            });
             if !comparable {
                 // The wide value is expensive to compare, but an empty write
                 // set cannot have changed any reader. Sample it before the

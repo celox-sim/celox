@@ -59,17 +59,51 @@ impl Generator<'_> {
                 let (_, readers) = self.publication(address.absolute_addr())?;
                 // A dynamic or wide write marks its readers only if this
                 // block executes, without copying a memory to compare it.
-                let changed = match write.offset {
-                    SIROffset::Static(offset)
-                        if (1..=64).contains(&write.width)
-                            && offset.checked_add(write.width).is_some_and(|end| {
-                                end <= self.program.layout().widths[&address.absolute_addr()]
-                            }) =>
+                let sparse = match &inst {
+                    SIRInstruction::Commit(source, ..)
+                        if self.outlined.is_some()
+                            && source.region == celox_design::SPARSE_WORKING_REGION =>
+                    {
+                        self.program
+                            .layout()
+                            .sparse_layouts
+                            .get(&source.absolute_addr())
+                            .filter(|s| (1..=8).contains(&s.summary_word_count))
+                    }
+                    _ => None,
+                };
+                let layout = self.program.layout();
+                let comparable = match write.offset {
+                    SIROffset::Static(offset) => {
+                        offset
+                            .checked_add(write.width)
+                            .is_some_and(|end| end <= layout.widths[&address.absolute_addr()])
+                            && !crate::settle::spans_padded_elements(
+                                layout,
+                                &address,
+                                write.offset,
+                                write.width,
+                            )
+                    }
+                    SIROffset::Element {
+                        element_width,
+                        bit_offset,
+                        dynamic_bit_offset: None,
+                        ..
+                    } => bit_offset
+                        .checked_add(write.width)
+                        .is_some_and(|end| end <= *element_width),
+                    _ => false,
+                };
+                let changed = match sparse {
+                    _ if comparable
+                        && (1..=256).contains(&write.width)
+                        && (write.width <= 64 || sparse.is_none()) =>
                     {
                         let width = write.width;
                         let logic = self.keeps_unknowns(address.absolute_addr());
                         let before = register(width, logic);
-                        let offset = SIROffset::Static(*offset);
+                        let offset = write.offset.clone();
                         out.push(SIRInstruction::Load(before, address, offset.clone(), width));
                         // A value already in the destination's representation
                         // can be compared directly to the old register.
@@ -100,6 +134,12 @@ impl Generator<'_> {
                             after,
                         ));
                         changed
+                    }
+                    Some(sparse) => {
+                        let written =
+                            crate::settle::sparse_written(out, sparse, |w| register(w, false));
+                        out.push(inst);
+                        written
                     }
                     _ => {
                         out.push(inst);
