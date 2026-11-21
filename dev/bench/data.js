@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795240820341,
+  "lastUpdate": 1795240997888,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -461853,6 +461853,42 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-veryl-cc-x86_64/heliodor_suite_linux_boot_execution",
             "unit": "ms",
             "value": 93895.37476
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "c3d3fcdb8ef9fc7c30373d4879d34dcac41ada61",
+          "message": "chore(master): release 0.14.0 (#4460)",
+          "timestamp": "2026-11-20T09:20:26Z",
+          "url": "https://github.com/celox-sim/celox/commit/c3d3fcdb8ef9fc7c30373d4879d34dcac41ada61"
+        },
+        "date": 1795240997888,
+        "cpu": "Intel Xeon 6975P-C",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-native-x86_64/heliodor_suite_linux_boot_compilation",
+            "unit": "ms",
+            "value": 36322.100567
+          },
+          {
+            "name": "heliodor-native-x86_64/heliodor_suite_linux_boot_execution",
+            "unit": "ms",
+            "value": 124308.192866
+          },
+          {
+            "name": "heliodor-celox-jit/heliodor_suite_linux_boot_execution",
+            "unit": "ms",
+            "value": 124288.169562
           }
         ]
       }
