@@ -18,7 +18,7 @@ impl SLTToSIRLowerer {
         dest
     }
 
-    pub(super) fn cast_reg_width<A>(
+    pub(crate) fn cast_reg_width<A>(
         &self,
         builder: &mut SIRBuilder<A>,
         reg: RegisterId,
