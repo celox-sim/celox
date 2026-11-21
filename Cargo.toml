@@ -53,7 +53,7 @@ license     = "MIT OR Apache-2.0"
 readme      = "README.md"
 edition     = "2024"
 description = "Celox HDL Simulator"
-rust-version = "1.99.1"
+rust-version = "1.100.0"
 
 [workspace.dependencies]
 # wasmtime's defaults without `cache`: Celox never configures its compilation
