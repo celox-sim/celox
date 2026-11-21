@@ -1,10 +1,10 @@
-//! Graph-first lowering of packed register updates. Processes with one
+//! Graph-first lowering of register and memory updates. Processes with one
 //! nonblocking write per destination along a path share their trigger's next-state DAG.
 //! A procedural evaluation ends a batch because it may change stable state.
 use super::*;
-use celox_frontend_core::symbolic::artifact::NextStateForms;
-use celox_sir::RegisterId;
-use celox_slt::{SLTToSIRLowerer, canon::Reinterner};
+use celox_frontend_core::symbolic::artifact::{EdgeEvaluation, NextStateForms};
+use celox_slt::canon::Reinterner;
+use celox_slt::next_state::Publication;
 use comb::NextState;
 
 #[derive(Default)]
@@ -37,15 +37,21 @@ impl FfGraph {
         let reads_temporary = celox_slt::canon::reachable(&raw, form.nodes()).into_iter().any(|node| {
             matches!(raw.get(node), SLTNode::Input { variable, .. } if variable.0 >= first_temp.0)
         });
-        if !form.ports.is_empty() || form.roots.is_empty() || reads_temporary {
+        // Constant-index writes can appear as wide packed roots. Use the sparse
+        // protocol only for element-addressed memory writes.
+        if (form.ports.is_empty() && form.roots.is_empty())
+            || reads_temporary
+            || form
+                .roots
+                .iter()
+                .any(|root| !pm.var(root.target).array_dims.is_empty())
+        {
             return None;
         }
         let form = canonical_copy(&raw, &mut self.arena, &form).ok()?;
-        self.pending
-            .entry(trigger.clone())
-            .or_default()
-            .roots
-            .extend(form.roots.iter().cloned());
+        let batch = self.pending.entry(trigger.clone()).or_default();
+        batch.roots.extend(form.roots.iter().cloned());
+        batch.ports.extend(form.ports.iter().cloned());
         self.forms.forms.push((trigger.clone(), form));
         Some(())
     }
@@ -62,9 +68,9 @@ impl FfGraph {
         if let Some(form) = self.pending.remove(trigger) {
             let segments = self.schedule.batches.entry(trigger.clone()).or_default();
             if let Some(unit) = evaluations.remove(trigger) {
-                segments.push(EdgeBatch::Procedural(unit));
+                segments.push(EdgeBatch::Procedure(unit));
             }
-            let targets: Vec<_> = form
+            let mut targets: Vec<_> = form
                 .roots
                 .iter()
                 .map(|root| VarAtomBase {
@@ -73,9 +79,15 @@ impl FfGraph {
                 })
                 .collect();
             let mut commit = SIRBuilder::new();
-            emit_ff_commits(&mut commit, &targets, pm);
+            let memories = form.ports.iter().map(|port| port.array).collect();
+            targets.extend(
+                form.ports
+                    .iter()
+                    .map(|port| VarAtomBase::new(port.array, 0, pm.var(port.array).width - 1)),
+            );
+            ff::emit_sparse_memory_commits(&mut commit, &targets, &memories, pm);
             let commit = seal_builder(commit);
-            segments.push(EdgeBatch::Registers(form));
+            segments.push(EdgeBatch::Graph(form));
             ff_processes::insert_or_merge_ff_unit(applications, trigger.clone(), commit.clone());
             // All the writes in this batch publish in the NBA phase.
             active
@@ -91,11 +103,7 @@ pub(super) struct EdgeSchedule {
     batches: HashMap<TriggerSet<SourceVarId>, Vec<EdgeBatch>>,
 }
 
-#[derive(Clone)]
-enum EdgeBatch {
-    Procedural(ExecutionUnit<RegionedVarAddr>),
-    Registers(NextState),
-}
+type EdgeBatch = EdgeEvaluation<SourceVarId, RegionedVarAddr>;
 
 impl EdgeSchedule {
     pub fn contains(&self, trigger: &TriggerSet<SourceVarId>) -> bool {
@@ -115,36 +123,47 @@ impl EdgeSchedule {
         }
         let values = super::dataflow::optimize(module, wires)?;
         for (trigger, batches) in &self.batches {
-            let tail = module.eval_only_ff_blocks.remove(trigger);
-            let mut evals = Vec::new();
+            let mut plan = Vec::with_capacity(batches.len() + 1);
             for batch in batches {
-                let eval = match batch {
-                    EdgeBatch::Procedural(unit) => unit.clone(),
-                    EdgeBatch::Registers(form) => {
-                        let form = form.map(|id| *id, |node| Ok::<_, String>(values[&node]))?;
-                        next_state_unit(pm, &module.arena, &form, WORKING_REGION)?
+                plan.push(match batch {
+                    EdgeBatch::Graph(form) => {
+                        EdgeBatch::Graph(form.map(|id| *id, |node| Ok::<_, String>(values[&node]))?)
                     }
-                };
-                evals.push(eval);
+                    EdgeBatch::Procedure(unit) => EdgeBatch::Procedure(unit.clone()),
+                });
             }
-            evals.extend(tail);
+            plan.extend(
+                module
+                    .eval_only_ff_blocks
+                    .remove(trigger)
+                    .map(EdgeBatch::Procedure),
+            );
+            let mut evals = plan
+                .iter()
+                .map(|batch| match batch {
+                    EdgeBatch::Procedure(unit) => Ok(unit.clone()),
+                    EdgeBatch::Graph(form) => {
+                        next_state_unit(pm, &module.arena, form, Publication::Deferred)
+                    }
+                })
+                .collect::<Result<Vec<_>, String>>()?;
             let mut eval = if evals.len() == 1 {
                 evals.pop().unwrap()
             } else {
                 merge_sir_eus(&evals).0
             };
             ff::prune_unreachable_blocks(&mut eval);
-            let direct = if let [EdgeBatch::Registers(form)] = batches.as_slice()
+            let direct = if let [EdgeBatch::Graph(form)] = plan.as_slice()
                 && module.next_state.complete.contains(trigger)
             {
-                let form = form.map(|id| *id, |node| Ok::<_, String>(values[&node]))?;
-                next_state_unit(pm, &module.arena, &form, STABLE_REGION)?
+                next_state_unit(pm, &module.arena, form, Publication::Direct)?
             } else {
                 let mut combined =
                     celox_sir::merge_sir_eu_refs(&[&eval, &module.apply_ff_blocks[trigger]]).0;
                 ff::prune_unreachable_blocks(&mut combined);
                 combined
             };
+            module.next_state.evaluations.insert(trigger.clone(), plan);
             module.eval_only_ff_blocks.insert(trigger.clone(), eval);
             module.eval_apply_ff_blocks.insert(trigger.clone(), direct);
         }
@@ -218,8 +237,11 @@ fn register_updates(
             let name = lhs.name();
             let Some(id) = pm.id(name) else { return false };
             let var = pm.var(id);
-            let static_target = match lhs {
-                sv::ir::LValue::Ident(_) => true,
+            let supported_target = match lhs {
+                sv::ir::LValue::Ident(_) => var.array_dims.is_empty(),
+                sv::ir::LValue::Select { .. } if !var.array_dims.is_empty() => {
+                    var.array_dims.len() == 1 && !procedural::lvalue_calls(lhs, &mut |_| true)
+                }
                 sv::ir::LValue::Select { msb, lsb, .. } => [msb, lsb].into_iter().all(|bound| {
                     sv::typecheck::eval_const_expr_with_types(
                         bound,
@@ -229,9 +251,8 @@ fn register_updates(
                     .is_some()
                 }),
             };
-            static_target
+            supported_target
                 && !var.hidden
-                && var.array_dims.is_empty()
                 && var.float.is_none()
                 && var.value_kind == celox_design::ValueKind::Bits
                 && !excluded.contains(name)
@@ -258,171 +279,27 @@ pub(super) fn next_state_unit(
     pm: &procedural::ProcModule<'_>,
     dag: &SLTNodeArena<SourceVarId>,
     form: &NextState,
-    output_region: u32,
+    publication: Publication,
 ) -> Result<ExecutionUnit<RegionedVarAddr>, String> {
-    let mut mapped = SLTNodeArena::<RegionedVarAddr>::new();
-    let mut cache = HashMap::default();
-    let stable = |var_id| RegionedVarAddrBase {
-        region: STABLE_REGION,
-        var_id,
-    };
-    let map = |id: &SourceVarId| stable(*id);
-    let mut mapped_nodes = Vec::new();
-    for node in form.nodes() {
-        mapped_nodes.push(
-            dag.get(node)
-                .map_addr(node, dag, &mut mapped, &mut cache, &map)
-                .map_err(|error| error.to_string())?,
-        );
-    }
-    let element_widths: HashMap<RegionedVarAddr, usize> = pm
+    let element_widths = pm
         .variables
         .iter()
-        .filter_map(|(&id, variable)| Some((stable(id), unpacked_element_width(variable)?)))
+        .filter_map(|(&id, v)| Some((id, unpacked_element_width(v)?)))
         .collect();
-    let mut lowerer =
-        SLTToSIRLowerer::new(pm.four_state).with_unpacked_input_types(&mapped, &element_widths);
-    let mut b = SIRBuilder::<RegionedVarAddr>::new();
-    let mut lowered = HashMap::default();
-    // A common enable is one decision for the entire bank. Sample active
-    // data only on the enabled edge. A split evaluation must still leave
-    // the old values in its working slots for the later commit.
-    let enabled = (!pm.four_state && form.ports.is_empty())
-        .then(|| {
-            let mut enable = None;
-            let mut active = Vec::with_capacity(mapped_nodes.len());
-            for (root, node) in form.roots.iter().zip(&mapped_nodes) {
-                let SLTNode::Mux {
-                    cond,
-                    then_expr,
-                    else_expr,
-                } = *mapped.get(*node)
-                else {
-                    return None;
-                };
-                let holds = |node| {
-                    matches!(mapped.get(node), SLTNode::Input {variable, access, index, ..}
-                if *variable == stable(root.target) && *access == root.access && index.is_empty())
-                };
-                let (polarity, data) = if holds(else_expr) {
-                    (true, then_expr)
-                } else if holds(then_expr) {
-                    (false, else_expr)
-                } else {
-                    return None;
-                };
-                if enable
-                    .replace((cond, polarity))
-                    .is_some_and(|old| old != (cond, polarity))
-                {
-                    return None;
-                }
-                active.push(data);
-            }
-            Some((enable?, active))
-        })
-        .flatten();
-    let mut join = None;
-    if let Some(((condition, polarity), active)) = enabled {
-        let cond = lowerer.lower(&mut b, condition, &mapped, &mut lowered);
-        let taken = b.new_block();
-        let done = b.new_block();
-        let hold = if output_region == WORKING_REGION {
-            b.new_block()
-        } else {
-            done
-        };
-        let (yes, no) = if polarity {
-            (taken, hold)
-        } else {
-            (hold, taken)
-        };
-        b.seal_block(SIRTerminator::Branch {
-            cond,
-            true_block: (yes, Vec::new()),
-            false_block: (no, Vec::new()),
-        });
-        if hold != done {
-            b.switch_to_block(hold);
-            let targets: Vec<_> = form
-                .roots
-                .iter()
-                .map(|root| VarAtomBase {
-                    id: root.target,
-                    access: root.access,
-                })
-                .collect();
-            emit_ff_seeds(&mut b, &targets);
-            b.seal_block(SIRTerminator::Jump(done, Vec::new()));
-        }
-        b.switch_to_block(taken);
-        mapped_nodes = active;
-        join = Some(done);
-    }
-    let registers: Vec<RegisterId> = mapped_nodes
-        .into_iter()
-        .map(|node| lowerer.lower(&mut b, node, &mapped, &mut lowered))
-        .collect();
-    let (root_registers, port_registers) = registers.split_at(form.roots.len());
-    for (root, &value) in form.roots.iter().zip(root_registers) {
-        let width = root.access.msb - root.access.lsb + 1;
-        if b.register(&value).width() != width {
-            return Err(format!("root of {width} bits has a value of another width"));
-        }
-        b.emit(SIRInstruction::Store(
-            RegionedVarAddrBase {
-                region: output_region,
-                var_id: root.target,
-            },
-            SIROffset::Static(root.access.lsb),
-            width,
-            value,
-            Vec::new(),
-            Vec::new(),
-        ));
-    }
-    for (port, registers) in form.ports.iter().zip(port_registers.chunks(3)) {
-        let &[index, value, guard] = registers else {
-            unreachable!("a port computes three nodes");
-        };
-        let write = b.new_block();
-        let next = b.new_block();
-        b.seal_block(SIRTerminator::Branch {
-            cond: guard,
-            true_block: (write, Vec::new()),
-            false_block: (next, Vec::new()),
-        });
-        b.switch_to_block(write);
-        b.emit(SIRInstruction::Store(
-            RegionedVarAddrBase {
-                region: output_region,
-                var_id: port.array,
-            },
-            SIROffset::Element {
-                index,
-                element_width: port.element_width,
-                bit_offset: port.access.lsb,
-                dynamic_bit_offset: None,
-            },
-            port.access.msb - port.access.lsb + 1,
-            value,
-            Vec::new(),
-            Vec::new(),
-        ));
-        b.seal_block(SIRTerminator::Jump(next, Vec::new()));
-        b.switch_to_block(next);
-    }
-    if let Some(done) = join {
-        b.seal_block(SIRTerminator::Jump(done, Vec::new()));
-        b.switch_to_block(done);
-    }
-    Ok(seal_builder(b))
+    celox_slt::next_state::lower_transition(
+        dag,
+        form,
+        publication,
+        pm.four_state,
+        |var_id, region| RegionedVarAddrBase { region, var_id },
+        &element_widths,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use celox_design::{DeadStorePolicy, RegionedStateAddr, StateAddr};
+    use celox_design::{DeadStorePolicy, RegionedStateAddr, SPARSE_WORKING_REGION, StateAddr};
 
     fn schedule(
         source: &str,
@@ -451,6 +328,157 @@ mod tests {
         .unwrap()
         .scheduled
         .sir
+    }
+
+    #[test]
+    fn ram_banks_share_the_sampled_address_at_any_depth() {
+        let source = r#"
+            module Bank(input wire clk, en, d, input wire [AW-1:0] addr, output reg q);
+                parameter AW = 3;
+                reg words[0:(1<<AW)-1];
+                always @(posedge clk) begin
+                    if (en) words[addr] <= d;
+                    q <= en ? d : words[addr];
+                end
+            endmodule
+            module Top(input wire clk, select_addr, input wire [AW-1:0] a,b,
+                       input wire [3:0] en,d, output wire [3:0] q, observed);
+                parameter AW = 3;
+                wire [AW-1:0] addr = select_addr ? a : b;
+                assign observed = q * d;
+                for (genvar i=0; i<4; i++) begin : bank
+                    Bank #(.AW(AW)) mem(clk,en[i],d[i],addr,q[i]);
+                end
+            endmodule
+        "#;
+        let instructions = |width| {
+            let source = source.replace("AW = 3", &format!("AW = {width}"));
+            let sir = schedule(&source, true, DeadStorePolicy::Off);
+            let units: Vec<_> = sir.eval_comb_apply_ffs.values().flatten().collect();
+            assert_eq!(units.len(), 1);
+            let ops: Vec<_> = units[0]
+                .blocks
+                .values()
+                .flat_map(|b| &b.instructions)
+                .collect();
+            // The output still settles after publication, using the new q.
+            let multiply = |op: &SIRInstruction<_>| {
+                matches!(op, SIRInstruction::Binary(_, _, BinaryOp::Mul, _))
+            };
+            assert!(
+                sir.eval_comb
+                    .iter()
+                    .flat_map(|u| u.blocks.values())
+                    .flat_map(|b| &b.instructions)
+                    .any(multiply)
+            );
+            assert!(!ops.iter().any(|op| multiply(op)));
+            let writes: Vec<_> = ops
+                .iter()
+                .filter_map(|op| match op {
+                    SIRInstruction::Store(target, SIROffset::Element { index, .. }, ..) => {
+                        Some((target, index))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(writes.len(), 4);
+            assert_eq!(
+                writes
+                    .iter()
+                    .map(|(target, _)| target)
+                    .collect::<HashSet<_>>()
+                    .len(),
+                4
+            );
+            assert!(writes.iter().all(|(_, index)| *index == writes[0].1));
+            assert!(
+                !ops.iter()
+                    .any(|op| matches!(op, SIRInstruction::Commit(..)))
+            );
+            ops.len()
+        };
+        assert_eq!(instructions(3), instructions(9));
+    }
+
+    #[test]
+    fn independent_samples_cross_a_procedure_on_the_same_clock() {
+        let source = r#"
+            module Top(input bit clk, other, input bit [7:0] a,b,
+                       output bit [7:0] q0,q1,q2,q3,temp,p,watch);
+                always @(posedge clk) q0 <= a+b;
+                always @(posedge clk) q1 <= b+a;
+                always @(posedge clk) begin
+                    temp = a*b;
+                    p <= temp;
+                end
+                always @(posedge clk) q2 <= a+b;
+                always @(posedge clk) q3 <= b+a;
+                always @(posedge other) watch <= p;
+            endmodule
+        "#;
+        let sir = schedule(source, true, DeadStorePolicy::Off);
+        let units = sir
+            .eval_only_ffs
+            .values()
+            .find(|units| units.len() == 2)
+            .unwrap();
+        let operations = |unit: &ExecutionUnit<_>, op| {
+            unit.blocks
+                .values()
+                .flat_map(|b| &b.instructions)
+                .filter(|i| matches!(i, SIRInstruction::Binary(_,_,actual,_) if *actual == op))
+                .count()
+        };
+        assert_eq!(operations(&units[0], BinaryOp::Mul), 1);
+        assert_eq!(operations(&units[1], BinaryOp::Add), 1);
+    }
+
+    #[test]
+    fn mixed_clock_publishes_a_sampled_memory_port_at_its_commit() {
+        let source = r#"
+            module Top(input bit clk, en, other, input bit [3:0] addr, input bit [7:0] d,
+                       output bit [7:0] old, tmp, p, seen);
+                always @(posedge other) seen <= old;
+                bit [7:0] words[0:8];
+                always @(posedge clk) begin
+                    tmp = d*d;
+                    p <= tmp;
+                end
+                always @(posedge clk) begin
+                    if (en) words[addr] <= d;
+                    old <= words[addr];
+                end
+            endmodule
+        "#;
+        let sir = schedule(source, true, DeadStorePolicy::Off);
+        let stores = |units: &[ExecutionUnit<RegionedStateAddr>]| {
+            units
+                .iter()
+                .flat_map(|u| u.blocks.values())
+                .flat_map(|b| &b.instructions)
+                .filter_map(|inst| match inst {
+                    SIRInstruction::Store(addr, SIROffset::Element { .. }, ..) => Some(addr.region),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            sir.eval_apply_ffs
+                .values()
+                .flat_map(|u| stores(u))
+                .collect::<Vec<_>>(),
+            [STABLE_REGION]
+        );
+        assert_eq!(
+            sir.eval_only_ffs
+                .values()
+                .flat_map(|u| stores(u))
+                .collect::<Vec<_>>(),
+            [SPARSE_WORKING_REGION]
+        );
+        assert!(sir.eval_apply_ffs.values().flatten().flat_map(|u| u.blocks.values())
+            .flat_map(|b| &b.instructions).all(|i| !matches!(i, SIRInstruction::Commit(src,..) if src.region == SPARSE_WORKING_REGION)));
     }
 
     #[test]
@@ -499,7 +527,9 @@ mod tests {
         "#;
         let loads = |graph| {
             let sir = schedule(source, graph, DeadStorePolicy::PreserveTopPorts);
-            assert!(sir.eval_comb_apply_ffs.is_empty());
+            if !graph {
+                assert!(sir.eval_comb_apply_ffs.is_empty());
+            }
             sir.eval_apply_ffs
                 .values()
                 .flatten()
@@ -526,7 +556,9 @@ mod tests {
         "#;
         let edge_adds = |graph, policy| {
             let sir = schedule(source, graph, policy);
-            assert!(sir.eval_comb_apply_ffs.is_empty());
+            if !graph {
+                assert!(sir.eval_comb_apply_ffs.is_empty());
+            }
             sir.eval_apply_ffs
                 .values()
                 .flatten()

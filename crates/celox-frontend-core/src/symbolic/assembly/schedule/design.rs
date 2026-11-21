@@ -187,7 +187,7 @@ pub(super) fn relocate_design(
     flatten_timing: bool,
     trace_opts: &FrontendTraceOptions,
     trace: &mut Option<&mut FrontendTrace>,
-) -> Result<(CombLogic, Units, FfParts, SplitCommits), ParserError> {
+) -> Result<(StateGraph, Units, FfParts, SplitCommits), ParserError> {
     let Design {
         bindings,
         expanded,
@@ -247,7 +247,8 @@ pub(super) fn relocate_design(
     )?;
     let timing = relocate_timing(bindings, instance_modules, modules, &processes);
     Ok((
-        CombLogic {
+        StateGraph {
+            transitions: BTreeMap::new(),
             global_arena,
             comb_blocks,
             comb_observers,
@@ -278,6 +279,7 @@ pub(super) fn relocate_design(
 /// large design would otherwise keep both copies until its schedule is built.
 pub(super) fn release_module_units(modules: &mut HashMap<ModuleId, SimModule>) {
     for module in modules.values_mut() {
+        module.next_state.evaluations = Default::default();
         module.eval_only_ff_blocks = Default::default();
         module.apply_ff_blocks = Default::default();
         module.eval_apply_ff_blocks = Default::default();

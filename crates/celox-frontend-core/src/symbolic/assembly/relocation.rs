@@ -1,6 +1,13 @@
 //! Relocating the units of every instance into the global design.
 
+mod sampled;
+
 use super::*;
+use crate::symbolic::artifact::EdgeEvaluation;
+use celox_slt::next_state::{NextStateForm, Publication, lower_transition};
+
+type EventEvaluations =
+    HashMap<AbsoluteAddr, Vec<EdgeEvaluation<AbsoluteAddr, RegionedAbsoluteAddr>>>;
 
 pub(super) fn elaborated_scope_name(
     root_name: &str,
@@ -237,8 +244,7 @@ pub(super) fn relocate_units(
     let mut processes = Vec::new();
     let mut eval_apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>> =
         HashMap::default();
-    let mut eval_only_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>> =
-        HashMap::default();
+    let mut evaluations = EventEvaluations::default();
     let mut apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>> =
         HashMap::default();
     let mut ff_access_summaries: HashMap<AbsoluteAddr, Vec<FfAccessSummary<RegionedAbsoluteAddr>>> =
@@ -340,12 +346,24 @@ pub(super) fn relocate_units(
         )?;
 
         // Relocate sequential blocks for this instance
-        relocate_ff_evaluations(&instance, &mut eval_apply_ffs, &mut eval_only_ffs);
+        relocate_ff_evaluations(
+            &instance,
+            &mut eval_apply_ffs,
+            &mut evaluations,
+            &mut global_arena,
+        )?;
 
         relocate_processes(&instance, &rebase, &mut processes);
 
         relocate_ff_applications(&instance, split_commits, &mut apply_ffs);
     }
+    let eval_only_ffs = lower_event_evaluations(
+        evaluations,
+        &global_arena,
+        unpacked_element_widths,
+        &apply_ffs,
+        &mut eval_apply_ffs,
+    )?;
     // A canonical event may collect multiple reset groups or instances. The
     // ordinary tick path must evaluate every group against pre-edge state
     // before any group publishes its nonblocking assignments. Concatenating
@@ -779,8 +797,9 @@ fn relocate_comb_logic(
 fn relocate_ff_evaluations(
     instance: &InstanceRelocation<'_>,
     eval_apply_ffs: &mut HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
-    eval_only_ffs: &mut HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
-) {
+    evaluations: &mut EventEvaluations,
+    arena: &mut SLTNodeArena<AbsoluteAddr>,
+) -> Result<(), ParserError> {
     let &InstanceRelocation {
         id,
         sim_module,
@@ -792,78 +811,185 @@ fn relocate_ff_evaluations(
         ref extern_function_map,
         ..
     } = instance;
-    for (trigger_set, eu) in &sim_module.eval_apply_ff_blocks {
-        let clock_addr = bindings.locate(*id, trigger_set.clock);
-        let canonical_addr = clock_domains
-            .get(&clock_addr)
-            .copied()
-            .unwrap_or(clock_addr);
-
-        eval_apply_ffs.entry(canonical_addr).or_default().push(
-            relocate_executation_unit_with_errors(
-                eu,
-                &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
-                runtime_error_codes,
-                runtime_event_site_map,
-                extern_function_map,
-                function_base,
-            ),
-        );
-
-        for &reset in &trigger_set.resets {
-            let reset_addr = bindings.locate(*id, reset);
-            let canonical_addr = clock_domains
-                .get(&reset_addr)
-                .copied()
-                .unwrap_or(reset_addr);
-            eval_apply_ffs.entry(canonical_addr).or_default().push(
-                relocate_executation_unit_with_errors(
-                    eu,
-                    &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
-                    runtime_error_codes,
-                    runtime_event_site_map,
-                    extern_function_map,
-                    function_base,
-                ),
-            );
+    let relocate = |unit: &ExecutionUnit<RegionedVarAddr>| {
+        relocate_executation_unit_with_errors(
+            unit,
+            &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
+            runtime_error_codes,
+            runtime_event_site_map,
+            extern_function_map,
+            function_base,
+        )
+    };
+    let canonical = |signal| {
+        let address = bindings.locate(*id, signal);
+        clock_domains.get(&address).copied().unwrap_or(address)
+    };
+    for (trigger, unit) in &sim_module.eval_apply_ff_blocks {
+        for event in std::iter::once(trigger.clock).chain(trigger.resets.iter().copied()) {
+            eval_apply_ffs
+                .entry(canonical(event))
+                .or_default()
+                .push(relocate(unit));
         }
     }
-
-    for (trigger_set, eu) in &sim_module.eval_only_ff_blocks {
-        let clock_addr = bindings.locate(*id, trigger_set.clock);
-        let canonical_addr = clock_domains
-            .get(&clock_addr)
-            .copied()
-            .unwrap_or(clock_addr);
-        eval_only_ffs.entry(canonical_addr).or_default().push(
-            relocate_executation_unit_with_errors(
-                eu,
-                &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
-                runtime_error_codes,
-                runtime_event_site_map,
-                extern_function_map,
-                function_base,
-            ),
-        );
-
-        for &reset in &trigger_set.resets {
-            let reset_addr = bindings.locate(*id, reset);
-            let canonical_addr = clock_domains
-                .get(&reset_addr)
-                .copied()
-                .unwrap_or(reset_addr);
-            eval_only_ffs.entry(canonical_addr).or_default().push(
-                relocate_executation_unit_with_errors(
-                    eu,
-                    &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
-                    runtime_error_codes,
-                    runtime_event_site_map,
-                    extern_function_map,
-                    function_base,
-                ),
-            );
+    for (trigger, unit) in &sim_module.eval_only_ff_blocks {
+        let plan = if let Some(batches) = sim_module.next_state.evaluations.get(trigger) {
+            batches
+                .iter()
+                .map(|batch| match batch {
+                    EdgeEvaluation::Graph(form) => form
+                        .relocate(&sim_module.arena, arena, &|var| bindings.locate(*id, *var))
+                        .map(EdgeEvaluation::Graph)
+                        .map_err(|e| {
+                            ParserError::illegal_context("clock evaluation", e.to_string(), None)
+                        }),
+                    EdgeEvaluation::Procedure(unit) => {
+                        Ok(EdgeEvaluation::Procedure(relocate(unit)))
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            vec![EdgeEvaluation::Procedure(relocate(unit))]
+        };
+        for reset in &trigger.resets {
+            evaluations
+                .entry(canonical(*reset))
+                .or_default()
+                .extend(plan.iter().cloned());
         }
+        evaluations
+            .entry(canonical(trigger.clock))
+            .or_default()
+            .extend(plan);
     }
+    Ok(())
+}
+
+/// Graphs can share a sampling pass across a procedure when delaying their
+/// staging until after the procedure preserves every read and write.
+fn can_delay_samples(
+    procedure: &ExecutionUnit<RegionedAbsoluteAddr>,
+    reads: &HashSet<RegionedAbsoluteAddr>,
+    writes: &HashSet<RegionedAbsoluteAddr>,
+) -> bool {
+    procedure.blocks.values().all(|block| {
+        !matches!(block.terminator, SIRTerminator::Error(_))
+            && block.instructions.iter().all(|inst| {
+                !inst.may_fail()
+                    && !inst.is_host_interaction()
+                    && inst.state_writes().objects().is_some_and(|mut addresses| {
+                        addresses.all(|addr| !reads.contains(addr) && !writes.contains(addr))
+                    })
+                    && inst
+                        .state_reads()
+                        .objects()
+                        .is_some_and(|mut addresses| addresses.all(|addr| !writes.contains(addr)))
+            })
+    })
+}
+
+/// Coalesce symbolic samples across instances until a procedure needs a staged
+/// write or may invalidate a sampled input. Publication keeps its original order.
+fn lower_event_evaluations(
+    events: EventEvaluations,
+    arena: &SLTNodeArena<AbsoluteAddr>,
+    elements: &HashMap<AbsoluteAddr, usize>,
+    apply: &FfUnits,
+    combined: &mut FfUnits,
+) -> Result<FfUnits, ParserError> {
+    let lower = |form: &NextStateForm<_>| {
+        lower_transition(
+            arena,
+            form,
+            Publication::Deferred,
+            false,
+            |addr, region| RegionedAbsoluteAddr::from_absolute_addr(region, addr),
+            elements,
+        )
+        .map_err(|e| ParserError::illegal_context("clock evaluation", e, None))
+    };
+    let mut result = HashMap::default();
+    for (event, evaluations) in events {
+        let mut units = Vec::new();
+        let mut pending = NextStateForm::default();
+        let mut reads = HashSet::default();
+        let mut writes = HashSet::default();
+        let mut roots = 0;
+        let mut ports = 0;
+        let mut procedures = 0;
+        let mixed = evaluations
+            .iter()
+            .any(|e| matches!(e, EdgeEvaluation::Procedure(_)));
+        let mut movable = true;
+        for evaluation in evaluations {
+            match evaluation {
+                EdgeEvaluation::Graph(form) => {
+                    if mixed {
+                        for node in celox_slt::canon::reachable(arena, form.nodes()) {
+                            use celox_slt::SLTNode;
+                            match arena.get(node) {
+                                SLTNode::Input { variable, .. } => {
+                                    reads.insert(RegionedAbsoluteAddr::from_absolute_addr(
+                                        STABLE_REGION,
+                                        *variable,
+                                    ));
+                                }
+                                SLTNode::ForFold { .. }
+                                | SLTNode::ForFoldGroup { .. }
+                                | SLTNode::Capture { .. } => movable = false,
+                                SLTNode::Constant(..)
+                                | SLTNode::Binary(..)
+                                | SLTNode::Unary(..)
+                                | SLTNode::Mux { .. }
+                                | SLTNode::Concat(..)
+                                | SLTNode::Slice { .. } => {}
+                            }
+                        }
+                        writes.extend(form.roots.iter().map(|root| {
+                            RegionedAbsoluteAddr::from_absolute_addr(WORKING_REGION, root.target)
+                        }));
+                        writes.extend(form.ports.iter().map(|port| {
+                            RegionedAbsoluteAddr::from_absolute_addr(
+                                celox_design::SPARSE_WORKING_REGION,
+                                port.array,
+                            )
+                        }));
+                    }
+                    roots += form.roots.len();
+                    ports += form.ports.len();
+                    pending.roots.extend(form.roots);
+                    pending.ports.extend(form.ports);
+                }
+                EdgeEvaluation::Procedure(unit) => {
+                    if !writes.is_empty()
+                        && (!movable || !can_delay_samples(&unit, &reads, &writes))
+                    {
+                        units.push(lower(&pending)?);
+                        pending = NextStateForm::default();
+                        reads.clear();
+                        writes.clear();
+                        movable = true;
+                    }
+                    procedures += 1;
+                    units.push(unit);
+                }
+            }
+        }
+        if !pending.roots.is_empty() || !pending.ports.is_empty() {
+            if procedures > 0
+                && let Some(applications) = apply.get(&event)
+                && let Some(direct) =
+                    sampled::combined(arena, &pending, elements, &units, applications)?
+            {
+                combined.insert(event, vec![direct]);
+            }
+            units.push(lower(&pending)?);
+        }
+        tracing::debug!(target: "celox::edge_graph", ?event, roots, ports, procedures, graphs = units.len()-procedures, "scheduled edge evaluations");
+        result.insert(event, units);
+    }
+    Ok(result)
 }
 
 /// Relocate the process kernels of the instance, keyed by the instance and

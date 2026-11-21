@@ -183,9 +183,7 @@ pub(super) fn optimize(
             .map_err(|err| err.to_string())?;
     }
     for (_, form) in &mut module.next_state.forms {
-        for root in &mut form.roots {
-            root.value = values[&root.value];
-        }
+        *form = form.map(|id| *id, |node| Ok::<_, String>(values[&node]))?;
     }
     tracing::debug!(target: "celox::dataflow", module = %module.name, producer_reads, constants, shared_wires, "scheduled comb and clocked roots");
     Ok(values)
