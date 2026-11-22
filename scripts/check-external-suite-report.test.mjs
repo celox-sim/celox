@@ -541,6 +541,7 @@ test("every retained baseline accepts only its existing failures", () => {
                 "fork_deferred::sibling_event_queues_are_independent",
                 "fork_deferred::sibling_wait_queues_are_independent",
                 "literals::unsized_decimal_literals_wider_than_32_bits_stay_positive",
+                "net_strengths::two_state_drivers_of_different_strengths",
                 "operators::two_state_case_equality_compares_literal_structure",
                 "operators::two_state_case_equality_keeps_unknown_expression_bits",
                 "operators::two_state_case_equality_preserves_conditional_unknowns",
