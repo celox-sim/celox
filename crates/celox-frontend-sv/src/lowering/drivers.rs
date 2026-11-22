@@ -655,12 +655,24 @@ pub(super) fn continuous_targets_repeat(module: &sv::ir::Module) -> bool {
         })
 }
 
+/// Whether a continuous assignment of `module` drives high impedance for 0
+/// or 1 (IEEE 1800-2023 28.11): its net resolves strengths even with one
+/// driver.
+pub(super) fn high_impedance_drivers(module: &sv::ir::Module) -> bool {
+    module.comb_processes().iter().any(|process| {
+        process
+            .drive_strength()
+            .is_some_and(|strength| strength.zero == 0 || strength.one == 0)
+    })
+}
+
 /// Repeated zero-delay aliases or identical literal drivers of a declared net
 /// have one effective value (IEEE 1800-2023 6.6.1, 10.3.1). Keep the authored
 /// process indices so removing a driver does not renumber the random streams
 /// of later processes. Only whole-net identifier reads and identical literals
 /// qualify: calls, slices, variables and conditional assignments retain their
-/// independent driver identities. In particular, `uwire` drivers must not merge.
+/// independent driver identities. In particular, `uwire` drivers must not merge,
+/// and neither do drivers of different strengths.
 pub(super) fn redundant_net_drivers(module: &sv::ir::Module) -> HashSet<usize> {
     let nets: HashSet<_> = module
         .signals()
@@ -700,8 +712,14 @@ pub(super) fn redundant_net_drivers(module: &sv::ir::Module) -> HashSet<usize> {
             sv::ir::Expr::Literal(source) => (true, source),
             _ => continue,
         };
+        // Drivers of different strengths stay distinct (28.12).
         if nets.contains(target.as_str())
-            && !drivers.insert((target.as_str(), literal, source.as_str()))
+            && !drivers.insert((
+                target.as_str(),
+                literal,
+                source.as_str(),
+                process.drive_strength(),
+            ))
         {
             redundant.insert(index);
         }

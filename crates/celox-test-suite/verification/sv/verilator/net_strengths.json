@@ -1,0 +1,15 @@
+{
+  "cases": [
+    {
+      "category": "Combinational",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error-UNSUPPORTED: <case>/source_0.sv:7:30: Unsupported: Unable to resolve unequal strength specifier\n                                           : ... note: In instance 'celox_suite_tb.dut'\n    7 |   assign (strong1, weak0) w1 = a;\n      |                              ^\n                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.054\n%Error-UNSUPPORTED: <case>/source_0.sv:8:30: Unsupported: Unable to resolve unequal strength specifier\n                                           : ... note: In instance 'celox_suite_tb.dut'\n    8 |   assign (weak1, strong0) w1 = b;\n      |                              ^\n%Error-UNSUPPORTED: <case>/source_0.sv:15:30: Unsupported: Unable to resolve unequal strength specifier\n                                            : ... note: In instance 'celox_suite_tb.dut'\n   15 |   assign (weak1, supply0) w4 = a;\n      |                              ^\n%Error-UNSUPPORTED: <case>/source_0.sv:16:30: Unsupported: Unable to resolve unequal strength specifier\n                                            : ... note: In instance 'celox_suite_tb.dut'\n   16 |   assign (strong1, weak0) w4 = b;\n      |                              ^\n%Error-UNSUPPORTED: <case>/source_0.sv:23:30: Unsupported: Unable to resolve unequal strength specifier\n                                            : ... note: In instance 'celox_suite_tb.dut'\n   23 |   assign (weak1, supply0) w7 = a;\n      |                              ^\n%Error-UNSUPPORTED: <case>/source_0.sv:24:28: Unsupported: Unable to resolve unequal strength specifier\n                                            : ... note: In instance 'celox_suite_tb.dut'\n   24 |   assign (weak1, pull0) w7 = b;\n      |                            ^\n%Error: Exiting due to 6 error(s)\n",
+      "expectation": "Simulation",
+      "name": "net_strengths::two_state_drivers_of_different_strengths",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

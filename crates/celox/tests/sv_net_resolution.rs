@@ -195,6 +195,59 @@ fn delayed_nets_resolve_as_their_net_type() {
     assert_eq!(display(source, false), ["010", "111"]);
 }
 
+/// Drivers of different strengths combine by strength (IEEE 1800-2023
+/// 28.12), on nets wider than a word too, and a driver that repeats another
+/// one with a different strength still drives.
+#[test]
+fn drivers_combine_by_strength() {
+    let source = r#"`timescale 1ns/1ns
+      module Top;
+        reg [69:0] a, b;
+        wire [69:0] w, r;
+        assign (pull1, pull0) w = a;
+        assign w = b;
+        assign r = a;
+        assign (supply1, supply0) r = a;
+        assign r = b;
+        initial begin
+          a = '1; b = '0; #1 $display("%h %h", w, r);
+          b = 'x; #1 $display("%h %h", w, r);
+        end
+      endmodule"#;
+    assert_eq!(
+        display(source, true),
+        [
+            "000000000000000000 3fffffffffffffffff",
+            "xxxxxxxxxxxxxxxxxx 3fffffffffffffffff"
+        ]
+    );
+    assert_eq!(
+        display(source, false),
+        [
+            "000000000000000000 3fffffffffffffffff",
+            "000000000000000000 3fffffffffffffffff"
+        ]
+    );
+}
+
+/// A driver of high impedance for a value drives z for it, also as the only
+/// driver of its net (IEEE 1800-2023 28.11); a two-state net stores it as 0.
+#[test]
+fn a_lone_driver_of_high_impedance_drives_z() {
+    let source = r#"`timescale 1ns/1ns
+      module Top;
+        reg [1:0] a;
+        wire [1:0] y;
+        assign (highz1, strong0) y = a;
+        initial begin
+          a = 2'b01; #1 $display("%b", y);
+          a = 2'b10; #1 $display("%b", y);
+        end
+      endmodule"#;
+    assert_eq!(display(source, true), ["0z", "z0"]);
+    assert_eq!(display(source, false), ["00", "00"]);
+}
+
 /// What the resolution does not cover keeps the single-driver rule.
 #[test]
 fn other_drivers_stay_rejected() {
@@ -209,14 +262,9 @@ fn other_drivers_stay_rejected() {
             "module Top(input logic a, b, output logic y); tri1 t; assign t = a; assign t = b; assign y = t; endmodule",
             "multiple net drivers",
         ),
-        // A drive strength decides between conflicting drivers (28.12).
+        // Wired logic with drive strengths (28.12.4) is not modelled.
         (
-            "module Top(input logic a, b, output wire y); assign (pull1, pull0) y = a; assign y = b; endmodule",
-            "multiple net drivers",
-        ),
-        // Also when the assignment with the strength repeats another driver.
-        (
-            "module Top(input logic a, b, output wire y); assign y = a; assign (supply1, supply0) y = a; assign y = b; endmodule",
+            "module Top(input logic a, b, output wand y); assign (pull1, pull0) y = a; assign y = b; endmodule",
             "multiple net drivers",
         ),
         // One assignment that drives a bit twice.
