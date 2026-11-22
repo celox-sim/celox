@@ -8,12 +8,12 @@ impl StateDependencies {
     /// with consumers in different schedules belongs to the shared settle.
     /// Its inputs then serve just that settle, avoiding extra stores deeper
     /// in the shared cone. Wiring forwards its consumers to its producer.
-    pub(in super::super) fn shared_calculations(
+    pub(in super::super) fn sample_placement(
         &self,
         arena: &SLTNodeArena<AbsoluteAddr>,
         event_nets: HashSet<AbsoluteAddr>,
-        full_settle_samples: Option<&EventEvaluations>,
-    ) -> HashSet<AbsoluteAddr> {
+        samples: &EventEvaluations,
+    ) -> SamplePlacement {
         #[derive(Clone, Copy, PartialEq, Eq)]
         enum Consumer {
             Observation,
@@ -31,37 +31,35 @@ impl StateDependencies {
                 })
                 .or_insert(consumer);
         };
-        // A full settle runs even while every data arm of a clocked mux is
+        // An input change can run a settle even while every clocked mux is
         // inactive. Its selector is always sampled. Data and RAM port payloads
         // can share an already observed result without making their producer
         // run on every settle just because two clocks might sample it.
         let mut conditional_reads = HashSet::default();
-        if let Some(events) = full_settle_samples {
-            for (&event, batches) in events {
-                let mut roots = HashSet::default();
-                for batch in batches {
-                    let EdgeEvaluation::Graph(form) = batch else {
-                        continue;
-                    };
-                    roots.extend(form.roots.iter().map(|r| eager_sample_root(arena, r.value)));
-                    roots.extend(form.ports.iter().map(|p| p.guard));
-                }
-                let mut inputs = HashSet::default();
-                for root in roots {
-                    crate::flattening::collect_inputs(root, arena, &mut inputs);
-                }
-                for input in inputs {
-                    demand(&mut owners, input.id, Consumer::Clock(event));
-                }
+        for (&event, batches) in samples {
+            let mut roots = HashSet::default();
+            for batch in batches {
+                let EdgeEvaluation::Graph(form) = batch else {
+                    continue;
+                };
+                roots.extend(form.roots.iter().map(|r| eager_sample_root(arena, r.value)));
+                roots.extend(form.ports.iter().map(|p| p.guard));
+            }
+            let mut inputs = HashSet::default();
+            for root in roots {
+                crate::flattening::collect_inputs(root, arena, &mut inputs);
+            }
+            for input in inputs {
+                demand(&mut owners, input.id, Consumer::Clock(event));
             }
         }
         for p in &self.producers {
             let consumer = match p.update {
-                Update::Sample(_) if full_settle_samples.is_some() => {
+                Update::Sample(_) => {
                     conditional_reads.extend(p.inputs.iter().map(|a| a.absolute_addr()));
                     continue;
                 }
-                Update::Sample(event) | Update::Procedure(Some(event)) => Consumer::Clock(event),
+                Update::Procedure(Some(event)) => Consumer::Clock(event),
                 Update::Procedure(None) => Consumer::Observation,
                 _ => continue,
             };
@@ -94,16 +92,19 @@ impl StateDependencies {
             .copied()
             .filter(|net| !users.contains_key(net))
             .collect();
-        let mut shared = HashSet::default();
+        let mut placement = SamplePlacement::default();
         while let Some(net) = ready.pop() {
             let (root, writer) = definitions[&net];
             let mut owner = owners.get(&net).copied();
             let mut sampled_lazily = conditional_reads.contains(&net);
+            if sampled_lazily && owner.is_none() && matches!(arena.get(root), SLTNode::Concat(_)) {
+                placement.conditional_packs.insert(net);
+            }
             if (owner == Some(Consumer::Shared)
                 || (owner == Some(Consumer::Observation) && sampled_lazily))
                 && is_calculation(arena, root)
             {
-                shared.insert(net);
+                placement.shared.insert(net);
                 owner = Some(Consumer::Observation);
                 sampled_lazily = false;
             }
@@ -122,7 +123,7 @@ impl StateDependencies {
                 }
             }
         }
-        shared
+        placement
     }
 }
 
