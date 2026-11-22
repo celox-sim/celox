@@ -613,6 +613,52 @@ fn level_lists_equal_to_the_implicit_reads_bitwise_are_combinational() {
     assert_eq!(procedure_kernels(more_bits), 2);
 }
 
+/// The optimizer may replace the exact decoder only when the selector, labels,
+/// physical bit positions and incoming word prove the shift equivalent.
+#[test]
+fn exact_one_hot_case_builds_a_single_shift() {
+    for (selector, range, clear, last, four_state, shifts) in [
+        ("s", "3:0", "0", "2'd2", false, 1),
+        ("s", "0:3", "0", "2'd2", false, 0),
+        ("s", "3:0", "2", "2'd2", false, 0),
+        ("s", "3:0", "0", "2'd1", false, 0),
+        ("s", "3:0", "0", "2'd2", true, 0),
+        ("{1'bx, s[0]}", "3:0", "0", "2'd2", false, 0),
+    ] {
+        let source = format!(
+            "module Top(input logic [1:0] s, output logic [{range}] y);
+            always_comb begin y = {clear}; case ({selector})
+                2'd3: y[3] = 1; 2'd0: y[0] = 1;
+                2'd1: y[1] = 1; {last}: y[2] = 1;
+            endcase end endmodule"
+        );
+        let mut trace = FrontendTrace::default();
+        schedule_sources(
+            &[(&source, Path::new("one_hot.sv"))],
+            "Top",
+            &[],
+            &[],
+            &[],
+            four_state,
+            &Default::default(),
+            &FrontendTraceOptions {
+                sim_modules: true,
+                ..Default::default()
+            },
+            Some(&mut trace),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let modules = trace.sim_modules.unwrap();
+        let found = modules
+            .values()
+            .flat_map(|m| m.arena.iter())
+            .filter(|n| matches!(n, SLTNode::Binary(_, BinaryOp::Shl, _)))
+            .count();
+        assert_eq!(found, shifts, "{source} (four_state={four_state})");
+    }
+}
+
 /// A decoder with a default and an override can join the graph even when
 /// its sensitivity covers only part of a word. Omitting a read must still
 /// leave it as an event process.
