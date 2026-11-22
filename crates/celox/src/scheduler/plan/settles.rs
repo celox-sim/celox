@@ -572,6 +572,15 @@ impl<'a> PlanBuilder<'a> {
         let mut publications = HashMap::default();
         let mut event_readers = None;
         let mut changed_outputs: HashMap<_, Vec<_>> = HashMap::default();
+        let sizes: Vec<_> = sir
+            .eval_comb
+            .iter()
+            .map(|unit| instructions(unit).count())
+            .collect();
+        if start + 64 <= program.layout().widths[&self.slots.settle_events] {
+            let banks = event_order::read_banks(events, &inputs, &register_inputs, storage);
+            groups = event_order::register_groups(groups, &banks, &sizes);
+        }
         let count = groups.iter().filter(|(a, _)| !a.every_settle).count();
         if count > 0 && start + 64 <= program.layout().widths[&self.slots.settle_events] {
             // Publish a ready-to-use consumer mask. Even a wide clock
@@ -636,11 +645,6 @@ impl<'a> PlanBuilder<'a> {
             }));
         }
         if tracing::enabled!(target: "celox::scheduler", tracing::Level::DEBUG) {
-            let sizes: Vec<_> = sir
-                .eval_comb
-                .iter()
-                .map(|unit| instructions(unit).count())
-                .collect();
             let active = |index: usize| {
                 groups
                     .iter()

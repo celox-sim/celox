@@ -2922,6 +2922,53 @@ endmodule"#;
     }
 }
 
+/// A sparse write at either of two coincident clocks must publish the data
+/// before the combinational read. Five-bit words also exercise padded elements.
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+#[test]
+fn sparse_clock_publications_reach_the_selected_word() {
+    let source = r#"`timescale 1ns/1ns
+module Top(input bit [7:0] addr, input bit [4:0] data, input bit en,
+           output wire [4:0] y, output bit [4:0] captured);
+    bit a, b;
+    bit [4:0] mem[256];
+    always #2 a = ~a;
+    always #6 b = ~b;
+    always @(posedge a) if (en) mem[addr] <= data;
+    always @(posedge b) captured <= mem[addr];
+    assign y = mem[addr];
+endmodule"#;
+    let mut sim = crate::Simulation::from_sv_sources(
+        vec![(source, std::path::Path::new("sparse-enable.sv"))],
+        "Top",
+    )
+    .opt_level(crate::OptLevel::O2)
+    .disable_pass(crate::SirPass::PartitionedSettle)
+    .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+    .build_native()
+    .unwrap();
+    let [address, data, enable, y, captured] =
+        ["addr", "data", "en", "y", "captured"].map(|name| sim.signal(name));
+    for (time, row, incoming, write, expected, sample) in [
+        (2, 3u8, 17u8, 1u8, 17u8, 0u8),
+        (6, 173, 31, 1, 31, 0),
+        (10, 3, 9, 0, 17, 0),
+        (14, 173, 31, 1, 31, 0),
+        (18, 3, 21, 1, 21, 17),
+    ] {
+        sim.modify(|io| {
+            io.set(address, row);
+            io.set(data, incoming);
+            io.set(enable, write);
+        })
+        .unwrap();
+        sim.run_until(time).unwrap();
+        assert_eq!(sim.get(y), expected.into(), "word at {time}");
+        assert_eq!(sim.get(captured), sample.into(), "sample at {time}");
+    }
+    assert!(sim.scheduler_stats().checked_steps > 0);
+}
+
 /// Changes to the shared decode reach the banks between their clock edges.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
