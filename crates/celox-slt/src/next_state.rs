@@ -9,7 +9,9 @@
 //! (IEEE 1800-2023 10.4.2); the ports apply after the roots, in order.
 
 mod lower;
-pub use lower::{Publication, SampledStore, lower_transition, sample_transition};
+pub use lower::{
+    Publication, SampledStore, lower_transition, sample_enabled_transition, sample_transition,
+};
 
 use std::hash::Hash;
 
