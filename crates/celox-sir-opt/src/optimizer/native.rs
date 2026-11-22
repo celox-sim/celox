@@ -192,6 +192,8 @@ pub fn optimize_merged_chain(
         changed = true;
         verify(eu, "after native final pure-value placement")?;
     }
+    changed |=
+        super::passes::analysis::dead_working_stores::eliminate_overwritten_working_stores(eu);
     // The schedule and packed-store decisions are final. Removing a pack
     // here cannot change which settle regions execute on an input change.
     changed |= pass_concat_folding::fold_private_concat_consumers(eu, four_state);

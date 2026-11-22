@@ -189,15 +189,36 @@ fn store_transfer(
     transfer
 }
 
+/// A call or halt can expose pending values to the caller. Notifications
+/// implicitly read the old destination and a non-static read may alias any
+/// tracked range. Earlier writes still die if overwritten before this point.
+fn observes_pending_state(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
+    inst.is_host_interaction()
+        || inst.may_fail()
+        || inst.accesses_unknown_state()
+        || (inst.is_observable()
+            && inst
+                .memory_write()
+                .is_some_and(|w| w.addr.region == WORKING_REGION))
+        || inst.memory_read().is_some_and(|r| {
+            r.addr.region == WORKING_REGION && !matches!(r.offset, SIROffset::Static(_))
+        })
+}
+
 fn transfer_block(
     block: &BasicBlock<RegionedAbsoluteAddr>,
     mut live: LiveBits,
     mut unknown: bool,
     read_index: &HashMap<WorkingKey, usize>,
     store_transfers: &HashMap<WorkingKey, StoreTransfer>,
+    external: Option<&LiveBits>,
 ) -> (LiveBits, bool) {
     for inst in block.instructions.iter().rev() {
-        if is_dynamic_working_read(inst) {
+        if let Some(external) = external
+            && observes_pending_state(inst)
+        {
+            live.union_with(external);
+        } else if is_dynamic_working_read(inst) {
             unknown = true;
         } else if inst.has_opaque_state_access() {
             for key in read_working_keys(inst) {
@@ -250,9 +271,22 @@ fn backward_order(successors: &[Vec<usize>]) -> VecDeque<usize> {
 pub(in crate::optimizer) fn eliminate_dead_working_stores(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
 ) {
+    eliminate_stores(eu, false);
+}
+
+/// The caller may publish any pending range after this unit returns.
+/// A store can still be dead if every path overwrites it before observation.
+pub(in crate::optimizer) fn eliminate_overwritten_working_stores(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+) -> bool {
+    eliminate_stores(eu, true)
+}
+
+fn eliminate_stores(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, live_at_exit: bool) -> bool {
     let mut read_keys = Vec::new();
     let mut read_index = HashMap::default();
     let mut store_keys = HashSet::default();
+    let mut repeated = false;
     for block in eu.blocks.values() {
         for inst in &block.instructions {
             for key in read_working_keys(inst) {
@@ -262,12 +296,26 @@ pub(in crate::optimizer) fn eliminate_dead_working_stores(
                 });
             }
             if let Some(key) = working_store_key(inst) {
-                store_keys.insert(key);
+                repeated |= !store_keys.insert(key);
             }
         }
     }
-    if store_keys.is_empty() {
-        return;
+    if store_keys.is_empty() || (live_at_exit && !repeated) {
+        return false;
+    }
+    if live_at_exit {
+        for &key in &store_keys {
+            read_index.entry(key).or_insert_with(|| {
+                read_keys.push(key);
+                read_keys.len() - 1
+            });
+        }
+    }
+    let mut exit = LiveBits::with_len(read_keys.len());
+    if live_at_exit {
+        for key in &store_keys {
+            exit.insert(read_index[key]);
+        }
     }
 
     let mut reads_by_addr: HashMap<AbsoluteAddr, Vec<(WorkingKey, usize)>> = HashMap::default();
@@ -305,14 +353,21 @@ pub(in crate::optimizer) fn eliminate_dead_working_stores(
         }
     }
 
-    let mut live_in = vec![LiveBits::with_len(read_keys.len()); block_ids.len()];
+    // In an outlined function, keep the last pending value even on a
+    // non-returning path unless a later store definitely replaces it.
+    let external = live_at_exit.then_some(&exit);
+    let mut live_in = vec![exit.clone(); block_ids.len()];
     let mut unknown_in = vec![false; block_ids.len()];
     let mut queued = vec![true; block_ids.len()];
     let mut work = backward_order(&successors);
     let mut out = LiveBits::with_len(read_keys.len());
     while let Some(block) = work.pop_front() {
         queued[block] = false;
-        out.words.fill(0);
+        if successors[block].is_empty() {
+            out.clone_from(&exit);
+        } else {
+            out.words.fill(0);
+        }
         let mut out_unknown = false;
         for &successor in &successors[block] {
             out.union_with(&live_in[successor]);
@@ -324,6 +379,7 @@ pub(in crate::optimizer) fn eliminate_dead_working_stores(
             out_unknown,
             &read_index,
             &store_transfers,
+            external,
         );
         out = next;
         if out == live_in[block] && next_unknown == unknown_in[block] {
@@ -343,8 +399,13 @@ pub(in crate::optimizer) fn eliminate_dead_working_stores(
 
     let mut live = out;
     let mut keep = Vec::new();
+    let mut changed = false;
     for (block, block_id) in block_ids.into_iter().enumerate() {
-        live.words.fill(0);
+        if successors[block].is_empty() {
+            live.clone_from(&exit);
+        } else {
+            live.words.fill(0);
+        }
         let mut unknown = false;
         for &successor in &successors[block] {
             live.union_with(&live_in[successor]);
@@ -355,7 +416,11 @@ pub(in crate::optimizer) fn eliminate_dead_working_stores(
         keep.resize(body.instructions.len(), true);
         for index in (0..body.instructions.len()).rev() {
             let inst = &body.instructions[index];
-            if is_dynamic_working_read(inst) {
+            if let Some(external) = external
+                && observes_pending_state(inst)
+            {
+                live.union_with(external);
+            } else if is_dynamic_working_read(inst) {
                 unknown = true;
             } else if inst.has_opaque_state_access() {
                 for key in read_working_keys(inst) {
@@ -372,6 +437,7 @@ pub(in crate::optimizer) fn eliminate_dead_working_stores(
                         .any(|&read| live.contains(read))
                 {
                     keep[index] = false;
+                    changed = true;
                 }
                 if !unknown {
                     for &read in &transfer.covered_reads {
@@ -387,6 +453,7 @@ pub(in crate::optimizer) fn eliminate_dead_working_stores(
             retain
         });
     }
+    changed
 }
 
 #[cfg(test)]
@@ -459,6 +526,113 @@ mod tests {
         eliminate_dead_working_stores(&mut eu);
 
         assert_eq!(eu.blocks[&BlockId(0)].instructions, vec![stage, apply]);
+    }
+
+    #[test]
+    fn external_publication_keeps_the_last_write_on_each_path() {
+        let working = address(WORKING_REGION, 0);
+        let first = store(working, 0, 16, 0);
+        let last = store(working, 0, 16, 1);
+        let part = store(working, 0, 8, 2);
+        for (other, exit, remove_first) in [
+            (vec![last.clone()], SIRTerminator::Return, true),
+            (vec![part], SIRTerminator::Return, false),
+            (vec![], SIRTerminator::Error(1), false),
+            (vec![], SIRTerminator::Jump(BlockId(2), vec![]), false),
+        ] {
+            let mut eu = unit([
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![],
+                    instructions: vec![first.clone()],
+                    terminator: SIRTerminator::Branch {
+                        cond: RegisterId(3),
+                        true_block: (BlockId(1), vec![]),
+                        false_block: (BlockId(2), vec![]),
+                    },
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    params: vec![],
+                    instructions: vec![last.clone()],
+                    terminator: SIRTerminator::Return,
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    params: vec![],
+                    instructions: other.clone(),
+                    terminator: exit,
+                },
+            ]);
+            assert_eq!(eliminate_overwritten_working_stores(&mut eu), remove_first);
+            assert_eq!(eu.blocks[&BlockId(0)].instructions.is_empty(), remove_first);
+            assert_eq!(
+                eu.blocks[&BlockId(1)].instructions.as_slice(),
+                std::slice::from_ref(&last)
+            );
+            assert_eq!(eu.blocks[&BlockId(2)].instructions, other);
+        }
+    }
+
+    #[test]
+    fn observed_pending_values_survive_an_overwrite() {
+        let working = address(WORKING_REGION, 0);
+        let first = store(working, 0, 16, 0);
+        let last = store(working, 0, 16, 1);
+        let mut notifying = last.clone();
+        if let SIRInstruction::Store(_, _, _, _, _, sites) = &mut notifying {
+            sites.push(0);
+        }
+        for instructions in [
+            vec![
+                first.clone(),
+                SIRInstruction::Load(RegisterId(2), working, SIROffset::Static(7), 1),
+                last.clone(),
+            ],
+            vec![
+                first.clone(),
+                SIRInstruction::Load(RegisterId(2), working, SIROffset::Dynamic(RegisterId(3)), 1),
+                last,
+            ],
+            vec![first, notifying],
+        ] {
+            let mut eu = unit([BasicBlock {
+                id: BlockId(0),
+                params: vec![],
+                instructions: instructions.clone(),
+                terminator: SIRTerminator::Return,
+            }]);
+            assert!(!eliminate_overwritten_working_stores(&mut eu));
+            assert_eq!(eu.blocks[&BlockId(0)].instructions, instructions);
+        }
+    }
+
+    #[test]
+    fn overwrite_elimination_resumes_on_both_sides_of_a_dynamic_read() {
+        let working = address(WORKING_REGION, 0);
+        let dead = store(working, 0, 8, 0);
+        let before = store(working, 0, 8, 1);
+        let after = store(working, 0, 8, 2);
+        let read =
+            SIRInstruction::Load(RegisterId(3), working, SIROffset::Dynamic(RegisterId(4)), 1);
+        let mut eu = unit([BasicBlock {
+            id: BlockId(0),
+            params: vec![],
+            instructions: vec![
+                dead.clone(),
+                before.clone(),
+                read.clone(),
+                dead,
+                after.clone(),
+            ],
+            terminator: SIRTerminator::Return,
+        }]);
+
+        assert!(eliminate_overwritten_working_stores(&mut eu));
+        assert_eq!(
+            eu.blocks[&BlockId(0)].instructions,
+            vec![before, read, after]
+        );
     }
 
     #[test]
