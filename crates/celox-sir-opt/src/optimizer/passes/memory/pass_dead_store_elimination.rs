@@ -33,35 +33,36 @@ pub(crate) fn eliminate_dead_stores(
 
     let all_eus = program
         .sir
-        .eval_comb
+        .updates
+        .observe
         .iter()
         .chain(
             program
                 .sir
-                .eval_apply_ffs
-                .values()
-                .flat_map(|units| units.iter()),
+                .updates
+                .groups(celox_sir::UpdateEntry::Transition)
+                .flat_map(|(_, units)| units),
         )
         .chain(
             program
                 .sir
-                .eval_comb_apply_ffs
-                .values()
-                .flat_map(|units| units.iter()),
+                .updates
+                .groups(celox_sir::UpdateEntry::FromInputs)
+                .flat_map(|(_, units)| units),
         )
         .chain(
             program
                 .sir
-                .eval_only_ffs
-                .values()
-                .flat_map(|units| units.iter()),
+                .updates
+                .groups(celox_sir::UpdateEntry::Sample)
+                .flat_map(|(_, units)| units),
         )
         .chain(
             program
                 .sir
-                .apply_ffs
-                .values()
-                .flat_map(|units| units.iter()),
+                .updates
+                .groups(celox_sir::UpdateEntry::Publish)
+                .flat_map(|(_, units)| units),
         )
         .chain(
             program
@@ -134,8 +135,8 @@ pub(crate) fn eliminate_dead_stores(
         .sir
         .parallel
         .iter_mut()
-        .flat_map(|parallel| parallel.eval_comb.iter_mut().map(|unit| &mut unit.unit));
-    for eu in program.sir.eval_comb.iter_mut().chain(parallel_comb) {
+        .flat_map(|parallel| parallel.observe.iter_mut().map(|unit| &mut unit.unit));
+    for eu in program.sir.updates.observe.iter_mut().chain(parallel_comb) {
         for block in eu.blocks.values_mut() {
             block.instructions.retain(|inst| {
                 match inst {
@@ -227,19 +228,17 @@ mod tests {
     /// and a function unit loads object 3.
     fn surviving_stores() -> Vec<u32> {
         let mut sir = SirProgram {
-            eval_comb: vec![unit(vec![
-                store(1),
-                store(2),
-                store(3),
-                store(4),
-                call(vec![address(2)]),
-            ])],
-            eval_apply_ffs: HashMap::default(),
-            eval_comb_apply_ffs: HashMap::default(),
-            merge_comb_apply: false,
-            eval_comb_stateful: None,
-            eval_only_ffs: HashMap::default(),
-            apply_ffs: HashMap::default(),
+            updates: celox_sir::StateUpdates::from_groups(
+                vec![unit(vec![
+                    store(1),
+                    store(2),
+                    store(3),
+                    store(4),
+                    call(vec![address(2)]),
+                ])],
+                None,
+                [],
+            ),
             parallel: None,
             processes: Vec::new(),
             functions: vec![celox_sir::FunctionUnit {
@@ -266,7 +265,7 @@ mod tests {
             layout_requirements: &mut layout_requirements,
         };
         eliminate_dead_stores(&mut program, &HashSet::default(), &HashMap::default());
-        sir.eval_comb[0].blocks[&BlockId(0)]
+        sir.updates.observe[0].blocks[&BlockId(0)]
             .instructions
             .iter()
             .filter_map(|instruction| match instruction {

@@ -298,8 +298,6 @@ pub(super) fn stage_nba_sites(
     design: &Design,
     clocks: &ClockAnalysis,
     units: &mut Units,
-    eval_comb: &[ExecutionUnit<RegionedAbsoluteAddr>],
-    eval_comb_apply_ffs: &FfUnits,
     runtime_comb_observers: &[RuntimeCombObserver<AbsoluteAddr>],
     comb_sources: &HashMap<AbsoluteAddr, HashSet<AbsoluteAddr>>,
 ) {
@@ -314,9 +312,7 @@ pub(super) fn stage_nba_sites(
     let ClockAnalysis {
         topological_clocks, ..
     } = clocks;
-    let eval_apply_ffs = &units.eval_apply_ffs;
-    let eval_only_ffs = &units.eval_only_ffs;
-    let apply_ffs = &units.apply_ffs;
+    let updates = &units.updates;
     let functions = &units.functions;
     let processes = &mut units.processes;
     let timing = &mut units.timing;
@@ -345,14 +341,7 @@ pub(super) fn stage_nba_sites(
                         .flat_map(|observer| observer.sensitivity.iter().map(|atom| atom.id)),
                 )
                 .collect();
-            for ffs in [
-                eval_apply_ffs,
-                eval_comb_apply_ffs,
-                eval_only_ffs,
-                apply_ffs,
-            ] {
-                observed.extend(ffs.keys().copied());
-            }
+            observed.extend(updates.events.keys().copied());
             through_comb(observed, comb_sources)
         };
         // The ports of the top module, which the host drives.
@@ -376,12 +365,8 @@ pub(super) fn stage_nba_sites(
             .unwrap_or_default();
         let staged = staged_nba_sites(
             timing,
-            eval_comb
-                .iter()
-                .chain(eval_apply_ffs.values().flatten())
-                .chain(eval_comb_apply_ffs.values().flatten())
-                .chain(eval_only_ffs.values().flatten())
-                .chain(apply_ffs.values().flatten())
+            updates
+                .units()
                 .chain(processes.iter().map(|process| &process.kernel))
                 .chain(functions.iter().map(|function| &function.unit)),
             &top_ports,
@@ -397,8 +382,6 @@ pub(super) fn check_function_stores(
     design: &Design,
     clocks: &ClockAnalysis,
     units: &Units,
-    eval_comb: &[ExecutionUnit<RegionedAbsoluteAddr>],
-    eval_comb_apply_ffs: &FfUnits,
 ) -> Result<(), ParserError> {
     let Design {
         instance_modules,
@@ -411,11 +394,7 @@ pub(super) fn check_function_stores(
         topological_clocks, ..
     } = clocks;
     let Units {
-        eval_apply_ffs,
-        eval_only_ffs,
-        apply_ffs,
-        functions,
-        ..
+        updates, functions, ..
     } = units;
 
     // The per-store instrumentation above rewrites the stores of function
@@ -444,18 +423,12 @@ pub(super) fn check_function_stores(
         // store there. A variable that is only wired to another, as through
         // a continuous assignment to a port, is no event: `clock_domains`
         // names every end of such wiring.
-        let domains: HashSet<AbsoluteAddr> = eval_apply_ffs
-            .keys()
-            .chain(eval_comb_apply_ffs.keys())
-            .chain(eval_only_ffs.keys())
-            .chain(apply_ffs.keys())
-            .copied()
-            .collect();
+        let domains = &updates.events;
         let events: HashSet<AbsoluteAddr> = clock_domains
             .iter()
-            .filter(|(_, canonical)| domains.contains(canonical))
+            .filter(|(_, canonical)| domains.contains_key(canonical))
             .flat_map(|(&alias, &canonical)| [alias, canonical])
-            .chain(domains.iter().copied())
+            .chain(domains.keys().copied())
             .chain(topological_clocks.iter().copied())
             .collect();
         let calls = |unit: &ExecutionUnit<RegionedAbsoluteAddr>| -> Vec<usize> {
@@ -468,14 +441,7 @@ pub(super) fn check_function_stores(
                 })
                 .collect()
         };
-        let mut pending: Vec<usize> = eval_comb
-            .iter()
-            .chain(eval_apply_ffs.values().flatten())
-            .chain(eval_comb_apply_ffs.values().flatten())
-            .chain(eval_only_ffs.values().flatten())
-            .chain(apply_ffs.values().flatten())
-            .flat_map(calls)
-            .collect();
+        let mut pending: Vec<usize> = updates.units().flat_map(calls).collect();
         let mut called_by_units = HashSet::default();
         while let Some(function) = pending.pop() {
             if called_by_units.insert(function)

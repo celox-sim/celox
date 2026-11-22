@@ -99,10 +99,10 @@ pub(super) fn prepare_comb_logic(
     Ok(var_widths)
 }
 
-/// What a fused flip-flop factory schedules: the actions of every event and
+/// Source-scheduled actions of each event alongside their
 /// the combinational paths, widths and loop options over stable addresses.
-pub(super) type FusedInputs = (
-    HashMap<AbsoluteAddr, Vec<FusedFfAction>>,
+pub(super) type SourceUpdateInputs = (
+    HashMap<AbsoluteAddr, Vec<EventAction>>,
     SLTNodeArena<RegionedAbsoluteAddr>,
     Vec<LogicPath<RegionedAbsoluteAddr>>,
     HashMap<RegionedAbsoluteAddr, usize>,
@@ -111,38 +111,23 @@ pub(super) type FusedInputs = (
     HashMap<(RegionedAbsoluteAddr, RegionedAbsoluteAddr), usize>,
 );
 
-/// The inputs of the fused schedules, if a factory lowers flip-flops.
-pub(super) fn fused_ff_inputs(
-    fused_ff_factory: Option<&dyn FusedFfLoweringFactory>,
+/// Project the expression arena only when a source scheduler has events.
+pub(super) fn source_update_inputs(
+    actions: HashMap<AbsoluteAddr, Vec<EventAction>>,
     design: &Design,
     logic: &StateGraph,
-    ff_runtime_relocations: &HashMap<InstanceId, FfRuntimeRelocation>,
     var_widths: &HashMap<AbsoluteAddr, usize>,
     ignored_loops: &HashSet<(AbsoluteAddr, AbsoluteAddr)>,
     true_loops: &HashMap<(AbsoluteAddr, AbsoluteAddr), usize>,
-) -> Result<Option<FusedInputs>, ParserError> {
-    let Design {
-        bindings,
-        modules,
-        instance_modules,
-        clock_domains,
-        unpacked_element_widths,
-        ..
-    } = design;
+) -> Result<Option<SourceUpdateInputs>, ParserError> {
+    let unpacked_element_widths = &design.unpacked_element_widths;
     let StateGraph {
         global_arena,
         comb_blocks,
         ..
     } = logic;
 
-    let fused_inputs = if fused_ff_factory.is_some() {
-        let actions = build_fused_ff_actions(
-            bindings,
-            modules,
-            instance_modules,
-            clock_domains,
-            ff_runtime_relocations,
-        );
+    let source_inputs = if !actions.is_empty() {
         let mut clock_arena = SLTNodeArena::<RegionedAbsoluteAddr>::new();
         let mut clock_node_cache = HashMap::default();
         let clock_comb_blocks = comb_blocks
@@ -207,7 +192,7 @@ pub(super) fn fused_ff_inputs(
     } else {
         None
     };
-    Ok(fused_inputs)
+    Ok(source_inputs)
 }
 
 /// The event signals and their aliases.
@@ -326,7 +311,7 @@ pub(super) fn comb_process_state(
 /// and the design allow it. Returns the nets that left the program.
 pub(super) fn inline_unobserved_nets(
     parallel: &ParallelScheduleOptions,
-    fused_ff_factory: Option<&dyn FusedFfLoweringFactory>,
+    has_source_actions: bool,
     four_state: bool,
     design: &Design,
     logic: &mut StateGraph,
@@ -354,9 +339,7 @@ pub(super) fn inline_unobserved_nets(
         ..
     } = logic;
     let Units {
-        eval_apply_ffs,
-        eval_only_ffs,
-        apply_ffs,
+        updates,
         processes,
         functions,
         timing,
@@ -368,7 +351,7 @@ pub(super) fn inline_unobserved_nets(
     // a `$dumpvars` may select any object at run time.
     let mut inlined_nets: Vec<AbsoluteAddr> = Vec::new();
     if parallel.unobserved_nets != celox_design::DeadStorePolicy::Off
-        && fused_ff_factory.is_none()
+        && !has_source_actions
         && !four_state
         && !parallel.enabled()
         && !timing
@@ -383,11 +366,8 @@ pub(super) fn inline_unobserved_nets(
             modules,
             bindings,
             PinnedUnits {
-                flip_flops: eval_apply_ffs
-                    .values()
-                    .chain(eval_only_ffs.values())
-                    .chain(apply_ffs.values())
-                    .flatten()
+                flip_flops: updates
+                    .units()
                     .chain(
                         parallel_ff_units
                             .values()
@@ -404,10 +384,9 @@ pub(super) fn inline_unobserved_nets(
                     .chain(processes.iter().map(|process| &process.kernel))
                     .chain(functions.iter().map(|function| &function.unit))
                     .collect(),
-                events: eval_apply_ffs
+                events: updates
+                    .events
                     .keys()
-                    .chain(eval_only_ffs.keys())
-                    .chain(apply_ffs.keys())
                     .chain(topological_clocks)
                     .chain(clock_nets)
                     .copied()
@@ -466,56 +445,58 @@ pub(super) fn plan_settle_flags(
         ..
     } = logic;
     let Units {
-        eval_apply_ffs,
-        timing,
-        ..
+        updates, timing, ..
     } = units;
 
     let root_instance = expanded[&InstancePath(Vec::new())];
-    settle_partitioning(parallel, comb_blocks, global_arena, eval_apply_ffs.len()).map(
-        |target_cost| {
-            let var_id = SourceVarId(
-                modules[&root_id]
-                    .variables
-                    .keys()
-                    .map(|id| id.0 + 1)
-                    .max()
-                    .unwrap_or(0),
-            );
-            // The wait flags follow the partition flags: a partition
-            // changing a signal an edge wait watches, or one of the
-            // signal's occurrence counters, sets its process's flag
-            // (`SettlePartitions::waits`). A pulse that returns to the
-            // starting value within one partition changes only the
-            // counters.
-            let mut external_readers: HashMap<AbsoluteAddr, Vec<usize>> = HashMap::default();
-            for site in &timing.wait_sites {
-                for &(signal, _) in &site.terms {
-                    let counters = counted
-                        .get(&signal)
-                        .into_iter()
-                        .flat_map(|slots| [slots.changes, slots.rises, slots.falls]);
-                    for watched in std::iter::once(signal).chain(counters) {
-                        let readers = external_readers.entry(watched).or_default();
-                        if !readers.contains(&site.process) {
-                            readers.push(site.process);
-                        }
+    settle_partitioning(
+        parallel,
+        comb_blocks,
+        global_arena,
+        updates.groups(UpdateEntry::Transition).count(),
+    )
+    .map(|target_cost| {
+        let var_id = SourceVarId(
+            modules[&root_id]
+                .variables
+                .keys()
+                .map(|id| id.0 + 1)
+                .max()
+                .unwrap_or(0),
+        );
+        // The wait flags follow the partition flags: a partition
+        // changing a signal an edge wait watches, or one of the
+        // signal's occurrence counters, sets its process's flag
+        // (`SettlePartitions::waits`). A pulse that returns to the
+        // starting value within one partition changes only the
+        // counters.
+        let mut external_readers: HashMap<AbsoluteAddr, Vec<usize>> = HashMap::default();
+        for site in &timing.wait_sites {
+            for &(signal, _) in &site.terms {
+                let counters = counted
+                    .get(&signal)
+                    .into_iter()
+                    .flat_map(|slots| [slots.changes, slots.rises, slots.falls]);
+                for watched in std::iter::once(signal).chain(counters) {
+                    let readers = external_readers.entry(watched).or_default();
+                    if !readers.contains(&site.process) {
+                        readers.push(site.process);
                     }
                 }
             }
-            scheduler::SettlePartitioning {
-                flags: AbsoluteAddr {
-                    instance_id: root_instance,
-                    var_id,
-                },
-                target_cost,
-                external_readers,
-                clock_nets: clock_nets.clone(),
-                write_domains: write_domains.clone(),
-                profile: parallel.settle_profile.then_some(process_count),
-            }
-        },
-    )
+        }
+        scheduler::SettlePartitioning {
+            flags: AbsoluteAddr {
+                instance_id: root_instance,
+                var_id,
+            },
+            target_cost,
+            external_readers,
+            clock_nets: clock_nets.clone(),
+            write_domains: write_domains.clone(),
+            profile: parallel.settle_profile.then_some(process_count),
+        }
+    })
 }
 
 /// The error of a program the scheduler rejected, in the names of the

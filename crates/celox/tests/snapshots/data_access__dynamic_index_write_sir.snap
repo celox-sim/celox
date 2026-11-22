@@ -2,13 +2,7 @@
 source: crates/celox/tests/data_access.rs
 expression: output
 ---
-=== Evaluation Flip-Flops (eval_apply_ffs) ===
-
-=== Evaluation Flip-Flops (eval_only_ffs) ===
-
-=== Application Flip-Flops (apply_ffs) ===
-
-=== Evaluation Combinational Logic (eval_comb) ===
+=== Observation ===
 Execution Unit 0:
   Entry Block: 0
   Registers:

@@ -43,7 +43,8 @@ impl<'a> PlanBuilder<'a> {
             _ => inst.host_effects() != celox_sir::HostEffects::default(),
         };
         let effects = sir
-            .eval_comb
+            .updates
+            .observe
             .iter()
             .any(|unit| instructions(unit).any(effect));
         // Some effects are no work of a settle whose inputs did not change.
@@ -79,7 +80,8 @@ impl<'a> PlanBuilder<'a> {
             _ => false,
         };
         let skippable = sir
-            .eval_comb
+            .updates
+            .observe
             .iter()
             .flat_map(instructions)
             .all(|inst| unchanged_inputs_do_nothing(inst) || !effect(inst));
@@ -97,7 +99,8 @@ impl<'a> PlanBuilder<'a> {
         // Opaque readers only keep settles from waiting for their readers
         // (`deferred_settles`).
         let settle_reads: Option<HashSet<AbsoluteAddr>> = skippable.then(|| {
-            sir.eval_comb
+            sir.updates
+                .observe
                 .iter()
                 .flat_map(instructions)
                 .flat_map(read_storage)
@@ -135,7 +138,8 @@ impl<'a> PlanBuilder<'a> {
         // scheduler knows this from its bit-level dependencies; its loads
         // alone can only bound it, since a load may cover bits the settle
         // has not stored yet and then discard them.
-        let comb_stores: HashSet<AbsoluteAddr> = sir.eval_comb.iter().flat_map(stores).collect();
+        let comb_stores: HashSet<AbsoluteAddr> =
+            sir.updates.observe.iter().flat_map(stores).collect();
         // Keep sensitivity signals and their occurrence counters eager. A
         // slice rooted only at the final value can discard the counter writes
         // that record an intermediate pulse (even when the value is unchanged).
@@ -158,7 +162,7 @@ impl<'a> PlanBuilder<'a> {
             .filter(|signal| comb_stores.contains(signal))
             .collect();
         let written_homes: HashSet<_> = comb_stores.iter().copied().map(storage).collect();
-        let retained_candidates = sir.eval_comb_stateful.as_ref().map_or_else(
+        let retained_candidates = sir.updates.retained.as_ref().map_or_else(
             || written_homes.clone(),
             |stateful| {
                 stateful
@@ -168,7 +172,7 @@ impl<'a> PlanBuilder<'a> {
                     .collect()
             },
         );
-        let retained = retained_storage(&sir.eval_comb, &storage, &retained_candidates);
+        let retained = retained_storage(&sir.updates.observe, &storage, &retained_candidates);
         let mut eager_candidate_instructions = None;
         // A host watching every update sees each settle as it happens.
         let update_points = schema
@@ -184,10 +188,10 @@ impl<'a> PlanBuilder<'a> {
                 !update_points
                     && !opaque_dependencies
                     && !effects
-                    && !sir.eval_comb.iter().any(fails)
+                    && !sir.updates.observe.iter().any(fails)
             })
             .and_then(|_| {
-                let stateful = sir.eval_comb_stateful.as_ref();
+                let stateful = sir.updates.retained.as_ref();
                 let eager = stateful.and_then(|stateful| {
                     if stateful.is_empty() && watched_comb.is_empty() {
                         return Some(Vec::new());
@@ -208,11 +212,11 @@ impl<'a> PlanBuilder<'a> {
                     // Keep at least half of the comb work deferred.
                     let size = |units: &[Unit]| units.iter().flat_map(instructions).count();
                     eager_candidate_instructions = Some(size(&eager));
-                    (size(&eager) * 2 < size(&sir.eval_comb)).then_some(eager)
+                    (size(&eager) * 2 < size(&sir.updates.observe)).then_some(eager)
                 });
                 eager.or_else(|| {
                     (watched_comb.is_empty()
-                        && !retains_state(&sir.eval_comb, &storage, &comb_stores))
+                        && !retains_state(&sir.updates.observe, &storage, &comb_stores))
                     .then(Vec::new)
                 })
             });
@@ -255,11 +259,11 @@ impl<'a> PlanBuilder<'a> {
                     if !event.clock {
                         return DomainSettle::Settled;
                     }
-                    let fused = &sir.eval_comb_apply_ffs;
-                    let aliased = fused.keys().any(|key| {
+                    let entry = celox_sir::UpdateEntry::FromInputs;
+                    let aliased = sir.updates.groups(entry).any(|(key, _)| {
                         *key != event.signal && topology.canonical(*key) == event.signal
                     });
-                    match fused.get(&event.signal) {
+                    match sir.updates.at(&event.signal, entry) {
                         Some(units) if !aliased => DomainSettle::Fused(units.clone()),
                         _ => DomainSettle::Settled,
                     }
@@ -328,14 +332,15 @@ impl<'a> PlanBuilder<'a> {
         let incremental = if lazy.is_none()
             && settle_reads.is_some()
             && !self.found.effects
-            && !sir.eval_comb.iter().any(fails)
+            && !sir.updates.observe.iter().any(fails)
             && sir
-                .eval_comb
+                .updates
+                .observe
                 .iter()
                 .flat_map(instructions)
                 .flat_map(read_storage)
                 .all(|read| read.region == STABLE_REGION)
-            && sir.eval_comb.iter().all(|unit| {
+            && sir.updates.observe.iter().all(|unit| {
                 celox_sir::cfg::SirCfg::analyze(unit).is_ok_and(|cfg| cfg.loops.is_empty())
             }) {
             // A partitioned settle has a cone of its own: the partitions the
@@ -371,7 +376,7 @@ impl<'a> PlanBuilder<'a> {
                 let flags =
                     RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, partitioning.flags);
                 let (units, cone_partitions) = crate::settle::clock_cone(
-                    &sir.eval_comb,
+                    &sir.updates.observe,
                     &flags,
                     settle.partitions,
                     offsets,
@@ -382,9 +387,9 @@ impl<'a> PlanBuilder<'a> {
                     "[settle-cone] {cone_partitions} of {} partitions, {} of {} instructions",
                     settle.partitions,
                     size(&units),
-                    size(&sir.eval_comb)
+                    size(&sir.updates.observe)
                 );
-                (size(&units) * 4 < size(&sir.eval_comb) * 3).then_some(Incremental {
+                (size(&units) * 4 < size(&sir.updates.observe) * 3).then_some(Incremental {
                     source: Some(source),
                     events: None,
                     sources,
@@ -447,7 +452,7 @@ impl<'a> PlanBuilder<'a> {
                 .copied()
                 .chain(schema.time_slots.iter().copied().map(&storage)),
         );
-        let retained: Vec<_> = match &sir.eval_comb_stateful {
+        let retained: Vec<_> = match &sir.updates.retained {
             None => retained.iter().copied().collect(),
             Some(targets) => targets
                 .iter()
@@ -457,7 +462,8 @@ impl<'a> PlanBuilder<'a> {
         };
         let stateful = forward.affected_storage(retained.iter().copied());
         let outputs: Vec<HashSet<_>> = sir
-            .eval_comb
+            .updates
+            .observe
             .iter()
             .map(|unit| {
                 instructions(unit)
@@ -549,7 +555,7 @@ impl<'a> PlanBuilder<'a> {
             let affected = clock.union(&stateful).copied().collect();
             let units = slicer.slice_affected(&affected);
             let size = |units: &[Unit]| units.iter().flat_map(instructions).count();
-            return (size(&units) * 4 < size(&sir.eval_comb) * 3).then_some(Incremental {
+            return (size(&units) * 4 < size(&sir.updates.observe) * 3).then_some(Incremental {
                 source: Some(source),
                 sources,
                 units,
@@ -558,7 +564,8 @@ impl<'a> PlanBuilder<'a> {
             });
         }
         let inputs: Vec<HashSet<_>> = sir
-            .eval_comb
+            .updates
+            .observe
             .iter()
             .map(|unit| {
                 instructions(unit)
@@ -573,7 +580,8 @@ impl<'a> PlanBuilder<'a> {
         let mut event_readers = None;
         let mut changed_outputs: HashMap<_, Vec<_>> = HashMap::default();
         let sizes: Vec<_> = sir
-            .eval_comb
+            .updates
+            .observe
             .iter()
             .map(|unit| instructions(unit).count())
             .collect();
@@ -705,7 +713,8 @@ impl<'a> PlanBuilder<'a> {
 
         excluded.extend(
             self.sir
-                .eval_comb
+                .updates
+                .observe
                 .iter()
                 .flat_map(instructions)
                 .flat_map(written_storage)

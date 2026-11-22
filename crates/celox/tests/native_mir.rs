@@ -126,7 +126,7 @@ fn ff_branch_mir() {
 }
 
 #[test]
-fn trace_contains_the_exact_fused_native_pipeline() {
+fn trace_contains_the_emitted_native_event_function() {
     let code = r#"
         module Top (
             clk: input '_ clock,
@@ -152,8 +152,11 @@ fn trace_contains_the_exact_fused_native_pipeline() {
     let mir = result.trace.mir.expect("native MIR should be captured");
 
     assert!(native_sir.contains("=== Native function eval_comb ==="));
-    assert!(native_sir.contains("=== Native function eval_comb_apply_ff[0] ==="));
-    assert!(mir.contains("=== Native function eval_comb_apply_ff[0] ==="));
+    // The register samples an input directly. Both tick entries share its body.
+    for dump in [&native_sir, &mir] {
+        assert!(dump.contains("=== Native function eval_apply_ff[0] ==="));
+        assert!(!dump.contains("=== Native function eval_comb_apply_ff[0] ==="));
+    }
     assert!(
         !mir.contains("Execution Unit eval_apply_ffs"),
         "trace must not independently re-lower source execution units"
@@ -234,8 +237,7 @@ fn scalar_float_arithmetic_stays_explicit_in_mir() {
     }
 }
 
-/// Above a handful of clocks, the combined comb-then-FF ticks share the one
-/// combinational function instead of each compiling a copy of it.
+/// Both small and large sets of clocks share a calculation read by every event.
 #[test]
 fn many_clocks_compile_the_comb_program_once() {
     let functions = |clocks: usize| {
@@ -271,8 +273,7 @@ fn many_clocks_compile_the_comb_program_once() {
         };
         (count("eval_comb ==="), count("eval_comb_apply_ff["))
     };
-    // A handful of clocks keeps one merged comb+FF function per clock.
-    assert_eq!(functions(2), (1, 2));
+    assert_eq!(functions(2), (1, 0));
     assert_eq!(functions(12), (1, 0));
 }
 

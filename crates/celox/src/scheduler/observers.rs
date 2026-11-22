@@ -364,7 +364,7 @@ endmodule"#
                     &options.optimize_options,
                 )
                 .unwrap();
-                assert!(program.sir.eval_comb.iter().any(|unit| {
+                assert!(program.sir.updates.observe.iter().any(|unit| {
                     super::super::instructions(unit).any(|instruction| {
                         matches!(instruction, SIRInstruction::CombCaptureEvent { .. })
                     })
@@ -401,7 +401,7 @@ endmodule"#
                 ));
                 // Keep a separate final unit: an early finish check must not
                 // skip its write after the preceding unit captured $finish.
-                program.sir.eval_comb.push(b.flush_eu().unwrap());
+                program.sir.updates.observe.push(b.flush_eu().unwrap());
                 let mut program = program.into_laid_out(four_state);
                 if mode == SchedulerMode::Compiled {
                     super::super::enable_native_services(&mut program);

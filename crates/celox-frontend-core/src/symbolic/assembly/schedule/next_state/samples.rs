@@ -13,7 +13,6 @@ impl StateGraph {
         dependencies: &StateDependencies,
         shared: &HashSet<AbsoluteAddr>,
         design: &Design,
-        units: &mut Units,
         initial: &[InstanceValue],
         shapes: &HashMap<AbsoluteAddr, (usize, bool)>,
         active_writes: &HashMap<AbsoluteAddr, HashSet<AbsoluteAddr>>,
@@ -181,9 +180,6 @@ impl StateGraph {
                 }
             }
         };
-        for unit in units.eval_apply_ffs.values_mut().flatten() {
-            rewrite(unit);
-        }
         let mut roots = HashSet::default();
         for batch in self.evaluations.values_mut().flatten() {
             match batch {

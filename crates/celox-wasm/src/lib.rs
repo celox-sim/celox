@@ -74,7 +74,7 @@ impl SimHandle {
     #[wasm_bindgen(js_name = "combWasmBytes")]
     pub fn comb_wasm_bytes(&self) -> Vec<u8> {
         let wasm = wasm_codegen::compile_units(
-            &self.program().sir.eval_comb,
+            &self.program().sir.updates.observe,
             self.layout(),
             self.four_state,
             false,
@@ -87,8 +87,12 @@ impl SimHandle {
     /// `event_name` should match a clock or reset port name (e.g. "clk", "rst").
     #[wasm_bindgen(js_name = "eventWasmBytes")]
     pub fn event_wasm_bytes(&self, event_name: &str) -> Result<Vec<u8>, JsError> {
-        // Search through eval_apply_ffs to find matching event
-        for (addr, units) in &self.program().sir.eval_apply_ffs {
+        for (addr, units) in self
+            .program()
+            .sir
+            .updates
+            .groups(celox::UpdateEntry::Transition)
+        {
             let event_path = self.program().get_path(addr);
             if event_path == event_name {
                 let wasm =
@@ -102,8 +106,9 @@ impl SimHandle {
             event_name,
             self.program()
                 .sir
-                .eval_apply_ffs
-                .keys()
+                .updates
+                .groups(celox::UpdateEntry::Transition)
+                .map(|(event, _)| event)
                 .map(|addr| self.program().get_path(addr))
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -161,8 +166,11 @@ impl SimHandle {
 
         let mut events: BTreeMap<String, usize> = BTreeMap::new();
 
-        for (next_id, addr) in self.program().sir.eval_apply_ffs.keys().enumerate() {
-            let name = self.program().get_path(addr);
+        for (next_id, addr) in celox::event_addresses(self.program())
+            .into_iter()
+            .enumerate()
+        {
+            let name = self.program().get_path(&addr);
             events.insert(name, next_id);
         }
 

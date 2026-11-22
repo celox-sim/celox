@@ -278,9 +278,6 @@ pub fn flatten_module(
     Ok(FlattenedModule {
         pre_atomized_comb_blocks: comb_blocks,
         relocation: RelocationModule {
-            eval_apply_ff_blocks: HashMap::default(),
-            eval_only_ff_blocks: HashMap::default(),
-            apply_ff_blocks: HashMap::default(),
             comb_blocks: atomized_comb_blocks,
             comb_observers,
         },

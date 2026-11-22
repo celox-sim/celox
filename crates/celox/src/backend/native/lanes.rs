@@ -248,7 +248,6 @@ pub(super) fn compile_lane_kernels(
                 options.four_state,
                 "lane_task",
                 NativeMergeKind::Partial,
-                None,
                 &lane_options,
                 false,
                 &options.optimize_options.diagnostics,

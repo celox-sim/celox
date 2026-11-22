@@ -253,7 +253,8 @@ impl Generator<'_> {
             && self
                 .program
                 .sir
-                .eval_comb
+                .updates
+                .observe
                 .iter()
                 .any(|settle| std::ptr::eq(settle, unit))
             && !self.unit_finishes(unit)

@@ -34,9 +34,7 @@ pub(super) fn instrument_occurrences(
         ..
     } = logic;
     let Units {
-        eval_apply_ffs,
-        eval_only_ffs,
-        apply_ffs,
+        updates,
         processes,
         functions,
         timing,
@@ -47,13 +45,16 @@ pub(super) fn instrument_occurrences(
     let occurrence_probes: Vec<(VarAtomBase<AbsoluteAddr>, AbsoluteAddr)>;
     let counted = {
         // Flip-flop event domains and the aliases that resolve to them.
-        let event_addresses: HashSet<AbsoluteAddr> = eval_apply_ffs
-            .keys()
+        let event_addresses: HashSet<AbsoluteAddr> = updates
+            .groups(UpdateEntry::Transition)
+            .map(|(event, _)| event)
             .copied()
             .chain(
                 clock_domains
                     .iter()
-                    .filter(|(_, canonical)| eval_apply_ffs.contains_key(canonical))
+                    .filter(|(_, canonical)| {
+                        updates.at(canonical, UpdateEntry::Transition).is_some()
+                    })
                     .map(|(alias, _)| *alias),
             )
             .collect();
@@ -98,7 +99,7 @@ pub(super) fn instrument_occurrences(
         // that the commit of the final value alone would not show; the
         // working state is seeded with the stable value first, so a store
         // compares with the value its update replaces.
-        let ff_multi_stored = ff_multi_stored(eval_apply_ffs, eval_only_ffs, parallel_ff_units);
+        let ff_multi_stored = ff_multi_stored(updates, parallel_ff_units);
         // Each unit is instrumented once for all probes. Probe `p` is pass
         // `2p` over the stable state and pass `2p + 1` over a flip-flop
         // evaluation's working state, the order of instrumenting probe by
@@ -225,16 +226,13 @@ pub(super) fn instrument_occurrences(
         for function in &mut *functions {
             crate::watch::instrument_writes_in_passes(&mut function.unit, stable_code);
         }
-        for units in eval_apply_ffs
-            .values_mut()
-            .chain(eval_only_ffs.values_mut())
-        {
-            for unit in units {
-                crate::watch::instrument_writes_in_passes(unit, evaluation_code);
+        for update in updates.events.values_mut() {
+            for at in [UpdateEntry::Transition, UpdateEntry::Sample] {
+                for unit in update.entry_mut(at).into_iter().flatten() {
+                    crate::watch::instrument_writes_in_passes(unit, evaluation_code);
+                }
             }
-        }
-        for units in apply_ffs.values_mut() {
-            for unit in units {
+            for unit in update.entry_mut(UpdateEntry::Publish).into_iter().flatten() {
                 crate::watch::instrument_writes_in_passes(unit, stable_code);
             }
         }
@@ -261,11 +259,8 @@ pub(super) fn instrument_occurrences(
                 });
             }
         }
-        let ff_written: HashSet<AbsoluteAddr> = eval_apply_ffs
-            .values()
-            .chain(eval_only_ffs.values())
-            .chain(apply_ffs.values())
-            .flatten()
+        let ff_written: HashSet<AbsoluteAddr> = updates
+            .units()
             .chain(
                 parallel_ff_units
                     .values()
@@ -285,11 +280,8 @@ pub(super) fn instrument_occurrences(
             .map(|destination| destination.absolute_addr())
             .collect();
         let gated = gated_terms(timing, comb_blocks, &ff_written);
-        let ff_units = eval_apply_ffs
-            .values_mut()
-            .chain(eval_only_ffs.values_mut())
-            .chain(apply_ffs.values_mut())
-            .flatten()
+        let ff_units = updates
+            .units_mut()
             .chain(
                 parallel_ff_units
                     .values_mut()
@@ -320,8 +312,7 @@ pub(super) fn instrument_occurrences(
             &ff_multi_stored,
             variables,
             four_state,
-            eval_apply_ffs,
-            eval_only_ffs,
+            updates,
             parallel_ff_units,
         );
         counted
@@ -337,8 +328,7 @@ fn count_repeated_evaluation_stores(
     ff_multi_stored: &HashSet<AbsoluteAddr>,
     variables: &HashMap<AbsoluteAddr, (usize, bool)>,
     four_state: bool,
-    eval_apply_ffs: &mut FfUnits,
-    eval_only_ffs: &mut FfUnits,
+    updates: &mut ScheduledUpdates,
     parallel_ff_units: &mut FfParts,
 ) {
     // A counted signal without pending slots (a design without waits)
@@ -373,7 +363,7 @@ fn count_repeated_evaluation_stores(
         })
         .collect();
     if !multi_stored.is_empty() {
-        for_each_ff_evaluation(eval_apply_ffs, eval_only_ffs, parallel_ff_units, |unit| {
+        for_each_ff_evaluation(updates, parallel_ff_units, |unit| {
             crate::watch::instrument_writes_in_passes(unit, |instruction, after| {
                 let SIRInstruction::Store(address, ..) = instruction else {
                     return None;

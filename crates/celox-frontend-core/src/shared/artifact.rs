@@ -48,13 +48,11 @@ impl ScheduledRtl {
         let events = &self.design.events;
         for unit in self
             .sir
-            .eval_apply_ffs
+            .updates
+            .events
             .values_mut()
-            .flatten()
-            .chain(self.sir.eval_comb_apply_ffs.values_mut().flatten())
-            .chain(self.sir.eval_only_ffs.values_mut().flatten())
-            .chain(self.sir.apply_ffs.values_mut().flatten())
-            .chain(self.sir.eval_comb.iter_mut())
+            .flat_map(|e| e.units_mut())
+            .chain(&mut self.sir.updates.observe)
             .chain(
                 self.sir
                     .parallel
@@ -113,15 +111,14 @@ impl ScheduledRtl {
     }
 }
 
-/// Optimizer inputs derived while fused comb/FF scheduling still has exact
-/// action provenance. These hints are kept beside, not inside, `SirProgram`.
+/// Destinations published by a source-scheduled standalone event entry.
 #[derive(Clone, Debug, Default)]
-pub struct FusedSirOptimizationHints {
+pub struct EventWriteHints {
     pub direct_ff_writes: HashMap<StateAddr, Vec<VarAtomBase<RegionedStateAddr>>>,
 }
 
 #[derive(Clone, Debug)]
 pub struct ScheduledRtlOutput {
     pub scheduled: ScheduledRtl,
-    pub fused_optimization_hints: FusedSirOptimizationHints,
+    pub event_write_hints: EventWriteHints,
 }

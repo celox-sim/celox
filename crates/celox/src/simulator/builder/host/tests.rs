@@ -209,7 +209,7 @@ endmodule"#;
     .settle_partition(crate::SettlePartition::Always)
     .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, false, false)
     .unwrap();
-    assert!(!program.sir.eval_comb.is_empty());
+    assert!(!program.sir.updates.observe.is_empty());
     for large in [false, true] {
         for cancel_before_publication in [false, true] {
             let mut runtime = HotspotRuntime::new(program.layout(), &options).unwrap();
@@ -237,7 +237,7 @@ endmodule"#;
                 runtime.collect(
                     EntryKey::Comb,
                     &mut units,
-                    &program.sir.eval_comb[0],
+                    &program.sir.updates.observe[0],
                     &mut instructions,
                 );
                 assert!(units.is_none());
@@ -245,7 +245,11 @@ endmodule"#;
                 let (_, units) = runtime.begin(EntryKey::Comb);
                 assert!(units.is_some());
             }
-            runtime.finish(EntryKey::Comb, None, Some(program.sir.eval_comb.clone()));
+            runtime.finish(
+                EntryKey::Comb,
+                None,
+                Some(program.sir.updates.observe.clone()),
+            );
             // Large groups prepare while the worker compiles Comb: on the
             // owner with a single CPU, otherwise on their own thread.
             // Small groups retain lazy preparation on that worker.
@@ -438,7 +442,7 @@ fn native_comb_chunks_preserve_cross_unit_state_through_image_roundtrip() {
             .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, false, false)
             .unwrap();
     crate::backend::native::NativeBackend::split_comb_units_for_test(&mut program);
-    assert!(program.sir.eval_comb.len() > 1);
+    assert!(program.sir.updates.observe.len() > 1);
     let merged = crate::backend::native::NativeBackend::compile_image(&program, &options).unwrap();
     let chunked =
         crate::backend::native::NativeBackend::compile_outlined_image_for_test(&program, &options)
@@ -877,7 +881,8 @@ fn always_comb_startup_gate_reads_process_statuses_once() {
     assert!(statuses.len() >= 9);
     let loads = program
         .sir
-        .eval_comb
+        .updates
+        .observe
         .iter()
         .flat_map(|unit| unit.blocks.values())
         .flat_map(|block| &block.instructions)
@@ -1005,7 +1010,7 @@ fn discarded_stale_bits_keep_settles_deferred() {
         .disable_pass(crate::SirPass::ConcatFolding)
         .into_laid_out_program(crate::MemoryLayoutMode::Packed, false, false)
         .unwrap();
-    assert_eq!(program.sir.eval_comb_stateful, Some(Vec::new()));
+    assert_eq!(program.sir.updates.retained, Some(Vec::new()));
     let (defers, by_loads) = crate::scheduler::defers_settles_for_test(&program);
     assert!(defers);
     assert!(!by_loads, "the fixture must load stale bits it discards");
@@ -2340,7 +2345,12 @@ fn first_tier_scheduler_settles_instead_of_fusing() {
             .sum::<usize>()
     };
     assert!(
-        !program.sir.eval_comb_apply_ffs.is_empty(),
+        program
+            .sir
+            .updates
+            .groups(celox_sir::UpdateEntry::FromInputs)
+            .next()
+            .is_some(),
         "the fixture fuses its domain"
     );
     let first_tier = crate::scheduler::without_fused_domains(program.clone(), true);
@@ -2379,7 +2389,7 @@ fn count_clean_clock_batch(clock_data: bool, alias: bool, dirty: bool) -> (u64, 
         .into_laid_out_program(crate::MemoryLayoutMode::Packed, false, false)
         .unwrap();
     if alias {
-        assert!(program.sir.eval_comb.iter().flat_map(|u| u.blocks.values())
+        assert!(program.sir.updates.observe.iter().flat_map(|u| u.blocks.values())
                 .flat_map(|b| &b.instructions).any(|inst| matches!(inst,
                     crate::ir::SIRInstruction::Store(_, _, _, _, triggers, _) if !triggers.is_empty()
                 )), "the fixture must retain clock notifications");
@@ -2601,7 +2611,12 @@ endmodule"#;
             .into_laid_out_program(crate::MemoryLayoutMode::Packed, false, false)
             .unwrap();
         assert!(
-            !program.sir.eval_apply_ffs.is_empty(),
+            program
+                .sir
+                .updates
+                .groups(celox_sir::UpdateEntry::Transition)
+                .next()
+                .is_some(),
             "a delayed nonblocking flip-flop must fuse into its clock domain"
         );
         let mut simulation = builder()
@@ -2659,7 +2674,11 @@ endmodule"#
                 .emit_triggers()
                 .into_laid_out_program(crate::MemoryLayoutMode::Packed, false, false)
                 .unwrap_or_else(|error| panic!("{keyword}: {error}"));
-            program.sir.eval_apply_ffs.len()
+            program
+                .sir
+                .updates
+                .groups(celox_sir::UpdateEntry::Transition)
+                .count()
         };
         let twice = source("q <= #1 1'b1; q <= #1 1'b0;");
         let looped = source("for (int i = 0; i < 2; i++) q <= #1 ~i[0];");
@@ -3340,10 +3359,10 @@ endmodule"#;
         let clock = program.get_addr(&[], &["clk"]).unwrap();
         let stale =
             crate::ir::RegionedAbsoluteAddr::from_absolute_addr(celox_design::STABLE_REGION, clock);
-        program.sir.eval_comb_stateful.as_mut().unwrap().push(stale);
+        program.sir.updates.retained.as_mut().unwrap().push(stale);
         // Also model an old self-read eliminated from a surviving writer.
         let padding = program.get_addr(&[], &["padding"]).unwrap();
-        program.sir.eval_comb_stateful.as_mut().unwrap().push(
+        program.sir.updates.retained.as_mut().unwrap().push(
             crate::ir::RegionedAbsoluteAddr::from_absolute_addr(
                 celox_design::STABLE_REGION,
                 padding,
@@ -3513,8 +3532,9 @@ fn opposite_edge_clock_copies_share_one_domain() {
     .0;
     let domains = program
         .sir
-        .eval_apply_ffs
-        .values()
+        .updates
+        .groups(celox_sir::UpdateEntry::Transition)
+        .map(|(_, units)| units)
         .filter(|units| !units.is_empty())
         .count();
     assert!(domains <= 3, "{domains} FF domains for 24 copies");
@@ -3566,7 +3586,8 @@ fn the_scheduler_calls_the_settle_unless_it_instruments_it() {
         let is_settle = program.scheduler_callees.iter().any(|callee| {
             program
                 .sir
-                .eval_comb
+                .updates
+                .observe
                 .iter()
                 .any(|unit| *crate::settle::without_shadow_commits(unit) == *callee)
         });

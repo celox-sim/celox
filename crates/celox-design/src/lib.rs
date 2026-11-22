@@ -2322,6 +2322,24 @@ impl<A: Copy + Eq + std::hash::Hash> EventTopology<A> {
         self.aliases.get(&address).copied().unwrap_or(address)
     }
 
+    /// Number declared events in semantic order, then any additional kernel
+    /// domains in address order. Every alias uses its canonical domain's ID.
+    pub fn execution_order(&self, domains: impl IntoIterator<Item = A>) -> Vec<A>
+    where
+        A: Ord,
+    {
+        let mut result = self.ordered_events.clone();
+        let mut seen: HashSet<_> = result.iter().copied().collect();
+        let mut extra: Vec<_> = domains
+            .into_iter()
+            .map(|addr| self.canonical(addr))
+            .filter(|addr| seen.insert(*addr))
+            .collect();
+        extra.sort_unstable();
+        result.extend(extra);
+        result
+    }
+
     pub fn len(&self) -> usize {
         self.ordered_events.len()
     }

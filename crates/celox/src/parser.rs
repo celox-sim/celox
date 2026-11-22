@@ -12,15 +12,19 @@ pub use celox_frontend_veryl::ParserError;
 pub use celox_frontend_veryl::parse_ir;
 use celox_frontend_veryl::parse_ir_with_loop_provenance;
 
-fn apply_fused_optimization_hints(
+fn apply_event_write_hints(
     scheduled: &mut celox_frontend_core::ScheduledRtl,
-    hints: celox_frontend_core::FusedSirOptimizationHints,
+    hints: celox_frontend_core::EventWriteHints,
     diagnostics: &crate::RuntimeDiagnostics,
 ) -> Result<(), ParserError> {
     let mut pending = hints.direct_ff_writes.into_iter().collect::<Vec<_>>();
     pending.sort_unstable_by_key(|(event, _)| *event);
     while let Some((event, direct_ff_writes)) = pending.pop() {
-        let Some(units) = scheduled.sir.eval_comb_apply_ffs.get(&event) else {
+        let Some(units) = scheduled
+            .sir
+            .updates
+            .at(&event, celox_sir::UpdateEntry::FromInputs)
+        else {
             return Err(ParserError::illegal_context(
                 "fused comb/FF optimization hints",
                 format!("event {event} has hints but no scheduled SIR"),
@@ -33,7 +37,11 @@ fn apply_fused_optimization_hints(
         let mut aliases = Vec::new();
         pending.retain(|(candidate, writes)| {
             if writes == &direct_ff_writes
-                && scheduled.sir.eval_comb_apply_ffs.get(candidate) == Some(units)
+                && scheduled
+                    .sir
+                    .updates
+                    .at(candidate, celox_sir::UpdateEntry::FromInputs)
+                    == Some(units)
             {
                 aliases.push(*candidate);
                 false
@@ -41,7 +49,14 @@ fn apply_fused_optimization_hints(
                 true
             }
         });
-        let units = scheduled.sir.eval_comb_apply_ffs.get_mut(&event).unwrap();
+        let units = scheduled
+            .sir
+            .updates
+            .events
+            .get_mut(&event)
+            .unwrap()
+            .entry_mut(celox_sir::UpdateEntry::FromInputs)
+            .unwrap();
         for unit in units {
             let start = diagnostics.phase_timing.then(crate::timing::now);
             let removed =
@@ -80,8 +95,17 @@ fn apply_fused_optimization_hints(
             );
         }
         for alias in aliases {
-            let optimized = scheduled.sir.eval_comb_apply_ffs[&event].clone();
-            scheduled.sir.eval_comb_apply_ffs.insert(alias, optimized);
+            let optimized = scheduled.sir.updates.events[&event]
+                .entry(celox_sir::UpdateEntry::FromInputs)
+                .unwrap()
+                .clone();
+            scheduled
+                .sir
+                .updates
+                .events
+                .get_mut(&alias)
+                .unwrap()
+                .set(celox_sir::UpdateEntry::FromInputs, optimized);
         }
     }
     Ok(())
@@ -155,55 +179,69 @@ fn normalized_addr_id(raw: &str) -> String {
         .to_string()
 }
 
+#[derive(Clone, Copy)]
+enum UnitRole {
+    Observation,
+    Event(celox_sir::UpdateEntry),
+    Process,
+    Function,
+}
+
+impl UnitRole {
+    fn name(self) -> &'static str {
+        use celox_sir::UpdateEntry::*;
+        match self {
+            Self::Observation => "observation",
+            Self::Event(Transition) => "transition",
+            Self::Event(FromInputs) => "from inputs",
+            Self::Event(Sample) => "sample",
+            Self::Event(Publish) => "publish",
+            Self::Process => "processes",
+            Self::Function => "functions",
+        }
+    }
+}
+
 fn verify_program_sir(
     sir: &SirProgram,
     program: &RuntimeProgram,
     phase: &'static str,
 ) -> Result<(), ParserError> {
+    use celox_sir::UpdateEntry;
     let units = sir
-        .eval_comb
+        .updates
+        .observe
         .iter()
         .enumerate()
-        .map(|(unit, eu)| ("eval_comb", unit, eu))
-        .chain(
-            sir.eval_apply_ffs
-                .values()
-                .flatten()
-                .enumerate()
-                .map(|(unit, eu)| ("eval_apply_ffs", unit, eu)),
-        )
-        .chain(
-            sir.eval_comb_apply_ffs
-                .values()
-                .flatten()
-                .enumerate()
-                .map(|(unit, eu)| ("eval_comb_apply_ffs", unit, eu)),
-        )
-        .chain(
-            sir.eval_only_ffs
-                .values()
-                .flatten()
-                .enumerate()
-                .map(|(unit, eu)| ("eval_only_ffs", unit, eu)),
-        )
-        .chain(
-            sir.apply_ffs
-                .values()
-                .flatten()
-                .enumerate()
-                .map(|(unit, eu)| ("apply_ffs", unit, eu)),
-        )
+        .map(|(i, eu)| (UnitRole::Observation, i, eu))
+        .chain(sir.updates.events.values().flat_map(|event| {
+            [
+                UpdateEntry::Transition,
+                UpdateEntry::FromInputs,
+                UpdateEntry::Sample,
+                UpdateEntry::Publish,
+            ]
+            .into_iter()
+            .flat_map(|entry| {
+                event
+                    .entry(entry)
+                    .into_iter()
+                    .flatten()
+                    .enumerate()
+                    .map(move |(i, eu)| (UnitRole::Event(entry), i, eu))
+            })
+        }))
         .chain(
             sir.processes
                 .iter()
                 .enumerate()
-                .map(|(unit, eu)| ("processes", unit, eu)),
+                .map(|(unit, eu)| (UnitRole::Process, unit, eu)),
         )
         .chain(
             sir.functions
                 .iter()
                 .enumerate()
-                .map(|(unit, function)| ("functions", unit, &function.unit)),
+                .map(|(unit, function)| (UnitRole::Function, unit, &function.unit)),
         );
     sir.verify_functions()
         .map_err(|error| ParserError::SirVerify {
@@ -212,14 +250,15 @@ fn verify_program_sir(
             unit: 0,
             error,
         })?;
-    for (group, unit, eu) in units {
+    for (role, unit, eu) in units {
+        let group = role.name();
         verify_memory_offset_contract(program, eu).map_err(|error| ParserError::SirVerify {
             phase,
             group,
             unit,
             error,
         })?;
-        verify_region_contract(group, eu).map_err(|error| ParserError::SirVerify {
+        verify_region_contract(role, eu).map_err(|error| ParserError::SirVerify {
             phase,
             group,
             unit,
@@ -243,10 +282,11 @@ pub(crate) fn verify_memory_offset_contract(
 }
 
 fn verify_region_contract(
-    group: &'static str,
+    role: UnitRole,
     eu: &crate::ir::ExecutionUnit<RegionedAbsoluteAddr>,
 ) -> Result<(), crate::ir::verify::SirVerifyError> {
     use crate::ir::{SIRInstruction, SIROffset, SPARSE_WORKING_REGION};
+    use celox_sir::UpdateEntry::{FromInputs, Publish, Sample, Transition};
 
     for block in eu.blocks.values() {
         for (index, inst) in block.instructions.iter().enumerate() {
@@ -254,7 +294,8 @@ fn verify_region_contract(
                 // The frame slots of a function unit.
                 SIRInstruction::Load(_, addr, _, _)
                 | SIRInstruction::Store(addr, _, _, _, _, _)
-                    if addr.region == crate::ir::FRAME_REGION && group == "functions" => {}
+                    if addr.region == crate::ir::FRAME_REGION
+                        && matches!(role, UnitRole::Function) => {}
                 SIRInstruction::Load(_, addr, _, _)
                 | SIRInstruction::Store(addr, _, _, _, _, _)
                     if addr.region > SPARSE_WORKING_REGION =>
@@ -286,26 +327,20 @@ fn verify_region_contract(
                 }
                 SIRInstruction::Store(addr, _, _, _, _, _)
                     if addr.region == SPARSE_WORKING_REGION
-                        && !matches!(
-                            group,
-                            "eval_only_ffs" | "eval_apply_ffs" | "eval_comb_apply_ffs"
-                        ) =>
+                        && !matches!(role, UnitRole::Event(Transition | FromInputs | Sample)) =>
                 {
                     return Err(crate::ir::verify::SirVerifyError::instruction(
                         "REGION.SPARSE_STORE_IN_EVALUATOR",
                         block.id,
                         index,
-                        format!("SPARSE Store is not valid in {group}"),
+                        format!("SPARSE Store is not valid in {}", role.name()),
                     ));
                 }
                 SIRInstruction::Commit(src, dst, offset, _, triggers)
                     if src.region == SPARSE_WORKING_REGION =>
                 {
                     if dst.region != STABLE_REGION
-                        || !matches!(
-                            group,
-                            "apply_ffs" | "eval_apply_ffs" | "eval_comb_apply_ffs"
-                        )
+                        || !matches!(role, UnitRole::Event(Transition | FromInputs | Publish))
                         || !matches!(offset, SIROffset::Static(0))
                         || !triggers.is_empty()
                     {
@@ -386,9 +421,9 @@ pub(crate) fn project_scheduled_rtl(
     four_state: bool,
     diagnostics: &crate::RuntimeDiagnostics,
 ) -> Result<(crate::ir::SirProgram, crate::ir::RuntimeProgram), ParserError> {
-    apply_fused_optimization_hints(
+    apply_event_write_hints(
         &mut scheduled.scheduled,
-        scheduled.fused_optimization_hints,
+        scheduled.event_write_hints,
         diagnostics,
     )?;
     scheduled.scheduled.inject_triggers();
@@ -621,14 +656,14 @@ pub fn parse(
     let scheduled = scheduled?;
     let celox_frontend_veryl::VerylScheduledRtlOutput {
         scheduled,
-        fused_optimization_hints,
+        event_write_hints,
         testbench_source,
         dynamic_for_diagnostics,
     } = scheduled;
     let program = finalize_scheduled_rtl(
         celox_frontend_core::ScheduledRtlOutput {
             scheduled,
-            fused_optimization_hints,
+            event_write_hints,
         },
         Some(testbench_source),
         four_state,
@@ -1141,14 +1176,14 @@ pub fn parse_with_external_hierarchy(
     }
     let celox_frontend_veryl::VerylScheduledRtlOutput {
         scheduled,
-        fused_optimization_hints,
+        event_write_hints,
         testbench_source,
         dynamic_for_diagnostics,
     } = scheduled;
     let program = finalize_scheduled_rtl(
         celox_frontend_core::ScheduledRtlOutput {
             scheduled,
-            fused_optimization_hints,
+            event_write_hints,
         },
         Some(testbench_source),
         four_state,
@@ -1254,20 +1289,21 @@ mod fused_hint_tests {
         let distinct = unit(77);
         let mut scheduled = celox_frontend_core::ScheduledRtl {
             sir: SirProgram {
-                eval_comb: Vec::new(),
-                eval_apply_ffs: Default::default(),
-                eval_comb_apply_ffs: [
-                    (event(0), vec![original.clone()]),
-                    (event(1), vec![original.clone()]),
-                    (event(2), vec![distinct.clone()]),
-                    (event(3), vec![original.clone()]),
-                ]
-                .into_iter()
-                .collect(),
-                merge_comb_apply: true,
-                eval_comb_stateful: None,
-                eval_only_ffs: Default::default(),
-                apply_ffs: Default::default(),
+                updates: celox_sir::StateUpdates::from_groups(
+                    Vec::new(),
+                    None,
+                    [(
+                        celox_sir::UpdateEntry::FromInputs,
+                        [
+                            (event(0), vec![original.clone()]),
+                            (event(1), vec![original.clone()]),
+                            (event(2), vec![distinct.clone()]),
+                            (event(3), vec![original.clone()]),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    )],
+                ),
                 parallel: None,
                 processes: Vec::new(),
                 functions: Vec::new(),
@@ -1277,7 +1313,7 @@ mod fused_hint_tests {
             runtime_schema: Default::default(),
         };
         let protected = vec![celox_design::VarAtomBase::new(address, 0, 7)];
-        let hints = celox_frontend_core::FusedSirOptimizationHints {
+        let hints = celox_frontend_core::EventWriteHints {
             direct_ff_writes: [
                 (event(0), protected.clone()),
                 (event(1), Vec::new()),
@@ -1287,16 +1323,16 @@ mod fused_hint_tests {
             .into_iter()
             .collect(),
         };
-        apply_fused_optimization_hints(&mut scheduled, hints, &Default::default()).unwrap();
-        let groups = &scheduled.sir.eval_comb_apply_ffs;
-        assert_eq!(groups[&event(0)], vec![original.clone()]);
-        assert_eq!(groups[&event(3)], vec![original]);
-        assert_eq!(groups[&event(2)], vec![distinct]);
-        assert!(
-            groups[&event(1)][0].blocks[&BlockId(0)]
-                .instructions
-                .is_empty()
-        );
+        apply_event_write_hints(&mut scheduled, hints, &Default::default()).unwrap();
+        let group = |id| {
+            &scheduled.sir.updates.events[&event(id)]
+                .entry(celox_sir::UpdateEntry::FromInputs)
+                .unwrap()[..]
+        };
+        assert_eq!(group(0), vec![original.clone()]);
+        assert_eq!(group(3), vec![original]);
+        assert_eq!(group(2), vec![distinct]);
+        assert!(group(1)[0].blocks[&BlockId(0)].instructions.is_empty());
     }
 }
 

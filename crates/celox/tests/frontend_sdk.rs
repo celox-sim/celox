@@ -465,3 +465,56 @@ fn frontend_rejects_one_async_reset_shared_across_clock_domains() {
     assert!(message.contains("clock_a"));
     assert!(message.contains("clock_b"));
 }
+
+#[test]
+fn registers_on_one_event_sample_before_either_is_published() {
+    let byte = ValueType::bits(8).unwrap();
+    let mut module = ModuleBuilder::new("Swap").unwrap();
+    let clk = module.input("clk", ValueType::bits(1).unwrap()).unwrap();
+    let a = module.output("a", byte).unwrap();
+    let b = module.output("b", byte).unwrap();
+    for (target, source, initial) in [(a, b, 3u8), (b, a, 11u8)] {
+        module
+            .set_initial(target, Constant::two_state(initial, 8).unwrap())
+            .unwrap();
+        let target = module.whole(target).unwrap();
+        let next = module.read(source).unwrap();
+        module
+            .register(target, next, clk, Edge::Posedge, None, None)
+            .unwrap();
+    }
+    fn run<B: celox::SimBackend>(mut sim: Simulator<B>) {
+        let (clk, a, b) = (sim.event("clk"), sim.signal("a"), sim.signal("b"));
+        for (left, right) in [(11u8, 3u8), (3, 11)] {
+            sim.tick(clk).unwrap();
+            assert_eq!((sim.get(a), sim.get(b)), (left.into(), right.into()));
+        }
+    }
+    let artifact = module.finish();
+    let builder = || Simulator::from_frontend(artifact.clone());
+    let traced = builder().trace_sim_modules().build_with_trace();
+    traced.res.unwrap();
+    let modules = traced.trace.sim_modules.unwrap();
+    let module = modules
+        .values()
+        .find(|module| !module.event_bodies.is_empty())
+        .unwrap();
+    assert!(
+        module
+            .event_bodies
+            .values()
+            .all(|body| body.sample.is_none())
+    );
+    assert!(
+        matches!(module.next_state.evaluations.values().next().unwrap().as_slice(),
+        [celox_frontend_core::symbolic::artifact::EdgeEvaluation::Graph(form)] if form.roots.len() == 2)
+    );
+    run(builder()
+        .threads(4)
+        .parallel_partition(celox::ParallelPartition::Always)
+        .build_native()
+        .unwrap());
+    run(builder().build_interpreter().unwrap());
+    run(builder().build().unwrap());
+    run(builder().build_cranelift().unwrap());
+}

@@ -17,6 +17,49 @@ fn setup_and_trace(code: &str, top: &str) -> celox::CompilationTrace {
     result.trace
 }
 
+#[test]
+fn scalar_clock_assignments_read_from_the_wire_graph() {
+    let code = r#"
+        module Top (clk: input clock, d: input logic<8>, a: output logic<8>, b: output logic<8>) {
+            var wire_value: logic<8>;
+            assign wire_value = d ^ a;
+            always_ff (clk) { a = wire_value; }
+            always_ff (clk) { b = a; }
+        }
+    "#;
+    let result = SimulatorBuilder::new(code, "Top")
+        .four_state(false)
+        .trace_sim_modules()
+        .build_with_trace();
+    let mut sim = result.res.unwrap();
+    let modules = result.trace.sim_modules.unwrap();
+    let module = modules
+        .values()
+        .find(|module| !module.event_bodies.is_empty())
+        .unwrap();
+    let plan = module.next_state.evaluations.values().next().unwrap();
+    assert!(
+        matches!(plan.as_slice(), [celox_frontend_core::symbolic::artifact::EdgeEvaluation::Graph(form)] if form.roots.len() == 2)
+    );
+    assert!(
+        module
+            .event_bodies
+            .values()
+            .all(|body| body.sample.is_none())
+    );
+    let (clk, d, a, b) = (
+        sim.event("clk"),
+        sim.signal("d"),
+        sim.signal("a"),
+        sim.signal("b"),
+    );
+    for (input, next, previous) in [(3u8, 3u8, 0u8), (5, 6, 3), (6, 0, 6)] {
+        sim.modify(|io| io.set(d, input)).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!((sim.get(a), sim.get(b)), (next.into(), previous.into()));
+    }
+}
+
 all_backends! {
 
 fn test_ff_runtime_display_and_assert_continue(sim) {
@@ -3993,9 +4036,9 @@ fn test_ff_assert_effectful_args_snapshot_earlier_pure_values_before_branch() {
     let program = result.trace.pre_optimized_sir.unwrap();
     let unit = program
         .sir
-        .eval_apply_ffs
-        .values()
-        .flatten()
+        .updates
+        .groups(celox_sir::UpdateEntry::Transition)
+        .flat_map(|(_, units)| units)
         .next()
         .expect("FF execution unit");
     let first_event_arg = unit
@@ -4110,8 +4153,22 @@ fn test_single_clock_optimization() {
     "#;
     let trace = setup_and_trace(code, "Top");
     let program = trace.post_optimized_sir.unwrap();
-    assert!(program.sir.eval_only_ffs.is_empty());
-    assert!(program.sir.apply_ffs.is_empty());
+    assert!(
+        program
+            .sir
+            .updates
+            .groups(celox::UpdateEntry::Sample)
+            .next()
+            .is_none()
+    );
+    assert!(
+        program
+            .sir
+            .updates
+            .groups(celox::UpdateEntry::Publish)
+            .next()
+            .is_none()
+    );
 }
 
 #[test]
@@ -4124,8 +4181,22 @@ fn test_multi_clock_no_optimization() {
     "#;
     let trace = setup_and_trace(code, "Top");
     let program = trace.post_optimized_sir.unwrap();
-    assert!(!program.sir.eval_only_ffs.is_empty());
-    assert!(!program.sir.apply_ffs.is_empty());
+    assert!(
+        !program
+            .sir
+            .updates
+            .groups(celox::UpdateEntry::Sample)
+            .next()
+            .is_none()
+    );
+    assert!(
+        !program
+            .sir
+            .updates
+            .groups(celox::UpdateEntry::Publish)
+            .next()
+            .is_none()
+    );
 }
 
 #[test]
@@ -4546,6 +4617,23 @@ fn test_ff_static_branch_array_literal_access_is_lazy() {
     assert!(output.lines().count() < 150, "{output}");
 }
 
+fn assert_one_side_store_per_transition(trace: &celox::CompilationTrace) {
+    let program = trace.pre_optimized_sir.as_ref().unwrap();
+    let updates = &program.sir.updates.events;
+    assert_eq!(updates.len(), 1);
+    let event = updates.values().next().unwrap();
+    for entry in [
+        celox::UpdateEntry::Transition,
+        celox::UpdateEntry::FromInputs,
+    ] {
+        let units = event.entry(entry).unwrap();
+        let stores = units.iter().flat_map(|u| u.blocks.values()).flat_map(|b| &b.instructions)
+            .filter(|inst| matches!(inst, celox_sir::SIRInstruction::Store(addr, ..) if program.runtime.get_path(&addr.absolute_addr()) == "side"))
+            .count();
+        assert_eq!(stores, 1, "{entry:?}");
+    }
+}
+
 #[test]
 fn test_ff_array_literal_argument_is_not_reevaluated_for_array_output() {
     let code = r#"
@@ -4582,9 +4670,7 @@ fn test_ff_array_literal_argument_is_not_reevaluated_for_array_output() {
         .trace_pre_optimized_sir()
         .build_with_trace();
     assert!(result.res.is_ok(), "{:?}", result.res.err());
-    let output = result.trace.format_pre_optimized_sir().unwrap();
-
-    assert_eq!(output.matches("Store(addr=side").count(), 1, "{output}");
+    assert_one_side_store_per_transition(&result.trace);
 }
 
 #[test]
@@ -4625,9 +4711,7 @@ fn test_ff_array_literal_static_then_dynamic_access_evaluates_each_item_once() {
         .trace_pre_optimized_sir()
         .build_with_trace();
     assert!(result.res.is_ok(), "{:?}", result.res.err());
-    let output = result.trace.format_pre_optimized_sir().unwrap();
-
-    assert_eq!(output.matches("Store(addr=side").count(), 1, "{output}");
+    assert_one_side_store_per_transition(&result.trace);
 }
 
 #[test]

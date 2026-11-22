@@ -82,15 +82,16 @@ mod tests {
         let stable = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, event);
         let commit = SIRInstruction::Commit(sparse, stable, SIROffset::Static(0), 8, Vec::new());
         let mut sir = SirProgram {
-            eval_comb: Vec::new(),
-            eval_apply_ffs: [(event, vec![unit(vec![commit.clone()]), unit(Vec::new())])]
-                .into_iter()
-                .collect(),
-            eval_comb_apply_ffs: crate::HashMap::default(),
-            merge_comb_apply: true,
-            eval_comb_stateful: None,
-            eval_only_ffs: crate::HashMap::default(),
-            apply_ffs: crate::HashMap::default(),
+            updates: celox_sir::StateUpdates::from_groups(
+                Vec::new(),
+                None,
+                [(
+                    celox_sir::UpdateEntry::Transition,
+                    [(event, vec![unit(vec![commit.clone()]), unit(Vec::new())])]
+                        .into_iter()
+                        .collect(),
+                )],
+            ),
             parallel: None,
             processes: Vec::new(),
             functions: Vec::new(),
@@ -113,7 +114,9 @@ mod tests {
             },
         );
 
-        let units = &context.sir.eval_apply_ffs[&event];
+        let units = &context.sir.updates.events[&event]
+            .entry(celox_sir::UpdateEntry::Transition)
+            .unwrap();
         assert_eq!(units.len(), 3);
         assert!(units[..2].iter().all(|unit| {
             unit.blocks

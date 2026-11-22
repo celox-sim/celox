@@ -832,7 +832,7 @@ fn per_destination_samples_keep_the_statement_order_and_case_priority() {
 #[test]
 fn two_clock_domains_sample_one_observed_calculation() {
     use celox_design::BinaryOp;
-    use celox_sir::{CombApply, SIRInstruction};
+    use celox_sir::SIRInstruction;
 
     let source = r#"
 module Top(input bit src, a, b, input bit [7:0] i, j,
@@ -863,14 +863,16 @@ endmodule"#;
             .filter(|inst| matches!(inst, SIRInstruction::Binary(_, _, BinaryOp::Mul, _)))
             .count()
     };
-    assert_eq!(count(&program.eval_comb), 1);
+    assert_eq!(count(&program.updates.observe), 1);
     for clock in [a, b] {
-        assert!(matches!(
-            program.comb_apply(&clock.addr),
-            Some(CombApply::Shared)
-        ));
-        assert_eq!(count(&program.eval_apply_ffs[&clock.addr]), 0);
-        assert_eq!(count(&program.eval_only_ffs[&clock.addr]), 0);
+        let update = &program.updates.events[&clock.addr];
+        assert!(update.entry(celox_sir::UpdateEntry::FromInputs).is_none());
+        for at in [
+            celox_sir::UpdateEntry::Transition,
+            celox_sir::UpdateEntry::Sample,
+        ] {
+            assert_eq!(count(update.entry(at).unwrap()), 0);
+        }
     }
     let (i, j) = (sim.signal("i"), sim.signal("j"));
     let (seen, qa, qb) = (sim.signal("seen"), sim.signal("qa"), sim.signal("qb"));

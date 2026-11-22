@@ -22,9 +22,7 @@ pub(super) struct ClockAnalysis {
 
 pub(super) fn analyze_clock_dependencies(
     bindings: &PackageBindings,
-    eval_apply_ffs: &mut HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
-    eval_only_ffs: &mut HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
-    apply_ffs: &mut HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+    updates: &mut ScheduledUpdates,
     comb_blocks: &[LogicPath<AbsoluteAddr>],
     arena: &SLTNodeArena<AbsoluteAddr>,
     clock_domains: &HashMap<AbsoluteAddr, AbsoluteAddr>,
@@ -40,13 +38,16 @@ pub(super) fn analyze_clock_dependencies(
     let mut ff_outputs: BTreeSet<AbsoluteAddr> = BTreeSet::new();
     // Each FF output to the event domains that store it.
     let mut ff_writers: BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>> = BTreeMap::new();
-    unique_clocks.extend(eval_apply_ffs.keys().copied());
+    unique_clocks.extend(
+        updates
+            .groups(UpdateEntry::Transition)
+            .map(|(event, _)| event)
+            .copied(),
+    );
 
     declare_event_domains(
         bindings,
-        eval_apply_ffs,
-        eval_only_ffs,
-        apply_ffs,
+        updates,
         clock_domains,
         expanded,
         instance_modules,
@@ -55,7 +56,7 @@ pub(super) fn analyze_clock_dependencies(
     );
 
     record_ff_writes(
-        eval_apply_ffs,
+        updates,
         clock_domains,
         &unique_clocks,
         &mut ff_outputs,
@@ -93,9 +94,7 @@ pub(super) fn analyze_clock_dependencies(
 
     let topological_clocks = order_clocks(
         bindings,
-        eval_apply_ffs,
-        eval_only_ffs,
-        apply_ffs,
+        updates,
         clock_domains,
         expanded,
         instance_modules,
@@ -124,7 +123,7 @@ pub(super) fn analyze_clock_dependencies(
     let (level_unread_by_domain, independent_derived, combinationally_read, combinational_derived) =
         combinational_derived_clocks(
             bindings,
-            eval_apply_ffs,
+            updates,
             comb_blocks,
             arena,
             clock_domains,
@@ -152,9 +151,7 @@ pub(super) fn analyze_clock_dependencies(
 /// driven by.
 fn declare_event_domains(
     bindings: &PackageBindings,
-    eval_apply_ffs: &mut HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
-    eval_only_ffs: &mut HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
-    apply_ffs: &mut HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+    updates: &mut ScheduledUpdates,
     clock_domains: &HashMap<AbsoluteAddr, AbsoluteAddr>,
     expanded: &HashMap<InstancePath, InstanceId>,
     instance_modules: &HashMap<InstanceId, ModuleId>,
@@ -181,9 +178,14 @@ fn declare_event_domains(
             let addr = bindings.locate(*id, *var_id);
             let canonical = clock_domains.get(&addr).copied().unwrap_or(addr);
             unique_clocks.insert(canonical);
-            eval_apply_ffs.entry(canonical).or_default();
-            eval_only_ffs.entry(canonical).or_default();
-            apply_ffs.entry(canonical).or_default();
+            let update = updates.events.entry(canonical).or_default();
+            for at in [
+                UpdateEntry::Transition,
+                UpdateEntry::Sample,
+                UpdateEntry::Publish,
+            ] {
+                update.entry_or_default(at);
+            }
         }
     }
 }
@@ -191,14 +193,14 @@ fn declare_event_domains(
 /// Record what the flip-flops of every domain write, and the clocks among
 /// it as dependents of the domain.
 fn record_ff_writes(
-    eval_apply_ffs: &HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+    updates: &ScheduledUpdates,
     clock_domains: &HashMap<AbsoluteAddr, AbsoluteAddr>,
     unique_clocks: &BTreeSet<AbsoluteAddr>,
     ff_outputs: &mut BTreeSet<AbsoluteAddr>,
     ff_writers: &mut BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>>,
     clock_deps: &mut BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>>,
 ) {
-    for (domain_clock, eus) in eval_apply_ffs {
+    for (domain_clock, eus) in updates.groups(UpdateEntry::Transition) {
         for eu in eus {
             for bb in eu.blocks.values() {
                 // The domain's stores, and what its calls write.
@@ -399,9 +401,7 @@ fn mark_ff_derived_clocks(
 /// event-typed signal becomes a domain of its own.
 fn order_clocks(
     bindings: &PackageBindings,
-    eval_apply_ffs: &mut HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
-    eval_only_ffs: &mut HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
-    apply_ffs: &mut HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+    updates: &mut ScheduledUpdates,
     clock_domains: &HashMap<AbsoluteAddr, AbsoluteAddr>,
     expanded: &HashMap<InstancePath, InstanceId>,
     instance_modules: &HashMap<InstanceId, ModuleId>,
@@ -445,9 +445,14 @@ fn order_clocks(
                 let addr = bindings.locate(*id, *var_id);
                 let canonical = clock_domains.get(&addr).copied().unwrap_or(addr);
                 // Add empty execution units so it becomes a valid event domain for scheduling
-                eval_apply_ffs.entry(canonical).or_default();
-                eval_only_ffs.entry(canonical).or_default();
-                apply_ffs.entry(canonical).or_default();
+                let update = updates.events.entry(canonical).or_default();
+                for at in [
+                    UpdateEntry::Transition,
+                    UpdateEntry::Sample,
+                    UpdateEntry::Publish,
+                ] {
+                    update.entry_or_default(at);
+                }
 
                 if !visited.contains(&canonical) {
                     topo_visit(
@@ -531,7 +536,7 @@ fn derived_event_targets(
 /// reads.
 fn combinational_derived_clocks(
     bindings: &PackageBindings,
-    eval_apply_ffs: &HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+    updates: &ScheduledUpdates,
     comb_blocks: &[LogicPath<AbsoluteAddr>],
     arena: &SLTNodeArena<AbsoluteAddr>,
     clock_domains: &HashMap<AbsoluteAddr, AbsoluteAddr>,
@@ -584,7 +589,11 @@ fn combinational_derived_clocks(
     let access = |domain: &AbsoluteAddr| {
         let mut reads = BTreeSet::new();
         let mut writes = BTreeSet::new();
-        for unit in eval_apply_ffs.get(domain).into_iter().flatten() {
+        for unit in updates
+            .at(domain, UpdateEntry::Transition)
+            .into_iter()
+            .flatten()
+        {
             for block in unit.blocks.values() {
                 for instruction in &block.instructions {
                     // Records, captures and external calls, a callee's too.
@@ -607,8 +616,8 @@ fn combinational_derived_clocks(
     // A domain reads its own clock's level when a flip-flop samples it as
     // data. An external call may read anything.
     let canonical = |address: AbsoluteAddr| clock_domains.get(&address).copied().unwrap_or(address);
-    let level_unread_by_domain: BTreeSet<AbsoluteAddr> = eval_apply_ffs
-        .iter()
+    let level_unread_by_domain: BTreeSet<AbsoluteAddr> = updates
+        .groups(UpdateEntry::Transition)
         .filter(|(domain, units)| {
             let domain = canonical(**domain);
             !units

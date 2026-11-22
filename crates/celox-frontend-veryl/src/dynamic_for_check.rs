@@ -68,8 +68,8 @@ use veryl_analyzer::symbol::Affiliation;
 use veryl_parser::resource_table::{self, StrId};
 
 use crate::{
-    FrontendDiagnostic, FusedSirOptimizationHints, HashMap, HashSet, ScheduledRtl,
-    VerylTestbenchSource, bitaccess::eval_var_select,
+    EventWriteHints, FrontendDiagnostic, HashMap, HashSet, ScheduledRtl, VerylTestbenchSource,
+    bitaccess::eval_var_select,
 };
 
 fn owner_source_var(
@@ -181,7 +181,7 @@ pub fn check_elaborated_dynamic_for_bounds(
     scheduled: &ScheduledRtl,
     source: &VerylTestbenchSource,
     module: &Module,
-    hints: &FusedSirOptimizationHints,
+    hints: &EventWriteHints,
 ) -> Vec<FrontendDiagnostic> {
     let Some(statements) = &source.initial_statements else {
         return Vec::new();
@@ -215,7 +215,7 @@ fn check_elaborated_statements(
     module: &Module,
     scheduled: &ScheduledRtl,
     source: &VerylTestbenchSource,
-    hints: &FusedSirOptimizationHints,
+    hints: &EventWriteHints,
     diagnostics: &mut Vec<FrontendDiagnostic>,
 ) {
     for statement in statements {
@@ -303,7 +303,7 @@ fn check_elaborated_for(
     module: &Module,
     scheduled: &ScheduledRtl,
     source: &VerylTestbenchSource,
-    hints: &FusedSirOptimizationHints,
+    hints: &EventWriteHints,
     diagnostics: &mut Vec<FrontendDiagnostic>,
 ) {
     let continuation_bound = match &statement.range {
@@ -590,7 +590,7 @@ fn collect_state_change_writes(
     changes: &[StateChange],
     scheduled: &ScheduledRtl,
     source: &VerylTestbenchSource,
-    hints: &FusedSirOptimizationHints,
+    hints: &EventWriteHints,
     unknown: &mut Option<String>,
 ) -> Vec<StateWrite> {
     let mut writes = Vec::new();
@@ -666,7 +666,7 @@ fn push_whole_state_write(address: StateAddr, width: usize, writes: &mut Vec<Sta
 fn push_direct_event_writes(
     event: StateAddr,
     scheduled: &ScheduledRtl,
-    hints: &FusedSirOptimizationHints,
+    hints: &EventWriteHints,
     writes: &mut Vec<StateWrite>,
 ) {
     let event = scheduled.design.events.canonical(event);
@@ -682,8 +682,14 @@ fn push_direct_event_writes(
         }
     }
     for units in [
-        scheduled.sir.eval_apply_ffs.get(&event),
-        scheduled.sir.apply_ffs.get(&event),
+        scheduled
+            .sir
+            .updates
+            .at(&event, celox_sir::UpdateEntry::Transition),
+        scheduled
+            .sir
+            .updates
+            .at(&event, celox_sir::UpdateEntry::Publish),
     ]
     .into_iter()
     .flatten()
@@ -738,7 +744,7 @@ fn propagate_comb_writes(scheduled: &ScheduledRtl, writes: &mut Vec<StateWrite>)
     // was retained. Iterate to a fixed point rather than relying on unit order.
     loop {
         let before = writes.clone();
-        for unit in &scheduled.sir.eval_comb {
+        for unit in &scheduled.sir.updates.observe {
             propagate_comb_unit(unit, settle_flags, writes);
         }
         if *writes == before {

@@ -30,7 +30,7 @@ pub(crate) fn extract(
     let is_alias =
         |address: RegionedAbsoluteAddr| events.canonical(address.absolute_addr()) == clock;
     let mut result = Vec::new();
-    for unit in &program.sir.eval_comb {
+    for unit in &program.sir.updates.observe {
         let cfg = celox_sir::cfg::SirCfg::analyze_forward(unit).ok()?;
         // A copy must execute exactly once on every successful evaluation.
         // Exclude error exits rather than hoisting through them. Other logic

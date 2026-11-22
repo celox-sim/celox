@@ -64,8 +64,8 @@ fn combined_ticks_match_across_backends_with_shared_comb() {
         }
         seen
     }
-    use celox_frontend_core::symbolic::assembly::MERGED_COMB_APPLY_EVENTS;
-    for clocks in [2, MERGED_COMB_APPLY_EVENTS + 2] {
+    use celox_frontend_core::symbolic::assembly::MAX_SPECIALIZED_EVENTS;
+    for clocks in [2, MAX_SPECIALIZED_EVENTS + 2] {
         let code = many_clock_design(clocks);
         let builder = || Simulator::builder(&code, "Top");
         let reference = run(builder().build_interpreter().unwrap(), clocks);
@@ -75,7 +75,8 @@ fn combined_ticks_match_across_backends_with_shared_comb() {
             .id_to_event_slice()
             .iter()
             .all(|event| event.comb_apply_func.is_none());
-        assert_eq!(shared, clocks > MERGED_COMB_APPLY_EVENTS, "{clocks} clocks");
+        // Every domain samples x. Its producer belongs to the shared observation.
+        assert!(shared, "{clocks} clocks");
         assert_eq!(run(cranelift, clocks), reference, "{clocks} clocks");
         assert_eq!(
             run(builder().build().unwrap(), clocks),

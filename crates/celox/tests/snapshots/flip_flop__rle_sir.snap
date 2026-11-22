@@ -2,29 +2,42 @@
 source: crates/celox/tests/flip_flop.rs
 expression: output
 ---
-=== Evaluation Flip-Flops (eval_apply_ffs) ===
-Trigger Group: clk (AbsoluteAddr(inst0, state0))
-  Execution Unit 0:
-    Entry Block: 0
-    Registers:
-      r0: logic<32>
-      r3: logic<32>
-    b0:
-      r0 = Load(addr=x (region=0), offset=0, bits=32)
-      Store(addr=a (region=0), offset=0, bits=32, src_reg = 0)
-      Store(addr=b (region=0), offset=0, bits=32, src_reg = 0)
-      r3 = Load(addr=c (region=0), offset=0, bits=32)
-      Store(addr=c (region=0), offset=0, bits=32, src_reg = 0)
-      Store(addr=d (region=0), offset=0, bits=32, src_reg = 3)
-      Return
-
-=== Evaluation Flip-Flops (eval_only_ffs) ===
-
-=== Application Flip-Flops (apply_ffs) ===
-
-=== Evaluation Combinational Logic (eval_comb) ===
+=== Observation ===
 Execution Unit 0:
   Entry Block: 0
   Registers:
   b0:
+    Return
+
+=== Event clk (AbsoluteAddr(inst0, state0)) ===
+Transition
+Execution Unit 0:
+  Entry Block: 0
+  Registers:
+    r0: logic<32>
+    r3: logic<32>
+  b0:
+    r0 = Load(addr=x (region=0), offset=0, bits=32)
+    Store(addr=c (region=1), offset=0, bits=32, src_reg = 0)
+    Store(addr=a (region=0), offset=0, bits=32, src_reg = 0)
+    Store(addr=b (region=0), offset=0, bits=32, src_reg = 0)
+    r3 = Load(addr=c (region=0), offset=0, bits=32)
+    Store(addr=d (region=0), offset=0, bits=32, src_reg = 3)
+    Jump(b1)
+  b1:
+    Commit(src=c (region=1), dst=c (region=0), offset=0, bits=32)
+    Return
+FromInputs
+Execution Unit 0:
+  Entry Block: 0
+  Registers:
+    r0: logic<32>
+    r3: logic<32>
+  b0:
+    r0 = Load(addr=x (region=0), offset=0, bits=32)
+    Store(addr=a (region=0), offset=0, bits=32, src_reg = 0)
+    Store(addr=b (region=0), offset=0, bits=32, src_reg = 0)
+    r3 = Load(addr=c (region=0), offset=0, bits=32)
+    Store(addr=d (region=0), offset=0, bits=32, src_reg = 3)
+    Store(addr=c (region=0), offset=0, bits=32, src_reg = 0)
     Return

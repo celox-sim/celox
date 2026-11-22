@@ -9073,9 +9073,9 @@ fn shared_ff_memories_keep_native_sparse_next_state() {
         let mut sparse_commits = 0;
         for instruction in program
             .sir
-            .eval_apply_ffs
-            .values()
-            .flatten()
+            .updates
+            .groups(celox_sir::UpdateEntry::Transition)
+            .flat_map(|(_, units)| units)
             .flat_map(|unit| unit.blocks.values())
             .flat_map(|block| &block.instructions)
         {
@@ -9155,9 +9155,9 @@ fn nonblocking_runtime_element_writes_use_sparse_next_state() {
         let mut regions = Vec::new();
         for instruction in program
             .sir
-            .eval_apply_ffs
-            .values()
-            .flatten()
+            .updates
+            .groups(celox_sir::UpdateEntry::Transition)
+            .flat_map(|(_, units)| units)
             .flat_map(|unit| unit.blocks.values())
             .flat_map(|block| &block.instructions)
         {
@@ -9228,9 +9228,9 @@ fn disjoint_ff_processes_keep_array_out_of_sparse_next_state() {
         let mut regions = Vec::new();
         for instruction in program
             .sir
-            .eval_apply_ffs
-            .values()
-            .flatten()
+            .updates
+            .groups(celox_sir::UpdateEntry::Transition)
+            .flat_map(|(_, units)| units)
             .flat_map(|unit| unit.blocks.values())
             .flat_map(|block| &block.instructions)
         {

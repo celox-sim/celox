@@ -188,7 +188,7 @@ impl StateDependencies {
                 }
             }
         }
-        for (&event, publications) in &units.apply_ffs {
+        for (&event, publications) in units.updates.groups(UpdateEntry::Publish) {
             for unit in publications {
                 // Simple commits are transfers from one staged slot. Keep
                 // control and data dependencies together for an arbitrary kernel.
@@ -213,14 +213,6 @@ impl StateDependencies {
                         );
                     }
                 } else {
-                    deps.kernel(Update::Procedure(Some(event)), unit, |a| *a);
-                }
-            }
-        }
-        // Some source adapters supply just the already combined event.
-        for (&event, direct) in &units.eval_apply_ffs {
-            if !graph.evaluations.contains_key(&event) {
-                for unit in direct {
                     deps.kernel(Update::Procedure(Some(event)), unit, |a| *a);
                 }
             }

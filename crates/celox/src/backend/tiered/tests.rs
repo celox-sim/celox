@@ -1399,7 +1399,11 @@ fn call_factorial(sir: &mut crate::ir::SirProgram) {
         BinaryOp, BlockId, ExecutionUnit, FrameLayout, FrameSlot, FunctionId, FunctionUnit,
         RegisterId, RegisterType, SIRInstruction, SIROffset, SIRTerminator,
     };
-    let comb = sir.eval_comb.iter().flat_map(|unit| unit.blocks.values());
+    let comb = sir
+        .updates
+        .observe
+        .iter()
+        .flat_map(|unit| unit.blocks.values());
     let accesses = comb
         .flat_map(|block| &block.instructions)
         .collect::<Vec<_>>();
@@ -1514,7 +1518,7 @@ fn call_factorial(sir: &mut crate::ir::SirProgram) {
         },
         effects: Default::default(),
     });
-    sir.eval_comb.push(ExecutionUnit {
+    sir.updates.observe.push(ExecutionUnit {
         entry_block_id: BlockId(0),
         blocks: [block(
             0,

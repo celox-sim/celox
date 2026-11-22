@@ -2262,14 +2262,20 @@ fn clocked_process_calling_an_empty_function_is_still_dropped() {
         }
         let program = result.trace.pre_optimized_sir.unwrap().sir;
         let kinds = [
-            &program.eval_apply_ffs,
-            &program.eval_only_ffs,
-            &program.apply_ffs,
+            celox::UpdateEntry::Transition,
+            celox::UpdateEntry::Sample,
+            celox::UpdateEntry::Publish,
         ];
-        let units = kinds.map(|units| units.values().flatten().count());
+        let units = kinds.map(|at| {
+            program
+                .updates
+                .groups(at)
+                .flat_map(|(_, units)| units)
+                .count()
+        });
         let instructions: usize = kinds
             .into_iter()
-            .flat_map(|units| units.values().flatten())
+            .flat_map(|at| program.updates.groups(at).flat_map(|(_, units)| units))
             .flat_map(|unit| unit.blocks.values())
             .map(|block| block.instructions.len())
             .sum();

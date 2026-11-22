@@ -638,9 +638,10 @@ impl NativeBackend {
 
     #[cfg(all(test, target_arch = "x86_64", not(feature = "arm64-codegen")))]
     pub(crate) fn split_comb_units_for_test(program: &mut LaidOutProgram) {
-        program.sir.eval_comb = program
+        program.sir.updates.observe = program
             .sir
-            .eval_comb
+            .updates
+            .observe
             .iter()
             .flat_map(split_comb_execution_unit)
             .collect();

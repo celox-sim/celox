@@ -3,7 +3,7 @@
 use super::passes::control_flow::pass_guarded_region_sinking;
 use super::passes::dataflow::pass_vectorize_concat;
 use super::passes::memory::{
-    fused_comb_dse, pass_dead_store_elimination, pass_global_store_load_forwarding,
+    event_store_liveness, pass_dead_store_elimination, pass_global_store_load_forwarding,
     pass_identity_store_bypass,
 };
 use super::pipeline::pass_manager;
@@ -19,19 +19,11 @@ pub fn remove_dead_sir_definitions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>)
     pass_vectorize_concat::remove_dead_definitions(eu);
 }
 
-pub fn eliminate_unobserved_comb_state_stores(
-    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
-    provenance: &crate::ir::SirMergeProvenance,
-    first_ff_unit: usize,
-) -> Result<usize, crate::OptimizationError> {
-    fused_comb_dse::eliminate(eu, provenance, first_ff_unit)
-}
-
 pub fn eliminate_shared_comb_state_stores(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     direct_ff_writes: &[crate::ir::VarAtomBase<RegionedAbsoluteAddr>],
 ) -> Result<usize, crate::OptimizationError> {
-    fused_comb_dse::eliminate_shared(eu, direct_ff_writes)
+    event_store_liveness::eliminate(eu, direct_ff_writes)
 }
 
 pub fn promote_fused_comb_static_slots(
@@ -79,7 +71,7 @@ pub fn optimize_rooted_comb_memory(
         four_state,
         ..PassOptions::default()
     };
-    for eu in &mut program.sir.eval_comb {
+    for eu in &mut program.sir.updates.observe {
         // The control-region stages follow the opt-in of guarded-region
         // sinking, which they belong to.
         if pass_manager::makes_calls(eu)

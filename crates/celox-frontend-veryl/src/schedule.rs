@@ -62,14 +62,14 @@ pub fn schedule_symbolic_rtl(
     let functions = root
         .map(|module| module.functions.clone())
         .unwrap_or_default();
-    let fused_ff_factory = super::lowering::global_ff::VerylFusedFfFactory::new(
+    let event_factory = super::lowering::global_ff::VerylEventFactory::new(
         &module_ir,
         &source_id_maps,
         config.clone(),
     );
     let output = assembly::schedule_symbolic_rtl(
         symbolic,
-        Some(&fused_ff_factory),
+        Some(&event_factory),
         ignored_loops,
         true_loops,
         four_state,
@@ -316,12 +316,12 @@ pub fn schedule_symbolic_rtl(
             &output.scheduled,
             source,
             module,
-            &output.fused_optimization_hints,
+            &output.event_write_hints,
         ));
     }
     Ok(VerylScheduledRtlOutput {
         scheduled: output.scheduled,
-        fused_optimization_hints: output.fused_optimization_hints,
+        event_write_hints: output.event_write_hints,
         testbench_source,
         dynamic_for_diagnostics,
     })

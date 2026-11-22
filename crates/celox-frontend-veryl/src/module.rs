@@ -1187,6 +1187,90 @@ impl<'a> ModuleParser<'a> {
         })
     }
 
+    /// Assignments in distinct clocked declarations sample the same old state.
+    /// Lower their scalar expressions in the arena also used by wire drivers.
+    fn scalar_event(
+        &mut self,
+        decls: &[&veryl_analyzer::ir::FfDeclaration],
+    ) -> Result<Option<celox_slt::next_state::NextStateForm<VarId>>, ParserError> {
+        use veryl_analyzer::ir::{Op, TypeKind};
+        fn scalar(module: &Module, id: &VarId) -> bool {
+            module.variables.get(id).is_some_and(|v| {
+                matches!(v.r#type.kind, TypeKind::Bit | TypeKind::Logic)
+                    && v.r#type.total_array().unwrap_or(1) == 1
+                    && !v.r#type.signed
+            })
+        }
+        fn pure(module: &Module, expr: &Expression) -> bool {
+            match expr {
+                Expression::Term(term) => match &**term {
+                    Factor::Variable(id, index, select, _) => {
+                        scalar(module, id)
+                            && index.indices.is_empty()
+                            && select.0.is_empty()
+                            && select.1.is_none()
+                    }
+                    Factor::Value(v) => {
+                        matches!(v.value, veryl_analyzer::ir::ValueVariant::Numeric(_))
+                            && crate::float::precision(&v.r#type).is_none()
+                    }
+                    _ => false,
+                },
+                Expression::Binary(
+                    a,
+                    Op::Add | Op::Sub | Op::Mul | Op::BitAnd | Op::BitOr | Op::BitXor,
+                    b,
+                    _,
+                ) => pure(module, a) && pure(module, b),
+                _ => false,
+            }
+        }
+        let mut targets = HashSet::default();
+        let mut assignments = Vec::new();
+        for decl in decls {
+            let [Statement::Assign(assign)] = decl.statements.as_slice() else {
+                return Ok(None);
+            };
+            let [dst] = assign.dst.as_slice() else {
+                return Ok(None);
+            };
+            if decl.reset.is_some()
+                || !scalar(self.module, &dst.id)
+                || !dst.index.indices.is_empty()
+                || !dst.select.0.is_empty()
+                || dst.select.1.is_some()
+                || !targets.insert(dst.id)
+                || !pure(self.module, &assign.expr)
+            {
+                return Ok(None);
+            }
+            assignments.push((dst.id, &assign.expr));
+        }
+        let mut form = celox_slt::next_state::NextStateForm::default();
+        for (id, expr) in assignments {
+            let width = resolve_total_width(self.module, &self.module.variables[&id])?;
+            let ((value, _), _) = eval_expression(
+                self.module,
+                &SymbolicStore::default(),
+                expr,
+                &mut self.arena,
+                Some(width),
+            )?;
+            let value = coerce_node_width(
+                &mut self.arena,
+                value,
+                Some(width),
+                crate::context_width::expression_signed(expr),
+            )?;
+            form.roots.push(celox_slt::next_state::ValueRoot {
+                target: id,
+                value,
+                access: BitAccess::new(0, width - 1),
+            });
+        }
+        Ok(Some(form))
+    }
+
     fn parse_inner(mut self) -> Result<SimModule, ParserError> {
         crate::value_type_check::check_module(self.module)?;
         let mut ff_groups: HashMap<TriggerSet<VarId>, Vec<&veryl_analyzer::ir::FfDeclaration>> =
@@ -1218,22 +1302,48 @@ impl<'a> ModuleParser<'a> {
             }
         }
 
-        // 2. Build FF blocks per trigger set.
-        //    parse_ff_group emits only WORKING-region stores (pure eval).
-        //    We build three variants:
-        //      eval_only  = seeds (STABLE->WORKING) + stores
-        //      apply      = commits (WORKING->STABLE) only
-        //      eval_apply = eval_only with commits appended to the Return block
-        let mut eval_only_ff_blocks = HashMap::default();
-        let mut apply_ff_blocks = HashMap::default();
-        let mut eval_apply_ff_blocks = HashMap::default();
+        // Sample once per source trigger. Assembly orders publications across instances.
+        let mut event_bodies = HashMap::default();
         let mut ff_access_summaries = HashMap::default();
 
+        let mut event_graphs = HashMap::default();
         for (trigger_set, decls) in &ff_groups {
-            // --- eval_only and eval_apply ---
-            // Run parse_ff_group once. Clone the builder before sealing so that
-            // eval_only and eval_apply are produced from independent builder states,
-            // each with their own register namespace (no shared RegisterIds).
+            if !self.four_state
+                && let Some(form) = self.scalar_event(decls)?
+            {
+                let mut publication = SIRBuilder::new();
+                for root in &form.roots {
+                    let target = root.target;
+                    publication.emit(SIRInstruction::Commit(
+                        RegionedVarAddr {
+                            region: WORKING_REGION,
+                            var_id: target,
+                        },
+                        RegionedVarAddr {
+                            region: STABLE_REGION,
+                            var_id: target,
+                        },
+                        SIROffset::Static(root.access.lsb),
+                        root.access.msb - root.access.lsb + 1,
+                        Vec::new(),
+                    ));
+                }
+                publication.seal_block(SIRTerminator::Return);
+                let (blocks, register_map, _) = publication.drain();
+                event_bodies.insert(
+                    trigger_set.clone(),
+                    crate::symbolic::artifact::EventBody {
+                        sample: None,
+                        publish: ExecutionUnit {
+                            blocks,
+                            register_map,
+                            entry_block_id: BlockId(0),
+                        },
+                    },
+                );
+                event_graphs.insert(trigger_set.clone(), form);
+                continue;
+            }
             let mut builder = SIRBuilder::new();
             let ff_group = self.ff_parser.parse_ff_group(decls, &mut builder)?;
             let targets = ff_group.targets;
@@ -1262,13 +1372,6 @@ impl<'a> ModuleParser<'a> {
             );
             commits.extend(build_sparse_ff_commits(&targets, &dynamic_write_vars));
 
-            // Clone before sealing: eval_apply_builder gets the commit instructions appended.
-            let mut eval_apply_builder = builder.clone();
-            for commit in &commits {
-                eval_apply_builder.emit(commit.clone());
-            }
-
-            // Seal and drain eval_only.
             builder.seal_block(SIRTerminator::Return);
             let (bbs, regs, _) = builder.drain();
             let mut eval_only_eu = ExecutionUnit {
@@ -1277,18 +1380,8 @@ impl<'a> ModuleParser<'a> {
                 register_map: regs,
             };
 
-            // Seal and drain eval_apply.
-            eval_apply_builder.seal_block(SIRTerminator::Return);
-            let (ea_bbs, ea_regs, _) = eval_apply_builder.drain();
-            let mut eval_apply_eu = ExecutionUnit {
-                blocks: ea_bbs,
-                entry_block_id: BlockId(0),
-                register_map: ea_regs,
-            };
             rewrite_dynamic_ff_stores_to_sparse(&mut eval_only_eu, &dynamic_write_vars);
-            rewrite_dynamic_ff_stores_to_sparse(&mut eval_apply_eu, &dynamic_write_vars);
 
-            // Build seeds (STABLE -> WORKING) and prepend to both eval_only and eval_apply.
             let seeds = build_ff_region_copies_skipping(
                 &targets,
                 STABLE_REGION,
@@ -1296,11 +1389,6 @@ impl<'a> ModuleParser<'a> {
                 &dynamic_write_vars,
             );
             if let Some(entry) = eval_only_eu.blocks.get_mut(&BlockId(0)) {
-                let mut s = seeds.clone();
-                s.append(&mut entry.instructions);
-                entry.instructions = s;
-            }
-            if let Some(entry) = eval_apply_eu.blocks.get_mut(&BlockId(0)) {
                 let mut s = seeds;
                 s.append(&mut entry.instructions);
                 entry.instructions = s;
@@ -1319,9 +1407,13 @@ impl<'a> ModuleParser<'a> {
                 register_map: apply_regs,
             };
 
-            eval_only_ff_blocks.insert(trigger_set.clone(), eval_only_eu);
-            apply_ff_blocks.insert(trigger_set.clone(), apply_eu);
-            eval_apply_ff_blocks.insert(trigger_set.clone(), eval_apply_eu);
+            event_bodies.insert(
+                trigger_set.clone(),
+                crate::symbolic::artifact::EventBody {
+                    sample: Some(eval_only_eu),
+                    publish: apply_eu,
+                },
+            );
         }
 
         // Lane-partitioned builds also lower every trigger group as several
@@ -1373,7 +1465,12 @@ impl<'a> ModuleParser<'a> {
                 .native_outputs
                 .iter()
                 .any(|target| target.id == *external_id && target.access.overlaps(external_access));
-            if overlaps_comb || overlaps_ff || overlaps_child_output {
+            let overlaps_graph = event_graphs.values().any(|form| {
+                form.roots.iter().any(|root| {
+                    root.target == *external_id && root.access.overlaps(external_access)
+                })
+            });
+            if overlaps_comb || overlaps_ff || overlaps_graph || overlaps_child_output {
                 let variable = &self.module.variables[external_id];
                 let driver = if overlaps_child_output {
                     "child output driver"
@@ -1432,9 +1529,8 @@ impl<'a> ModuleParser<'a> {
             port_refs: self.port_refs,
             indexed_instance_names: HashSet::default(),
             ff_access_summaries,
-            eval_only_ff_blocks,
-            apply_ff_blocks,
-            eval_apply_ff_blocks,
+            event_graphs,
+            event_bodies,
             parallel_ff_parts,
             comb_blocks: self.comb_blocks,
             comb_process_ranges: self.comb_process_ranges,

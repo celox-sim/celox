@@ -91,7 +91,9 @@ fn acyclic_shared_clock_inputs_do_not_require_a_working_copy() {
     let clk = result.res.unwrap().event("clk").addr;
     let program = result.trace.pre_optimized_sir.unwrap();
     let mut stores = 0;
-    for instruction in program.sir.eval_apply_ffs[&clk]
+    for instruction in program.sir.updates.events[&clk]
+        .entry(celox_sir::UpdateEntry::Transition)
+        .unwrap()
         .iter()
         .flat_map(|unit| unit.blocks.values())
         .flat_map(|block| &block.instructions)
