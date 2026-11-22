@@ -11,6 +11,7 @@ use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 pub mod canon;
 mod condition_groups;
 pub mod const_inline;
+pub mod decode;
 mod lower;
 pub mod net_inline;
 pub mod next_state;

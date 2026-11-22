@@ -292,7 +292,7 @@ impl<'a, A: Clone + Eq + Hash> Canonicalizer<'a, A> {
 
 /// Whether SIR lowering may give `node` a signed register: the operations
 /// whose result register takes the signedness of their value.
-fn signed_register<A: Clone + Eq + Hash>(arena: &SLTNodeArena<A>, node: NodeId) -> bool {
+pub(super) fn signed_register<A: Clone + Eq + Hash>(arena: &SLTNodeArena<A>, node: NodeId) -> bool {
     matches!(
         arena.get(node),
         SLTNode::Unary(
@@ -749,49 +749,7 @@ impl<'a, A: Clone + Eq + Hash> Reinterner<'a, A> {
                 continue;
             }
             let copy = |operand: &NodeId| self.copies[operand];
-            let rebuilt = match source {
-                SLTNode::Input {
-                    variable,
-                    signed,
-                    index,
-                    access,
-                } => SLTNode::Input {
-                    variable: variable.clone(),
-                    signed: *signed,
-                    index: index
-                        .iter()
-                        .map(|entry| {
-                            let mut entry = entry.clone();
-                            entry.node = copy(&entry.node);
-                            entry
-                        })
-                        .collect(),
-                    access: *access,
-                },
-                SLTNode::Constant(..) => source.clone(),
-                SLTNode::Binary(lhs, op, rhs) => SLTNode::Binary(copy(lhs), *op, copy(rhs)),
-                SLTNode::Unary(op, operand) => SLTNode::Unary(*op, copy(operand)),
-                SLTNode::Mux {
-                    cond,
-                    then_expr,
-                    else_expr,
-                } => SLTNode::Mux {
-                    cond: copy(cond),
-                    then_expr: copy(then_expr),
-                    else_expr: copy(else_expr),
-                },
-                SLTNode::Slice { expr, access } => SLTNode::Slice {
-                    expr: copy(expr),
-                    access: *access,
-                },
-                SLTNode::Concat(parts) => SLTNode::Concat(
-                    parts
-                        .iter()
-                        .map(|(part, width)| (copy(part), *width))
-                        .collect(),
-                ),
-                _ => return Err(ReinternError::Unsupported(node)),
-            };
+            let rebuilt = map_expression(source, copy).ok_or(ReinternError::Unsupported(node))?;
             let id = intern(target, rebuilt)?;
             self.copies.insert(node, id);
         }
@@ -799,9 +757,59 @@ impl<'a, A: Clone + Eq + Hash> Reinterner<'a, A> {
     }
 }
 
+/// Rebuild an ordinary expression with the supplied operand mapping.
+pub(super) fn map_expression<A: Clone + Eq + Hash>(
+    source: &SLTNode<A>,
+    copy: impl Fn(&NodeId) -> NodeId,
+) -> Option<SLTNode<A>> {
+    Some(match source {
+        SLTNode::Input {
+            variable,
+            signed,
+            index,
+            access,
+        } => SLTNode::Input {
+            variable: variable.clone(),
+            signed: *signed,
+            index: index
+                .iter()
+                .map(|entry| {
+                    let mut entry = entry.clone();
+                    entry.node = copy(&entry.node);
+                    entry
+                })
+                .collect(),
+            access: *access,
+        },
+        SLTNode::Constant(..) => source.clone(),
+        SLTNode::Binary(lhs, op, rhs) => SLTNode::Binary(copy(lhs), *op, copy(rhs)),
+        SLTNode::Unary(op, operand) => SLTNode::Unary(*op, copy(operand)),
+        SLTNode::Mux {
+            cond,
+            then_expr,
+            else_expr,
+        } => SLTNode::Mux {
+            cond: copy(cond),
+            then_expr: copy(then_expr),
+            else_expr: copy(else_expr),
+        },
+        SLTNode::Slice { expr, access } => SLTNode::Slice {
+            expr: copy(expr),
+            access: *access,
+        },
+        SLTNode::Concat(parts) => SLTNode::Concat(
+            parts
+                .iter()
+                .map(|(part, width)| (copy(part), *width))
+                .collect(),
+        ),
+        _ => return None,
+    })
+}
+
 /// The operands of a node that the canonical form and the DAG measures
 /// follow.
-fn operands<A: Clone + Eq + Hash>(node: &SLTNode<A>) -> Vec<NodeId> {
+pub(super) fn operands<A: Clone + Eq + Hash>(node: &SLTNode<A>) -> Vec<NodeId> {
     match node {
         SLTNode::Input { index, .. } => index.iter().map(|entry| entry.node).collect(),
         SLTNode::Binary(lhs, _, rhs) => vec![*lhs, *rhs],
