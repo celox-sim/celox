@@ -49,7 +49,7 @@ pub fn lower_transition<
         four_state,
         address,
         element_widths,
-        &HashSet::default(),
+        (&HashSet::default(), &HashSet::default()),
     )?
     .0)
 }
@@ -73,6 +73,29 @@ pub fn sample_transition<
     element_widths: &HashMap<A, usize>,
     captured: &HashSet<A>,
 ) -> Result<(ExecutionUnit<B>, Vec<SampledStore<B>>), String> {
+    sample_enabled_transition(
+        dag,
+        form,
+        address,
+        element_widths,
+        captured,
+        &HashSet::default(),
+    )
+}
+
+/// A captured scalar in `unchanged` still holds its sampled old value at
+/// publication. Its explicit feedback arm can leave that destination alone.
+pub fn sample_enabled_transition<
+    A: Copy + Eq + Hash + Debug + Display,
+    B: Copy + Eq + Hash + Debug + Display,
+>(
+    dag: &SLTNodeArena<A>,
+    form: &NextStateForm<A>,
+    address: impl Fn(A, u32) -> B,
+    element_widths: &HashMap<A, usize>,
+    captured: &HashSet<A>,
+    unchanged: &HashSet<A>,
+) -> Result<(ExecutionUnit<B>, Vec<SampledStore<B>>), String> {
     lower_edge(
         dag,
         form,
@@ -80,7 +103,7 @@ pub fn sample_transition<
         false,
         address,
         element_widths,
-        captured,
+        (captured, unchanged),
     )
 }
 
@@ -91,7 +114,7 @@ fn lower_edge<A: Copy + Eq + Hash + Debug + Display, B: Copy + Eq + Hash + Debug
     four_state: bool,
     address: impl Fn(A, u32) -> B,
     element_widths: &HashMap<A, usize>,
-    captured: &HashSet<A>,
+    (captured, unchanged): (&HashSet<A>, &HashSet<A>),
 ) -> Result<(ExecutionUnit<B>, Vec<SampledStore<B>>), String> {
     let mut samples = Vec::new();
     let mut mapped = SLTNodeArena::<B>::new();
@@ -121,25 +144,8 @@ fn lower_edge<A: Copy + Eq + Hash + Debug + Display, B: Copy + Eq + Hash + Debug
             let mut enable = None;
             let mut active = Vec::with_capacity(mapped_nodes.len());
             for (root, node) in form.roots.iter().zip(&mapped_nodes) {
-                let SLTNode::Mux {
-                    cond,
-                    then_expr,
-                    else_expr,
-                } = *mapped.get(*node)
-                else {
-                    return None;
-                };
-                let holds = |node| {
-                    matches!(mapped.get(node), SLTNode::Input {variable, access, index, ..}
-                if *variable == address(root.target, STABLE_REGION) && *access == root.access && index.is_empty())
-                };
-                let (polarity, data) = if holds(else_expr) {
-                    (true, then_expr)
-                } else if holds(then_expr) {
-                    (false, else_expr)
-                } else {
-                    return None;
-                };
+                let (cond, polarity, data) =
+                    feedback_arm(&mapped, *node, stable(&root.target), root.access)?;
                 if enable
                     .replace((cond, polarity))
                     .is_some_and(|old| old != (cond, polarity))
@@ -154,37 +160,14 @@ fn lower_edge<A: Copy + Eq + Hash + Debug + Display, B: Copy + Eq + Hash + Debug
     let mut join = None;
     if let Some(((condition, polarity), active)) = enabled {
         let cond = lowerer.lower(&mut b, condition, &mapped, &mut lowered);
-        let taken = b.new_block();
-        let done = b.new_block();
-        let hold = if publication == Publication::Deferred {
-            b.new_block()
-        } else {
-            done
-        };
-        let (yes, no) = if polarity {
-            (taken, hold)
-        } else {
-            (hold, taken)
-        };
-        b.seal_block(SIRTerminator::Branch {
+        let done = open_enabled_bank(
+            &mut b,
             cond,
-            true_block: (yes, Vec::new()),
-            false_block: (no, Vec::new()),
-        });
-        if hold != done {
-            b.switch_to_block(hold);
-            for root in &form.roots {
-                b.emit(SIRInstruction::Commit(
-                    address(root.target, STABLE_REGION),
-                    address(root.target, WORKING_REGION),
-                    SIROffset::Static(root.access.lsb),
-                    root.access.msb - root.access.lsb + 1,
-                    Vec::new(),
-                ));
-            }
-            b.seal_block(SIRTerminator::Jump(done, Vec::new()));
-        }
-        b.switch_to_block(taken);
+            polarity,
+            form.roots.iter(),
+            &address,
+            publication,
+        );
         mapped_nodes = active;
         join = Some(done);
     }
@@ -229,6 +212,7 @@ fn lower_edge<A: Copy + Eq + Hash + Debug + Display, B: Copy + Eq + Hash + Debug
             selector,
         );
     }
+    let mut enables = HashMap::default();
     for bank in order.chunk_by(|&a, &b| {
         group
             && !captured.contains(&target(a))
@@ -237,14 +221,36 @@ fn lower_edge<A: Copy + Eq + Hash + Debug + Display, B: Copy + Eq + Hash + Debug
     }) {
         if let &[i] = bank {
             let root = &form.roots[i];
-            let value = lowerer.lower(&mut b, root_nodes[i], &mapped, &mut lowered);
-            // Common-enable extraction replaced the root mux with its active arm.
-            let value = if join.is_some() {
+            let capture = captured.contains(&root.target);
+            let feedback = (capture && group && unchanged.contains(&root.target))
+                .then(|| feedback_arm(&mapped, root_nodes[i], stable(&root.target), root.access))
+                .flatten();
+            let mut guard = None;
+            let node = if let Some((cond, polarity, data)) = feedback {
+                guard = Some(*enables.entry((cond, polarity)).or_insert_with(|| {
+                    let value = lowerer.lower(&mut b, cond, &mapped, &mut lowered);
+                    let truth = b.normalize_branch_condition(value);
+                    if polarity {
+                        return truth;
+                    }
+                    let inverse = b.alloc_bit(1, false);
+                    b.emit(SIRInstruction::Unary(
+                        inverse,
+                        celox_sir::UnaryOp::LogicNot,
+                        truth,
+                    ));
+                    inverse
+                }));
+                data
+            } else {
+                root_nodes[i]
+            };
+            let value = lowerer.lower(&mut b, node, &mapped, &mut lowered);
+            let value = if join.is_some() || feedback.is_some() {
                 lowerer.cast_reg_width(&mut b, value, crate::get_width(root.value, dag))
             } else {
                 value
             };
-            let capture = captured.contains(&root.target);
             let region = if capture {
                 STABLE_REGION
             } else {
@@ -252,7 +258,7 @@ fn lower_edge<A: Copy + Eq + Hash + Debug + Display, B: Copy + Eq + Hash + Debug
             };
             let store = root_store(&b, root, address(root.target, region), value)?;
             if capture {
-                samples.push(SampledStore { store, guard: None });
+                samples.push(SampledStore { store, guard });
             } else {
                 b.emit(store);
             }
@@ -271,18 +277,67 @@ fn lower_edge<A: Copy + Eq + Hash + Debug + Display, B: Copy + Eq + Hash + Debug
         for arm in [yes, no] {
             b.switch_to_block(arm);
             let mut local = Vec::new();
-            for &i in bank {
+            let arm_value = |i: usize| {
+                let (_, then_expr, else_expr) = mux(root_nodes[i]).expect("a bank of muxes");
+                if arm == yes { then_expr } else { else_expr }
+            };
+            let feedback = |i: usize| {
                 let root = &form.roots[i];
-                let node = root_nodes[i];
-                let (_, then_expr, else_expr) = mux(node).expect("a bank of muxes");
-                let expr = if arm == yes { then_expr } else { else_expr };
-                let value = lowerer.lower(&mut b, expr, &mapped, &mut lowered);
-                // Match full mux lowering, including an enclosing common enable.
-                let value =
-                    lowerer.cast_reg_width(&mut b, value, crate::get_width(root.value, dag));
-                local.extend(lowerer.take_scheduled_region_insertions());
-                let store = root_store(&b, root, address(root.target, WORKING_REGION), value)?;
-                b.emit(store);
+                feedback_arm(&mapped, arm_value(i), stable(&root.target), root.access)
+            };
+            // Registers can share a reset but have different enables on its
+            // inactive arm. Stage each independent enabled bank together.
+            let enable = |i| feedback(i).map(|(condition, polarity, _)| (condition, polarity));
+            let mut order = bank.to_vec();
+            group_staged_roots(
+                &mut order,
+                |i| address(target(i), WORKING_REGION),
+                |_| false,
+                |i| enable(i).map(|(condition, _)| condition),
+            );
+            for bank in order.chunk_by(|&a, &b| enable(a).is_some() && enable(a) == enable(b)) {
+                let nested_join = if bank.len() > 1 {
+                    let (condition, polarity) =
+                        enable(bank[0]).expect("a bank with a shared enable");
+                    let cond = lowerer.lower(&mut b, condition, &mapped, &mut lowered);
+                    local.extend(lowerer.take_scheduled_region_insertions());
+                    Some(open_enabled_bank(
+                        &mut b,
+                        cond,
+                        polarity,
+                        bank.iter().map(|&i| &form.roots[i]),
+                        &address,
+                        Publication::Deferred,
+                    ))
+                } else {
+                    None
+                };
+                let checkpoint = local.len();
+                for &i in bank {
+                    let root = &form.roots[i];
+                    let expr = if nested_join.is_some() {
+                        feedback(i).expect("an enabled write").2
+                    } else {
+                        arm_value(i)
+                    };
+                    let value = lowerer.lower(&mut b, expr, &mapped, &mut lowered);
+                    let value =
+                        lowerer.cast_reg_width(&mut b, value, crate::get_width(root.value, dag));
+                    local.extend(lowerer.take_scheduled_region_insertions());
+                    b.emit(root_store(
+                        &b,
+                        root,
+                        address(root.target, WORKING_REGION),
+                        value,
+                    )?);
+                }
+                if let Some(done) = nested_join {
+                    b.seal_block(SIRTerminator::Jump(done, Vec::new()));
+                    b.switch_to_block(done);
+                    for node in local.drain(checkpoint..) {
+                        lowered.remove(&node);
+                    }
+                }
             }
             for node in local {
                 lowered.remove(&node);
@@ -346,6 +401,78 @@ fn lower_edge<A: Copy + Eq + Hash + Debug + Display, B: Copy + Eq + Hash + Debug
         },
         samples,
     ))
+}
+
+/// Enter the active branch and return its join. A split NBA commit needs
+/// valid working values even on the hold edge. A direct write can skip it.
+fn open_enabled_bank<'a, A: Copy + 'a, B>(
+    b: &mut SIRBuilder<B>,
+    cond: RegisterId,
+    active_high: bool,
+    roots: impl Iterator<Item = &'a ValueRoot<A>>,
+    address: &impl Fn(A, u32) -> B,
+    publication: Publication,
+) -> BlockId {
+    let active = b.new_block();
+    let done = b.new_block();
+    let hold = if publication == Publication::Deferred {
+        b.new_block()
+    } else {
+        done
+    };
+    let (yes, no) = if active_high {
+        (active, hold)
+    } else {
+        (hold, active)
+    };
+    b.seal_block(SIRTerminator::Branch {
+        cond,
+        true_block: (yes, Vec::new()),
+        false_block: (no, Vec::new()),
+    });
+    if hold != done {
+        b.switch_to_block(hold);
+        for root in roots {
+            b.emit(SIRInstruction::Commit(
+                address(root.target, STABLE_REGION),
+                address(root.target, WORKING_REGION),
+                SIROffset::Static(root.access.lsb),
+                root.access.msb - root.access.lsb + 1,
+                Vec::new(),
+            ));
+        }
+        b.seal_block(SIRTerminator::Jump(done, Vec::new()));
+    }
+    b.switch_to_block(active);
+    done
+}
+
+/// A root mux whose inactive arm reads exactly the destination it writes.
+fn feedback_arm<A: Clone + Eq + Hash>(
+    arena: &SLTNodeArena<A>,
+    node: NodeId,
+    target: A,
+    range: celox_design::BitAccess,
+) -> Option<(NodeId, bool, NodeId)> {
+    let SLTNode::Mux {
+        cond,
+        then_expr,
+        else_expr,
+    } = *arena.get(node)
+    else {
+        return None;
+    };
+    let holds = |node| {
+        matches!(arena.get(node), SLTNode::Input {variable, access, index, ..}
+        if *variable == target && *access == range && index.is_empty())
+    };
+    if holds(else_expr) {
+        Some((cond, true, then_expr))
+    } else if holds(then_expr) {
+        Some((cond, false, else_expr))
+    } else {
+        None
+    }
 }
 
 /// Reads in a pure staged transition see only stable state. Gather independent
@@ -472,6 +599,78 @@ mod tests {
                 .filter(|block| block.as_slice() == bank)
                 .count(),
             2
+        );
+    }
+
+    #[test]
+    fn split_reset_bank_stages_held_values_under_its_inner_enable() {
+        let mut dag = SLTNodeArena::new();
+        let reset = input(&mut dag, 0, 1);
+        let disable = input(&mut dag, 1, 1);
+        let data = input(&mut dag, 2, 3);
+        let cleared = input(&mut dag, 3, 8);
+        let mut form = NextStateForm::default();
+        for target in [4, 5] {
+            let old = input(&mut dag, target, 8);
+            let next = dag
+                .alloc(SLTNode::Mux {
+                    cond: disable,
+                    then_expr: old,
+                    else_expr: data,
+                })
+                .unwrap();
+            let value = dag
+                .alloc(SLTNode::Mux {
+                    cond: reset,
+                    then_expr: cleared,
+                    else_expr: next,
+                })
+                .unwrap();
+            form.roots.push(ValueRoot {
+                target,
+                access: BitAccess::new(0, 7),
+                value,
+            });
+        }
+        let address = |id, region| region * 100 + id;
+        let unit = lower_transition(
+            &dag,
+            &form,
+            Publication::Deferred,
+            false,
+            address,
+            &HashMap::default(),
+        )
+        .unwrap();
+        unit.verify();
+        assert!(unit.blocks.values().all(|b| {
+            !b.instructions
+                .iter()
+                .any(|i| matches!(i, SIRInstruction::Mux(..)))
+        }));
+        let staged: Vec<_> = unit
+            .blocks
+            .values()
+            .filter_map(|b| {
+                let copies: Vec<_> = b
+                    .instructions
+                    .iter()
+                    .filter_map(|i| match i {
+                        SIRInstruction::Commit(src, dst, SIROffset::Static(0), 8, _) => {
+                            Some((*src, *dst))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                (!copies.is_empty()).then_some(copies)
+            })
+            .collect();
+        assert_eq!(
+            staged,
+            [vec![
+                (4, address(4, WORKING_REGION)),
+                (5, address(5, WORKING_REGION))
+            ]]
         );
     }
 

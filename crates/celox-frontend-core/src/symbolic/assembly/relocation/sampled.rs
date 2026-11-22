@@ -3,7 +3,7 @@
 use super::*;
 use celox_design::SPARSE_WORKING_REGION;
 use celox_sir::{BlockId, cfg::SirDominance};
-use celox_slt::next_state::sample_transition;
+use celox_slt::next_state::sample_enabled_transition;
 
 type Unit = ExecutionUnit<RegionedAbsoluteAddr>;
 
@@ -46,13 +46,19 @@ fn exclude_accesses(
     Some(())
 }
 
+struct PrivateSlots {
+    captured: HashSet<AbsoluteAddr>,
+    /// No other publication can change these destinations after sampling.
+    unchanged: HashSet<AbsoluteAddr>,
+}
+
 /// One graph writer and one unconditional publication own the working slot.
 /// An earlier writer of the same sparse array could leave other dirty entries.
 fn private_slots(
     form: &NextStateForm<AbsoluteAddr>,
     before: &[Unit],
     apply: &[Unit],
-) -> Option<HashSet<AbsoluteAddr>> {
+) -> Option<PrivateSlots> {
     let mut slots = HashMap::default();
     let mut excluded = HashSet::default();
     for (id, shape) in form
@@ -73,6 +79,7 @@ fn private_slots(
         exclude_accesses(inst, &mut excluded)?;
     }
     let mut published = HashSet::default();
+    let mut changed = HashSet::default();
     for unit in apply {
         let mut dominance = None;
         for block in unit.blocks.values() {
@@ -102,12 +109,22 @@ fn private_slots(
                     }
                 } else {
                     exclude_accesses(inst, &mut excluded)?;
+                    changed.extend(
+                        inst.state_writes()
+                            .objects()?
+                            .filter(|a| a.region == STABLE_REGION)
+                            .map(|a| a.absolute_addr()),
+                    );
                 }
             }
         }
     }
     published.retain(|id| !excluded.contains(id));
-    Some(published)
+    let unchanged = published.difference(&changed).copied().collect();
+    Some(PrivateSlots {
+        captured: published,
+        unchanged,
+    })
 }
 
 pub(super) fn combined(
@@ -117,15 +134,16 @@ pub(super) fn combined(
     before: &[Unit],
     apply: &[Unit],
 ) -> Result<Option<Unit>, ParserError> {
-    let Some(slots) = private_slots(form, before, apply).filter(|s| !s.is_empty()) else {
+    let Some(slots) = private_slots(form, before, apply).filter(|s| !s.captured.is_empty()) else {
         return Ok(None);
     };
-    let (sample, stores) = sample_transition(
+    let (sample, stores) = sample_enabled_transition(
         arena,
         form,
         |a, r| RegionedAbsoluteAddr::from_absolute_addr(r, a),
         elements,
-        &slots,
+        &slots.captured,
+        &slots.unchanged,
     )
     .map_err(|e| ParserError::illegal_context("clock samples", e, None))?;
     let phases: Vec<_> = before.iter().chain([&sample]).chain(apply).collect();
@@ -160,13 +178,15 @@ pub(super) fn combined(
     debug_assert!(samples.is_empty());
     // Split backwards so earlier instruction positions remain valid.
     guards.sort_unstable_by_key(|(block, index, _)| (*block, std::cmp::Reverse(*index)));
-    for (id, index, guard) in guards {
+    for run in guards.chunk_by(|(a, i, x), (b, j, y)| a == b && *i == j + 1 && x == y) {
+        let (id, last, guard) = run[0];
+        let first = run.last().unwrap().1;
         let write = BlockId(next);
         let join = BlockId(next + 1);
         next += 2;
         let block = unit.blocks.get_mut(&id).unwrap();
-        let tail = block.instructions.split_off(index + 1);
-        let store = block.instructions.pop().unwrap();
+        let tail = block.instructions.split_off(last + 1);
+        let stores = block.instructions.split_off(first);
         let terminator = std::mem::replace(
             &mut block.terminator,
             SIRTerminator::Branch {
@@ -180,7 +200,7 @@ pub(super) fn combined(
             BasicBlock {
                 id: write,
                 params: Vec::new(),
-                instructions: vec![store],
+                instructions: stores,
                 terminator: SIRTerminator::Jump(join, Vec::new()),
             },
         );
@@ -194,7 +214,7 @@ pub(super) fn combined(
             },
         );
     }
-    tracing::debug!(target: "celox::edge_graph", sampled = slots.len(), "published graph samples");
+    tracing::debug!(target: "celox::edge_graph", sampled = slots.captured.len(), "published graph samples");
     Ok(Some(unit))
 }
 
@@ -203,6 +223,104 @@ mod tests {
     use super::*;
     use celox_sir::SIRBuilder;
     use celox_slt::next_state::{RamWritePort, ValueRoot};
+
+    #[test]
+    fn shared_feedback_is_guarded_only_while_the_sampled_destination_is_unchanged() {
+        use celox_slt::SLTNode;
+        let addr = |n| AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: SourceVarId(n),
+        };
+        let region = RegionedAbsoluteAddr::from_absolute_addr;
+        let access = BitAccess::new(0, 0);
+        let mut arena = SLTNodeArena::new();
+        let mut input = |n| {
+            arena
+                .alloc(SLTNode::Input {
+                    variable: addr(n),
+                    access,
+                    index: Vec::new(),
+                    signed: false,
+                })
+                .unwrap()
+        };
+        let cond = input(0);
+        let data = input(1);
+        let old = [input(2), input(3), input(4)];
+        let mut form = NextStateForm::default();
+        let mut apply = SIRBuilder::new();
+        // Another writer replaces q4 before its NBA. On a disabled edge
+        // q4 must publish the value sampled before this competing write.
+        apply.emit(SIRInstruction::Commit(
+            region(STABLE_REGION, addr(1)),
+            region(STABLE_REGION, addr(4)),
+            SIROffset::Static(0),
+            1,
+            Vec::new(),
+        ));
+        for (i, old) in old.into_iter().enumerate() {
+            let target = addr(i as u32 + 2);
+            let value = arena
+                .alloc(SLTNode::Mux {
+                    cond,
+                    then_expr: old,
+                    else_expr: data,
+                })
+                .unwrap();
+            form.roots.push(ValueRoot {
+                target,
+                access,
+                value,
+            });
+            apply.emit(SIRInstruction::Commit(
+                region(WORKING_REGION, target),
+                region(STABLE_REGION, target),
+                SIROffset::Static(0),
+                1,
+                Vec::new(),
+            ));
+        }
+        let unit = combined(
+            &arena,
+            &form,
+            &HashMap::default(),
+            &[],
+            &[apply.flush_eu().unwrap()],
+        )
+        .unwrap()
+        .unwrap();
+        unit.verify();
+        let branch = unit
+            .blocks
+            .values()
+            .find_map(|block| match &block.terminator {
+                SIRTerminator::Branch {
+                    true_block,
+                    false_block,
+                    ..
+                } => Some((true_block.0, false_block.0)),
+                _ => None,
+            })
+            .unwrap();
+        let stores = |id| {
+            unit.blocks[&id]
+                .instructions
+                .iter()
+                .filter_map(|i| match i {
+                    SIRInstruction::Store(a, ..) => Some(a.absolute_addr()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(stores(branch.0), [addr(2), addr(3)]);
+        assert_eq!(stores(branch.1), [addr(4)]);
+        assert!(
+            unit.blocks
+                .values()
+                .flat_map(|b| &b.instructions)
+                .any(|i| matches!(i,SIRInstruction::Load(_,a,..) if a.absolute_addr() == addr(4)))
+        );
+    }
 
     #[test]
     fn a_procedure_orders_only_the_affected_roots_and_ram() {
@@ -301,7 +419,7 @@ mod tests {
             Vec::new(),
         ));
         let apply = [b.flush_eu().unwrap()];
-        assert_eq!(private_slots(&form, &[], &apply).unwrap().len(), 2);
+        assert_eq!(private_slots(&form, &[], &apply).unwrap().captured.len(), 2);
         b.emit(SIRInstruction::Commit(
             stable(array),
             sparse,
@@ -311,7 +429,7 @@ mod tests {
         ));
         let before = [b.flush_eu().unwrap()];
         assert_eq!(
-            private_slots(&form, &before, &apply).unwrap(),
+            private_slots(&form, &before, &apply).unwrap().captured,
             [q].into_iter().collect()
         );
         let reads = [stable(array)].into_iter().collect();
