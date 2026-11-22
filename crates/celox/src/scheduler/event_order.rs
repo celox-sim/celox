@@ -202,10 +202,16 @@ pub(super) fn register_groups(
             low = middle + 1;
         }
     }
-    let boundaries: Vec<_> = starts(low).map(|(start, _)| start).collect();
+    let mut cuts: Vec<_> = starts(low)
+        .enumerate()
+        .filter_map(|(i, (start, _))| start.then_some(i))
+        .collect();
+    cuts.push(candidates.len());
+    align_event_boundaries(&mut cuts, &candidates, &costs);
+    let mut cuts = cuts.into_iter().peekable();
     let mut result: Vec<(Activation, Vec<usize>)> = Vec::new();
-    for ((activation, members), start) in candidates.into_iter().zip(boundaries) {
-        if start {
+    for (i, (activation, members)) in candidates.into_iter().enumerate() {
+        if cuts.next_if_eq(&i).is_some() {
             result.push((activation, members));
         } else {
             let (previous, units) = result.last_mut().unwrap();
@@ -217,10 +223,110 @@ pub(super) fn register_groups(
     result
 }
 
+/// A size cut can strand a small run with an unrelated, expensive domain.
+/// Move it across the cut when the neighboring mixed group already subscribes
+/// to the same events. The donor then has one exact trigger again; the
+/// neighbor needs no additional event. Preserve the bit and unit order.
+fn align_event_boundaries(
+    cuts: &mut [usize],
+    candidates: &[(Activation, Vec<usize>)],
+    costs: &[usize],
+) {
+    let domain = |i: usize| &candidates[i].0;
+    for group in 0..cuts.len() - 1 {
+        let (start, end) = (cuts[group], cuts[group + 1]);
+        let Some(split) = (start + 1..end).find(|&i| domain(i) != domain(start)) else {
+            continue;
+        };
+        if (split + 1..end).any(|i| domain(i) != domain(split)) {
+            continue;
+        }
+
+        let cost = |range: std::ops::Range<usize>| costs[range].iter().sum::<usize>();
+        let (cut, neighbor, moved) = match cost(start..split).cmp(&cost(split..end)) {
+            std::cmp::Ordering::Less if group > 0 && domain(start - 1) == domain(start) => {
+                (group, cuts[group - 1]..start, domain(start))
+            }
+            std::cmp::Ordering::Greater
+                if end < candidates.len() && domain(end) == domain(split) =>
+            {
+                (group + 1, end..cuts[group + 2], domain(split))
+            }
+            _ => continue,
+        };
+        // A homogeneous neighbor may still have a more selective register
+        // bank within its clock domain. Keep its membership intact.
+        if neighbor.into_iter().any(|i| domain(i) != moved) {
+            cuts[cut] = split;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use celox_design::{InstanceId, StateObjectId};
+
+    #[test]
+    fn size_packing_does_not_wake_a_heavy_bank_for_a_neighboring_event() {
+        let banks: Vec<_> = (0..66)
+            .map(|i| {
+                vec![AbsoluteAddr {
+                    instance_id: InstanceId(0),
+                    var_id: StateObjectId(i),
+                }]
+            })
+            .collect();
+        let domain = |bit: usize| Activation {
+            events: BigUint::from(1u8) << bit,
+            ..Activation::default()
+        };
+        let mut sizes = vec![1000; banks.len()];
+        // The 61 large units leave two bits. Size alone splits [6,3,1]
+        // from [2,8], putting the rare eight-instruction bank on event 70.
+        sizes[61..].copy_from_slice(&[6, 3, 1, 2, 8]);
+        let input = vec![
+            (domain(0), (0..62).collect()),
+            (domain(1), vec![62]),
+            (domain(70), vec![63, 64]),
+            (domain(3), vec![65]),
+        ];
+        let groups = register_groups(input, &banks, &sizes);
+        assert_eq!(groups.len(), 63);
+        assert_eq!(groups[61].1, [61, 62, 63, 64]);
+        assert_eq!(
+            groups[61].0.events,
+            domain(0).events | domain(1).events | domain(70).events
+        );
+        assert_eq!(groups[62].1, [65]);
+        assert_eq!(groups[62].0.events, domain(3).events);
+    }
+
+    #[test]
+    fn refining_an_event_boundary_preserves_homogeneous_banks_and_clocks() {
+        let domain = |bit: u8, clock_inputs| Activation {
+            events: (1u8 << bit).into(),
+            clock_inputs,
+            ..Activation::default()
+        };
+        let candidates = |clock| {
+            [(0, false), (1, false), (1, clock), (2, clock), (3, clock)]
+                .map(|(bit, clock)| (domain(bit, clock), Vec::new()))
+        };
+        // Move a short suffix into an already mixed neighbor in the same
+        // clock domain. A clock-level trigger or a homogeneous neighbor must
+        // keep its bank separate.
+        let mut cuts = [0, 2, 5];
+        align_event_boundaries(&mut cuts, &candidates(false), &[8, 2, 1, 3, 6]);
+        assert_eq!(cuts, [0, 1, 5]);
+        let mut cuts = [0, 2, 5];
+        align_event_boundaries(&mut cuts, &candidates(true), &[8, 2, 1, 3, 6]);
+        assert_eq!(cuts, [0, 2, 5]);
+        let units = candidates(false);
+        let mut cuts = [0, 2, 3];
+        align_event_boundaries(&mut cuts, &units[..3], &[8, 2, 1]);
+        assert_eq!(cuts, [0, 2, 3]);
+    }
 
     #[test]
     fn independent_readers_share_a_clock_but_keep_their_own_publication_bits() {
