@@ -749,3 +749,54 @@ fn repeated_large_register_mask_is_eliminated() {
         }
     ));
 }
+
+#[test]
+fn stores_bypass_only_masks_that_preserve_every_stored_bit() {
+    let input = VReg(0);
+    let masked = VReg(1);
+    for mask in [
+        MInst::AndImm {
+            dst: masked,
+            src: input,
+            imm: 0x1ff,
+        },
+        MInst::AndImm32 {
+            dst: masked,
+            src: input,
+            imm: 0x1ff,
+        },
+    ] {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: input,
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    size: OpSize::S64,
+                },
+                mask,
+                MInst::StoreIndexed {
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    index: masked,
+                    src: masked,
+                    size: OpSize::S8,
+                    alias_range: None,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    src: masked,
+                    size: OpSize::S16,
+                },
+                MInst::Return,
+            ],
+            2,
+        );
+        algebraic_simplify(&mut func);
+        assert!(
+            matches!(func.blocks[0].insts[2], MInst::StoreIndexed { src, index, .. } if src == input && index == masked)
+        );
+        assert!(matches!(func.blocks[0].insts[3], MInst::Store { src, .. } if src == masked));
+    }
+}
