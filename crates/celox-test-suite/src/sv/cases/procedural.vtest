@@ -1974,3 +1974,60 @@ endmodule
   (assert_eq negative 0)
   (assert_eq comb_count 4)
   (assert_eq function_count 3))
+
+; IEEE 1800-2023 12.7.1, 6.12: a `for` loop over a real variable counts in
+; real values and leaves the variable at the value that ended it, with or
+; without timing controls in its body.
+(case for_loops_over_real_variables
+  (source "real_for_loops.sv" #"
+module Top(output int counted, output int timed, output logic [63:0] ended,
+           output logic [63:0] timed_end);
+  real r, t;
+  initial begin
+    counted = 0;
+    for (r = -10; r <= 10; r = r + 2.5) counted++;
+    ended = $realtobits(r);
+    timed = 0;
+    for (t = 0; t < 3; t = t + 1) begin
+      timed++;
+      #1;
+    end
+    timed_end = $realtobits(t);
+  end
+endmodule
+"#)
+  (top Top) (run_until 5)
+  (assert_eq counted 9) (assert_eq ended 0x4029000000000000)
+  (assert_eq timed 3) (assert_eq timed_end 0x4008000000000000))
+
+; A rounded-away step does not prevent the body from ending a real loop.
+(case real_for_loop_body_can_end_the_loop
+  (source "real_for_loop_body.sv" #"
+module Top(input bit clk, output int variable_count, bound_count, break_count);
+  real r, limit;
+  always_ff @(posedge clk) begin
+    variable_count = 0;
+    for (r = 1e20; r < 1e21; r = r + 0.5) begin
+      variable_count++;
+      r = 1e21;
+    end
+
+    limit = 1e21;
+    bound_count = 0;
+    for (r = 1e20; r < limit; r = r + 1) begin
+      bound_count++;
+      if (bound_count == 2) limit = 1e20;
+    end
+
+    break_count = 0;
+    for (r = 1e20; r < 1e21; r = r + 0.5) begin
+      break_count++;
+      if (break_count == 3) break;
+    end
+  end
+endmodule
+"#)
+  (top Top) (tick clk)
+  (assert_eq variable_count 1)
+  (assert_eq bound_count 2)
+  (assert_eq break_count 3))
