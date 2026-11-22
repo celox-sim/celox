@@ -149,6 +149,7 @@ impl Comb<'_, '_> {
         &mut self,
         body: &[sv::ir::Stmt],
         blocking: &HashSet<SourceVarId>,
+        mut enables: Option<&mut Vec<(SourceVarId, NodeId, NodeId)>>,
     ) -> Result<NextState, sv::AnalyzerError> {
         self.allow_nonblocking = true;
         self.hold_latches = true;
@@ -213,8 +214,24 @@ impl Comb<'_, '_> {
                 // from where it was placed.
                 let node =
                     self.slice(node, BitAccess::new(lsb - origin, lsb - origin + width - 1))?;
+                if let Some(enables) = enables.as_deref_mut()
+                    && !self.m.four_state
+                    && target != shadow
+                    && lsb == 0
+                    && width == self.m.var(target).width
+                    && let Some((condition, data)) = self.write_enable(node, shadow, 0)?
+                    && !celox_slt::canon::reachable(self.arena, [data]).into_iter().any(|id|
+                        matches!(self.arena.get(id), SLTNode::Input { variable, .. } if *variable == shadow))
+                {
+                    enables.push((
+                        target,
+                        self.read_targets(condition, &targets, &mut memo)?,
+                        self.read_targets(data, &targets, &mut memo)?,
+                    ));
+                }
                 let value = self.read_targets(node, &targets, &mut memo)?;
                 form.roots.push(NextStateRoot {
+                    enable: None,
                     target,
                     access: BitAccess::new(lsb, lsb + width - 1),
                     value,
@@ -230,6 +247,65 @@ impl Comb<'_, '_> {
             });
         }
         Ok(form)
+    }
+
+    /// Before replacing shadow reads, a shadow arm means no assignment.
+    /// An explicit nonblocking self-assignment reads the original variable.
+    /// Recognize an enable, optionally nested under a reset or another selector.
+    fn write_enable(
+        &mut self,
+        node: NodeId,
+        shadow: SourceVarId,
+        depth: usize,
+    ) -> Result<Option<(NodeId, NodeId)>, sv::AnalyzerError> {
+        let SLTNode::Mux {
+            cond,
+            then_expr,
+            else_expr,
+        } = *self.arena.get(node)
+        else {
+            return Ok(None);
+        };
+        for (inactive, active, positive) in
+            [(else_expr, then_expr, true), (then_expr, else_expr, false)]
+        {
+            if matches!(self.arena.get(inactive), SLTNode::Input { variable, index, .. }
+                if *variable == shadow && index.is_empty())
+            {
+                let cond = if positive {
+                    cond
+                } else {
+                    slt_not(self.arena, &mut self.consts, cond)?
+                };
+                return Ok(Some((cond, active)));
+            }
+        }
+        if depth == 0 {
+            for (nested, other, positive) in
+                [(else_expr, then_expr, true), (then_expr, else_expr, false)]
+            {
+                if let Some((inner, data)) = self.write_enable(nested, shadow, 1)? {
+                    let direct = if positive {
+                        cond
+                    } else {
+                        slt_not(self.arena, &mut self.consts, cond)?
+                    };
+                    let enabled = slt_or(self.arena, &mut self.consts, direct, inner)?;
+                    let (then_expr, else_expr) = if positive {
+                        (other, data)
+                    } else {
+                        (data, other)
+                    };
+                    let data = self.alloc(SLTNode::Mux {
+                        cond,
+                        then_expr,
+                        else_expr,
+                    })?;
+                    return Ok(Some((enabled, data)));
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// `node` with each read of a hidden next-state variable, the value a

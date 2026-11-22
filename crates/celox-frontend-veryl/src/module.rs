@@ -1263,6 +1263,7 @@ impl<'a> ModuleParser<'a> {
                 crate::context_width::expression_signed(expr),
             )?;
             form.roots.push(celox_slt::next_state::ValueRoot {
+                enable: None,
                 target: id,
                 value,
                 access: BitAccess::new(0, width - 1),

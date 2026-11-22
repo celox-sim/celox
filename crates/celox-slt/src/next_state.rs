@@ -25,6 +25,16 @@ pub struct ValueRoot<A> {
     pub target: A,
     pub access: BitAccess,
     pub value: NodeId,
+    /// A conditional NBA with a private working slot shared by its bank.
+    /// The total value above remains available to direct transitions.
+    pub enable: Option<WriteEnable<A>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WriteEnable<A> {
+    pub slot: A,
+    pub condition: NodeId,
+    pub data: NodeId,
 }
 
 /// A nonblocking write of an unpacked-array element at a run-time index.
@@ -61,11 +71,20 @@ impl<A> Default for NextStateForm<A> {
 impl<A> NextStateForm<A> {
     /// The nodes the roots and ports compute.
     pub fn nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
-        self.roots.iter().map(|root| root.value).chain(
-            self.ports
-                .iter()
-                .flat_map(|port| [port.index, port.value, port.guard]),
-        )
+        self.roots
+            .iter()
+            .map(|root| root.value)
+            .chain(
+                self.ports
+                    .iter()
+                    .flat_map(|port| [port.index, port.value, port.guard]),
+            )
+            .chain(
+                self.roots
+                    .iter()
+                    .filter_map(|root| root.enable.as_ref())
+                    .flat_map(|enable| [enable.condition, enable.data]),
+            )
     }
 
     /// The form with each node mapped by `node` and each variable by `var`.
@@ -77,6 +96,14 @@ impl<A> NextStateForm<A> {
         let mut mapped = NextStateForm::default();
         for root in &self.roots {
             mapped.roots.push(ValueRoot {
+                enable: match &root.enable {
+                    Some(enable) => Some(WriteEnable {
+                        slot: var(&enable.slot),
+                        condition: node(enable.condition)?,
+                        data: node(enable.data)?,
+                    }),
+                    None => None,
+                },
                 target: var(&root.target),
                 access: root.access,
                 value: node(root.value)?,

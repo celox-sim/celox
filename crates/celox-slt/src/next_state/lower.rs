@@ -144,24 +144,29 @@ fn lower_edge<A: Copy + Eq + Hash + Debug + Display, B: Copy + Eq + Hash + Debug
     // A common enable is one decision for the entire bank. Sample active
     // data only on the enabled edge. A split evaluation must still leave
     // the old values in its working slots for the later commit.
-    let enabled = (!four_state && form.ports.is_empty() && captured.is_empty())
-        .then(|| {
-            let mut enable = None;
-            let mut active = Vec::with_capacity(mapped_nodes.len());
-            for (root, node) in form.roots.iter().zip(&mapped_nodes) {
-                let (cond, polarity, data) =
-                    feedback_arm(&mapped, *node, stable(&root.target), root.access)?;
-                if enable
-                    .replace((cond, polarity))
-                    .is_some_and(|old| old != (cond, polarity))
-                {
-                    return None;
-                }
-                active.push(data);
+    let deferred_bank =
+        |root: &ValueRoot<A>| publication == Publication::Deferred && root.enable.is_some();
+    let enabled = (!four_state
+        && form.ports.is_empty()
+        && captured.is_empty()
+        && !form.roots.iter().any(deferred_bank))
+    .then(|| {
+        let mut enable = None;
+        let mut active = Vec::with_capacity(mapped_nodes.len());
+        for (root, node) in form.roots.iter().zip(&mapped_nodes) {
+            let (cond, polarity, data) =
+                feedback_arm(&mapped, *node, stable(&root.target), root.access)?;
+            if enable
+                .replace((cond, polarity))
+                .is_some_and(|old| old != (cond, polarity))
+            {
+                return None;
             }
-            Some((enable?, active))
-        })
-        .flatten();
+            active.push(data);
+        }
+        Some((enable?, active))
+    })
+    .flatten();
     let mut join = None;
     if let Some(((condition, polarity), active)) = enabled {
         let cond = lowerer.lower(&mut b, condition, &mapped, &mut lowered);
@@ -186,7 +191,7 @@ fn lower_edge<A: Copy + Eq + Hash + Debug + Display, B: Copy + Eq + Hash + Debug
             .iter()
             .any(|node| matches!(node, SLTNode::ForFold { .. } | SLTNode::ForFoldGroup { .. }));
     if !stream {
-        let mut ordered = mapped_nodes.clone();
+        let mut ordered = mapped_nodes[..form.roots.len() + 3 * form.ports.len()].to_vec();
         ordered.sort_unstable_by_key(|node| node.0);
         ordered.dedup();
         for node in ordered {
@@ -206,6 +211,7 @@ fn lower_edge<A: Copy + Eq + Hash + Debug + Display, B: Copy + Eq + Hash + Debug
     let mut order: Vec<_> = root_nodes
         .iter()
         .enumerate()
+        .filter(|(index, _)| !deferred_bank(&form.roots[*index]))
         .map(|(index, &value)| Write { index, value })
         .collect();
     if group {
@@ -329,6 +335,62 @@ fn lower_edge<A: Copy + Eq + Hash + Debug + Display, B: Copy + Eq + Hash + Debug
                 Ok::<_, String>(())
             },
         )?;
+    }
+    let (port_nodes, guard_nodes) = port_nodes.split_at(form.ports.len() * 3);
+    if publication == Publication::Deferred {
+        let mut banks = Vec::new();
+        let mut indices = HashMap::default();
+        for (root, &[condition, data]) in form
+            .roots
+            .iter()
+            .filter(|r| r.enable.is_some())
+            .zip(guard_nodes.as_chunks::<2>().0)
+        {
+            let slot = root.enable.as_ref().unwrap().slot;
+            let index = *indices.entry(slot).or_insert_with(|| {
+                banks.push((slot, condition, Vec::new()));
+                banks.len() - 1
+            });
+            banks[index].2.push((root, data));
+        }
+        for (slot, condition, roots) in banks {
+            let guard = lowerer.lower(&mut b, condition, &mapped, &mut lowered);
+            let guard = b.normalize_branch_condition(guard);
+            let write = b.new_block();
+            let next = b.new_block();
+            b.seal_block(SIRTerminator::Branch {
+                cond: guard,
+                true_block: (write, vec![]),
+                false_block: (next, vec![]),
+            });
+            b.switch_to_block(write);
+            b.emit(SIRInstruction::Store(
+                address(slot, WORKING_REGION),
+                SIROffset::Static(0),
+                1,
+                guard,
+                vec![],
+                vec![],
+            ));
+            let mut local = Vec::new();
+            for (root, data) in roots {
+                let value = lowerer.lower(&mut b, data, &mapped, &mut lowered);
+                let value =
+                    lowerer.cast_reg_width(&mut b, value, root.access.msb - root.access.lsb + 1);
+                b.emit(root_store(
+                    &b,
+                    root,
+                    address(root.target, WORKING_REGION),
+                    value,
+                )?);
+                local.extend(lowerer.take_scheduled_region_insertions());
+            }
+            for node in local {
+                lowered.remove(&node);
+            }
+            b.seal_block(SIRTerminator::Jump(next, vec![]));
+            b.switch_to_block(next);
+        }
     }
     for (port, nodes) in form.ports.iter().zip(port_nodes.as_chunks::<3>().0) {
         let [index, value, guard] =
@@ -538,6 +600,7 @@ mod tests {
                 .unwrap()
         };
         let root = |target, value| ValueRoot {
+            enable: None,
             target,
             value,
             access: BitAccess::new(0, 7),
@@ -611,6 +674,7 @@ mod tests {
                 })
                 .unwrap();
             form.roots.push(ValueRoot {
+                enable: None,
                 target,
                 access: BitAccess::new(0, 7),
                 value,
@@ -673,6 +737,7 @@ mod tests {
             .unwrap();
         let form = NextStateForm {
             roots: vec![ValueRoot {
+                enable: None,
                 target: 2,
                 access: BitAccess::new(0, 63),
                 value: mux,
