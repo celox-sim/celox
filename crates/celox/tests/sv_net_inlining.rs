@@ -826,3 +826,106 @@ fn per_destination_samples_keep_the_statement_order_and_case_priority() {
     run(build().build_interpreter().unwrap());
     run(build().build().unwrap());
 }
+
+/// The settle computes the product once. Both clocks sample that value even
+/// through a wire alias, and the observed output follows later input changes.
+#[test]
+fn two_clock_domains_sample_one_observed_calculation() {
+    use celox_design::BinaryOp;
+    use celox_sir::{CombApply, SIRInstruction};
+
+    let source = r#"
+module Top(input bit src, a, b, input bit [7:0] i, j,
+           output bit [7:0] seen, qa, qb);
+    bit [7:0] x, y;
+    always_ff @(posedge src) begin x <= i; y <= j; end
+    wire [7:0] product = x * y;
+    wire [7:0] copy = product;
+    assign seen = product;
+    always_ff @(posedge a) qa <= product;
+    always_ff @(posedge b) qb <= copy;
+endmodule"#;
+    let build = Simulator::from_sv_sources(vec![(source, Path::new("shared-product.sv"))], "Top")
+        .opt_level(OptLevel::O2)
+        .four_state(false)
+        .enable_pass(SirPass::NextStateDag)
+        .disable_pass(SirPass::PartitionedSettle)
+        .trace_pre_optimized_sir()
+        .build_with_trace();
+    let mut sim = build.res.unwrap();
+    let (src, a, b) = (sim.event("src"), sim.event("a"), sim.event("b"));
+    let program = build.trace.pre_optimized_sir.unwrap().sir;
+    let count = |units: &[_]| {
+        units
+            .iter()
+            .flat_map(|u: &celox_sir::ExecutionUnit<_>| u.blocks.values())
+            .flat_map(|block| &block.instructions)
+            .filter(|inst| matches!(inst, SIRInstruction::Binary(_, _, BinaryOp::Mul, _)))
+            .count()
+    };
+    assert_eq!(count(&program.eval_comb), 1);
+    for clock in [a, b] {
+        assert!(matches!(
+            program.comb_apply(&clock.addr),
+            Some(CombApply::Shared)
+        ));
+        assert_eq!(count(&program.eval_apply_ffs[&clock.addr]), 0);
+        assert_eq!(count(&program.eval_only_ffs[&clock.addr]), 0);
+    }
+    let (i, j) = (sim.signal("i"), sim.signal("j"));
+    let (seen, qa, qb) = (sim.signal("seen"), sim.signal("qa"), sim.signal("qb"));
+    sim.modify(|io| {
+        io.set(i, 9u8);
+        io.set(j, 7u8);
+    })
+    .unwrap();
+    sim.tick(src).unwrap();
+    sim.tick(a).unwrap();
+    assert_eq!(sim.get(qa), 63u8.into());
+    sim.modify(|io| io.set(i, 11u8)).unwrap();
+    sim.tick(src).unwrap();
+    assert_eq!(sim.get(seen), 77u8.into());
+    sim.tick(b).unwrap();
+    assert_eq!(sim.get(qb), 77u8.into());
+    assert_eq!(sim.get(qa), 63u8.into());
+}
+
+/// A wait is an observation root even when its body does not read the
+/// observed value. Check occurrences separated from the sampling edge.
+#[test]
+fn a_wait_and_a_clock_share_the_settled_product() {
+    let source = r#"`timescale 1ns/1ns
+module Top(output int changes, output bit [7:0] sampled);
+    bit clk;
+    bit [7:0] x;
+    always #1 clk = ~clk;
+    wire [7:0] product = x * x;
+    initial forever begin @(product); changes++; end
+    always_ff @(posedge clk) sampled <= product;
+    initial begin
+        #2 x = 5;
+        #2 x = 7;
+    end
+endmodule"#;
+    let build = || {
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("observed-product.sv"))], "Top")
+            .four_state(false)
+            .opt_level(OptLevel::O2)
+            .enable_pass(SirPass::NextStateDag)
+    };
+    for partition in [false, true] {
+        let builder = if partition {
+            build().settle_partition(SettlePartition::Always)
+        } else {
+            build().disable_pass(SirPass::PartitionedSettle)
+        };
+        let mut sim = builder.build().unwrap();
+        let (changes, sampled) = (sim.signal("changes"), sim.signal("sampled"));
+        sim.run_until(3).unwrap();
+        assert_eq!(sim.get(changes), 1u32.into());
+        assert_eq!(sim.get(sampled), 25u8.into());
+        sim.run_until(4).unwrap();
+        assert_eq!(sim.get(changes), 2u32.into());
+        assert_eq!(sim.get(sampled), 25u8.into());
+    }
+}
