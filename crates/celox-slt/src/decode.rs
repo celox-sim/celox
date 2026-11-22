@@ -1,4 +1,5 @@
 //! Reduce priority mux chains over mutually exclusive two-state selector values.
+mod decision;
 mod state_table;
 use crate::{
     HashMap, HashSet, NodeId, SLTNode, SLTNodeArena, SLTNodeFactsError, canon, lower::bound_signed,
@@ -38,19 +39,25 @@ fn row<A: Clone + Eq + Hash>(arena: &SLTNodeArena<A>, node: NodeId) -> Option<Ro
     })
 }
 
+fn boolean_child<A: Clone + Eq + Hash>(arena: &SLTNodeArena<A>, node: NodeId) -> Option<NodeId> {
+    match *arena.get(node) {
+        SLTNode::Unary(UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Or, child)
+            if arena.node_width(child) == Some(1) =>
+        {
+            Some(child)
+        }
+        _ => None,
+    }
+}
+
 /// An equality test on a scalar input and a known constant of its width.
 /// A wildcard comparison is exact only when the right operand has no wildcard bits.
 pub(super) fn exact_label<A: Clone + Eq + Hash>(
     arena: &SLTNodeArena<A>,
     mut predicate: NodeId,
 ) -> Option<(NodeId, BinaryOp, u64)> {
-    while let SLTNode::Unary(UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Or, child) =
-        *arena.get(predicate)
-    {
-        if arena.node_width(child) != Some(1) {
-            return None;
-        }
-        predicate = child;
+    while let Some(inner) = boolean_child(arena, predicate) {
+        predicate = inner;
     }
     let SLTNode::Binary(left, op @ (BinaryOp::Eq | BinaryOp::EqCase | BinaryOp::EqWildcard), right) =
         *arena.get(predicate)
@@ -80,24 +87,22 @@ pub(super) fn exact_label<A: Clone + Eq + Hash>(
     Some((selector, op, label))
 }
 
-fn membership<A: Clone + Eq + Hash>(
+/// Match unique labels using one masked comparison or one immediate bitmap.
+fn compact_membership<A: Clone + Eq + Hash>(
     arena: &mut SLTNodeArena<A>,
     selector: NodeId,
-    labels: &[(u64, NodeId)],
-) -> Result<NodeId, SLTNodeFactsError> {
-    let (first, predicate) = labels[0];
-    if labels.len() == 1 {
-        return Ok(predicate);
-    }
+    labels: impl ExactSizeIterator<Item = u64> + Clone,
+) -> Result<Option<NodeId>, SLTNodeFactsError> {
+    let first = labels.clone().next().expect("nonempty decode group");
     let width = crate::get_width(selector, arena);
-    let varying = labels
-        .iter()
-        .fold(0, |diff, (value, _)| diff | (first ^ value));
+    let varying = labels.clone().fold(0, |diff, value| diff | (first ^ value));
     // Distinct labels exhaust all assignments to the varying bits.
     if 1usize.checked_shl(varying.count_ones()) == Some(labels.len()) {
         let mask = (u64::MAX >> (64 - width)) & !varying;
         if mask == 0 {
-            return arena.alloc(SLTNode::Constant(1u8.into(), 0u8.into(), 1, false));
+            return arena
+                .alloc(SLTNode::Constant(1u8.into(), 0u8.into(), 1, false))
+                .map(Some);
         }
         let literal = arena.alloc(SLTNode::Constant(
             (first & mask).into(),
@@ -107,13 +112,13 @@ fn membership<A: Clone + Eq + Hash>(
         ))?;
         let mask = arena.alloc(SLTNode::Constant(mask.into(), 0u8.into(), width, false))?;
         let masked = arena.alloc(SLTNode::Binary(selector, BinaryOp::And, mask))?;
-        return arena.alloc(SLTNode::Binary(masked, BinaryOp::Eq, literal));
+        return arena
+            .alloc(SLTNode::Binary(masked, BinaryOp::Eq, literal))
+            .map(Some);
     }
     if width <= 6 && labels.len() > 2 {
         let table_width = 1usize << width;
-        let bits = labels
-            .iter()
-            .fold(0u64, |bits, (value, _)| bits | (1u64 << value));
+        let bits = labels.fold(0u64, |bits, value| bits | (1u64 << value));
         let table = arena.alloc(SLTNode::Constant(
             bits.into(),
             0u8.into(),
@@ -121,12 +126,36 @@ fn membership<A: Clone + Eq + Hash>(
             false,
         ))?;
         let shifted = arena.alloc(SLTNode::Binary(table, BinaryOp::Shr, selector))?;
-        return arena.alloc(SLTNode::Slice {
-            expr: shifted,
-            access: BitAccess::new(0, 0),
-        });
+        return arena
+            .alloc(SLTNode::Slice {
+                expr: shifted,
+                access: BitAccess::new(0, 0),
+            })
+            .map(Some);
     }
-    let mut conditions: Vec<_> = labels.iter().map(|&(_, node)| node).collect();
+    Ok(None)
+}
+
+fn membership<A: Clone + Eq + Hash>(
+    arena: &mut SLTNodeArena<A>,
+    selector: NodeId,
+    labels: &[(u64, NodeId)],
+) -> Result<NodeId, SLTNodeFactsError> {
+    let (_, predicate) = labels[0];
+    if labels.len() == 1 {
+        return Ok(predicate);
+    }
+    if let Some(test) = compact_membership(arena, selector, labels.iter().map(|&(label, _)| label))?
+    {
+        return Ok(test);
+    }
+    any(arena, labels.iter().map(|&(_, node)| node).collect())
+}
+
+fn any<A: Clone + Eq + Hash>(
+    arena: &mut SLTNodeArena<A>,
+    mut conditions: Vec<NodeId>,
+) -> Result<NodeId, SLTNodeFactsError> {
     while conditions.len() > 1 {
         let mut next = Vec::with_capacity(conditions.len().div_ceil(2));
         for pair in conditions.chunks(2) {
@@ -215,6 +244,7 @@ pub fn reduce_two_state_decodes<'a, A: Clone + Eq + Hash>(
     let mut uses = HashMap::<NodeId, usize>::default();
     let mut order = Vec::new();
     let mut rows = HashMap::default();
+    let mut disjunctions = HashSet::default();
     while let Some(n) = pending.pop() {
         let uses = uses.entry(n).or_default();
         *uses += 1;
@@ -222,6 +252,11 @@ pub fn reduce_two_state_decodes<'a, A: Clone + Eq + Hash>(
             continue;
         }
         order.push(n);
+        if let SLTNode::Mux { cond, .. } = *arena.get(n)
+            && let Some(disjunction) = decision::disjunction(arena, cond)
+        {
+            disjunctions.insert(disjunction);
+        }
         if let Some(r) = row(arena, n) {
             rows.insert(n, r);
         }
@@ -235,7 +270,7 @@ pub fn reduce_two_state_decodes<'a, A: Clone + Eq + Hash>(
         })
         .map(|r| r.tail)
         .collect();
-    if interior.is_empty() {
+    if interior.is_empty() && disjunctions.is_empty() {
         return Ok(());
     }
     // Arena operands precede their users, so replacements propagate in one pass.
@@ -259,7 +294,11 @@ pub fn reduce_two_state_decodes<'a, A: Clone + Eq + Hash>(
             impure.insert(node);
         }
         let mapped = |id: &NodeId| changed.get(id).copied().unwrap_or(*id);
-        let mut replacement = None;
+        let mut replacement = if disjunctions.contains(&node) {
+            decision::reduce(arena, node, &uses)?
+        } else {
+            None
+        };
         if !impure.contains(&node)
             && !interior.contains(&node)
             && let Some(head) = rows.get(&node)
