@@ -50,81 +50,45 @@ pub(super) fn lower_store(
         // Skip value store entirely
     } else {
         ctx.trigger_only_seen.clear();
-        let old_comb_probe = if comb_capture_sites.is_empty() || *width_bits > 64 {
-            None
-        } else {
-            match offset {
-                SIROffset::Static(bit_off)
-                | SIROffset::PackedElements {
-                    bit_offset: bit_off,
-                    ..
-                } => {
-                    let intra = ctx.static_byte_and_intra(addr, *bit_off).1;
-                    let containing_byte_off = ctx.byte_offset(addr, *bit_off);
-                    let size = ISelContext::op_size_for_width(*width_bits + intra);
-                    let old = ctx.alloc_vreg(SpillDesc::transient());
-                    block.push(MInst::Load {
-                        dst: old,
-                        base: BaseReg::SimState,
-                        offset: containing_byte_off,
-                        size,
-                    });
-                    Some((old, containing_byte_off, size))
-                }
-                SIROffset::Dynamic(_)
-                | SIROffset::Element { .. }
-                | SIROffset::ElementRun { .. } => None,
-            }
-        };
-        let old_comb_wide_probe = if comb_capture_sites.is_empty() || *width_bits <= 64 {
-            Vec::new()
-        } else if let SIROffset::Static(bit_off) = offset {
-            collect_static_comb_store_byte_probes(ctx, block, addr, *bit_off, *width_bits, false)
-        } else {
-            Vec::new()
-        };
-        let old_comb_mask_probe =
-            if comb_capture_sites.is_empty() || *width_bits > 64 || !ctx.is_4state_var(addr) {
-                None
-            } else {
-                match offset {
-                    SIROffset::Static(bit_off)
-                    | SIROffset::PackedElements {
-                        bit_offset: bit_off,
-                        ..
-                    } => {
-                        let intra = ctx.static_byte_and_intra(addr, *bit_off).1;
-                        let containing_byte_off = ctx.mask_byte_offset(addr, *bit_off);
-                        let size = ISelContext::op_size_for_width(*width_bits + intra);
-                        let old = ctx.alloc_vreg(SpillDesc::transient());
-                        block.push(MInst::Load {
-                            dst: old,
-                            base: BaseReg::SimState,
-                            offset: containing_byte_off,
-                            size,
-                        });
-                        Some((old, containing_byte_off, size))
-                    }
-                    SIROffset::Dynamic(_)
-                    | SIROffset::Element { .. }
-                    | SIROffset::ElementRun { .. } => None,
-                }
-            };
-        let old_comb_wide_mask_probe =
-            if comb_capture_sites.is_empty() || *width_bits <= 64 || !ctx.is_4state_var(addr) {
-                Vec::new()
-            } else if let SIROffset::Static(bit_off) = offset {
-                collect_static_comb_store_byte_probes(ctx, block, addr, *bit_off, *width_bits, true)
-            } else {
-                Vec::new()
-            };
         match offset {
             SIROffset::Static(bit_off)
             | SIROffset::PackedElements {
                 bit_offset: bit_off,
                 ..
             } => {
+                let four_state = ctx.is_4state_var(addr);
+                let mut probes = Vec::new();
+                if !comb_capture_sites.is_empty() {
+                    probes = collect_static_comb_store_byte_probes(
+                        ctx,
+                        block,
+                        addr,
+                        *bit_off,
+                        *width_bits,
+                        false,
+                    );
+                    if four_state {
+                        probes.extend(collect_static_comb_store_byte_probes(
+                            ctx,
+                            block,
+                            addr,
+                            *bit_off,
+                            *width_bits,
+                            true,
+                        ));
+                    }
+                }
                 lower_static_value_store(ctx, block, addr, bit_off, width_bits, src_reg);
+                if four_state {
+                    let mask = ctx.get_mask(*src_reg, block);
+                    lower_static_mask_store(ctx, block, addr, bit_off, width_bits, src_reg, mask);
+                }
+                emit_enable_comb_capture_sites_if_byte_probes_changed(
+                    ctx,
+                    block,
+                    probes,
+                    comb_capture_sites,
+                );
             }
             SIROffset::Dynamic(_) | SIROffset::Element { .. } | SIROffset::ElementRun { .. } => {
                 lower_dynamic_value_store(
@@ -136,25 +100,8 @@ pub(super) fn lower_store(
                     src_reg,
                     comb_capture_sites,
                 );
-            }
-        }
-
-        // 4-state: store mask to memory
-        if ctx.is_4state_var(addr) {
-            let mask_vreg = ctx.get_mask(*src_reg, block);
-            match offset {
-                SIROffset::Static(bit_off)
-                | SIROffset::PackedElements {
-                    bit_offset: bit_off,
-                    ..
-                } => {
-                    lower_static_mask_store(
-                        ctx, block, addr, bit_off, width_bits, src_reg, mask_vreg,
-                    );
-                }
-                SIROffset::Dynamic(_)
-                | SIROffset::Element { .. }
-                | SIROffset::ElementRun { .. } => {
+                if ctx.is_4state_var(addr) {
+                    let mask = ctx.get_mask(*src_reg, block);
                     lower_dynamic_mask_store(
                         ctx,
                         block,
@@ -162,62 +109,11 @@ pub(super) fn lower_store(
                         offset,
                         width_bits,
                         src_reg,
-                        mask_vreg,
+                        mask,
                         comb_capture_sites,
                     );
                 }
             }
-        }
-
-        if let Some((old_comb_probe, byte_off, size)) = old_comb_probe {
-            let new_comb_probe = ctx.alloc_vreg(SpillDesc::transient());
-            block.push(MInst::Load {
-                dst: new_comb_probe,
-                base: BaseReg::SimState,
-                offset: byte_off,
-                size,
-            });
-            let changed = ctx.alloc_vreg(SpillDesc::transient());
-            block.push(MInst::Cmp {
-                dst: changed,
-                lhs: old_comb_probe,
-                rhs: new_comb_probe,
-                kind: CmpKind::Ne,
-            });
-            emit_enable_comb_capture_sites(ctx, block, changed, comb_capture_sites);
-        }
-        if !old_comb_wide_probe.is_empty() {
-            emit_enable_comb_capture_sites_if_byte_probes_changed(
-                ctx,
-                block,
-                old_comb_wide_probe,
-                comb_capture_sites,
-            );
-        }
-        if let Some((old_comb_mask_probe, byte_off, size)) = old_comb_mask_probe {
-            let new_comb_mask_probe = ctx.alloc_vreg(SpillDesc::transient());
-            block.push(MInst::Load {
-                dst: new_comb_mask_probe,
-                base: BaseReg::SimState,
-                offset: byte_off,
-                size,
-            });
-            let changed = ctx.alloc_vreg(SpillDesc::transient());
-            block.push(MInst::Cmp {
-                dst: changed,
-                lhs: old_comb_mask_probe,
-                rhs: new_comb_mask_probe,
-                kind: CmpKind::Ne,
-            });
-            emit_enable_comb_capture_sites(ctx, block, changed, comb_capture_sites);
-        }
-        if !old_comb_wide_mask_probe.is_empty() {
-            emit_enable_comb_capture_sites_if_byte_probes_changed(
-                ctx,
-                block,
-                old_comb_wide_mask_probe,
-                comb_capture_sites,
-            );
         }
 
         // Trigger detection: compare old vs new value, set triggered_bits
@@ -310,6 +206,74 @@ fn lower_trigger_only_store(
     }
 }
 
+/// Write a byte-aligned scalar fragment without reading its destination. A
+/// partial last byte is writable only at a private storage boundary. Keep
+/// scalar padding zero: whole-object loads can rely on that invariant.
+fn try_store_bytes(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    addr: &RegionedAbsoluteAddr,
+    bit_offset: usize,
+    width: usize,
+    src: VReg,
+    plane_offset: i32,
+) -> bool {
+    let (byte, intra) = ctx.static_byte_and_intra(addr, bit_offset);
+    if intra != 0 {
+        return false;
+    }
+    let whole = ctx.full_static_store_size(addr, bit_offset, width);
+    let bytes = if let Some(size) = whole {
+        size.bytes() as usize
+    } else {
+        if !width.is_multiple_of(8) {
+            // Only an element-strided layout explicitly reserves a private
+            // tail for each element. Packed slices keep the enclosing bits.
+            let private_tail = ctx
+                .layout
+                .unpacked_arrays
+                .get(&addr.absolute_addr())
+                .is_some_and(|array| {
+                    bit_offset % array.element_width + width == array.element_width
+                });
+            if !private_tail {
+                return false;
+            }
+        }
+        width.div_ceil(8)
+    };
+    let mut consumed = 0;
+    while consumed < bytes {
+        let size = match bytes - consumed {
+            1 => OpSize::S8,
+            2..=3 => OpSize::S16,
+            4..=7 => OpSize::S32,
+            _ => OpSize::S64,
+        };
+        let mut piece = src;
+        if consumed != 0 {
+            piece = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::ShrImm {
+                dst: piece,
+                src,
+                imm: (consumed * 8) as u8,
+            });
+        }
+        let remaining = width - consumed * 8;
+        if remaining < size.bytes() as usize * 8 {
+            piece = ctx.mask_for_store_width(block, piece, remaining);
+        }
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: byte + plane_offset + consumed as i32,
+            src: piece,
+            size,
+        });
+        consumed += size.bytes() as usize;
+    }
+    true
+}
+
 /// The value plane of a static-offset store.
 fn lower_static_value_store(
     ctx: &mut ISelContext,
@@ -350,14 +314,7 @@ fn lower_static_value_store(
                         shifted
                     };
 
-                    if intra == 0 && OpSize::from_bits(part_width).is_some() {
-                        block.push(MInst::Store {
-                            base: BaseReg::SimState,
-                            offset: part_byte_off,
-                            src: part_src,
-                            size: OpSize::from_bits(part_width).unwrap(),
-                        });
-                    } else {
+                    if !try_store_bytes(ctx, block, addr, part_bit_off, part_width, part_src, 0) {
                         // Non-aligned chunk part: RMW via BitFieldInsert.
                         let containing_off = part_byte_off;
                         let load_size = ISelContext::op_size_for_width(part_width + intra);
@@ -409,55 +366,7 @@ fn lower_static_value_store(
         // Skip the rest of the static offset handling
     } else {
         let src_vreg = ctx.reg_map.get(*src_reg);
-        let byte_off = ctx.byte_offset(addr, *bit_off);
-        let intra_byte = ctx.static_byte_and_intra(addr, *bit_off).1;
-
-        if let Some(size) = ctx.full_static_store_size(addr, *bit_off, *width_bits) {
-            let src_vreg = ctx.mask_for_store_width(block, src_vreg, *width_bits);
-            block.push(MInst::Store {
-                base: BaseReg::SimState,
-                offset: byte_off,
-                src: src_vreg,
-                size,
-            });
-        } else if intra_byte == 0 && OpSize::from_bits(*width_bits).is_some() {
-            // Word-aligned, native size: direct store
-            block.push(MInst::Store {
-                base: BaseReg::SimState,
-                offset: byte_off,
-                src: src_vreg,
-                size: OpSize::from_bits(*width_bits).unwrap(),
-            });
-        } else if intra_byte == 0 && *width_bits <= 64 && width_bits.is_multiple_of(8) {
-            // Whole bytes of another count: store them in
-            // native-size pieces, low first, instead of a
-            // read-modify-write of the containing word.
-            let mut consumed = 0usize;
-            while consumed < *width_bits {
-                let piece = [64, 32, 16, 8]
-                    .into_iter()
-                    .find(|&piece| piece <= *width_bits - consumed)
-                    .unwrap();
-                let part_src = if consumed == 0 {
-                    src_vreg
-                } else {
-                    let shifted = ctx.alloc_vreg(SpillDesc::transient());
-                    block.push(MInst::ShrImm {
-                        dst: shifted,
-                        src: src_vreg,
-                        imm: consumed as u8,
-                    });
-                    shifted
-                };
-                block.push(MInst::Store {
-                    base: BaseReg::SimState,
-                    offset: byte_off + (consumed / 8) as i32,
-                    src: part_src,
-                    size: OpSize::from_bits(piece).unwrap(),
-                });
-                consumed += piece;
-            }
-        } else {
+        if !try_store_bytes(ctx, block, addr, *bit_off, *width_bits, src_vreg, 0) {
             let mut consumed = 0usize;
             while consumed < *width_bits {
                 let part_bit_off = *bit_off + consumed;
@@ -512,6 +421,65 @@ fn lower_static_value_store(
                 consumed += part_width;
             }
         }
+    }
+}
+
+/// The access itself truncates to the machine width. Normalize any extra
+/// bits inside the slot, and compare only logical bits when observing it.
+fn direct_indexed_store(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    base: i32,
+    index: VReg,
+    size: OpSize,
+    width: usize,
+    src: VReg,
+    range: Option<MemoryAliasRange>,
+    sites: &[u32],
+) {
+    let old = if sites.is_empty() {
+        None
+    } else {
+        let old = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::LoadIndexed {
+            dst: old,
+            base: BaseReg::SimState,
+            offset: base,
+            index,
+            scale: 1,
+            size,
+            alias_range: range,
+        });
+        Some(old)
+    };
+    let src = if ISelContext::access_size_has_padding(size, width) {
+        ctx.mask_for_store_width(block, src, width)
+    } else {
+        src
+    };
+    block.push(MInst::StoreIndexed {
+        base: BaseReg::SimState,
+        offset: base,
+        index,
+        src,
+        size,
+        alias_range: range,
+    });
+    if let Some(old) = old {
+        let changed = ctx.alloc_vreg(SpillDesc::transient());
+        let old = if ISelContext::access_size_has_padding(size, width) {
+            ctx.mask_for_store_width(block, old, width)
+        } else {
+            old
+        };
+        let new = ctx.mask_for_store_width(block, src, width);
+        block.push(MInst::Cmp {
+            dst: changed,
+            lhs: old,
+            rhs: new,
+            kind: CmpKind::Ne,
+        });
+        emit_enable_comb_capture_sites(ctx, block, changed, sites);
     }
 }
 
@@ -571,46 +539,17 @@ fn lower_dynamic_value_store(
     } else if offset_low_zero_bits >= 3
         && let Some(store_size) = full_element_size.or_else(|| OpSize::from_bits(*width_bits))
     {
-        let store_src = if *width_bits < 64 {
-            let masked = ctx.alloc_vreg(SpillDesc::transient());
-            ctx.emit_and_imm(block, masked, src_vreg, mask_for_width(*width_bits));
-            masked
-        } else {
-            src_vreg
-        };
-        let old_word = if comb_capture_sites.is_empty() {
-            None
-        } else {
-            let old = ctx.alloc_vreg(SpillDesc::transient());
-            block.push(MInst::LoadIndexed {
-                dst: old,
-                base: BaseReg::SimState,
-                offset: base_off,
-                index: byte_off,
-                scale: 1,
-                size: store_size,
-                alias_range: value_alias_range,
-            });
-            Some(old)
-        };
-        block.push(MInst::StoreIndexed {
-            base: BaseReg::SimState,
-            offset: base_off,
-            index: byte_off,
-            src: store_src,
-            size: store_size,
-            alias_range: value_alias_range,
-        });
-        if let Some(old_word) = old_word {
-            let changed = ctx.alloc_vreg(SpillDesc::transient());
-            block.push(MInst::Cmp {
-                dst: changed,
-                lhs: old_word,
-                rhs: store_src,
-                kind: CmpKind::Ne,
-            });
-            emit_enable_comb_capture_sites(ctx, block, changed, comb_capture_sites);
-        }
+        direct_indexed_store(
+            ctx,
+            block,
+            base_off,
+            byte_off,
+            store_size,
+            *width_bits,
+            src_vreg,
+            value_alias_range,
+            comb_capture_sites,
+        );
     } else {
         let bit_shift = ctx.alloc_vreg(SpillDesc::transient());
         ctx.emit_and_imm(block, bit_shift, offset_vreg, 7);
@@ -640,6 +579,7 @@ fn lower_static_mask_store(
     src_reg: &RegisterId,
     mask_vreg: VReg,
 ) {
+    let plane_offset = ctx.layout.plane_size(&addr.absolute_addr()) as i32;
     if *width_bits > 64 {
         // Wide mask store: chunk-by-chunk. A source
         // without wide mask chunks (e.g. a load of a
@@ -673,14 +613,15 @@ fn lower_static_mask_store(
                     shifted
                 };
 
-                if intra == 0 && OpSize::from_bits(part_width).is_some() {
-                    block.push(MInst::Store {
-                        base: BaseReg::SimState,
-                        offset: part_byte_off,
-                        src: part_src,
-                        size: OpSize::from_bits(part_width).unwrap(),
-                    });
-                } else {
+                if !try_store_bytes(
+                    ctx,
+                    block,
+                    addr,
+                    part_bit_off,
+                    part_width,
+                    part_src,
+                    plane_offset,
+                ) {
                     let containing_off = part_byte_off;
                     let load_size = ISelContext::op_size_for_width(part_width + intra);
                     let old = ctx.alloc_vreg(SpillDesc::transient());
@@ -712,24 +653,15 @@ fn lower_static_mask_store(
             store_remaining -= logical_chunk_width;
         }
     } else {
-        let mask_off = ctx.mask_byte_offset(addr, *bit_off);
-        let intra_byte = ctx.static_byte_and_intra(addr, *bit_off).1;
-        if let Some(size) = ctx.full_static_store_size(addr, *bit_off, *width_bits) {
-            let mask_vreg = ctx.mask_for_store_width(block, mask_vreg, *width_bits);
-            block.push(MInst::Store {
-                base: BaseReg::SimState,
-                offset: mask_off,
-                src: mask_vreg,
-                size,
-            });
-        } else if intra_byte == 0 && OpSize::from_bits(*width_bits).is_some() {
-            block.push(MInst::Store {
-                base: BaseReg::SimState,
-                offset: mask_off,
-                src: mask_vreg,
-                size: OpSize::from_bits(*width_bits).unwrap(),
-            });
-        } else {
+        if !try_store_bytes(
+            ctx,
+            block,
+            addr,
+            *bit_off,
+            *width_bits,
+            mask_vreg,
+            plane_offset,
+        ) {
             let mut consumed = 0usize;
             while consumed < *width_bits {
                 let part_bit_off = *bit_off + consumed;
@@ -850,21 +782,17 @@ fn lower_dynamic_mask_store(
     } else if offset_low_zero_bits >= 3
         && let Some(store_size) = full_element_size.or_else(|| OpSize::from_bits(*width_bits))
     {
-        let store_src = if *width_bits < 64 {
-            let masked = ctx.alloc_vreg(SpillDesc::transient());
-            ctx.emit_and_imm(block, masked, mask_vreg, mask_for_width(*width_bits));
-            masked
-        } else {
-            mask_vreg
-        };
-        block.push(MInst::StoreIndexed {
-            base: BaseReg::SimState,
-            offset: mask_base_off,
-            index: m_byte_off,
-            src: store_src,
-            size: store_size,
-            alias_range: mask_alias_range,
-        });
+        direct_indexed_store(
+            ctx,
+            block,
+            mask_base_off,
+            m_byte_off,
+            store_size,
+            *width_bits,
+            mask_vreg,
+            mask_alias_range,
+            comb_capture_sites,
+        );
     } else {
         let m_bit_shift = ctx.alloc_vreg(SpillDesc::transient());
         ctx.emit_and_imm(block, m_bit_shift, offset_vreg, 7);

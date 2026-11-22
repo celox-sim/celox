@@ -1767,3 +1767,148 @@ fn byte_aligned_stores_of_other_widths_use_native_pieces() {
         &[0xff, 0x88, 0x77, 0x66, 0x55, 0x44, 0xff, 0xff]
     );
 }
+
+fn element_store(
+    element_width: usize,
+    offset: SIROffset,
+    width: usize,
+    value: u16,
+    sites: Vec<u32>,
+) -> MFunction {
+    let absolute = AbsoluteAddr {
+        instance_id: InstanceId(0),
+        var_id: VarId(0),
+    };
+    let address = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, absolute);
+    let src = RegisterId(0);
+    let index = RegisterId(1);
+    let bits = RegisterType::Bit {
+        width: 16,
+        signed: false,
+    };
+    let mut layout = empty_layout();
+    layout.mode = MemoryLayoutMode::ElementStrided;
+    layout.four_state = true;
+    layout.offsets.insert(absolute, 32);
+    layout.widths.insert(absolute, 2 * element_width);
+    layout.is_4states.insert(absolute, true);
+    layout.unpacked_arrays.insert(
+        absolute,
+        celox_state_layout::UnpackedArrayLayout {
+            element_width,
+            element_count: 2,
+            element_stride: 2,
+            plane_size: 4,
+        },
+    );
+    layout.total_size = 40;
+    layout.merged_total_size = 40;
+    let unit = ExecutionUnit {
+        entry_block_id: SirBlockId(0),
+        blocks: [(
+            SirBlockId(0),
+            BasicBlock {
+                id: SirBlockId(0),
+                params: vec![],
+                instructions: vec![
+                    SIRInstruction::Imm(index, SIRValue::new(1u8)),
+                    SIRInstruction::Imm(src, SIRValue::new(value)),
+                    SIRInstruction::Store(address, offset, width, src, vec![], sites),
+                ],
+                terminator: SIRTerminator::Return,
+            },
+        )]
+        .into_iter()
+        .collect(),
+        register_map: [(src, bits.clone()), (index, bits.clone())]
+            .into_iter()
+            .collect(),
+    };
+    unit.verify();
+    lower_execution_unit(&unit, &layout, true)
+}
+
+fn compile_element_store(mut func: MFunction) -> JitCode {
+    mir_legalize::legalize(&mut func);
+    mir_opt::optimize(&mut func);
+    let alloc = regalloc::run_regalloc(&mut func).unwrap();
+    let code = emit::emit(&func, &alloc.assignment, alloc.spill_frame_size).unwrap();
+    JitCode::new(&code.code).unwrap()
+}
+
+#[test]
+fn partial_element_store_preserves_live_bits_and_can_overwrite_a_private_tail() {
+    // The last five bits in a 13-bit element have private byte padding. The
+    // same five-bit slice of a 16-bit element has three live neighbours.
+    for (element_width, expected_tail) in [(13, 0x15), (16, 0xf5)] {
+        let func = element_store(
+            element_width,
+            SIROffset::Static(element_width + 8),
+            5,
+            0xf5,
+            vec![],
+        );
+        let reads = func
+            .blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .filter(|i| {
+                matches!(
+                    i,
+                    MInst::Load {
+                        base: BaseReg::SimState,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(reads, if element_width == 13 { 0 } else { 2 });
+        let jit = compile_element_store(func);
+        let mut state = [0xff; 40];
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        assert_eq!(
+            state[32..],
+            [
+                0xff,
+                0xff,
+                0xff,
+                expected_tail,
+                0xff,
+                0xff,
+                0xff,
+                expected_tail & 0xe0
+            ]
+        );
+    }
+}
+
+#[test]
+fn padded_element_captures_observe_only_logical_value_and_mask_changes() {
+    for offset in [
+        SIROffset::Static(13),
+        SIROffset::Element {
+            index: RegisterId(1),
+            element_width: 13,
+            bit_offset: 0,
+            dynamic_bit_offset: None,
+        },
+    ] {
+        let jit = compile_element_store(element_store(13, offset, 13, 0xe015, vec![0]));
+        for (value, mask, expected) in [
+            (0xe015u16, 0xe000u16, 0),
+            (0xf015, 0xe000, 1),
+            (0xe015, 0xf000, 1),
+        ] {
+            let mut state = [0xff; 40];
+            let mut enabled = [0u8];
+            let pointer = celox_state_layout::STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET;
+            state[pointer..pointer + 8]
+                .copy_from_slice(&(enabled.as_mut_ptr() as usize).to_le_bytes());
+            state[34..36].copy_from_slice(&value.to_le_bytes());
+            state[38..40].copy_from_slice(&mask.to_le_bytes());
+            assert_eq!(unsafe { jit.call(&mut state) }, 0);
+            assert_eq!(enabled[0], expected);
+            assert_eq!(&state[32..], &[0xff, 0xff, 0x15, 0, 0xff, 0xff, 0, 0]);
+        }
+    }
+}
