@@ -19,9 +19,107 @@ impl Comb<'_, '_> {
         } else {
             selector.clone()
         };
+        if kind == sv::ir::CaseKind::Exact
+            && default.is_none_or(<[_]>::is_empty)
+            && self.one_hot_case(&mut store, frames, &selector, items)?
+        {
+            return Ok(store);
+        }
         let conditions = self.case_conditions(&mut store, frames, kind, &selector, items)?;
         let coverage = self.case_coverage(&mut store, frames, kind, &selector, items)?;
         self.exec_case_chain(store, frames, &conditions, items, default, &coverage)
+    }
+
+    /// A complete table setting bit `i` for label `i` in a cleared word.
+    /// Match physical bit offsets so declared vector direction is respected.
+    fn one_hot_case(
+        &mut self,
+        store: &mut Store,
+        frames: &[Frame],
+        selector: &sv::ir::Expr,
+        items: &[sv::ir::CaseItem],
+    ) -> Result<bool, sv::AnalyzerError> {
+        let Some(id) = self.one_hot_target(store, items) else {
+            return Ok(false);
+        };
+        let width = items.len();
+        let index_width = width.ilog2() as usize;
+        let (base, mut sources) = self.read_unforced(store, id, full(width))?;
+        if !slt_const4(self.arena, &mut self.consts, base)
+            .is_some_and(|(value, mask, _)| value.is_zero() && mask.is_zero())
+        {
+            return Ok(false);
+        }
+        let (index, index_sources) = self.eval_mode(store, frames, selector, None, true)?;
+        // Exact case (IEEE 1800-2023 12.5) leaves the word clear for X/Z.
+        // This includes literal unknown bits even in a two-state simulation.
+        if self.width(index) != index_width || self.expr_signed(selector) {
+            return Ok(false);
+        }
+        let known = if self.m.four_state {
+            self.two_state(index)
+        } else {
+            super::super::case_equality::is_known(self.arena, index).map_err(slt_error)?
+        };
+        if !known {
+            return Ok(false);
+        }
+        sources.extend(index_sources);
+        let one = self.constant(1, width)?;
+        let decoded = self.alloc(SLTNode::Binary(one, BinaryOp::Shl, index))?;
+        self.write(store, id, full(width), (decoded, sources))?;
+        Ok(true)
+    }
+
+    fn one_hot_target(&mut self, store: &Store, items: &[sv::ir::CaseItem]) -> Option<SourceVarId> {
+        let width = items.len();
+        if width < 4 || !width.is_power_of_two() {
+            return None;
+        }
+        let mut seen = vec![false; width];
+        let mut target = None;
+        for item in items {
+            let [sv::ir::CaseLabel::Value(sv::ir::Expr::Literal(label))] = item.labels.as_slice()
+            else {
+                return None;
+            };
+            let [
+                sv::ir::Stmt::Assign {
+                    lhs,
+                    rhs,
+                    nonblocking: false,
+                },
+            ] = item.body.as_slice()
+            else {
+                return None;
+            };
+            let label = sv::typecheck::parse_integral_literal(label)?;
+            if !label.mask.is_zero()
+                || label.width != width.ilog2() as usize
+                || literal_usize(rhs) != Some(1)
+                || self.m.lvalue_calls(lhs)
+            {
+                return None;
+            }
+            let bit = label.value.to_usize()?;
+            let assign::Target::Static {
+                id,
+                access,
+                width: 1,
+                ..
+            } = self.lvalue_target(store, lhs).ok()?
+            else {
+                return None;
+            };
+            if access != BitAccess::new(bit, bit)
+                || std::mem::replace(seen.get_mut(bit)?, true)
+                || self.m.var(id).width != width
+                || target.replace(id).is_some_and(|old| old != id)
+            {
+                return None;
+            }
+        }
+        target.filter(|id| store.get(id).is_some() && self.m.var(*id).float.is_none())
     }
 
     /// The match condition of each case item. The selector and the labels are
