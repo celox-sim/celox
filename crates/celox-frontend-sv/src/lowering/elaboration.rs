@@ -199,10 +199,8 @@ pub(crate) fn elaborate_instances(
             })
             .collect();
         let triggers = module
-            .eval_only_ff_blocks
+            .event_bodies
             .keys()
-            .chain(module.apply_ff_blocks.keys())
-            .chain(module.eval_apply_ff_blocks.keys())
             .chain(module.split_commit_ff_blocks.keys())
             .chain(module.parallel_ff_parts.keys());
         for trigger in triggers {
@@ -382,7 +380,11 @@ pub(crate) fn elaborate_instances(
     }
     // A flip-flop evaluation stores each update in the working state; two
     // of one execution are two update events (IEEE 1800-2023 4.3, 10.4.2).
-    for unit in module.eval_only_ff_blocks.values() {
+    for unit in module
+        .event_bodies
+        .values()
+        .filter_map(|body| body.sample.as_ref())
+    {
         candidates.extend(celox_frontend_core::watch::multi_store_only_candidates(
             unit,
             |address| (address.region == WORKING_REGION).then_some(address.var_id),

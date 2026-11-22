@@ -2,28 +2,18 @@
 
 use super::*;
 
-/// Schedule the flip-flop actions of every event through the fused factory,
-/// if there is one: alone where an event has several, replacing its units in
-/// `eval_apply_ffs`, and together with the combinational program where the
-/// ticks are merged. Returns the merged units and the ranges their
-/// flip-flops write directly, by event.
-pub(super) fn schedule_fused_ffs(
-    fused_ff_factory: Option<&dyn FusedFfLoweringFactory>,
-    fused_inputs: Option<FusedInputs>,
-    eval_apply_ffs: &mut FfUnits,
-    merge_comb_apply: bool,
+/// Lower source actions into the event's transition and, when requested, its
+/// standalone entry. Clock and reset aliases share the scheduling work.
+pub(super) fn schedule_source_updates(
+    event_factory: Option<&dyn EventLoweringFactory>,
+    source_inputs: Option<SourceUpdateInputs>,
+    updates: &mut ScheduledUpdates,
+    specialize_inputs: bool,
     four_state: bool,
     next_runtime_error_code: i64,
     flatten_timing: bool,
-) -> Result<
-    (
-        FfUnits,
-        HashMap<AbsoluteAddr, Vec<VarAtomBase<RegionedAbsoluteAddr>>>,
-    ),
-    ParserError,
-> {
-    let mut eval_comb_apply_ffs = HashMap::default();
-    let mut fused_direct_ff_writes = HashMap::default();
+) -> Result<HashMap<AbsoluteAddr, Vec<VarAtomBase<RegionedAbsoluteAddr>>>, ParserError> {
+    let mut direct_writes_by_event = HashMap::default();
     if let (
         Some(factory),
         Some((
@@ -35,7 +25,7 @@ pub(super) fn schedule_fused_ffs(
             clock_ignored_loops,
             clock_true_loops,
         )),
-    ) = (fused_ff_factory, fused_inputs)
+    ) = (event_factory, source_inputs)
     {
         let mut fused_schedule_cache = HashMap::<
             Vec<usize>,
@@ -74,11 +64,19 @@ pub(super) fn schedule_fused_ffs(
             let action_ids = actions.iter().map(|action| action.id).collect::<Vec<_>>();
             if let Some((ff_only, fused)) = fused_schedule_cache.get(&action_ids) {
                 if let Some(ff_only) = ff_only {
-                    eval_apply_ffs.insert(trigger, ff_only.clone());
+                    updates
+                        .events
+                        .entry(trigger)
+                        .or_default()
+                        .set(UpdateEntry::Transition, ff_only.clone());
                 }
                 if let Some((units, direct_ff_writes)) = fused {
-                    eval_comb_apply_ffs.insert(trigger, units.clone());
-                    fused_direct_ff_writes.insert(trigger, direct_ff_writes.clone());
+                    updates
+                        .events
+                        .entry(trigger)
+                        .or_default()
+                        .set(UpdateEntry::FromInputs, units.clone());
+                    direct_writes_by_event.insert(trigger, direct_ff_writes.clone());
                 }
                 continue;
             }
@@ -93,7 +91,7 @@ pub(super) fn schedule_fused_ffs(
             } else {
                 None
             };
-            let fused = if merge_comb_apply {
+            let fused = if specialize_inputs {
                 let fused = schedule(clock_comb_blocks.clone(), actions)?;
                 Some((fused.execution_units, fused.direct_ff_writes))
             } else {
@@ -104,29 +102,37 @@ pub(super) fn schedule_fused_ffs(
             }
             fused_schedule_cache.insert(action_ids, (ff_only.clone(), fused.clone()));
             if let Some(ff_only) = ff_only {
-                eval_apply_ffs.insert(trigger, ff_only);
+                updates
+                    .events
+                    .entry(trigger)
+                    .or_default()
+                    .set(UpdateEntry::Transition, ff_only);
             }
             if let Some((units, direct_ff_writes)) = fused {
-                eval_comb_apply_ffs.insert(trigger, units);
-                fused_direct_ff_writes.insert(trigger, direct_ff_writes);
+                updates
+                    .events
+                    .entry(trigger)
+                    .or_default()
+                    .set(UpdateEntry::FromInputs, units);
+                direct_writes_by_event.insert(trigger, direct_ff_writes);
             }
         }
     }
-    Ok((eval_comb_apply_ffs, fused_direct_ff_writes))
+    Ok(direct_writes_by_event)
 }
 
 /// The lane-partitioned program of a parallel schedule.
 pub(super) fn plan_parallel_sir(
     parallel: &ParallelScheduleOptions,
-    eval_apply_ffs: &FfUnits,
+    updates: &ScheduledUpdates,
     parallel_ff_units: FfParts,
     lane0_objects: &Option<HashSet<AbsoluteAddr>>,
     parallel_eval_comb: Vec<LaneUnit<RegionedAbsoluteAddr>>,
     object_sizes: super::super::super::parallel::ObjectSizes<'_>,
 ) -> Option<ParallelSirProgram<AbsoluteAddr, RegionedAbsoluteAddr>> {
     parallel.enabled().then(|| {
-        let mut events = eval_apply_ffs
-            .iter()
+        let mut events = updates
+            .groups(UpdateEntry::Transition)
             .filter(|(_, units)| !units.is_empty())
             .map(|(event, _)| *event)
             .collect::<Vec<_>>();
@@ -154,8 +160,8 @@ pub(super) fn plan_parallel_sir(
         }
         ParallelSirProgram {
             lanes: parallel.lanes,
-            eval_comb: parallel_eval_comb,
-            eval_apply_ffs,
+            observe: parallel_eval_comb,
+            events: eval_apply_ffs,
         }
     })
 }
@@ -169,9 +175,7 @@ pub(super) fn commit_observed_domains(
     clock_domains: &HashMap<AbsoluteAddr, AbsoluteAddr>,
 ) -> Vec<AbsoluteAddr> {
     let Units {
-        eval_apply_ffs,
-        eval_only_ffs,
-        apply_ffs,
+        updates,
         processes,
         timing,
         ..
@@ -183,14 +187,14 @@ pub(super) fn commit_observed_domains(
     // 10.4). Every other domain commits both together, as before.
     let mut active_commits = Vec::new();
     if !processes.is_empty() {
-        let events: HashSet<AbsoluteAddr> = eval_apply_ffs
-            .keys()
+        let events: HashSet<AbsoluteAddr> = updates
+            .groups(UpdateEntry::Transition)
+            .map(|(event, _)| event)
             .copied()
             .chain(clock_domains.keys().copied())
             .collect();
         active_commits = split_observed_commits(
-            eval_only_ffs,
-            apply_ffs,
+            updates,
             split_commits,
             comb_sources,
             processes.iter().map(|process| &process.kernel),

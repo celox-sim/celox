@@ -196,12 +196,29 @@ pub(super) fn prune_unread_sample_shadows(program: &mut crate::ir::LaidOutProgra
     reads.extend(schema.watches.iter().map(|watch| watch.signal));
     let sir = &program.sir;
     let units = sir
-        .eval_comb
+        .updates
+        .observe
         .iter()
-        .chain(sir.eval_apply_ffs.values().flatten())
-        .chain(sir.eval_comb_apply_ffs.values().flatten())
-        .chain(sir.eval_only_ffs.values().flatten())
-        .chain(sir.apply_ffs.values().flatten())
+        .chain(
+            sir.updates
+                .groups(celox_sir::UpdateEntry::Transition)
+                .flat_map(|(_, units)| units),
+        )
+        .chain(
+            sir.updates
+                .groups(celox_sir::UpdateEntry::FromInputs)
+                .flat_map(|(_, units)| units),
+        )
+        .chain(
+            sir.updates
+                .groups(celox_sir::UpdateEntry::Sample)
+                .flat_map(|(_, units)| units),
+        )
+        .chain(
+            sir.updates
+                .groups(celox_sir::UpdateEntry::Publish)
+                .flat_map(|(_, units)| units),
+        )
         .chain(sir.processes.iter())
         .chain(sir.functions.iter().map(|function| &function.unit));
     // A call of a process kernel or a host call reports

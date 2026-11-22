@@ -55,10 +55,10 @@ pub(crate) fn prune_stale_marks(
     let mut unresolved = vec![false; partitions];
     let mut bodies: Vec<Vec<(usize, Vec<BlockId>)>> = Vec::new();
     // An alias store leaves its load behind: only live values count.
-    for unit in &mut sir.eval_comb {
+    for unit in &mut sir.updates.observe {
         celox_sir_opt::optimizer::remove_dead_sir_definitions(unit);
     }
-    for unit in &sir.eval_comb {
+    for unit in &sir.updates.observe {
         let analysis = Analysis::new(unit, &flags, partitions, &layout.offsets);
         let mut unit_bodies = Vec::new();
         for &block in unit.blocks.keys() {
@@ -125,7 +125,7 @@ pub(crate) fn prune_stale_marks(
         dropped_marks += before - object.partitions.len();
     }
     let mut stats = PublishStats::default();
-    for (unit, unit_bodies) in sir.eval_comb.iter_mut().zip(bodies) {
+    for (unit, unit_bodies) in sir.updates.observe.iter_mut().zip(bodies) {
         let edits = {
             let analysis = Analysis::new(unit, &flags, partitions, &layout.offsets);
             let mut edits = Vec::new();
@@ -906,7 +906,7 @@ module Top (
         let partitions = settle.partitions;
         let flags = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, schema.flags);
         let mut checked = 0;
-        for unit in &program.sir.eval_comb {
+        for unit in &program.sir.updates.observe {
             let analysis = Analysis::new(unit, &flags, partitions, &layout.offsets);
             for &block in unit.blocks.keys() {
                 let Some((partition, body, merge)) = analysis.guard(block) else {

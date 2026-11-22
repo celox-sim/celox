@@ -12,8 +12,8 @@ pub mod watch;
 pub use error::{LoweringPhase, ParserError, SourceLocation};
 pub use sdk::{FrontendArtifactError, LoweredFrontendArtifact, lower_frontend_artifact};
 pub use shared::{
-    FrontendLookup, FusedSirOptimizationHints, InstancePath, ScheduledRtl, ScheduledRtlOutput,
-    SourceAddr, SourceVarId, VariableInfo, VariableKind,
+    EventWriteHints, FrontendLookup, InstancePath, ScheduledRtl, ScheduledRtlOutput, SourceAddr,
+    SourceVarId, VariableInfo, VariableKind,
 };
 pub use trace::{FrontendTrace, FrontendTraceOptions, TraceSimModule};
 

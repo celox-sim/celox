@@ -1,6 +1,9 @@
 //! Lowering of the edge-triggered processes of a module.
 
 use super::*;
+use celox_frontend_core::symbolic::artifact::EventBody;
+
+pub(super) type EventBodies = HashMap<TriggerSet<SourceVarId>, EventBody<RegionedVarAddr>>;
 
 fn expr_references_ident(expr: &sv::ir::Expr, name: &str) -> bool {
     match expr {
@@ -39,9 +42,7 @@ fn expr_references_ident(expr: &sv::ir::Expr, name: &str) -> bool {
 }
 
 type SvFfBlocks = (
-    HashMap<TriggerSet<SourceVarId>, ExecutionUnit<RegionedVarAddr>>,
-    HashMap<TriggerSet<SourceVarId>, ExecutionUnit<RegionedVarAddr>>,
-    HashMap<TriggerSet<SourceVarId>, ExecutionUnit<RegionedVarAddr>>,
+    EventBodies,
     HashMap<
         TriggerSet<SourceVarId>,
         celox_frontend_core::symbolic::artifact::SplitCommit<RegionedVarAddr>,
@@ -183,11 +184,9 @@ pub(super) fn lower_ff_processes(
     repeated_writes: &mut Vec<FfWriteStream>,
 ) -> Result<SvFfBlocks, sv::AnalyzerError> {
     let mut parallel_ff_parts = HashMap::<_, Vec<_>>::default();
-    let mut eval_only_ff_blocks = HashMap::default();
-    let mut apply_ff_blocks = HashMap::default();
+    let mut event_bodies = EventBodies::default();
     let mut active_ff_blocks = HashMap::default();
     let mut nba_ff_blocks: HashMap<_, ExecutionUnit<RegionedVarAddr>> = HashMap::default();
-    let mut eval_apply_ff_blocks = HashMap::default();
     let mut reset_clock_map = HashMap::default();
     let mut all_delayed_sites: Vec<celox_design::NbaSite<SourceVarId>> = Vec::new();
 
@@ -387,8 +386,7 @@ pub(super) fn lower_ff_processes(
         graph.flush(
             pm,
             &trigger_set,
-            &mut eval_only_ff_blocks,
-            &mut apply_ff_blocks,
+            &mut event_bodies,
             &mut active_ff_blocks,
             &mut nba_ff_blocks,
         );
@@ -423,8 +421,7 @@ pub(super) fn lower_ff_processes(
                     apply: apply.clone(),
                 });
         }
-        insert_or_merge_ff_unit(&mut eval_only_ff_blocks, trigger_set.clone(), eval_only);
-        insert_or_merge_ff_unit(&mut apply_ff_blocks, trigger_set.clone(), apply);
+        append_event_body(&mut event_bodies, &trigger_set, Some(eval_only), apply);
         insert_or_merge_ff_unit(&mut active_ff_blocks, trigger_set.clone(), active);
         insert_or_merge_ff_unit(&mut nba_ff_blocks, trigger_set, nba);
     }
@@ -432,23 +429,10 @@ pub(super) fn lower_ff_processes(
         graph.flush(
             pm,
             &trigger,
-            &mut eval_only_ff_blocks,
-            &mut apply_ff_blocks,
+            &mut event_bodies,
             &mut active_ff_blocks,
             &mut nba_ff_blocks,
         );
-    }
-    // Every process of a trigger evaluates against the pre-edge state before
-    // any of them commits (IEEE 1800-2023 10.4.2), so the combined unit runs
-    // all evaluations first and all commits afterwards.
-    for (trigger_set, eval_only) in &eval_only_ff_blocks {
-        if graph.schedule.contains(trigger_set) {
-            continue;
-        }
-        let apply = &apply_ff_blocks[trigger_set];
-        let mut eval_apply = merge_sir_eus(&[eval_only.clone(), apply.clone()]).0;
-        ff::prune_unreachable_blocks(&mut eval_apply);
-        eval_apply_ff_blocks.insert(trigger_set.clone(), eval_apply);
     }
     // One process is the whole trigger group.
     parallel_ff_parts.retain(|_, parts| parts.len() > 1);
@@ -474,9 +458,7 @@ pub(super) fn lower_ff_processes(
         })
         .collect();
     Ok((
-        eval_only_ff_blocks,
-        apply_ff_blocks,
-        eval_apply_ff_blocks,
+        event_bodies,
         split_commit_ff_blocks,
         reset_clock_map,
         parallel_ff_parts,
@@ -508,15 +490,35 @@ fn interacts_with_host(
         })
 }
 
+pub(super) fn append_event_body(
+    bodies: &mut EventBodies,
+    trigger: &TriggerSet<SourceVarId>,
+    sample: Option<ExecutionUnit<RegionedVarAddr>>,
+    publish: ExecutionUnit<RegionedVarAddr>,
+) {
+    let mut body = EventBody { sample, publish };
+    if let Some(previous) = bodies.remove(trigger) {
+        body = previous.append(body, merge_units);
+    }
+    bodies.insert(trigger.clone(), body);
+}
+
+fn merge_units(
+    first: ExecutionUnit<RegionedVarAddr>,
+    second: ExecutionUnit<RegionedVarAddr>,
+) -> ExecutionUnit<RegionedVarAddr> {
+    let mut merged = merge_sir_eus(&[first, second]).0;
+    ff::prune_unreachable_blocks(&mut merged);
+    merged
+}
+
 pub(super) fn insert_or_merge_ff_unit(
     blocks: &mut HashMap<TriggerSet<SourceVarId>, ExecutionUnit<RegionedVarAddr>>,
     trigger_set: TriggerSet<SourceVarId>,
     unit: ExecutionUnit<RegionedVarAddr>,
 ) {
     if let Some(existing) = blocks.remove(&trigger_set) {
-        let mut merged = merge_sir_eus(&[existing, unit]).0;
-        ff::prune_unreachable_blocks(&mut merged);
-        blocks.insert(trigger_set, merged);
+        blocks.insert(trigger_set, merge_units(existing, unit));
     } else {
         blocks.insert(trigger_set, unit);
     }

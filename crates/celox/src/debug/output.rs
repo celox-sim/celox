@@ -86,121 +86,36 @@ impl CompilationTrace {
 
 /// Format SIR using its runtime source map.
 pub fn format_program(sir: &SirProgram, program: &RuntimeProgram) -> String {
-    let mut output = String::new();
-
-    output.push_str("=== Evaluation Flip-Flops (eval_apply_ffs) ===\n");
-    for (addr, execution_units) in &sir.eval_apply_ffs {
+    let mut output = String::from("=== Observation ===\n");
+    append_units(&mut output, &sir.updates.observe, program);
+    let mut events: Vec<_> = sir.updates.events.iter().collect();
+    events.sort_unstable_by_key(|(addr, _)| **addr);
+    for (addr, update) in events {
         output.push_str(&format!(
-            "Trigger Group: {} ({})\n",
-            program.get_path(addr),
-            addr
+            "\n=== Event {} ({addr}) ===\n",
+            program.get_path(addr)
         ));
-        for (idx, eu) in execution_units.iter().enumerate() {
-            output.push_str(&format!("  Execution Unit {}:\n", idx));
-            output.push_str(&format!("    Entry Block: {}\n", eu.entry_block_id.0));
-            output.push_str("    Registers:\n");
-            let mut reg_ids: Vec<_> = eu.register_map.keys().collect();
-            reg_ids.sort();
-            for id in reg_ids {
-                let ty = &eu.register_map[id];
-                match ty {
-                    crate::ir::RegisterType::Logic { width } => {
-                        output.push_str(&format!("      r{}: logic<{}>\n", id.0, width));
-                    }
-                    crate::ir::RegisterType::Bit { width, signed } => {
-                        let s = if *signed { "signed " } else { "" };
-                        output.push_str(&format!("      r{}: {}bit<{}>\n", id.0, s, width));
-                    }
-                }
-            }
-            for block_id in sir_dominance_order(eu) {
-                let block = &eu.blocks[&block_id];
-                output.push_str(&format!("    b{}:\n", block.id.0));
-                append_sir_block_params(&mut output, &block.params, "      ");
-                for inst in &block.instructions {
-                    output.push_str(&format!("      {}\n", format_instruction(inst, program)));
-                }
-                output.push_str(&format!("      {}\n", block.terminator));
+        for entry in [
+            celox_sir::UpdateEntry::Transition,
+            celox_sir::UpdateEntry::FromInputs,
+            celox_sir::UpdateEntry::Sample,
+            celox_sir::UpdateEntry::Publish,
+        ] {
+            if let Some(units) = update.entry(entry) {
+                output.push_str(&format!("{entry:?}\n"));
+                append_units(&mut output, units, program);
             }
         }
     }
+    output
+}
 
-    output.push_str("\n=== Evaluation Flip-Flops (eval_only_ffs) ===\n");
-    for (addr, execution_units) in &sir.eval_only_ffs {
-        output.push_str(&format!(
-            "Trigger Group: {} ({})\n",
-            program.get_path(addr),
-            addr
-        ));
-        for (idx, eu) in execution_units.iter().enumerate() {
-            output.push_str(&format!("  Execution Unit {}:\n", idx));
-            output.push_str(&format!("    Entry Block: {}\n", eu.entry_block_id.0));
-            output.push_str("    Registers:\n");
-            let mut reg_ids: Vec<_> = eu.register_map.keys().collect();
-            reg_ids.sort();
-            for id in reg_ids {
-                let ty = &eu.register_map[id];
-                match ty {
-                    crate::ir::RegisterType::Logic { width } => {
-                        output.push_str(&format!("      r{}: logic<{}>\n", id.0, width));
-                    }
-                    crate::ir::RegisterType::Bit { width, signed } => {
-                        let s = if *signed { "signed " } else { "" };
-                        output.push_str(&format!("      r{}: {}bit<{}>\n", id.0, s, width));
-                    }
-                }
-            }
-            for block_id in sir_dominance_order(eu) {
-                let block = &eu.blocks[&block_id];
-                output.push_str(&format!("    b{}:\n", block.id.0));
-                append_sir_block_params(&mut output, &block.params, "      ");
-                for inst in &block.instructions {
-                    output.push_str(&format!("      {}\n", format_instruction(inst, program)));
-                }
-                output.push_str(&format!("      {}\n", block.terminator));
-            }
-        }
-    }
-
-    output.push_str("\n=== Application Flip-Flops (apply_ffs) ===\n");
-    for (addr, execution_units) in &sir.apply_ffs {
-        output.push_str(&format!(
-            "Trigger Group: {} ({})\n",
-            program.get_path(addr),
-            addr
-        ));
-        for (idx, eu) in execution_units.iter().enumerate() {
-            output.push_str(&format!("  Execution Unit {}:\n", idx));
-            output.push_str(&format!("    Entry Block: {}\n", eu.entry_block_id.0));
-            output.push_str("    Registers:\n");
-            let mut reg_ids: Vec<_> = eu.register_map.keys().collect();
-            reg_ids.sort();
-            for id in reg_ids {
-                let ty = &eu.register_map[id];
-                match ty {
-                    crate::ir::RegisterType::Logic { width } => {
-                        output.push_str(&format!("      r{}: logic<{}>\n", id.0, width));
-                    }
-                    crate::ir::RegisterType::Bit { width, signed } => {
-                        let s = if *signed { "signed " } else { "" };
-                        output.push_str(&format!("      r{}: {}bit<{}>\n", id.0, s, width));
-                    }
-                }
-            }
-            for block_id in sir_dominance_order(eu) {
-                let block = &eu.blocks[&block_id];
-                output.push_str(&format!("    b{}:\n", block.id.0));
-                append_sir_block_params(&mut output, &block.params, "      ");
-                for inst in &block.instructions {
-                    output.push_str(&format!("      {}\n", format_instruction(inst, program)));
-                }
-                output.push_str(&format!("      {}\n", block.terminator));
-            }
-        }
-    }
-
-    output.push_str("\n=== Evaluation Combinational Logic (eval_comb) ===\n");
-    for (idx, eu) in sir.eval_comb.iter().enumerate() {
+fn append_units(
+    output: &mut String,
+    units: &[ExecutionUnit<RegionedAbsoluteAddr>],
+    program: &RuntimeProgram,
+) {
+    for (idx, eu) in units.iter().enumerate() {
         output.push_str(&format!("Execution Unit {}:\n", idx));
         output.push_str(&format!("  Entry Block: {}\n", eu.entry_block_id.0));
         output.push_str("  Registers:\n");
@@ -221,15 +136,13 @@ pub fn format_program(sir: &SirProgram, program: &RuntimeProgram) -> String {
         for block_id in sir_dominance_order(eu) {
             let block = &eu.blocks[&block_id];
             output.push_str(&format!("  b{}:\n", block.id.0));
-            append_sir_block_params(&mut output, &block.params, "    ");
+            append_sir_block_params(output, &block.params, "    ");
             for inst in &block.instructions {
                 output.push_str(&format!("    {}\n", format_instruction(inst, program)));
             }
             output.push_str(&format!("    {}\n", block.terminator));
         }
     }
-
-    output
 }
 
 fn append_sir_block_params(output: &mut String, params: &[RegisterId], indent: &str) {

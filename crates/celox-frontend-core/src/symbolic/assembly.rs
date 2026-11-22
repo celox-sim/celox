@@ -5,8 +5,8 @@ use crate::symbolic::artifact::{
     FfPart, HierarchicalStart, NbaSwitch, RelocationModule, SimModule, SplitCommit, SymbolicRtl,
 };
 use crate::{
-    FrontendLookup, FrontendTrace, FrontendTraceOptions, FusedSirOptimizationHints, HashMap,
-    HashSet, InstancePath, ParallelScheduleOptions, ParserError, ScheduledRtl, ScheduledRtlOutput,
+    EventWriteHints, FrontendLookup, FrontendTrace, FrontendTraceOptions, HashMap, HashSet,
+    InstancePath, ParallelScheduleOptions, ParserError, ScheduledRtl, ScheduledRtlOutput,
     SettlePartitionMode, SourceAddr, SourceLocation, SourceVarId, VariableInfo, flattening,
 };
 use celox_design::{
@@ -19,12 +19,14 @@ use celox_design::{
 };
 use celox_sir::{
     BasicBlock, ExecutionUnit, LaneUnit, ParallelSirProgram, SIRInstruction, SIROffset,
-    SIRTerminator, SirProgram,
+    SIRTerminator, SirProgram, UpdateEntry,
 };
 use celox_slt::{
     CombObserver, FfAccessSummary, LogicPath, LogicPathId, LogicPathTarget, NodeId, SLTNodeArena,
     scheduler::{self, SchedulerError},
 };
+
+type ScheduledUpdates = celox_sir::StateUpdates<AbsoluteAddr, RegionedAbsoluteAddr>;
 
 mod boundaries;
 mod clock_analysis;
@@ -32,7 +34,7 @@ mod clock_domains;
 mod comb_observers;
 mod commits;
 mod counters;
-mod fused_ff;
+mod event_actions;
 mod hierarchy;
 mod loops;
 mod nba;
@@ -51,7 +53,7 @@ use clock_domains::*;
 use comb_observers::*;
 use commits::*;
 use counters::*;
-use fused_ff::*;
+use event_actions::*;
 use hierarchy::*;
 use loops::*;
 use nba::*;
@@ -87,7 +89,7 @@ pub struct FfRuntimeRelocation {
 /// Source-neutral description of one FF action offered to an adapter-specific
 /// lowering implementation.
 #[derive(Clone)]
-pub struct FusedFfAction {
+pub struct EventAction {
     pub id: usize,
     pub instance_id: InstanceId,
     pub module_id: ModuleId,
@@ -96,18 +98,14 @@ pub struct FusedFfAction {
     pub runtime: FfRuntimeRelocation,
 }
 
-/// Adapter hook for source-aware FF lowering used by shared-clock scheduling,
-/// with or without a preceding comb phase. The scheduler and all identities
-/// crossing this trait remain source neutral.
-/// The most events whose combined comb-then-FF ticks each get their own
-/// program with a copy of the combinational program
-/// ([`SirProgram::merge_comb_apply`]).
-pub const MERGED_COMB_APPLY_EVENTS: usize = 4;
+/// Maximum number of domains for which the source adapter specializes an update from current inputs.
+pub const MAX_SPECIALIZED_EVENTS: usize = 4;
 
-pub trait FusedFfLoweringFactory {
+/// Source-aware event lowering used by shared-clock scheduling.
+pub trait EventLoweringFactory {
     fn create(
         &self,
-        actions: Vec<FusedFfAction>,
+        actions: Vec<EventAction>,
     ) -> Result<
         Box<
             dyn scheduler::ClockFfLowering<
@@ -122,7 +120,7 @@ pub trait FusedFfLoweringFactory {
 #[allow(clippy::too_many_arguments)]
 pub fn schedule_symbolic_rtl(
     symbolic: SymbolicRtl,
-    fused_ff_factory: Option<&dyn FusedFfLoweringFactory>,
+    event_factory: Option<&dyn EventLoweringFactory>,
     ignored_loops: &[(
         (Vec<(String, usize)>, Vec<String>),
         (Vec<(String, usize)>, Vec<String>),
@@ -139,7 +137,7 @@ pub fn schedule_symbolic_rtl(
 ) -> Result<ScheduledRtlOutput, ParserError> {
     schedule_symbolic_rtl_reporting_loops(
         symbolic,
-        fused_ff_factory,
+        event_factory,
         ignored_loops,
         true_loops,
         four_state,

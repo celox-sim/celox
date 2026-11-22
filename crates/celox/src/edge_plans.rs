@@ -73,22 +73,10 @@ fn edge_name(kind: Option<DomainKind>) -> &'static str {
 /// topology does not list. An event need not have a kernel of its own: a
 /// clock that only drives a gated clock is one.
 pub fn event_addresses(program: &LaidOutProgram) -> Vec<AbsoluteAddr> {
-    let mut addresses = program.design.events.ordered_events.clone();
-    let mut seen: crate::HashSet<_> = addresses.iter().copied().collect();
-    // Preserve legacy/directly constructed programs whose event topology does
-    // not list every kernel, after the semantic IDs used by trigger code.
-    let mut extra: Vec<_> = program
-        .sir
-        .eval_apply_ffs
-        .keys()
-        .chain(program.sir.eval_only_ffs.keys())
-        .chain(program.sir.apply_ffs.keys())
-        .map(|address| program.design.events.canonical(*address))
-        .filter(|address| seen.insert(*address))
-        .collect();
-    extra.sort_unstable();
-    addresses.extend(extra);
-    addresses
+    program
+        .design
+        .events
+        .execution_order(program.sir.updates.events.keys().copied())
 }
 
 /// The edge plans of `program`'s events, named as [`event_addresses`] and
@@ -120,7 +108,13 @@ pub fn edge_plans(program: &LaidOutProgram) -> EdgePlans {
                     .get(&canonical)
                     .into_iter()
                     .flatten()
-                    .filter(|target| program.sir.eval_apply_ffs.contains_key(target))
+                    .filter(|target| {
+                        program
+                            .sir
+                            .updates
+                            .at(target, celox_sir::UpdateEntry::Transition)
+                            .is_some()
+                    })
                     .map(domain)
                     .collect(),
                 gated: events
@@ -128,7 +122,13 @@ pub fn edge_plans(program: &LaidOutProgram) -> EdgePlans {
                     .get(&canonical)
                     .into_iter()
                     .flatten()
-                    .filter(|derived| program.sir.eval_apply_ffs.contains_key(&derived.clock))
+                    .filter(|derived| {
+                        program
+                            .sir
+                            .updates
+                            .at(&derived.clock, celox_sir::UpdateEntry::Transition)
+                            .is_some()
+                    })
                     .map(|derived| domain(&derived.clock))
                     .collect(),
             };

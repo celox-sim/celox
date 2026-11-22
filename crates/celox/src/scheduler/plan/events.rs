@@ -33,6 +33,13 @@ impl<'a> PlanBuilder<'a> {
         }
         let mut events = Vec::with_capacity(addresses.len());
         let mut event_storage: HashMap<AbsoluteAddr, Vec<usize>> = HashMap::default();
+        let mut domains = HashMap::<_, Vec<_>>::default();
+        for (key, update) in &sir.updates.events {
+            domains
+                .entry(topology.canonical(*key))
+                .or_default()
+                .push((key, update));
+        }
         for &signal in &addresses {
             let (active, clock) = match model.kinds.get(&signal) {
                 Some(DomainKind::ClockPosedge) => (1, true),
@@ -42,33 +49,31 @@ impl<'a> PlanBuilder<'a> {
                 Some(DomainKind::Other) | None if native_observers => (1, true),
                 _ => return Err("an event is not a clock or reset edge".into()),
             };
-            let units =
-                |map: &HashMap<AbsoluteAddr, Vec<Unit>>| -> Result<Option<Vec<Unit>>, String> {
-                    if native_observers {
-                        // Match NativeBackend::compile_ff_group exactly: aliases
-                        // bind the first kernel of their canonical domain. The
-                        // frontend may clone that kernel under several aliases;
-                        // concatenating those copies would execute it repeatedly.
-                        return Ok(map
-                            .iter()
-                            .find(|(key, _)| topology.canonical(**key) == signal)
-                            .map(|(_, units)| units.clone()));
-                    }
-                    // An alias's domain must be the event's own; one with
-                    // nothing to run is no domain at all.
-                    let aliased = map.iter().any(|(key, units)| {
-                        *key != signal && topology.canonical(*key) == signal && !units.is_empty()
-                    });
-                    if aliased {
-                        return Err("an event domain has no separate units".into());
-                    }
-                    Ok(map.get(&signal).cloned())
-                };
-            let eval_only = units(&sir.eval_only_ffs)?;
-            let apply = units(&sir.apply_ffs)?;
+            let domain = domains.get(&signal).into_iter().flatten();
+            let units = |entry| -> Result<Option<Vec<Unit>>, String> {
+                if native_observers {
+                    // Match NativeBackend::compile_ff_group exactly: aliases
+                    // bind the first kernel of their canonical domain. The
+                    // frontend may clone that kernel under several aliases;
+                    // concatenating those copies would execute it repeatedly.
+                    return Ok(domain
+                        .clone()
+                        .find_map(|(_, update)| update.entry(entry))
+                        .cloned());
+                }
+                let aliased = domain.clone().any(|(key, update)| {
+                    **key != signal && update.entry(entry).is_some_and(|units| !units.is_empty())
+                });
+                if aliased {
+                    return Err("an event domain has no separate units".into());
+                }
+                Ok(sir.updates.at(&signal, entry).cloned())
+            };
+            let eval_only = units(celox_sir::UpdateEntry::Sample)?;
+            let apply = units(celox_sir::UpdateEntry::Publish)?;
             // An event no RTL process waits for, such as a TB clock that
             // only paces initial processes, has an empty domain.
-            let eval_apply = match units(&sir.eval_apply_ffs)? {
+            let eval_apply = match units(celox_sir::UpdateEntry::Transition)? {
                 Some(units) => units,
                 None if eval_only.is_none() && apply.is_none() => Vec::new(),
                 None => return Err("an event domain has no separate units".into()),
@@ -134,7 +139,8 @@ impl<'a> PlanBuilder<'a> {
         let rtl_written: BTreeSet<usize> = rtl_units().flat_map(written).collect();
         let rtl_stores: HashSet<AbsoluteAddr> = rtl_units().flat_map(stores).collect();
         let opaque_comb = sir
-            .eval_comb
+            .updates
+            .observe
             .iter()
             .any(|unit| opaque(unit, &schema.extern_functions));
         let kernel_stores: Vec<HashSet<AbsoluteAddr>> = sir
@@ -203,11 +209,12 @@ impl<'a> PlanBuilder<'a> {
         // combinational inputs so indirect cones are covered too. Missing
         // statefulness metadata is conservative for the same reason.
         if sir
-            .eval_comb_stateful
+            .updates
+            .retained
             .as_ref()
             .is_none_or(|targets| !targets.is_empty())
         {
-            active_observers.extend(sir.eval_comb.iter().flat_map(loads).map(storage));
+            active_observers.extend(sir.updates.observe.iter().flat_map(loads).map(storage));
         }
         let mut unknown_gate = false;
         for clock in topology.combinational_derived.values().flatten() {

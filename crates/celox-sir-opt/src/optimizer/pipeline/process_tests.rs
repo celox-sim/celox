@@ -151,13 +151,7 @@ fn optimize_process(
     let mut sir = SirProgram {
         processes: vec![process],
         functions: Vec::new(),
-        eval_comb: Vec::new(),
-        eval_apply_ffs: crate::HashMap::default(),
-        eval_comb_apply_ffs: crate::HashMap::default(),
-        merge_comb_apply: true,
-        eval_comb_stateful: None,
-        eval_only_ffs: crate::HashMap::default(),
-        apply_ffs: crate::HashMap::default(),
+        updates: Default::default(),
         parallel: None,
     };
     let design = celox_design::ElaboratedDesign::default();

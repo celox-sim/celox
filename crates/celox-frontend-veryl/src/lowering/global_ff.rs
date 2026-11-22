@@ -6,7 +6,7 @@ use celox_design::{
 };
 use celox_frontend_core::{
     ParserError as CoreParserError, SourceVarId,
-    symbolic::assembly::{FfRuntimeRelocation, FusedFfAction, FusedFfLoweringFactory},
+    symbolic::assembly::{EventAction, EventLoweringFactory, FfRuntimeRelocation},
 };
 use celox_sir::{SIRBuilder, SIRInstruction, SIROffset};
 use celox_slt::{FfAccessSummary, scheduler};
@@ -275,13 +275,13 @@ impl scheduler::ClockFfLowering<FusedRegionedAddr> for SharedClockLowering<'_> {
     }
 }
 
-pub(crate) struct VerylFusedFfFactory<'a> {
+pub(crate) struct VerylEventFactory<'a> {
     module_ir: &'a HashMap<ModuleId, &'a Module>,
     source_id_maps: &'a HashMap<ModuleId, HashMap<VarId, SourceVarId>>,
     config: BuildConfig,
 }
 
-impl<'a> VerylFusedFfFactory<'a> {
+impl<'a> VerylEventFactory<'a> {
     pub(crate) fn new(
         module_ir: &'a HashMap<ModuleId, &'a Module>,
         source_id_maps: &'a HashMap<ModuleId, HashMap<VarId, SourceVarId>>,
@@ -295,10 +295,10 @@ impl<'a> VerylFusedFfFactory<'a> {
     }
 }
 
-impl FusedFfLoweringFactory for VerylFusedFfFactory<'_> {
+impl EventLoweringFactory for VerylEventFactory<'_> {
     fn create(
         &self,
-        actions: Vec<FusedFfAction>,
+        actions: Vec<EventAction>,
     ) -> Result<
         Box<dyn scheduler::ClockFfLowering<FusedRegionedAddr, Error = CoreParserError> + '_>,
         CoreParserError,

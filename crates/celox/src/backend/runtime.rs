@@ -236,7 +236,8 @@ impl JitBackend {
         // superlinear compile time would dominate. The threshold is half the
         // CLIF instruction limit — at this size, code quality differences
         // between allocators are negligible compared to compile time savings.
-        let comb = celox_sir::byte_lookup::scalarize_units(&sir.sir.eval_comb, options.four_state);
+        let comb =
+            celox_sir::byte_lookup::scalarize_units(&sir.sir.updates.observe, options.four_state);
         let mut options = options.clone();
         {
             use celox_backend_cranelift::cost_model::*;
@@ -363,7 +364,7 @@ impl JitBackend {
                 let layout_ref = layout_for_mir.as_ref().unwrap();
 
                 mir_output.push_str("=== MIR (eval_comb) ===\n");
-                for (idx, eu) in sir.sir.eval_comb.iter().enumerate() {
+                for (idx, eu) in sir.sir.updates.observe.iter().enumerate() {
                     let mut mfunc = lower_execution_unit(eu, layout_ref, options.four_state);
                     mir_legalize::legalize(&mut mfunc);
                     mir_opt::optimize(&mut mfunc);
@@ -397,7 +398,7 @@ impl JitBackend {
                     }
                     mir_output.push('\n');
                 }
-                for (addr, units) in &sir.sir.eval_apply_ffs {
+                for (addr, units) in sir.sir.updates.groups(celox_sir::UpdateEntry::Transition) {
                     mir_output.push_str(&format!(
                         "=== MIR (eval_apply_ffs) Trigger: {} ===\n",
                         sir.get_path(addr)
@@ -433,10 +434,7 @@ impl JitBackend {
         let mut next_id = id_to_addr.len();
         let mut ff_funcs = Vec::new();
 
-        let mut compile_ffs = |ff_map: &HashMap<
-            AbsoluteAddr,
-            Vec<crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>>,
-        >,
+        let mut compile_ffs = |entry: celox_sir::UpdateEntry,
                                addr_to_id: &mut HashMap<AbsoluteAddr, usize>,
                                next_id: &mut usize,
                                id_to_addr: &mut Vec<AbsoluteAddr>|
@@ -445,7 +443,7 @@ impl JitBackend {
             crate::SimulatorError,
         > {
             let mut event_map = HashMap::default();
-            for (clock, units) in ff_map {
+            for (clock, units) in sir.sir.updates.groups(entry) {
                 let canonical = sir.design.events.canonical(*clock);
                 let id = *addr_to_id.entry(canonical).or_insert_with(|| {
                     let id = *next_id;
@@ -511,19 +509,19 @@ impl JitBackend {
         };
 
         let mut event_map = compile_ffs(
-            &sir.sir.eval_apply_ffs,
+            celox_sir::UpdateEntry::Transition,
             &mut addr_to_id,
             &mut next_id,
             &mut id_to_addr,
         )?;
         let mut eval_only_event_map = compile_ffs(
-            &sir.sir.eval_only_ffs,
+            celox_sir::UpdateEntry::Sample,
             &mut addr_to_id,
             &mut next_id,
             &mut id_to_addr,
         )?;
         let mut apply_event_map = compile_ffs(
-            &sir.sir.apply_ffs,
+            celox_sir::UpdateEntry::Publish,
             &mut addr_to_id,
             &mut next_id,
             &mut id_to_addr,
@@ -533,28 +531,21 @@ impl JitBackend {
         // (Using `let _` instead of `drop()` to avoid clippy::drop_non_drop.)
         let _ = compile_ffs;
 
-        // Deferred testbench ticks require the scheduler's combined comb/FF
-        // program. Calling independently compiled comb and FF functions can
-        // observe a different pre-edge snapshot around reset and NBA regions.
-        for clock in sir.sir.eval_apply_ffs.keys() {
-            let mut combined_units;
-            let units = match sir.sir.comb_apply(clock) {
-                Some(celox_sir::CombApply::Fused(fused)) => fused,
-                Some(celox_sir::CombApply::Merged { comb, ff }) => {
-                    combined_units = comb.to_vec();
-                    combined_units.extend(ff.iter().cloned());
-                    combined_units.as_slice()
-                }
-                Some(celox_sir::CombApply::Shared) | None => continue,
-            };
+        for (clock, units) in sir.sir.updates.groups(celox_sir::UpdateEntry::FromInputs) {
+            let event = event_map
+                .get_mut(clock)
+                .expect("standalone update has a transition");
+            if sir.sir.updates.events[clock].entry(celox_sir::UpdateEntry::Transition)
+                == Some(units)
+            {
+                event.comb_apply_func = Some(event.func);
+                continue;
+            }
             let ptr = engine
                 .compile_units(units, None, None, None)
                 .map_err(SimulatorError::from)?;
             let comb_apply_func: SimFunc = unsafe { std::mem::transmute(ptr) };
-            event_map
-                .get_mut(clock)
-                .expect("compiled clock event is present")
-                .comb_apply_func = Some(comb_apply_func);
+            event.comb_apply_func = Some(comb_apply_func);
         }
 
         let process_funcs = sir

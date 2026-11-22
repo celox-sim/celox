@@ -44,11 +44,20 @@ fn fingerprint(units: &[ExecutionUnit<RegionedAbsoluteAddr>]) -> u64 {
     hasher.finish()
 }
 
-pub(super) fn optimize_unit_groups_cached(
-    groups: &mut crate::HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+pub(super) fn optimize_unit_groups_cached<'a>(
+    groups: impl IntoIterator<
+        Item = (
+            &'a AbsoluteAddr,
+            &'a mut Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
+        ),
+    >,
     passes: &ExecutionUnitPassManager,
     options: &PassOptions,
 ) {
+    let mut groups: crate::HashMap<_, _> = groups
+        .into_iter()
+        .map(|(&addr, units)| (addr, units))
+        .collect();
     let timing = options.optimize_options.diagnostics.pass_timing;
     let total_start = timing.then(crate::timing::now);
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -89,8 +98,8 @@ pub(super) fn optimize_unit_groups_cached(
     addresses.sort_unstable();
     let mut classes: Vec<EquivalenceClass> = Vec::new();
     for address in addresses {
-        let candidate_shape = shape(&groups[&address]);
-        let candidate_fingerprint = fingerprint(&groups[&address]);
+        let candidate_shape = shape(groups[&address]);
+        let candidate_fingerprint = fingerprint(groups[&address]);
         if let Some(class) = classes.iter_mut().find(|class| {
             class.shape == candidate_shape
                 && class.fingerprint == candidate_fingerprint
@@ -125,7 +134,7 @@ pub(super) fn optimize_unit_groups_cached(
     // them with the optimized copy afterward.
     for class in &classes {
         for alias in &class.aliases {
-            *groups
+            **groups
                 .get_mut(alias)
                 .expect("equivalence-class alias must exist") = Vec::new();
         }
@@ -137,7 +146,7 @@ pub(super) fn optimize_unit_groups_cached(
     let mut counts = Vec::with_capacity(classes.len());
     for class in &classes {
         let group = std::mem::take(
-            groups
+            *groups
                 .get_mut(&class.representative)
                 .expect("equivalence-class representative must exist"),
         );
@@ -147,7 +156,7 @@ pub(super) fn optimize_unit_groups_cached(
     passes.run_parallel(&mut units, options);
     let mut optimized = units.into_iter();
     for (class, count) in classes.iter().zip(counts) {
-        *groups
+        **groups
             .get_mut(&class.representative)
             .expect("equivalence-class representative must exist") =
             optimized.by_ref().take(count).collect();
@@ -160,7 +169,7 @@ pub(super) fn optimize_unit_groups_cached(
             // Make only the copy that the alias owns; do not retain a third
             // group as an intermediate cache entry.
             let optimized = groups[&class.representative].clone();
-            *groups
+            **groups
                 .get_mut(&alias)
                 .expect("equivalence-class alias must exist") = optimized;
         }

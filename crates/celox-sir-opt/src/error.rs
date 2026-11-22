@@ -38,10 +38,6 @@ impl OptimizationError {
         self.stage
     }
 
-    pub(crate) fn invalid_input(stage: &'static str, detail: impl Into<String>) -> Self {
-        Self::without_source(OptimizationErrorKind::InvalidInput, stage, detail)
-    }
-
     pub(crate) fn invariant(stage: &'static str, detail: impl Into<String>) -> Self {
         Self::without_source(OptimizationErrorKind::Invariant, stage, detail)
     }

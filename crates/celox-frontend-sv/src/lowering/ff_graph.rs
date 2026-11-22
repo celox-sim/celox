@@ -88,14 +88,13 @@ impl FfGraph {
         &mut self,
         pm: &procedural::ProcModule<'_>,
         trigger: &TriggerSet<SourceVarId>,
-        evaluations: &mut HashMap<TriggerSet<SourceVarId>, ExecutionUnit<RegionedVarAddr>>,
-        applications: &mut HashMap<TriggerSet<SourceVarId>, ExecutionUnit<RegionedVarAddr>>,
+        bodies: &mut ff_processes::EventBodies,
         active: &mut HashMap<TriggerSet<SourceVarId>, ExecutionUnit<RegionedVarAddr>>,
         nba: &mut HashMap<TriggerSet<SourceVarId>, ExecutionUnit<RegionedVarAddr>>,
     ) {
         if let Some(form) = self.pending.remove(trigger) {
             let segments = self.schedule.batches.entry(trigger.clone()).or_default();
-            if let Some(unit) = evaluations.remove(trigger) {
+            if let Some(unit) = bodies.get_mut(trigger).and_then(|body| body.sample.take()) {
                 segments.push(EdgeBatch::Procedure(unit));
             }
             let mut targets: Vec<_> = form
@@ -116,7 +115,7 @@ impl FfGraph {
             ff::emit_sparse_memory_commits(&mut commit, &targets, &memories, pm);
             let commit = seal_builder(commit);
             segments.push(EdgeBatch::Graph(form));
-            ff_processes::insert_or_merge_ff_unit(applications, trigger.clone(), commit.clone());
+            ff_processes::append_event_body(bodies, trigger, None, commit.clone());
             let blocking = self.active_targets.remove(trigger).unwrap_or_default();
             if blocking.is_empty() {
                 active
@@ -148,10 +147,6 @@ pub(super) struct EdgeSchedule {
 type EdgeBatch = EdgeEvaluation<SourceVarId, RegionedVarAddr>;
 
 impl EdgeSchedule {
-    pub fn contains(&self, trigger: &TriggerSet<SourceVarId>) -> bool {
-        self.batches.contains_key(trigger)
-    }
-
     /// Keep symbolic batches and procedural barriers together until all of
     /// their instance inputs have producers in the design graph.
     pub fn finish(
@@ -175,8 +170,9 @@ impl EdgeSchedule {
             }
             plan.extend(
                 module
-                    .eval_only_ff_blocks
-                    .remove(trigger)
+                    .event_bodies
+                    .get_mut(trigger)
+                    .and_then(|body| body.sample.take())
                     .map(EdgeBatch::Procedure),
             );
             module.next_state.evaluations.insert(trigger.clone(), plan);
@@ -373,7 +369,11 @@ mod tests {
         let instructions = |width| {
             let source = source.replace("AW = 3", &format!("AW = {width}"));
             let sir = schedule(&source, true, DeadStorePolicy::Off);
-            let units: Vec<_> = sir.eval_comb_apply_ffs.values().flatten().collect();
+            let units: Vec<_> = sir
+                .updates
+                .groups(celox_sir::UpdateEntry::FromInputs)
+                .flat_map(|(_, units)| units)
+                .collect();
             assert_eq!(units.len(), 1);
             let ops: Vec<_> = units[0]
                 .blocks
@@ -385,7 +385,8 @@ mod tests {
                 matches!(op, SIRInstruction::Binary(_, _, BinaryOp::Mul, _))
             };
             assert!(
-                sir.eval_comb
+                sir.updates
+                    .observe
                     .iter()
                     .flat_map(|u| u.blocks.values())
                     .flat_map(|b| &b.instructions)
@@ -440,8 +441,9 @@ mod tests {
         "#;
         let sir = schedule(source, true, DeadStorePolicy::Off);
         let units = sir
-            .eval_only_ffs
-            .values()
+            .updates
+            .groups(celox_sir::UpdateEntry::Sample)
+            .map(|(_, units)| units)
             .find(|units| units.len() == 2)
             .unwrap();
         let operations = |unit: &ExecutionUnit<_>, op| {
@@ -525,9 +527,9 @@ mod tests {
             let mut staging_copies = 0;
             let mut multiplies = 0;
             for op in sir
-                .eval_apply_ffs
-                .values()
-                .flatten()
+                .updates
+                .groups(celox_sir::UpdateEntry::Transition)
+                .flat_map(|(_, units)| units)
                 .flat_map(|u| u.blocks.values())
                 .flat_map(|b| &b.instructions)
             {
@@ -573,20 +575,22 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(
-            sir.eval_apply_ffs
-                .values()
+            sir.updates
+                .groups(celox_sir::UpdateEntry::Transition)
+                .map(|(_, units)| units)
                 .flat_map(|u| stores(u))
                 .collect::<Vec<_>>(),
             [STABLE_REGION]
         );
         assert_eq!(
-            sir.eval_only_ffs
-                .values()
+            sir.updates
+                .groups(celox_sir::UpdateEntry::Sample)
+                .map(|(_, units)| units)
                 .flat_map(|u| stores(u))
                 .collect::<Vec<_>>(),
             [SPARSE_WORKING_REGION]
         );
-        assert!(sir.eval_apply_ffs.values().flatten().flat_map(|u| u.blocks.values())
+        assert!(sir.updates.groups(celox_sir::UpdateEntry::Transition).flat_map(|(_, units)|units).flat_map(|u| u.blocks.values())
             .flat_map(|b| &b.instructions).all(|i| !matches!(i, SIRInstruction::Commit(src,..) if src.region == SPARSE_WORKING_REGION)));
     }
 
@@ -600,7 +604,11 @@ mod tests {
             always_ff @(posedge clk) if (en) d <= c;
             endmodule";
         let sir = schedule(source, true, DeadStorePolicy::Off);
-        let units = sir.eval_apply_ffs.values().flatten().collect::<Vec<_>>();
+        let units = sir
+            .updates
+            .groups(celox_sir::UpdateEntry::Transition)
+            .flat_map(|(_, units)| units)
+            .collect::<Vec<_>>();
         let blocks: Vec<_> = units.iter().flat_map(|unit| unit.blocks.values()).collect();
         assert_eq!(
             blocks
@@ -638,9 +646,9 @@ mod tests {
             endmodule";
         let sir = schedule(source, true, DeadStorePolicy::Off);
         let blocks = sir
-            .eval_only_ffs
-            .values()
-            .flatten()
+            .updates
+            .groups(celox_sir::UpdateEntry::Sample)
+            .flat_map(|(_, units)| units)
             .flat_map(|unit| unit.blocks.values())
             .collect::<Vec<_>>();
         assert_eq!(
@@ -670,11 +678,16 @@ mod tests {
         let loads = |graph| {
             let sir = schedule(source, graph, DeadStorePolicy::PreserveTopPorts);
             if !graph {
-                assert!(sir.eval_comb_apply_ffs.is_empty());
+                assert!(
+                    sir.updates
+                        .groups(celox_sir::UpdateEntry::FromInputs)
+                        .next()
+                        .is_none()
+                );
             }
-            sir.eval_apply_ffs
-                .values()
-                .flatten()
+            sir.updates
+                .groups(celox_sir::UpdateEntry::Transition)
+                .flat_map(|(_, units)| units)
                 .flat_map(|unit| unit.blocks.values())
                 .flat_map(|block| &block.instructions)
                 .filter(|inst| matches!(inst, SIRInstruction::Load(..)))
@@ -699,11 +712,16 @@ mod tests {
         let edge_adds = |graph, policy| {
             let sir = schedule(source, graph, policy);
             if !graph {
-                assert!(sir.eval_comb_apply_ffs.is_empty());
+                assert!(
+                    sir.updates
+                        .groups(celox_sir::UpdateEntry::FromInputs)
+                        .next()
+                        .is_none()
+                );
             }
-            sir.eval_apply_ffs
-                .values()
-                .flatten()
+            sir.updates
+                .groups(celox_sir::UpdateEntry::Transition)
+                .flat_map(|(_, units)| units)
                 .flat_map(|unit| unit.blocks.values())
                 .flat_map(|block| &block.instructions)
                 .filter(|inst| matches!(inst, SIRInstruction::Binary(_, _, BinaryOp::Add, _)))
@@ -727,15 +745,21 @@ mod tests {
         "#;
         let additions = |graph| {
             let sir = schedule(source, graph, DeadStorePolicy::Off);
-            assert_eq!(!sir.eval_comb_apply_ffs.is_empty(), graph);
+            assert_eq!(
+                sir.updates
+                    .groups(celox_sir::UpdateEntry::FromInputs)
+                    .next()
+                    .is_some(),
+                graph
+            );
             let ticks = if graph {
-                &sir.eval_comb_apply_ffs
+                celox_sir::UpdateEntry::FromInputs
             } else {
-                &sir.eval_apply_ffs
+                celox_sir::UpdateEntry::Transition
             };
-            ticks
-                .values()
-                .flatten()
+            sir.updates
+                .groups(ticks)
+                .flat_map(|(_, units)| units)
                 .flat_map(|unit| unit.blocks.values())
                 .flat_map(|block| &block.instructions)
                 .filter(|inst| matches!(inst, SIRInstruction::Binary(_, _, BinaryOp::Add, _)))
@@ -769,9 +793,9 @@ endmodule"#;
             let source = source.replace("OBSERVER", watch);
             let sir = schedule(&source, true, DeadStorePolicy::PreserveTopPorts);
             let products = sir
-                .eval_apply_ffs
-                .values()
-                .flatten()
+                .updates
+                .groups(celox_sir::UpdateEntry::Transition)
+                .flat_map(|(_, units)| units)
                 .flat_map(|unit| unit.blocks.values())
                 .flat_map(|block| &block.instructions)
                 .filter(|inst| matches!(inst, SIRInstruction::Binary(_, _, BinaryOp::Mul, _)))

@@ -32,10 +32,6 @@ use crate::ir::{
     )
 ))]
 pub use celox_sir_opt::optimizer::pass_eliminate_working_round_trip;
-pub(crate) use celox_sir_opt::optimizer::{
-    eliminate_shared_comb_state_stores, promote_fused_comb_static_slots,
-    remove_dead_sir_definitions,
-};
 #[cfg(all(
     feature = "host-runtime",
     any(
@@ -44,8 +40,10 @@ pub(crate) use celox_sir_opt::optimizer::{
         target_arch = "aarch64"
     )
 ))]
+pub(crate) use celox_sir_opt::optimizer::promote_eval_apply_working_round_trips;
 pub(crate) use celox_sir_opt::optimizer::{
-    eliminate_unobserved_comb_state_stores, promote_eval_apply_working_round_trips,
+    eliminate_shared_comb_state_stores, promote_fused_comb_static_slots,
+    remove_dead_sir_definitions,
 };
 
 pub(crate) fn retain_final_identity_aliases(program: &mut OptimizedSir, four_state: bool) {

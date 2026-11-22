@@ -48,10 +48,8 @@ pub(super) fn expand_design(
         .map(|module| {
             let module = &modules[module];
             module
-                .eval_apply_ff_blocks
+                .event_bodies
                 .keys()
-                .chain(module.eval_only_ff_blocks.keys())
-                .chain(module.apply_ff_blocks.keys())
                 .flat_map(|triggers| std::iter::once(&triggers.clock).chain(&triggers.resets))
                 .collect::<HashSet<_>>()
                 .len()
@@ -189,6 +187,7 @@ pub(super) fn expand_design(
 pub(super) fn relocate_design(
     design: &Design,
     parallel: &ParallelScheduleOptions,
+    four_state: bool,
     flatten_timing: bool,
     trace_opts: &FrontendTraceOptions,
     trace: &mut Option<&mut FrontendTrace>,
@@ -212,10 +211,8 @@ pub(super) fn relocate_design(
     let mut split_commits = SplitCommits::default();
     let (
         global_arena,
-        eval_apply_ffs,
+        updates,
         evaluations,
-        apply_ffs,
-        _ff_access_summaries,
         ff_runtime_relocations,
         comb_blocks,
         comb_observers,
@@ -245,6 +242,7 @@ pub(super) fn relocate_design(
             clock_domains,
             parallel.enabled().then_some(&mut parallel_ff_units),
             &mut split_commits,
+            four_state,
             trace_opts,
             trace,
             startup_ready,
@@ -260,9 +258,7 @@ pub(super) fn relocate_design(
             comb_observers,
         },
         Units {
-            eval_apply_ffs,
-            eval_only_ffs: Default::default(),
-            apply_ffs,
+            updates,
             processes,
             functions,
             function_frames,
@@ -286,9 +282,7 @@ pub(super) fn relocate_design(
 pub(super) fn release_module_units(modules: &mut HashMap<ModuleId, SimModule>) {
     for module in modules.values_mut() {
         module.next_state.evaluations = Default::default();
-        module.eval_only_ff_blocks = Default::default();
-        module.apply_ff_blocks = Default::default();
-        module.eval_apply_ff_blocks = Default::default();
+        module.event_bodies.clear();
         module.split_commit_ff_blocks = Default::default();
         module.parallel_ff_parts = Default::default();
         module.functions = Default::default();

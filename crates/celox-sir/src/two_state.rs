@@ -20,51 +20,11 @@ use crate::{
 
 /// Canonicalize every execution unit of `program` for two-state simulation.
 pub fn canonicalize_program<EventAddr, StateAddr>(program: &mut SirProgram<EventAddr, StateAddr>) {
-    let SirProgram {
-        eval_comb,
-        eval_apply_ffs,
-        eval_comb_apply_ffs,
-        merge_comb_apply: _,
-        eval_comb_stateful: _,
-        eval_only_ffs,
-        apply_ffs,
-        parallel,
-        processes,
-        functions,
-    } = program;
-    let units = eval_comb
-        .iter_mut()
-        .chain(
-            [
-                eval_apply_ffs,
-                eval_comb_apply_ffs,
-                eval_only_ffs,
-                apply_ffs,
-            ]
-            .into_iter()
-            .flat_map(|units| units.values_mut().flatten()),
-        )
-        .chain(processes.iter_mut())
-        .chain(functions.iter_mut().map(|function| &mut function.unit));
-    for unit in units {
+    for unit in program.units_mut() {
         canonicalize_unit(unit);
     }
-    // Lane-partitioned kernels are alternatives of the units above and must
-    // compute the same values.
-    if let Some(parallel) = parallel {
-        let lane_units =
-            parallel
-                .eval_comb
-                .iter_mut()
-                .chain(parallel.eval_apply_ffs.values_mut().flat_map(|kernel| {
-                    kernel
-                        .evaluations
-                        .iter_mut()
-                        .chain(&mut kernel.applications)
-                }));
-        for lane_unit in lane_units {
-            canonicalize_unit(&mut lane_unit.unit);
-        }
+    for function in &mut program.functions {
+        canonicalize_unit(&mut function.unit);
     }
 }
 

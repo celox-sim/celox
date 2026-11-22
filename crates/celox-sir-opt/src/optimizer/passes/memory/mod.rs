@@ -5,7 +5,7 @@ use crate::optimizer::pipeline::pass_manager;
 
 pub(in crate::optimizer) mod block_opt;
 pub mod commit_ops;
-pub(in crate::optimizer) mod fused_comb_dse;
+pub(in crate::optimizer) mod event_store_liveness;
 pub(in crate::optimizer) mod pass_coalesce_stores;
 pub(in crate::optimizer) mod pass_commit_sinking;
 pub(in crate::optimizer) mod pass_dead_store_elimination;

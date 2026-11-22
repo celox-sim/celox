@@ -133,28 +133,25 @@ endmodule
         backend.enable_hotspots(&options).unwrap();
         let mut runtime = backend.hotspots.take().unwrap();
         let mut jobs = Vec::new();
-        if native_eval {
-            for (addr, group) in &backend.eval_only_units {
-                jobs.push((
-                    EntryKey::EvalOnly(backend.eval_only_event_map[addr].id()),
-                    group
-                        .units
-                        .iter()
-                        .map(|prepared| prepared.unit.as_ref().clone())
-                        .collect(),
-                ));
-            }
-        }
-        if native_apply {
-            for (addr, group) in &backend.apply_units {
-                jobs.push((
-                    EntryKey::Apply(backend.apply_event_map[addr].id()),
-                    group
-                        .units
-                        .iter()
-                        .map(|prepared| prepared.unit.as_ref().clone())
-                        .collect(),
-                ));
+        for (&addr, update) in &backend.updates {
+            for (enabled, at, key) in [
+                (
+                    native_eval,
+                    UpdateEntry::Sample,
+                    EntryKey::EvalOnly as fn(_) -> _,
+                ),
+                (native_apply, UpdateEntry::Publish, EntryKey::Apply),
+            ] {
+                if enabled && let Some(group) = update.entry(at) {
+                    jobs.push((
+                        key(backend.handles[&addr].entry(at).unwrap().id()),
+                        group
+                            .units
+                            .iter()
+                            .map(|prepared| prepared.unit.as_ref().clone())
+                            .collect(),
+                    ));
+                }
             }
         }
         assert!(!jobs.is_empty());
@@ -412,7 +409,15 @@ module Top (
     }
     let builder = || crate::Simulator::builder(CODE, "Top");
     let interpreted = builder().build_interpreter().unwrap();
-    assert_eq!(interpreted.backend.eval_apply_units.len(), 3);
+    assert_eq!(
+        interpreted
+            .backend
+            .updates
+            .values()
+            .filter(|e| e.entry(UpdateEntry::Transition).is_some())
+            .count(),
+        3
+    );
     assert_eq!(run(interpreted), run(builder().build().unwrap()));
 }
 
@@ -446,12 +451,17 @@ endmodule
     let backend = &interpreted.simulator.backend;
     assert!(backend.emit_triggers);
     assert!(!backend.comb_trigger_addrs.is_empty());
-    assert!(!backend.apply_units.is_empty());
-    for group in backend
-        .eval_only_units
-        .values()
-        .chain(backend.apply_units.values())
-    {
+    assert!(
+        backend
+            .updates
+            .values()
+            .any(|e| e.entry(UpdateEntry::Publish).is_some())
+    );
+    for group in backend.updates.values().flat_map(|event| {
+        [UpdateEntry::Sample, UpdateEntry::Publish]
+            .into_iter()
+            .filter_map(|at| event.entry(at))
+    }) {
         for addr in &group.trigger_addrs {
             assert!(backend.comb_trigger_addrs.binary_search(addr).is_err());
         }

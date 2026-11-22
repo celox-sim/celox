@@ -12,7 +12,7 @@ use celox_frontend_sdk::{
 };
 use celox_sir::{
     BlockId, ExecutionUnit, RegisterId, SIRBuilder, SIRInstruction, SIROffset, SIRTerminator,
-    SIRValue, merge_sir_eus,
+    SIRValue,
 };
 use celox_slt::{LogicPath, LogicPathTarget, NodeId, SLTNode, SLTNodeArena};
 use thiserror::Error;
@@ -831,46 +831,23 @@ fn lower_sir_expression(
     Ok(result)
 }
 
-fn lower_control(
-    artifact: &FrontendArtifact,
+fn control_node(
     signal: SignalId,
     active: ActiveLevel,
-    builder: &mut SIRBuilder<RegionedSourceAddr>,
-) -> Result<RegisterId, FrontendArtifactError> {
-    let signal_info = artifact
-        .signal(signal)
-        .ok_or(FrontendArtifactError::UnknownSignal(signal.index()))?;
-    let loaded = alloc_register(builder, signal_info.value_type());
-    builder.emit(SIRInstruction::Load(
-        loaded,
-        RegionedSourceAddr {
-            region: STABLE_REGION,
-            var_id: source_id(signal),
-        },
-        SIROffset::Static(0),
-        1,
-    ));
-    let polarized = if active == ActiveLevel::Low {
-        let inverted = alloc_register(
-            builder,
-            ValueType::new(1, false, signal_info.value_type().is_four_state())?,
-        );
-        builder.emit(SIRInstruction::Unary(inverted, UnaryOp::LogicNot, loaded));
-        inverted
+    arena: &mut SLTNodeArena<SourceVarId>,
+) -> Result<NodeId, FrontendArtifactError> {
+    let input = arena.alloc(SLTNode::Input {
+        variable: source_id(signal),
+        signed: false,
+        index: Vec::new(),
+        access: BitAccess::new(0, 0),
+    })?;
+    let active = if active == ActiveLevel::Low {
+        arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, input))?
     } else {
-        loaded
+        input
     };
-    if signal_info.value_type().is_four_state() {
-        let result = builder.alloc_bit(1, false);
-        builder.emit(SIRInstruction::Unary(
-            result,
-            UnaryOp::ToTwoState,
-            polarized,
-        ));
-        Ok(result)
-    } else {
-        Ok(polarized)
-    }
+    Ok(arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, active))?)
 }
 
 fn seal_builder(mut builder: SIRBuilder<RegionedSourceAddr>) -> ExecutionUnit<RegionedSourceAddr> {
@@ -883,25 +860,19 @@ fn seal_builder(mut builder: SIRBuilder<RegionedSourceAddr>) -> ExecutionUnit<Re
     }
 }
 
-fn insert_or_merge(
-    blocks: &mut HashMap<TriggerSet<SourceVarId>, ExecutionUnit<RegionedSourceAddr>>,
-    trigger: TriggerSet<SourceVarId>,
-    unit: ExecutionUnit<RegionedSourceAddr>,
-) {
-    if let Some(existing) = blocks.remove(&trigger) {
-        blocks.insert(trigger, merge_sir_eus(&[existing, unit]).0);
-    } else {
-        blocks.insert(trigger, unit);
-    }
-}
-
 fn lower_registers(
     artifact: &FrontendArtifact,
-    eval_only: &mut HashMap<TriggerSet<SourceVarId>, ExecutionUnit<RegionedSourceAddr>>,
-    apply: &mut HashMap<TriggerSet<SourceVarId>, ExecutionUnit<RegionedSourceAddr>>,
-    eval_apply: &mut HashMap<TriggerSet<SourceVarId>, ExecutionUnit<RegionedSourceAddr>>,
+    arena: &mut SLTNodeArena<SourceVarId>,
+    cache: &mut HashMap<ExprId, NodeId>,
+    next_state: &mut crate::symbolic::artifact::NextStateForms,
+    bodies: &mut HashMap<
+        TriggerSet<SourceVarId>,
+        crate::symbolic::artifact::EventBody<RegionedSourceAddr>,
+    >,
     reset_clock_map: &mut HashMap<SourceVarId, SourceVarId>,
 ) -> Result<(), FrontendArtifactError> {
+    use celox_slt::next_state::{NextStateForm, ValueRoot};
+    let mut groups = HashMap::<_, (NextStateForm<_>, SIRBuilder<_>)>::default();
     for register in artifact.registers() {
         let target = register.target();
         let target_id = source_id(target.signal());
@@ -938,95 +909,42 @@ fn lower_registers(
             reset_clock_map.insert(reset_id, clock_id);
         }
 
-        let build_eval =
-            |commit: bool| -> Result<ExecutionUnit<RegionedSourceAddr>, FrontendArtifactError> {
-                let mut builder = SIRBuilder::new();
-                let target_info = artifact.signal(target.signal()).ok_or(
-                    FrontendArtifactError::UnknownSignal(target.signal().index()),
-                )?;
-                let target_type = target_info.value_type();
-                builder.emit(SIRInstruction::Commit(
-                    RegionedSourceAddr {
-                        region: STABLE_REGION,
-                        var_id: target_id,
-                    },
-                    RegionedSourceAddr {
-                        region: WORKING_REGION,
-                        var_id: target_id,
-                    },
-                    SIROffset::Static(0),
-                    target.width(),
-                    Vec::new(),
-                ));
-                let mut cache = HashMap::default();
-                let mut next = coerce_sir_expression(
-                    artifact,
-                    register.next(),
-                    target_type,
-                    &mut builder,
-                    &mut cache,
-                )?;
-                if let Some(enable) = register.enable() {
-                    let condition =
-                        lower_control(artifact, enable.signal(), enable.active(), &mut builder)?;
-                    let current = alloc_register(&mut builder, target_type);
-                    builder.emit(SIRInstruction::Load(
-                        current,
-                        RegionedSourceAddr {
-                            region: STABLE_REGION,
-                            var_id: target_id,
-                        },
-                        SIROffset::Static(0),
-                        target.width(),
-                    ));
-                    let selected = alloc_register(&mut builder, target_type);
-                    builder.emit(SIRInstruction::Mux(selected, condition, next, current));
-                    next = selected;
-                }
-                if let Some(reset) = register.async_reset() {
-                    let condition =
-                        lower_control(artifact, reset.signal(), reset.active(), &mut builder)?;
-                    let reset_value = coerce_sir_expression(
-                        artifact,
-                        reset.value(),
-                        target_type,
-                        &mut builder,
-                        &mut cache,
-                    )?;
-                    let selected = alloc_register(&mut builder, target_type);
-                    builder.emit(SIRInstruction::Mux(selected, condition, reset_value, next));
-                    next = selected;
-                }
-                builder.emit(SIRInstruction::Store(
-                    RegionedSourceAddr {
-                        region: WORKING_REGION,
-                        var_id: target_id,
-                    },
-                    SIROffset::Static(0),
-                    target.width(),
-                    next,
-                    Vec::new(),
-                    Vec::new(),
-                ));
-                if commit {
-                    builder.emit(SIRInstruction::Commit(
-                        RegionedSourceAddr {
-                            region: WORKING_REGION,
-                            var_id: target_id,
-                        },
-                        RegionedSourceAddr {
-                            region: STABLE_REGION,
-                            var_id: target_id,
-                        },
-                        SIROffset::Static(0),
-                        target.width(),
-                        Vec::new(),
-                    ));
-                }
-                Ok(seal_builder(builder))
-            };
-
-        let mut apply_builder = SIRBuilder::new();
+        let target_type = signal_slice_type(artifact, target)?;
+        let access = signal_atom(target).access;
+        let mut next =
+            coerce_slt_expression_to_type(artifact, register.next(), target_type, arena, cache)?;
+        if let Some(enable) = register.enable() {
+            let cond = control_node(enable.signal(), enable.active(), arena)?;
+            let current = arena.alloc(SLTNode::Input {
+                variable: target_id,
+                signed: target_type.is_signed(),
+                index: Vec::new(),
+                access,
+            })?;
+            next = arena.alloc(SLTNode::Mux {
+                cond,
+                then_expr: next,
+                else_expr: current,
+            })?;
+        }
+        if let Some(reset) = register.async_reset() {
+            let cond = control_node(reset.signal(), reset.active(), arena)?;
+            let value =
+                coerce_slt_expression_to_type(artifact, reset.value(), target_type, arena, cache)?;
+            next = arena.alloc(SLTNode::Mux {
+                cond,
+                then_expr: value,
+                else_expr: next,
+            })?;
+        }
+        let (form, apply_builder) = groups
+            .entry(trigger)
+            .or_insert_with(|| (NextStateForm::default(), SIRBuilder::new()));
+        form.roots.push(ValueRoot {
+            target: target_id,
+            access,
+            value: next,
+        });
         apply_builder.emit(SIRInstruction::Commit(
             RegionedSourceAddr {
                 region: WORKING_REGION,
@@ -1040,9 +958,19 @@ fn lower_registers(
             target.width(),
             Vec::new(),
         ));
-        insert_or_merge(eval_only, trigger.clone(), build_eval(false)?);
-        insert_or_merge(apply, trigger.clone(), seal_builder(apply_builder));
-        insert_or_merge(eval_apply, trigger, build_eval(true)?);
+    }
+    for (trigger, (form, publication)) in groups {
+        next_state.evaluations.insert(
+            trigger.clone(),
+            vec![crate::symbolic::artifact::EdgeEvaluation::Graph(form)],
+        );
+        bodies.insert(
+            trigger,
+            crate::symbolic::artifact::EventBody {
+                sample: None,
+                publish: seal_builder(publication),
+            },
+        );
     }
     Ok(())
 }
@@ -1913,15 +1841,15 @@ pub fn lower_frontend_artifact(
     }
     comb_blocks.extend(comb_process_paths);
 
-    let mut eval_only_ff_blocks = HashMap::default();
-    let mut apply_ff_blocks = HashMap::default();
-    let mut eval_apply_ff_blocks = HashMap::default();
+    let mut event_bodies = HashMap::default();
     let mut reset_clock_map = HashMap::default();
+    let mut next_state = Default::default();
     lower_registers(
         artifact,
-        &mut eval_only_ff_blocks,
-        &mut apply_ff_blocks,
-        &mut eval_apply_ff_blocks,
+        &mut arena,
+        &mut node_cache,
+        &mut next_state,
+        &mut event_bodies,
         &mut reset_clock_map,
     )?;
 
@@ -1948,9 +1876,7 @@ pub fn lower_frontend_artifact(
         name: artifact.module_name().to_string(),
         variables,
         ff_access_summaries: HashMap::default(),
-        eval_only_ff_blocks,
-        apply_ff_blocks,
-        eval_apply_ff_blocks,
+        event_bodies,
         split_commit_ff_blocks: HashMap::default(),
         parallel_ff_parts: HashMap::default(),
         instances: HashMap::default(),
@@ -1984,7 +1910,7 @@ pub fn lower_frontend_artifact(
         time_slot: None,
         sample_shadows: Vec::new(),
         initial_copies: Vec::new(),
-        next_state: Default::default(),
+        next_state,
     };
     let symbolic = SymbolicRtl {
         modules: [(module_id, sim_module.clone())].into_iter().collect(),

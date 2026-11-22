@@ -1421,13 +1421,7 @@ fn final_alias_redirection_rewrites_functions_and_call_effects() {
     );
     let callee = single_block_unit(vec![load(0, alias, 8)], &[(0, 8)]);
     let mut sir = SirProgram {
-        eval_comb: vec![caller],
-        eval_apply_ffs: HashMap::default(),
-        eval_comb_apply_ffs: HashMap::default(),
-        merge_comb_apply: false,
-        eval_comb_stateful: None,
-        eval_only_ffs: HashMap::default(),
-        apply_ffs: HashMap::default(),
+        updates: celox_sir::StateUpdates::from_groups(vec![caller], None, []),
         parallel: None,
         processes: Vec::new(),
         functions: vec![celox_sir::FunctionUnit {
@@ -1460,7 +1454,7 @@ fn final_alias_redirection_rewrites_functions_and_call_effects() {
         [load(0, canonical, 8)]
     );
     let SIRInstruction::Call { effects, .. } =
-        &sir.eval_comb[0].blocks[&BlockId(0)].instructions[1]
+        &sir.updates.observe[0].blocks[&BlockId(0)].instructions[1]
     else {
         unreachable!()
     };
@@ -1487,13 +1481,7 @@ fn final_alias_redirection_names_the_root_of_a_chain() {
         &[(0, 1), (1, 1), (2, 1)],
     );
     let mut sir = SirProgram {
-        eval_comb: vec![unit],
-        eval_apply_ffs: HashMap::default(),
-        eval_comb_apply_ffs: HashMap::default(),
-        merge_comb_apply: false,
-        eval_comb_stateful: None,
-        eval_only_ffs: HashMap::default(),
-        apply_ffs: HashMap::default(),
+        updates: celox_sir::StateUpdates::from_groups(vec![unit], None, []),
         parallel: None,
         processes: Vec::new(),
         functions: Vec::new(),
@@ -1517,7 +1505,7 @@ fn final_alias_redirection_names_the_root_of_a_chain() {
         .collect(),
     );
     assert_eq!(
-        sir.eval_comb[0].blocks[&BlockId(0)].instructions[2..],
+        sir.updates.observe[0].blocks[&BlockId(0)].instructions[2..],
         [load(1, root, 1), load(2, root, 1)]
     );
 }

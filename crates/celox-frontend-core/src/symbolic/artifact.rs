@@ -2,8 +2,8 @@ use std::{collections::BTreeSet, fmt};
 
 use celox_design::{
     CounterSlots, ExternFunction, InitialStateValue, ModuleId, NbaPosition, NbaSite, ProcessSlots,
-    RegionedAbsoluteAddrBase, RegionedVarAddrBase, RuntimeErrorInfo, RuntimeEventSite, TriggerSet,
-    VarAtomBase, VariableMetadata, WaitSite,
+    RegionedVarAddrBase, RuntimeErrorInfo, RuntimeEventSite, TriggerSet, VarAtomBase,
+    VariableMetadata, WaitSite,
 };
 use celox_sir::ExecutionUnit;
 use celox_slt::{CombObserver, FfAccessSummary, LogicPath, SLTNodeArena};
@@ -120,6 +120,32 @@ pub struct CombAlternative {
     pub candidates: Vec<SourceVarId>,
 }
 
+/// Procedural entries of one source trigger. A graph supplies the missing
+/// sample when its symbolic roots are available after elaboration.
+#[derive(Clone, Debug)]
+pub struct EventBody<A> {
+    pub sample: Option<ExecutionUnit<A>>,
+    pub publish: ExecutionUnit<A>,
+}
+
+impl<A> EventBody<A> {
+    /// Append actions in source order within each part of the event.
+    pub fn append(
+        self,
+        next: Self,
+        merge: impl Fn(ExecutionUnit<A>, ExecutionUnit<A>) -> ExecutionUnit<A>,
+    ) -> Self {
+        let sample = match (self.sample, next.sample) {
+            (Some(first), Some(second)) => Some(merge(first, second)),
+            (first, second) => first.or(second),
+        };
+        Self {
+            sample,
+            publish: merge(self.publish, next.publish),
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct SimModule {
     /// A frontend's global tick precision; absent for scale-free frontends.
@@ -130,16 +156,13 @@ pub struct SimModule {
     pub variables: HashMap<SourceVarId, SymbolicVariable>,
     pub ff_access_summaries:
         HashMap<TriggerSet<SourceVarId>, FfAccessSummary<SymbolicRegionedAddr>>,
-    pub eval_only_ff_blocks: HashMap<TriggerSet<SourceVarId>, ExecutionUnit<SymbolicRegionedAddr>>,
-    pub apply_ff_blocks: HashMap<TriggerSet<SourceVarId>, ExecutionUnit<SymbolicRegionedAddr>>,
-    pub eval_apply_ff_blocks: HashMap<TriggerSet<SourceVarId>, ExecutionUnit<SymbolicRegionedAddr>>,
-    /// `apply_ff_blocks` split into the commit of the blocking results (the
+    pub event_bodies: HashMap<TriggerSet<SourceVarId>, EventBody<SymbolicRegionedAddr>>,
+    /// Publication split into the commit of the blocking results (the
     /// active region) and that of the nonblocking ones (the NBA region), for
     /// a domain whose blocking results another unit observes before the NBA
     /// region. Empty when the frontend does not distinguish them.
     pub split_commit_ff_blocks: HashMap<TriggerSet<SourceVarId>, SplitCommit<SymbolicRegionedAddr>>,
-    /// Lane-partitioning alternative of `eval_only_ff_blocks` and
-    /// `apply_ff_blocks`: a trigger group split into parts which may be
+    /// Lane-partitioning alternative for a trigger group split into parts which may be
     /// evaluated concurrently. Empty unless several lanes were requested.
     pub parallel_ff_parts: HashMap<TriggerSet<SourceVarId>, Vec<FfPart<SymbolicRegionedAddr>>>,
     pub instances: HashMap<String, Vec<ModuleId>>,
@@ -352,10 +375,8 @@ impl SimModule {
 
     pub fn instrumented_storage(&self) -> HashSet<SourceVarId> {
         let domains = self
-            .eval_only_ff_blocks
+            .event_bodies
             .keys()
-            .chain(self.apply_ff_blocks.keys())
-            .chain(self.eval_apply_ff_blocks.keys())
             .chain(self.split_commit_ff_blocks.keys())
             .chain(self.parallel_ff_parts.keys())
             .flat_map(|triggers| {
@@ -394,9 +415,7 @@ impl fmt::Debug for SimModule {
             .field("name", &self.name)
             .field("variables", &"<omitted>")
             .field("ff_access_summaries", &self.ff_access_summaries)
-            .field("eval_only_ff_blocks", &self.eval_only_ff_blocks)
-            .field("apply_ff_blocks", &self.apply_ff_blocks)
-            .field("eval_apply_ff_blocks", &self.eval_apply_ff_blocks)
+            .field("event_bodies", &self.event_bodies)
             .field("instances", &self.instances)
             .field("instance_ports", &self.instance_ports)
             .field("indexed_instance_names", &self.indexed_instance_names)
@@ -457,12 +476,6 @@ pub struct InstanceValue {
 
 #[derive(Clone)]
 pub struct RelocationModule {
-    pub eval_apply_ff_blocks:
-        HashMap<TriggerSet<SourceVarId>, ExecutionUnit<RegionedAbsoluteAddrBase<SourceVarId>>>,
-    pub eval_only_ff_blocks:
-        HashMap<TriggerSet<SourceVarId>, ExecutionUnit<RegionedAbsoluteAddrBase<SourceVarId>>>,
-    pub apply_ff_blocks:
-        HashMap<TriggerSet<SourceVarId>, ExecutionUnit<RegionedAbsoluteAddrBase<SourceVarId>>>,
     pub comb_blocks: Vec<LogicPath<crate::SourceAddr>>,
     pub comb_observers: Vec<CombObserver<crate::SourceAddr>>,
 }
@@ -470,9 +483,6 @@ pub struct RelocationModule {
 impl fmt::Debug for RelocationModule {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RelocationModule")
-            .field("eval_apply_ff_blocks", &self.eval_apply_ff_blocks)
-            .field("eval_only_ff_blocks", &self.eval_only_ff_blocks)
-            .field("apply_ff_blocks", &self.apply_ff_blocks)
             .field("comb_blocks", &self.comb_blocks)
             .field("comb_observers", &self.comb_observers)
             .finish()

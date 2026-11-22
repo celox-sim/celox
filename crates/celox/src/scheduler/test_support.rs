@@ -53,10 +53,10 @@ pub(crate) fn count_test_settles(
             }
         }
     }
-    let instrumented = counted(&program.sir.eval_comb, counter);
-    let original = std::mem::replace(&mut program.sir.eval_comb, instrumented);
+    let instrumented = counted(&program.sir.updates.observe, counter);
+    let original = std::mem::replace(&mut program.sir.updates.observe, instrumented);
     let generated = plan.generate(program, &schema.slots);
-    program.sir.eval_comb = original;
+    program.sir.updates.observe = original;
     program.sir.processes[schema.unit.unwrap()] = generated;
     fused
 }
@@ -172,7 +172,8 @@ pub(crate) fn defers_settles_for_test(program: &LaidOutProgram) -> (bool, bool) 
     let storage = |address: AbsoluteAddr| shared.get(&address).copied().unwrap_or(address);
     let stores: HashSet<AbsoluteAddr> = program
         .sir
-        .eval_comb
+        .updates
+        .observe
         .iter()
         .flat_map(instructions)
         .flat_map(written_storage)
@@ -180,7 +181,7 @@ pub(crate) fn defers_settles_for_test(program: &LaidOutProgram) -> (bool, bool) 
         .collect();
     (
         plan.lazy.is_some(),
-        !retains_state(&program.sir.eval_comb, &storage, &stores),
+        !retains_state(&program.sir.updates.observe, &storage, &stores),
     )
 }
 
@@ -214,7 +215,7 @@ pub(crate) fn without_probe_hints_for_test(
 ) -> LaidOutProgram {
     program.runtime.runtime_schema.occurrence_probes.clear();
     if !statefulness_known {
-        program.sir.eval_comb_stateful = None;
+        program.sir.updates.retained = None;
     }
     let schema = program.runtime.runtime_schema.scheduler.clone().unwrap();
     let plan = Plan::new(&program, &schema.slots, true).unwrap();

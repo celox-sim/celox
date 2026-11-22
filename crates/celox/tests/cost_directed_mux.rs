@@ -28,7 +28,8 @@ module Top (
     let sir = result.trace.pre_optimized_sir.as_ref().unwrap();
     let rendered_sir = sir
         .sir
-        .eval_comb
+        .updates
+        .observe
         .iter()
         .map(|eu| format!("{eu}"))
         .collect::<Vec<_>>()
@@ -95,7 +96,8 @@ fn scalar_case_with_a_data_bit_lowers_to_one_word() {
         let sir = result.trace.post_optimized_sir.unwrap();
         let blocks: Vec<_> = sir
             .sir
-            .eval_comb
+            .updates
+            .observe
             .iter()
             .flat_map(|eu| eu.blocks.values())
             .collect();

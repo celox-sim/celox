@@ -390,7 +390,7 @@ mod tests {
 
     use crate::{
         BasicBlock, BlockId, CallEffects, ExecutionUnit, FrameLayout, FrameSlot, FunctionId,
-        FunctionUnit, HashMap, RegisterId, RegisterType, SIRInstruction, SIROffset, SIRTerminator,
+        FunctionUnit, RegisterId, RegisterType, SIRInstruction, SIROffset, SIRTerminator,
         SirProgram, TriggerIdWithKind,
     };
 
@@ -473,13 +473,7 @@ mod tests {
         // fn0 writes 1 and its slot 100, and calls fn1; fn1 reads 2, stores 3
         // with a trigger, and calls fn0 back; fn2 makes a runtime event.
         let mut program = SirProgram::<u32, u32> {
-            eval_comb: vec![unit(vec![call(0)])],
-            eval_apply_ffs: HashMap::default(),
-            eval_comb_apply_ffs: HashMap::default(),
-            merge_comb_apply: false,
-            eval_comb_stateful: None,
-            eval_only_ffs: HashMap::default(),
-            apply_ffs: HashMap::default(),
+            updates: crate::StateUpdates::from_groups(vec![unit(vec![call(0)])], None, []),
             parallel: None,
             processes: vec![unit(vec![call(2)])],
             functions: vec![
@@ -517,7 +511,7 @@ mod tests {
         assert!(program.functions[2].effects.host.runtime_events);
         // Each call shares its callee's effects.
         let SIRInstruction::Call { effects, .. } =
-            &program.eval_comb[0].blocks[&BlockId(0)].instructions[0]
+            &program.updates.observe[0].blocks[&BlockId(0)].instructions[0]
         else {
             unreachable!()
         };
@@ -527,7 +521,7 @@ mod tests {
         ));
         program.verify_functions().unwrap();
         program.functions.clear();
-        program.eval_comb.clear();
+        program.updates.observe.clear();
         program.processes.clear();
         assert!(!program.has_calls() && program.calls_summarized());
     }
@@ -555,13 +549,7 @@ mod tests {
         // fn0 fails itself, fn1 calls fn0, fn2 calls a native kernel, and
         // fn3 only stores.
         let mut program = SirProgram::<u32, u32> {
-            eval_comb: vec![unit(vec![call(1)])],
-            eval_apply_ffs: HashMap::default(),
-            eval_comb_apply_ffs: HashMap::default(),
-            merge_comb_apply: false,
-            eval_comb_stateful: None,
-            eval_only_ffs: HashMap::default(),
-            apply_ffs: HashMap::default(),
+            updates: crate::StateUpdates::from_groups(vec![unit(vec![call(1)])], None, []),
             parallel: None,
             processes: Vec::new(),
             functions: vec![
@@ -578,7 +566,7 @@ mod tests {
             .map(|function| function.effects.may_fail)
             .collect();
         assert_eq!(fails, [true, true, true, false]);
-        let instruction = &program.eval_comb[0].blocks[&BlockId(0)].instructions[0];
+        let instruction = &program.updates.observe[0].blocks[&BlockId(0)].instructions[0];
         assert!(instruction.may_fail());
         assert!(!store(1, Vec::new()).may_fail());
     }
@@ -594,13 +582,7 @@ mod tests {
             vec![0],
         );
         let mut program = SirProgram::<u32, u32> {
-            eval_comb: vec![unit(vec![call(0)])],
-            eval_apply_ffs: HashMap::default(),
-            eval_comb_apply_ffs: HashMap::default(),
-            merge_comb_apply: false,
-            eval_comb_stateful: None,
-            eval_only_ffs: HashMap::default(),
-            apply_ffs: HashMap::default(),
+            updates: crate::StateUpdates::from_groups(vec![unit(vec![call(0)])], None, []),
             parallel: None,
             processes: Vec::new(),
             functions: vec![function(vec![captured], 100)],
@@ -638,13 +620,7 @@ mod tests {
         for instruction in cases {
             let expected = instruction.host_effects();
             let mut program = SirProgram::<u32, u32> {
-                eval_comb: vec![unit(vec![call(0)])],
-                eval_apply_ffs: HashMap::default(),
-                eval_comb_apply_ffs: HashMap::default(),
-                merge_comb_apply: false,
-                eval_comb_stateful: None,
-                eval_only_ffs: HashMap::default(),
-                apply_ffs: HashMap::default(),
+                updates: crate::StateUpdates::from_groups(vec![unit(vec![call(0)])], None, []),
                 parallel: None,
                 processes: Vec::new(),
                 functions: vec![function(vec![instruction], 100)],
@@ -652,12 +628,12 @@ mod tests {
             program.summarize_calls();
             assert_eq!(program.functions[0].effects.host, expected);
             let SIRInstruction::Call { .. } =
-                &program.eval_comb[0].blocks[&BlockId(0)].instructions[0]
+                &program.updates.observe[0].blocks[&BlockId(0)].instructions[0]
             else {
                 unreachable!()
             };
             assert_eq!(
-                program.eval_comb[0].blocks[&BlockId(0)].instructions[0].host_effects(),
+                program.updates.observe[0].blocks[&BlockId(0)].instructions[0].host_effects(),
                 expected
             );
         }

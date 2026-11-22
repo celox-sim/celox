@@ -23,7 +23,9 @@ pub mod native_memory;
 mod serde_helpers;
 pub mod transform;
 pub mod two_state;
+mod update;
 pub mod verify;
+pub use update::{EventEntries, EventUpdate, StateUpdates, UpdateEntry};
 
 pub use builder::{BuiltCode, SIRBuilder};
 pub use effects::{MemoryAccess, StateAccess};
@@ -38,24 +40,7 @@ pub use transform::{
 /// layout, or backend artifact.
 #[derive(Debug, Clone)]
 pub struct SirProgram<EventAddr, StateAddr> {
-    pub eval_comb: Vec<ExecutionUnit<StateAddr>>,
-    pub eval_apply_ffs: HashMap<EventAddr, Vec<ExecutionUnit<StateAddr>>>,
-    /// Native fast path in which required comb values and one FF event were
-    /// scheduled and lowered through the same SIR builder.
-    pub eval_comb_apply_ffs: HashMap<EventAddr, Vec<ExecutionUnit<StateAddr>>>,
-    /// Whether an event's combined comb-then-FF tick may be built as one
-    /// program from `eval_comb` and the event's `eval_apply_ffs`. Otherwise
-    /// the tick runs the one shared `eval_comb` program and then the event's
-    /// FF program, so the combinational program exists once however many
-    /// events there are. See [`SirProgram::comb_apply`].
-    pub merge_comb_apply: bool,
-    /// The storage of the `eval_comb` paths that keep state from one settle
-    /// to the next, as its scheduler found them: latches and other
-    /// previous-value reads, loops, guarded processes. Every other path is a
-    /// function of its inputs. `None` when unknown.
-    pub eval_comb_stateful: Option<Vec<StateAddr>>,
-    pub eval_only_ffs: HashMap<EventAddr, Vec<ExecutionUnit<StateAddr>>>,
-    pub apply_ffs: HashMap<EventAddr, Vec<ExecutionUnit<StateAddr>>>,
+    pub updates: StateUpdates<EventAddr, StateAddr>,
     /// Lane-partitioned alternatives of the hot phases, present only when
     /// compilation requested more than one simulation lane.
     pub parallel: Option<ParallelSirProgram<EventAddr, StateAddr>>,
@@ -295,7 +280,7 @@ impl<A> LaneUnit<A> {
 /// Running every evaluation and then every application in list order is
 /// equivalent to the event's sequential evaluate-and-apply kernel.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParallelFfKernel<A> {
+pub struct ParallelEventKernel<A> {
     /// Next-state evaluations. They publish staged (working or sparse) state,
     /// or STABLE state directly for targets that no later unit accesses.
     pub evaluations: Vec<LaneUnit<A>>,
@@ -303,7 +288,7 @@ pub struct ParallelFfKernel<A> {
     pub applications: Vec<LaneUnit<A>>,
 }
 
-impl<A> ParallelFfKernel<A> {
+impl<A> ParallelEventKernel<A> {
     /// Units in their sequential order.
     pub fn units(&self) -> impl Iterator<Item = &LaneUnit<A>> {
         self.evaluations.iter().chain(&self.applications)
@@ -325,57 +310,24 @@ pub struct ParallelSirProgram<EventAddr, StateAddr> {
     pub lanes: u32,
     /// Partitioned combinational settle. Empty when partitioning the
     /// combinational schedule was not profitable.
-    pub eval_comb: Vec<LaneUnit<StateAddr>>,
-    pub eval_apply_ffs: HashMap<EventAddr, ParallelFfKernel<StateAddr>>,
+    pub observe: Vec<LaneUnit<StateAddr>>,
+    pub events: HashMap<EventAddr, ParallelEventKernel<StateAddr>>,
 }
 
 impl<EventAddr, StateAddr> ParallelSirProgram<EventAddr, StateAddr> {
     /// Every unit of every partitioned kernel.
     pub fn units(&self) -> impl Iterator<Item = &LaneUnit<StateAddr>> {
-        self.eval_comb.iter().chain(
-            self.eval_apply_ffs
-                .values()
-                .flat_map(ParallelFfKernel::units),
-        )
+        self.observe
+            .iter()
+            .chain(self.events.values().flat_map(ParallelEventKernel::units))
     }
 
     pub fn units_mut(&mut self) -> impl Iterator<Item = &mut LaneUnit<StateAddr>> {
-        self.eval_comb.iter_mut().chain(
-            self.eval_apply_ffs
+        self.observe.iter_mut().chain(
+            self.events
                 .values_mut()
-                .flat_map(ParallelFfKernel::units_mut),
+                .flat_map(ParallelEventKernel::units_mut),
         )
-    }
-}
-
-/// The units of an event's combined comb-then-FF tick.
-#[derive(Debug, Clone, Copy)]
-pub enum CombApply<'a, StateAddr> {
-    /// Comb and FF units scheduled together as one program.
-    Fused(&'a [ExecutionUnit<StateAddr>]),
-    /// `eval_comb` followed by the event's FF units, built as one program.
-    Merged {
-        comb: &'a [ExecutionUnit<StateAddr>],
-        ff: &'a [ExecutionUnit<StateAddr>],
-    },
-    /// The shared `eval_comb` program, then the event's own FF program.
-    Shared,
-}
-
-impl<EventAddr: Eq + std::hash::Hash, StateAddr> SirProgram<EventAddr, StateAddr> {
-    /// The combined comb-then-FF tick of an event of `eval_apply_ffs`.
-    pub fn comb_apply(&self, event: &EventAddr) -> Option<CombApply<'_, StateAddr>> {
-        let ff = self.eval_apply_ffs.get(event)?;
-        Some(if let Some(fused) = self.eval_comb_apply_ffs.get(event) {
-            CombApply::Fused(fused)
-        } else if self.merge_comb_apply {
-            CombApply::Merged {
-                comb: &self.eval_comb,
-                ff,
-            }
-        } else {
-            CombApply::Shared
-        })
     }
 }
 
@@ -416,48 +368,20 @@ impl<EventAddr, StateAddr> SirProgram<EventAddr, StateAddr> {
     /// lane-partitioned alternatives. The [`Self::functions`] they call are
     /// not among them.
     pub fn units(&self) -> impl Iterator<Item = &ExecutionUnit<StateAddr>> {
-        let groups = [
-            &self.eval_apply_ffs,
-            &self.eval_comb_apply_ffs,
-            &self.eval_only_ffs,
-            &self.apply_ffs,
-        ];
-        self.eval_comb
-            .iter()
-            .chain(
-                groups
-                    .into_iter()
-                    .flat_map(|group| group.values().flatten()),
-            )
-            .chain(&self.processes)
-            .chain(
-                self.parallel
-                    .iter()
-                    .flat_map(|parallel| parallel.units().map(|lane| &lane.unit)),
-            )
+        self.updates.units().chain(&self.processes).chain(
+            self.parallel
+                .iter()
+                .flat_map(|parallel| parallel.units().map(|lane| &lane.unit)),
+        )
     }
 
     /// [`Self::units`], mutably.
     pub fn units_mut(&mut self) -> impl Iterator<Item = &mut ExecutionUnit<StateAddr>> {
-        let groups = [
-            &mut self.eval_apply_ffs,
-            &mut self.eval_comb_apply_ffs,
-            &mut self.eval_only_ffs,
-            &mut self.apply_ffs,
-        ];
-        self.eval_comb
-            .iter_mut()
-            .chain(
-                groups
-                    .into_iter()
-                    .flat_map(|group| group.values_mut().flatten()),
-            )
-            .chain(&mut self.processes)
-            .chain(
-                self.parallel
-                    .iter_mut()
-                    .flat_map(|parallel| parallel.units_mut().map(|lane| &mut lane.unit)),
-            )
+        self.updates.units_mut().chain(&mut self.processes).chain(
+            self.parallel
+                .iter_mut()
+                .flat_map(|parallel| parallel.units_mut().map(|lane| &mut lane.unit)),
+        )
     }
 
     /// Consume the program while replacing frontend address identities.
@@ -480,46 +404,25 @@ impl<EventAddr, StateAddr> SirProgram<EventAddr, StateAddr> {
             unit.into_map_addr(map)
         }
 
-        fn map_groups<E, NE, A: Clone, B>(
-            groups: HashMap<E, Vec<ExecutionUnit<A>>>,
-            map_event: &mut impl FnMut(E) -> NE,
-            map_state: &mut impl FnMut(A) -> B,
-        ) -> HashMap<NE, Vec<ExecutionUnit<B>>>
-        where
-            NE: Eq + std::hash::Hash,
-        {
-            groups
-                .into_iter()
-                .map(|(event, units)| {
-                    (
-                        map_event(event),
-                        units
-                            .into_iter()
-                            .map(|unit| map_unit(unit, &mut *map_state))
-                            .collect(),
-                    )
-                })
-                .collect()
-        }
-
         SirProgram {
-            eval_comb: self
-                .eval_comb
-                .into_iter()
-                .map(|unit| map_unit(unit, &mut map_state))
-                .collect(),
-            eval_apply_ffs: map_groups(self.eval_apply_ffs, &mut map_event, &mut map_state),
-            eval_comb_apply_ffs: map_groups(
-                self.eval_comb_apply_ffs,
-                &mut map_event,
-                &mut map_state,
-            ),
-            merge_comb_apply: self.merge_comb_apply,
-            eval_comb_stateful: self
-                .eval_comb_stateful
-                .map(|stateful| stateful.into_iter().map(&mut map_state).collect()),
-            eval_only_ffs: map_groups(self.eval_only_ffs, &mut map_event, &mut map_state),
-            apply_ffs: map_groups(self.apply_ffs, &mut map_event, &mut map_state),
+            updates: StateUpdates {
+                observe: self
+                    .updates
+                    .observe
+                    .into_iter()
+                    .map(|u| u.into_map_addr(&mut map_state))
+                    .collect(),
+                retained: self
+                    .updates
+                    .retained
+                    .map(|v| v.into_iter().map(&mut map_state).collect()),
+                events: self
+                    .updates
+                    .events
+                    .into_iter()
+                    .map(|(e, u)| (map_event(e), u.map(&mut map_state)))
+                    .collect(),
+            },
             processes: self
                 .processes
                 .into_iter()
@@ -532,18 +435,18 @@ impl<EventAddr, StateAddr> SirProgram<EventAddr, StateAddr> {
                 .collect(),
             parallel: self.parallel.map(|parallel| ParallelSirProgram {
                 lanes: parallel.lanes,
-                eval_comb: parallel
-                    .eval_comb
+                observe: parallel
+                    .observe
                     .into_iter()
                     .map(|unit| unit.into_map_addr(&mut map_state))
                     .collect(),
-                eval_apply_ffs: parallel
-                    .eval_apply_ffs
+                events: parallel
+                    .events
                     .into_iter()
                     .map(|(event, kernel)| {
                         (
                             map_event(event),
-                            ParallelFfKernel {
+                            ParallelEventKernel {
                                 evaluations: kernel
                                     .evaluations
                                     .into_iter()
@@ -1526,22 +1429,23 @@ mod program_mapping_tests {
             .collect(),
         };
         let program = SirProgram {
-            eval_comb: vec![unit.clone()],
-            eval_apply_ffs: [(1u32, vec![unit])].into_iter().collect(),
-            eval_comb_apply_ffs: HashMap::default(),
-            merge_comb_apply: true,
-            eval_comb_stateful: None,
-            eval_only_ffs: HashMap::default(),
-            apply_ffs: HashMap::default(),
+            updates: crate::StateUpdates::from_groups(
+                vec![unit.clone()],
+                None,
+                [(
+                    crate::UpdateEntry::Transition,
+                    [(1u32, vec![unit])].into_iter().collect(),
+                )],
+            ),
             parallel: None,
             processes: Vec::new(),
             functions: Vec::new(),
         };
 
         let mapped = program.into_map_addr(|event| event + 100, |state| state + 1000);
-        assert!(mapped.eval_apply_ffs.contains_key(&101));
+        assert!(mapped.updates.events.contains_key(&101));
         assert!(matches!(
-            mapped.eval_comb[0].blocks[&BlockId(0)]
+            mapped.updates.observe[0].blocks[&BlockId(0)]
                 .instructions
                 .as_slice(),
             [

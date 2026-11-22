@@ -117,29 +117,16 @@ pub(crate) fn plan_lane_kernels(
         return Ok((1, Vec::new()));
     }
     let mut candidates: Vec<(LaneKernelKind, Vec<&LaneUnit<RegionedAbsoluteAddr>>)> = Vec::new();
-    if !parallel.eval_comb.is_empty() {
-        candidates.push((LaneKernelKind::Comb, parallel.eval_comb.iter().collect()));
+    if !parallel.observe.is_empty() {
+        candidates.push((LaneKernelKind::Comb, parallel.observe.iter().collect()));
     }
-    let mut events = parallel.eval_apply_ffs.keys().copied().collect::<Vec<_>>();
+    let mut events = parallel.events.keys().copied().collect::<Vec<_>>();
     events.sort_unstable();
     for &event in &events {
         candidates.push((
             LaneKernelKind::Event(event),
-            parallel.eval_apply_ffs[&event].units().collect(),
+            parallel.events[&event].units().collect(),
         ));
-    }
-    // Shared comb-then-FF ticks run the comb and event kernels instead.
-    if !parallel.eval_comb.is_empty() && laid_out.sir.merge_comb_apply {
-        for &event in &events {
-            candidates.push((
-                LaneKernelKind::Fused(event),
-                parallel
-                    .eval_comb
-                    .iter()
-                    .chain(parallel.eval_apply_ffs[&event].units())
-                    .collect(),
-            ));
-        }
     }
     let mut planned: Vec<PlannedLaneKernel<'_>> = Vec::new();
     for (kind, units) in candidates {
