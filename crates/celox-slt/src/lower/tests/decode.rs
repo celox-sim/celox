@@ -209,3 +209,99 @@ fn small_constant_lookup_keeps_its_individual_rows() {
     reduce_two_state_decodes(&mut arena, [&mut root]).unwrap();
     assert_eq!(root, original);
 }
+
+#[test]
+fn state_table_matches_every_control_word_including_the_unlisted_state() {
+    let mut arena = SLTNodeArena::new();
+    let selector = input(&mut arena, 0, 3);
+    let mut controls = [1, 2, 3, 4, 5, 6, 7].map(|address| input(&mut arena, address, 1));
+    // A local enable is already an input. The other two factors can be
+    // supplied together, keeping the eight raw controls within seven bits.
+    let global_b = input(&mut arena, 8, 1);
+    let enabled_b = arena
+        .alloc(SLTNode::Binary(controls[0], BinaryOp::And, global_b))
+        .unwrap();
+    controls[6] = arena
+        .alloc(SLTNode::Binary(controls[6], BinaryOp::And, enabled_b))
+        .unwrap();
+    let states = [0, 1, 2, 3, 4, 5, 6, 7].map(|state| constant(&mut arena, state, 3));
+    let rest = arena
+        .alloc(SLTNode::Binary(controls[1], BinaryOp::Or, controls[2]))
+        .unwrap();
+    let either = arena
+        .alloc(SLTNode::Binary(controls[0], BinaryOp::Or, rest))
+        .unwrap();
+    let mut root = states[5];
+    for state in (0..7).rev() {
+        let other = (state + 1) % 7;
+        let inner = arena
+            .alloc(SLTNode::Mux {
+                cond: controls[other],
+                then_expr: states[(state + 2) % 8],
+                else_expr: states[state],
+            })
+            .unwrap();
+        let condition = if state == 6 { either } else { controls[state] };
+        let next = arena
+            .alloc(SLTNode::Mux {
+                cond: condition,
+                then_expr: states[(state + 3) % 8],
+                else_expr: inner,
+            })
+            .unwrap();
+        root = arm(&mut arena, selector, state as u64, next, root);
+    }
+    reduce_two_state_decodes(&mut arena, [&mut root]).unwrap();
+    assert!(matches!(arena.get(root), SLTNode::Slice { .. }));
+    let mut builder = SIRBuilder::new();
+    let result =
+        SLTToSIRLowerer::new(false).lower(&mut builder, root, &arena, &mut Default::default());
+    let unit = finish_lowering(builder);
+    let scalar = celox_sir::byte_lookup::scalarize(&unit, false);
+    assert!(matches!(scalar, std::borrow::Cow::Owned(_)));
+    assert!(scalar.register_map.values().all(|ty| ty.width() <= 64));
+    scalar.verify();
+    for control in 0..256usize {
+        let flags = (control & 63) | (usize::from(control & 0xc1 == 0xc1) << 6);
+        for state in 0..8usize {
+            let memory = (0..9)
+                .map(|i| {
+                    let bits = if i == 0 {
+                        state
+                    } else {
+                        (control >> (i - 1)) & 1
+                    };
+                    (
+                        i as u32,
+                        TestSIRValue {
+                            payload: bits.into(),
+                            mask: 0u8.into(),
+                        },
+                    )
+                })
+                .collect();
+            let request = if state == 6 {
+                flags & 7 != 0
+            } else {
+                flags & (1 << state) != 0
+            };
+            let expected = if state == 7 {
+                5
+            } else if request {
+                (state + 3) % 8
+            } else if flags & (1 << ((state + 1) % 7)) != 0 {
+                (state + 2) % 8
+            } else {
+                state
+            };
+            for code in [&unit, scalar.as_ref()] {
+                let values = execute_fold_group_sir_with_memory(code, &memory);
+                assert_eq!(
+                    values[&result].payload,
+                    expected.into(),
+                    "state {state}, controls {control}"
+                );
+            }
+        }
+    }
+}

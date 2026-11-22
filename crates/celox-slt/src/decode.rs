@@ -1,4 +1,5 @@
 //! Reduce priority mux chains over mutually exclusive two-state selector values.
+mod state_table;
 use crate::{
     HashMap, HashSet, NodeId, SLTNode, SLTNodeArena, SLTNodeFactsError, canon, lower::bound_signed,
 };
@@ -181,6 +182,9 @@ fn reduce_chain<A: Clone + Eq + Hash>(
             .all(|(value, _)| matches!(arena.get(*value), SLTNode::Constant(..)))
     {
         return Ok(None);
+    }
+    if let Some(table) = state_table::tabulate(arena, selector, &groups, result, node)? {
+        return Ok(Some(table));
     }
     groups.retain(|(v, _)| *v != result);
     if groups.len() == count {

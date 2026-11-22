@@ -139,7 +139,11 @@ impl JitEngine {
             self.declare_callees(&mut ctx.func, std::iter::once(&function.unit));
             {
                 let builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
-                self.translator.translate_function(&function.unit, builder);
+                let unit = celox_sir::byte_lookup::scalarize(
+                    &function.unit,
+                    self.translator.options.four_state,
+                );
+                self.translator.translate_function(unit.as_ref(), builder);
             }
             self.optimize_and_define(
                 &mut ctx,
@@ -302,6 +306,8 @@ impl JitEngine {
         native_out: Option<&mut String>,
     ) -> Result<*const u8, CraneliftError> {
         let four_state = self.translator.options.four_state;
+        let scalar = celox_sir::byte_lookup::scalarize_units(units, four_state);
+        let units = scalar.as_ref();
         let mut total_inst_cost = 0usize;
         let mut total_value_count = 0usize;
         for eu in units {
