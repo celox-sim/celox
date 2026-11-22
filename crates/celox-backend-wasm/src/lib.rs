@@ -517,6 +517,8 @@ fn compile_unit(
     locals: &mut LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
+    let scalar = celox_sir::byte_lookup::scalarize(unit, four_state);
+    let unit = scalar.as_ref();
     // Clear per-unit register map (RegisterIds are unit-scoped).
     locals.reg_map.clear();
     locals.block_arg_locals.clear();

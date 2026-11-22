@@ -277,7 +277,7 @@ fn recognizes_full_domain_dense_lookup_with_global_constants_and_zero_extended_c
     assert_eq!(first.selector, fixture.selector);
     assert_eq!(first.selector_width, 2);
     assert_eq!(first.entries, vec![10, 11, 12, 13]);
-    assert_eq!(first.default, fixture.defaults[0]);
+    assert!(matches!(first.source, LookupSource::Cases(default) if default == fixture.defaults[0]));
     for &(_, compare_idx, concat_idx) in &fixture.conditions {
         assert!(plans.skip_indices.contains(&compare_idx));
         assert!(plans.skip_indices.contains(&concat_idx));
@@ -786,6 +786,7 @@ fn lookup_plans(fixture: &LookupFixture) -> DenseLookupPlans {
         &fixture.eu.register_map,
         &constants,
         &uses,
+        &HashMap::default(),
     )
 }
 
@@ -1101,5 +1102,83 @@ fn loaded_bit_selects_lower_to_shifts_and_masks() {
                 "set={set}, input={input:#x}"
             );
         }
+    }
+}
+
+#[test]
+fn packed_constant_load_returns_only_the_requested_bits_at_every_byte() {
+    let address = |id| AbsoluteAddr {
+        instance_id: InstanceId(0),
+        var_id: VarId(id),
+    };
+    let region = |id| RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, address(id));
+    let mut b = celox_sir::SIRBuilder::new();
+    let index = b.alloc_bit(8, false);
+    let zero = b.alloc_bit(3, false);
+    let offset = b.alloc_bit(11, false);
+    let table = b.alloc_bit(2048, false);
+    let shifted = b.alloc_bit(2048, false);
+    let result = b.alloc_bit(5, false);
+    let bytes: Vec<_> = (0..=255u8).map(|i| i.wrapping_mul(97)).collect();
+    b.emit(SIRInstruction::Load(
+        index,
+        region(0),
+        SIROffset::Static(0),
+        8,
+    ));
+    b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+    b.emit(SIRInstruction::Concat(offset, vec![index, zero]));
+    b.emit(SIRInstruction::Imm(
+        table,
+        SIRValue::new(BigUint::from_bytes_le(&bytes)),
+    ));
+    b.emit(SIRInstruction::Binary(
+        shifted,
+        table,
+        BinaryOp::Shr,
+        offset,
+    ));
+    b.emit(SIRInstruction::Slice(result, shifted, 0, 5));
+    b.emit(SIRInstruction::Store(
+        region(1),
+        SIROffset::Static(0),
+        5,
+        result,
+        vec![],
+        vec![],
+    ));
+    let entry_block_id = b.seal_block(SIRTerminator::Return);
+    let (blocks, register_map, _) = b.drain();
+    let unit = ExecutionUnit {
+        entry_block_id,
+        blocks,
+        register_map,
+    };
+    let mut layout = empty_layout();
+    layout.offsets = [(address(0), 0), (address(1), 8)].into_iter().collect();
+    layout.widths = [(address(0), 8), (address(1), 5)].into_iter().collect();
+    layout.is_4states = [(address(0), false), (address(1), false)]
+        .into_iter()
+        .collect();
+    layout.total_size = 16;
+    layout.merged_total_size = 16;
+    let mut f = lower_execution_unit(&unit, &layout, false);
+    assert!(f.blocks.iter().flat_map(|b| &b.insts).any(|i| matches!(
+        i,
+        MInst::LoadPtrIndexed {
+            size: OpSize::S8,
+            ..
+        }
+    )));
+    mir_legalize::legalize(&mut f);
+    mir_opt::optimize(&mut f);
+    let allocation = regalloc::run_regalloc(&mut f).unwrap();
+    let emitted = emit::emit(&f, &allocation.assignment, allocation.spill_frame_size).unwrap();
+    let jit = JitCode::new(&emitted.code).unwrap();
+    for (index, expected) in bytes.into_iter().enumerate() {
+        let mut state = vec![0u8; 16];
+        state[0] = index as u8;
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        assert_eq!(state[8], expected & 31);
     }
 }
