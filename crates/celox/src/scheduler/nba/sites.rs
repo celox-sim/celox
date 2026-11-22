@@ -342,7 +342,7 @@ impl Sites {
             let target = self.sites[index].target;
             let home = g.shared.get(&target).copied().unwrap_or(target);
             g.mark_publication(schedule.nba_targets.get(&home).copied());
-        } else {
+        } else if !g.partition_tracks_publication(self.sites[index].target) {
             g.mark_dirty();
         }
     }
@@ -535,7 +535,9 @@ impl Sites {
             targets[id] = block;
         }
         g.dispatch_sites(site, &targets, bad);
-        let precise = g.incremental.is_some_and(|plan| plan.events.is_some());
+        let precise = g
+            .incremental
+            .is_some_and(|plan| plan.events.is_some() || plan.untracked.is_some());
         for (index, block) in blocks.into_iter().enumerate() {
             let site = &self.sites[index];
             g.b.switch_to_block(block);

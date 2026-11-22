@@ -11,6 +11,27 @@ impl Generator<'_> {
             .is_some_and(|reads| reads.contains(&storage))
     }
 
+    /// A generated NBA store already marks its partition readers, including
+    /// the dirty cause consumed by the clock cone. An additional coarse mark
+    /// would overwrite that cause. Keep it for inputs outside that metadata.
+    pub(super) fn partition_tracks_publication(&self, target: AbsoluteAddr) -> bool {
+        if !self
+            .incremental
+            .is_some_and(|plan| plan.untracked.is_some())
+        {
+            return false;
+        }
+        let layout = self.program.layout();
+        let Some((settle, offset)) = layout.settle.as_ref().zip(layout.offsets.get(&target)) else {
+            return false;
+        };
+        !self.settle_reads(target)
+            || settle
+                .objects
+                .binary_search_by_key(offset, |object| object.start)
+                .is_ok_and(|index| !settle.objects[index].partitions.is_empty())
+    }
+
     /// Record that state combinational logic reads may have changed.
     pub(super) fn mark_dirty(&mut self) {
         if self.settle_reads.is_some() {

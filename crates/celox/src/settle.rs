@@ -476,7 +476,10 @@ pub(crate) fn instrument_generated_glue(
     unit: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     blocks: &crate::HashSet<celox_sir::BlockId>,
 ) {
-    if let Some(marker) = Marker::new(program.layout(), program.runtime()) {
+    if let Some(mut marker) = Marker::new(program.layout(), program.runtime()) {
+        if let Some(homes) = &program.cone_homes {
+            marker.clock_homes.extend(homes);
+        }
         marker.instrument_blocks(unit, |block| blocks.contains(&block));
     }
 }
