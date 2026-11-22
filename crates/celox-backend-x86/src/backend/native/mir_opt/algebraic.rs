@@ -341,6 +341,22 @@ pub(super) fn algebraic_simplify(func: &mut MFunction) {
     for block in &mut func.blocks {
         for inst in &mut block.insts {
             let replacement = match inst {
+                // A store observes only its access width. Bypass a truncation
+                // for this use when every stored bit passes through the AND.
+                MInst::Store { src, size, .. } | MInst::StoreIndexed { src, size, .. } => {
+                    let stored = u64::MAX >> (64 - size.bytes() * 8);
+                    let masked = and_immediates.get(src).copied().or_else(|| {
+                        and_immediates32
+                            .get(src)
+                            .map(|&(value, mask)| (value, u64::from(mask)))
+                    });
+                    if let Some((value, mask)) = masked
+                        && mask & stored == stored
+                    {
+                        *src = value;
+                    }
+                    None
+                }
                 // Identity: add x, 0 → x
                 MInst::Add { dst, lhs, rhs } => {
                     if consts.get(rhs) == Some(&0) {

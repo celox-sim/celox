@@ -205,6 +205,13 @@ pub(super) fn emit_enable_comb_capture_sites_if_regs_changed(
     emit_enable_comb_capture_sites(ctx, block, changed, site_ids);
 }
 
+pub(super) struct StoreProbe {
+    old: VReg,
+    offset: i32,
+    size: OpSize,
+    logical_mask: u64,
+}
+
 pub(super) fn collect_static_comb_store_byte_probes(
     ctx: &mut ISelContext,
     block: &mut MBlock,
@@ -212,7 +219,7 @@ pub(super) fn collect_static_comb_store_byte_probes(
     bit_offset: usize,
     width_bits: usize,
     mask_region: bool,
-) -> Vec<(VReg, i32, OpSize)> {
+) -> Vec<StoreProbe> {
     let (value_start, intra) = ctx.static_byte_and_intra(addr, bit_offset);
     let start = if mask_region {
         value_start + ctx.layout.plane_size(&addr.absolute_addr()) as i32
@@ -242,7 +249,15 @@ pub(super) fn collect_static_comb_store_byte_probes(
             offset: byte_off,
             size,
         });
-        probes.push((old, byte_off, size));
+        let bits = size.bytes() as usize * 8;
+        let low = intra.saturating_sub(byte_pos * 8);
+        let high = bits.min(intra + width_bits - byte_pos * 8);
+        probes.push(StoreProbe {
+            old,
+            offset: byte_off,
+            size,
+            logical_mask: mask_for_width(high) & !mask_for_width(low),
+        });
         byte_pos += size.bytes() as usize;
     }
 
@@ -252,7 +267,7 @@ pub(super) fn collect_static_comb_store_byte_probes(
 pub(super) fn emit_enable_comb_capture_sites_if_byte_probes_changed(
     ctx: &mut ISelContext,
     block: &mut MBlock,
-    probes: Vec<(VReg, i32, OpSize)>,
+    probes: Vec<StoreProbe>,
     site_ids: &[u32],
 ) {
     if probes.is_empty() {
@@ -265,7 +280,13 @@ pub(super) fn emit_enable_comb_capture_sites_if_byte_probes_changed(
         value: 0,
     });
     let mut changed = zero;
-    for (old, byte_off, size) in probes {
+    for StoreProbe {
+        old,
+        offset: byte_off,
+        size,
+        logical_mask,
+    } in probes
+    {
         let new = ctx.alloc_vreg(SpillDesc::transient());
         block.push(MInst::Load {
             dst: new,
@@ -273,13 +294,25 @@ pub(super) fn emit_enable_comb_capture_sites_if_byte_probes_changed(
             offset: byte_off,
             size,
         });
+        // Padding may differ between physical representations of the same
+        // element. Only bits in the written RTL slice can enable a capture.
         let chunk_changed = ctx.alloc_vreg(SpillDesc::transient());
-        block.push(MInst::Cmp {
-            dst: chunk_changed,
-            lhs: old,
-            rhs: new,
-            kind: CmpKind::Ne,
-        });
+        if logical_mask == mask_for_width(size.bytes() as usize * 8) {
+            block.push(MInst::Cmp {
+                dst: chunk_changed,
+                lhs: old,
+                rhs: new,
+                kind: CmpKind::Ne,
+            });
+        } else {
+            let diff = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Xor {
+                dst: diff,
+                lhs: old,
+                rhs: new,
+            });
+            ctx.emit_and_imm(block, chunk_changed, diff, logical_mask);
+        }
         let next_changed = ctx.alloc_vreg(SpillDesc::transient());
         block.push(MInst::Or {
             dst: next_changed,
