@@ -258,6 +258,20 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         &occurrence_probes,
         &declaration_probes,
     )?;
+    if !four_state {
+        celox_slt::decode::reduce_two_state_decodes(
+            &mut logic.global_arena,
+            logic
+                .comb_blocks
+                .iter_mut()
+                .filter(|path| {
+                    matches!(path.target, celox_slt::LogicPathTarget::Var(_))
+                        && path.local_inputs.is_empty()
+                        && path.pre_lower_nodes.is_empty()
+                })
+                .map(|p| &mut p.expr),
+        )?;
+    }
     // Release the diagnostic DAGs before scheduling the combinational paths.
     if measure_graphs {
         drop(next_state_dags(&logic.transitions, &logic));

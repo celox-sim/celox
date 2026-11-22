@@ -129,6 +129,10 @@ fn lower_edge<A: Copy + Eq + Hash + Debug + Display, B: Copy + Eq + Hash + Debug
                 .map_err(|error| error.to_string())
         })
         .collect::<Result<Vec<_>, _>>()?;
+    if !four_state {
+        crate::decode::reduce_two_state_decodes(&mut mapped, &mut mapped_nodes)
+            .map_err(|error| error.to_string())?;
+    }
     let element_widths = element_widths
         .iter()
         .map(|(id, w)| (stable(id), *w))

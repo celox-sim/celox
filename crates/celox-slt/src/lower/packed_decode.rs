@@ -33,40 +33,6 @@ fn bit_value<A: Clone + Eq + Hash>(
     }
 }
 
-fn exact_label<A: Clone + Eq + Hash>(
-    arena: &SLTNodeArena<A>,
-    mut cond: NodeId,
-) -> Option<(NodeId, usize)> {
-    while let SLTNode::Unary(UnaryOp::ToTwoState | UnaryOp::Ident | UnaryOp::Or, child) =
-        arena.get(cond)
-    {
-        if arena.node_width(*child)? != 1 {
-            return None;
-        }
-        cond = *child;
-    }
-    let SLTNode::Binary(left, BinaryOp::Eq | BinaryOp::EqCase, right) = *arena.get(cond) else {
-        return None;
-    };
-    let (selector, constant) = if matches!(arena.get(left), SLTNode::Constant(..)) {
-        (right, left)
-    } else {
-        (left, right)
-    };
-    let SLTNode::Constant(value, mask, width, _) = arena.get(constant) else {
-        return None;
-    };
-    if !(1..=5).contains(width)
-        || !mask.is_zero()
-        || arena.node_width(selector)? != *width
-        || !matches!(arena.get(selector), SLTNode::Input {index,..} if index.is_empty())
-    {
-        return None;
-    }
-    let label = value.to_usize()?;
-    (label < 1 << width).then_some((selector, label))
-}
-
 impl SLTToSIRLowerer {
     pub(super) fn lower_packed_decode<
         A: Clone + Eq + Hash + std::fmt::Debug + std::fmt::Display,
@@ -93,7 +59,10 @@ impl SLTToSIRLowerer {
             if comparisons == 64 || (node != root && cache.contains_key(&node)) {
                 return None;
             }
-            let (input, index) = exact_label(arena, cond)?;
+            let (input, op, index) = crate::decode::exact_label(arena, cond)?;
+            if op == BinaryOp::EqWildcard || arena.node_width(input)? > 5 {
+                return None;
+            }
             if *selector.get_or_insert(input) != input {
                 return None;
             }
