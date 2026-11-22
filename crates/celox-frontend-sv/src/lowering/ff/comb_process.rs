@@ -10,7 +10,7 @@ impl Ff<'_, '_> {
     pub fn lower_comb_process(
         mut self,
         body: &[sv::ir::Stmt],
-        sensitivity_body: &[sv::ir::Stmt],
+        reads: HashSet<VarAtomBase<SourceVarId>>,
         kind: sv::ir::CombProcessKind,
         allow_inferred_latches: bool,
         site: Option<&sv::ir::SourceSpan>,
@@ -25,8 +25,6 @@ impl Ff<'_, '_> {
         let runs_at_time_zero = always_comb || !self.m.four_state;
         self.direct = true;
         self.holds_targets = true;
-        let mut reads = self.m.implicit_reads(body, always_comb);
-        reads.extend(self.m.implicit_reads(sensitivity_body, always_comb));
         for stmt in body {
             let mut nonblocking = false;
             stmt.walk(&mut |stmt| {
