@@ -685,7 +685,7 @@ impl Generator<'_> {
             self.store(site.pending, 1, clear);
             let value = self.load_state(site.value, 0, site.width);
             self.store_state(site.target, site.lsb, site.width, value);
-            if self.settle_reads(site.target) {
+            if self.settle_reads(site.target) && !self.partition_tracks_publication(site.target) {
                 self.mark_dirty();
             }
             self.b.seal_block(SIRTerminator::Jump(next, Vec::new()));
