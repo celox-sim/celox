@@ -22,6 +22,11 @@ use celox_design::{BinaryOp, STABLE_REGION};
 use celox_sir::effects::StateAccess;
 use celox_sir::{BlockId, ExecutionUnit, SIROffset, SIRTerminator, SIRValue};
 
+#[cfg(feature = "host-runtime")]
+mod coactive;
+#[cfg(feature = "host-runtime")]
+pub(crate) use coactive::full_settle;
+
 type Unit = ExecutionUnit<RegionedAbsoluteAddr>;
 type Instruction = SIRInstruction<RegionedAbsoluteAddr>;
 /// The stable-region homes (layout offsets) a partition touches.
