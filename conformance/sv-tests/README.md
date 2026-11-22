@@ -480,13 +480,11 @@ while no other case takes more than a few seconds: each one that analyzes
 5.5-9 GB, `uvm-examples/uvm_test_init` at 12.8 GB, so four at once do not fit
 a 16 GB runner or a local run of that size. Pull requests therefore run the
 other 1,478 cases in a single job (`sv-tests conformance (1/1)`), and the full
-runs above run the UVM cases one at a time with a case timeout of 480 seconds,
-the main shards keeping 78: the slowest passing UVM case usually takes about
-175 seconds on the CI runner (`testbenches/uvm_agent_active.sv`, 4-state), but
-`uvm-examples/uvm_test_init` (4-state, at its 12.8 GB peak) once took over 300.
-The timeout comes back down to 300 once the memory stack (#3881-#3883, #3886)
-lowers that peak. A change that moves a UVM case across the timeout
-shows up in the next daily full CI, whose failures open the Full CI issue.
+runs above run the UVM cases one at a time with a 600-second case timeout and a
+90-minute job timeout. Main shards use a 78-second case timeout and a 60-minute
+job timeout. In one daily run the four-state `uvm_register_mem_example` exceeded
+480 seconds, and its shard hit the 60-minute job limit before the final run
+finished. [Full CI issue #4519](https://github.com/celox-sim/celox/issues/4519)
 
 Both state modes run by default. Use `--state-mode 2state` or
 `--state-mode 4state` to run and compare only one; `--state-mode both` explicitly
