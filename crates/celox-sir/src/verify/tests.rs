@@ -90,13 +90,7 @@ fn calls(edit: impl FnOnce(&mut crate::SirProgram<usize, usize>)) -> Result<(), 
         element_width: None,
     };
     let mut program = crate::SirProgram {
-        eval_comb: Vec::new(),
-        eval_apply_ffs: HashMap::default(),
-        eval_comb_apply_ffs: HashMap::default(),
-        merge_comb_apply: false,
-        eval_comb_stateful: None,
-        eval_only_ffs: HashMap::default(),
-        apply_ffs: HashMap::default(),
+        updates: Default::default(),
         parallel: None,
         processes: vec![process],
         functions: vec![crate::FunctionUnit {

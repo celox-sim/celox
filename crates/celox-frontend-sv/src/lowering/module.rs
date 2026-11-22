@@ -644,9 +644,7 @@ fn lower_module_with_overrides(
     let mut repeated_ff_writes = Vec::new();
     let (
         (
-            eval_only_ff_blocks,
-            apply_ff_blocks,
-            eval_apply_ff_blocks,
+            event_bodies,
             split_commit_ff_blocks,
             reset_clock_map,
             parallel_ff_parts,
@@ -752,9 +750,7 @@ fn lower_module_with_overrides(
             name,
             variables: shared_variables,
             ff_access_summaries: HashMap::default(),
-            eval_only_ff_blocks,
-            apply_ff_blocks,
-            eval_apply_ff_blocks,
+            event_bodies,
             split_commit_ff_blocks,
             parallel_ff_parts,
             instances: HashMap::default(),

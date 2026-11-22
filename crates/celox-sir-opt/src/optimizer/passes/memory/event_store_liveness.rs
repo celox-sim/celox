@@ -37,62 +37,16 @@ fn mark_reaching(state: &StateSsa, version: MemoryVersionId, live: &mut [bool]) 
     }
 }
 
-/// Remove stable-state Stores in the combinational prefix which are not
-/// observed by the FF sink.
-///
-/// A combined comb/FF call does not publish settled combinational state on
-/// return: the clock transition makes that state dirty.  Consequently a comb
-/// Store is required only when its exact StateSSA version reaches a load in
-/// the FF suffix (or another read before it is overwritten).  Stores carrying
-/// runtime effects and accesses with imprecise aliases remain explicit.
+/// Eliminate unobserved stable stores at the event exit. Writes to
+/// architectural state and their exact bit ranges are protected by the caller.
 pub(in crate::optimizer) fn eliminate(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
-    provenance: &crate::ir::SirMergeProvenance,
-    first_ff_unit: usize,
-) -> Result<usize, OptimizationError> {
-    if first_ff_unit == 0 || first_ff_unit >= provenance.unit_entries.len() {
-        return Err(OptimizationError::invalid_input(
-            "fused comb dead-store elimination",
-            format!(
-                "invalid comb/FF phase cut: first_ff_unit={first_ff_unit} units={}",
-                provenance.unit_entries.len()
-            ),
-        ));
-    }
-    eliminate_candidates(
-        eu,
-        |block| {
-            provenance
-                .block_units
-                .get(&block)
-                .is_some_and(|unit| *unit < first_ff_unit)
-        },
-        &[],
-    )
-}
-
-/// Shared comb/FF lowering may publish acyclic FF updates directly to STABLE.
-/// Those exact ranges are semantic state updates. Every other ordinary STABLE
-/// Store is a comb publication and can use the StateSSA liveness test without
-/// an artificial source-EU boundary.
-pub(in crate::optimizer) fn eliminate_shared(
-    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
-    direct_ff_writes: &[VarAtomBase<RegionedAbsoluteAddr>],
-) -> Result<usize, OptimizationError> {
-    eliminate_candidates(eu, |_| true, direct_ff_writes)
-}
-
-fn eliminate_candidates(
-    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
-    is_comb_block: impl Fn(BlockId) -> bool,
     protected_writes: &[VarAtomBase<RegionedAbsoluteAddr>],
 ) -> Result<usize, OptimizationError> {
-    let cfg = SirCfg::analyze(eu).map_err(|error| {
-        OptimizationError::control_flow("fused comb dead-store elimination", error)
-    })?;
-    let state = StateSsa::analyze(eu, &cfg, STABLE_REGION, None).map_err(|error| {
-        OptimizationError::state_ssa("fused comb dead-store elimination", error)
-    })?;
+    let cfg = SirCfg::analyze(eu)
+        .map_err(|error| OptimizationError::control_flow("event store liveness", error))?;
+    let state = StateSsa::analyze(eu, &cfg, STABLE_REGION, None)
+        .map_err(|error| OptimizationError::state_ssa("event store liveness", error))?;
 
     let mut live = vec![false; state.accesses.len()];
     for access in &state.accesses {
@@ -186,9 +140,6 @@ fn eliminate_candidates(
 
     let mut remove = HashSet::default();
     for (&block_id, block) in &eu.blocks {
-        if !is_comb_block(block_id) {
-            continue;
-        }
         for (instruction, operation) in block.instructions.iter().enumerate() {
             let SIRInstruction::Store(addr, offset, width, _, triggers, capture_sites) = operation
             else {
@@ -329,7 +280,7 @@ mod tests {
         let refs = [&comb, &ff];
         let (mut fused, provenance) = crate::ir::merge_sir_eu_refs_with_provenance(&refs);
 
-        assert_eq!(eliminate(&mut fused, &provenance, 1).unwrap(), 1);
+        assert_eq!(eliminate(&mut fused, &[]).unwrap(), 1);
         let comb_entry = provenance.unit_entries[0];
         assert_eq!(fused.blocks[&comb_entry].instructions, vec![store(1, 1)]);
         let ff_entry = provenance.unit_entries[1];
@@ -347,7 +298,7 @@ mod tests {
             SIRInstruction::Load(RegisterId(2), address(1), SIROffset::Static(0), 8),
         ]);
 
-        assert_eq!(eliminate_shared(&mut fused, &[]).unwrap(), 1);
+        assert_eq!(eliminate(&mut fused, &[]).unwrap(), 1);
         assert_eq!(
             fused.blocks[&BlockId(0)].instructions,
             vec![
@@ -364,7 +315,7 @@ mod tests {
             SIRInstruction::Load(RegisterId(2), address(1), SIROffset::Static(0), 8),
         ]);
 
-        assert_eq!(eliminate_shared(&mut fused, &[]).unwrap(), 1);
+        assert_eq!(eliminate(&mut fused, &[]).unwrap(), 1);
         assert_eq!(
             fused.blocks[&BlockId(0)].instructions,
             vec![SIRInstruction::Load(
@@ -387,7 +338,7 @@ mod tests {
             SIRInstruction::Load(RegisterId(2), address(0), packed, 8),
         ]);
 
-        assert_eq!(eliminate_shared(&mut fused, &[]).unwrap(), 0);
+        assert_eq!(eliminate(&mut fused, &[]).unwrap(), 0);
         assert!(matches!(
             fused.blocks[&BlockId(0)].instructions.as_slice(),
             [SIRInstruction::Store(..), SIRInstruction::Load(..)]
@@ -399,7 +350,7 @@ mod tests {
         let mut fused = unit(vec![store(0, 0), store(1, 1)]);
         let direct_ff_write = VarAtomBase::new(address(0), 0, 7);
 
-        assert_eq!(eliminate_shared(&mut fused, &[direct_ff_write]).unwrap(), 1);
+        assert_eq!(eliminate(&mut fused, &[direct_ff_write]).unwrap(), 1);
         assert_eq!(fused.blocks[&BlockId(0)].instructions, vec![store(0, 0)]);
     }
 }

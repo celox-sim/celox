@@ -399,7 +399,7 @@ impl NativeSimulatorHandle {
     #[napi]
     pub fn comb_wasm_bytes(&self) -> Vec<u8> {
         let wasm = celox::wasm_codegen::compile_units(
-            &self.program.sir.eval_comb,
+            &self.program.sir.updates.observe,
             self.program.layout(),
             self.four_state,
             false,
@@ -415,7 +415,13 @@ impl NativeSimulatorHandle {
     /// gated clock) has no module.
     #[napi]
     pub fn event_wasm_bytes(&self, event_name: String) -> Result<Vec<u8>> {
-        if let Some(units) = self.event_units(&self.program.sir.eval_apply_ffs, &event_name) {
+        if let Some(units) = self.event_units(
+            self.program
+                .sir
+                .updates
+                .groups(celox::UpdateEntry::Transition),
+            &event_name,
+        ) {
             let wasm = celox::wasm_codegen::compile_units(
                 units,
                 self.program.layout(),
@@ -430,8 +436,9 @@ impl NativeSimulatorHandle {
             event_name,
             self.program
                 .sir
-                .eval_apply_ffs
-                .keys()
+                .updates
+                .groups(celox::UpdateEntry::Transition)
+                .map(|(event, _)| event)
                 .map(|addr| self.program.get_path(addr))
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -470,15 +477,15 @@ impl NativeSimulatorHandle {
     #[napi]
     pub fn event_phase_wasm_bytes(&self, event_name: String, phase: String) -> Result<Vec<u8>> {
         let units = match phase.as_str() {
-            "evalOnly" => &self.program.sir.eval_only_ffs,
-            "apply" => &self.program.sir.apply_ffs,
+            "evalOnly" => celox::UpdateEntry::Sample,
+            "apply" => celox::UpdateEntry::Publish,
             _ => {
                 return Err(Error::from_reason(format!(
                     "unknown event phase '{phase}'; expected 'evalOnly' or 'apply'"
                 )));
             }
         };
-        self.event_units(units, &event_name)
+        self.event_units(self.program.sir.updates.groups(units), &event_name)
             .map(|units| {
                 celox::wasm_codegen::compile_units(
                     units,

@@ -55,12 +55,18 @@ impl DomainUnits {
         let sir = &program.sir;
         Self {
             eval_apply: sir
-                .eval_apply_ffs
-                .get(&address)
+                .updates
+                .at(&address, celox_sir::UpdateEntry::Transition)
                 .cloned()
                 .unwrap_or_default(),
-            eval_only: sir.eval_only_ffs.get(&address).cloned(),
-            apply: sir.apply_ffs.get(&address).cloned(),
+            eval_only: sir
+                .updates
+                .at(&address, celox_sir::UpdateEntry::Sample)
+                .cloned(),
+            apply: sir
+                .updates
+                .at(&address, celox_sir::UpdateEntry::Publish)
+                .cloned(),
         }
     }
 }
@@ -125,7 +131,7 @@ impl EdgePlan {
         if !program.runtime.runtime_schema.comb_observers.is_empty() {
             return Err("the design observes combinational processes");
         }
-        let comb_fatal = program.sir.eval_comb.iter().any(|unit| {
+        let comb_fatal = program.sir.updates.observe.iter().any(|unit| {
             unit.blocks
                 .values()
                 .flat_map(|block| &block.instructions)
@@ -137,7 +143,12 @@ impl EdgePlan {
         // A derived clock without a domain of its own is left out, as the
         // Rust walk leaves out a clock without an event.
         let derived = |address: AbsoluteAddr| -> Result<Option<Derived>, &'static str> {
-            if !program.sir.eval_apply_ffs.contains_key(&address) {
+            if !program
+                .sir
+                .updates
+                .at(&address, celox_sir::UpdateEntry::Transition)
+                .is_some()
+            {
                 return Ok(None);
             }
             Ok(Some(Derived {
@@ -865,7 +876,7 @@ impl DeferredEdge {
         program: &LaidOutProgram,
         model: &ScheduleModel<AbsoluteAddr>,
     ) -> Result<Unit, &'static str> {
-        self.generate_with_comb(program, model, &program.sir.eval_comb)
+        self.generate_with_comb(program, model, &program.sir.updates.observe)
     }
 
     pub(crate) fn generate_with_comb(
@@ -926,9 +937,10 @@ fn attach_with_mode(program: &mut LaidOutProgram, deferred: bool, host_edges: bo
         let (estimated_blocks, estimated_instructions) = if deferred {
             let units = program
                 .sir
-                .eval_comb
+                .updates
+                .observe
                 .iter()
-                .chain(&program.sir.eval_comb)
+                .chain(&program.sir.updates.observe)
                 .chain(plan.entries().flat_map(|units| {
                     units
                         .eval_apply
@@ -990,7 +1002,7 @@ fn attach_with_mode(program: &mut LaidOutProgram, deferred: bool, host_edges: bo
                 }
             } else {
                 plan.unit(
-                    &program.sir.eval_comb,
+                    &program.sir.updates.observe,
                     rising,
                     fires(rising),
                     Settle::Flag(flag),
@@ -1057,8 +1069,12 @@ pub(crate) fn attach_test_units(program: &mut LaidOutProgram, sink: &TestEdgeUni
         for rising in [false, true] {
             for settle in [false, true] {
                 for fires in [false, true] {
-                    let unit =
-                        plan.unit(&program.sir.eval_comb, rising, fires, Settle::Fixed(settle));
+                    let unit = plan.unit(
+                        &program.sir.updates.observe,
+                        rising,
+                        fires,
+                        Settle::Fixed(settle),
+                    );
                     let index = program.sir.processes.len();
                     program.sir.processes.push(unit);
                     sink.lock().expect("unpoisoned").push(TestEdgeUnit {

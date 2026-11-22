@@ -30,8 +30,8 @@ pub(crate) struct NativeCodegenTrace {
 pub(in crate::backend::native) enum NativeMergeKind {
     /// A complete sequential group of execution units.
     Complete,
-    /// Combinational settling followed by an FF event in the same function.
-    FusedCombAndFf,
+    /// A self-contained transition scheduled from current inputs.
+    FromInputs,
     /// One task of a partitioned kernel; other tasks may define pending state.
     Partial,
 }
@@ -42,7 +42,6 @@ pub(super) fn prepare_merged_sir(
     four_state: bool,
     label: &str,
     merge_kind: NativeMergeKind,
-    first_ff_unit: Option<usize>,
     diagnostics: &crate::optimizer::SirDiagnostics,
     cancel: Option<&CompileCancel>,
     baseline: bool,
@@ -104,25 +103,7 @@ pub(super) fn prepare_merged_sir(
     if calls_functions {
         return Ok(sir_eu);
     }
-    if let Some(first_ff_unit) = first_ff_unit {
-        let removed = crate::optimizer::sir::eliminate_unobserved_comb_state_stores(
-            &mut sir_eu,
-            &merge_provenance,
-            first_ff_unit,
-        )
-        .map_err(|source| {
-            codegen_err(CodegenError::Optimization {
-                context: "comb/FF state-publication DSE",
-                source,
-            })
-        })?;
-        if removed != 0 {
-            crate::optimizer::sir::remove_dead_sir_definitions(&mut sir_eu);
-            verify(&sir_eu, "after comb/FF state-publication DSE")?;
-        }
-    }
-    report_phase("comb_state_dse");
-    if merge_kind == NativeMergeKind::FusedCombAndFf
+    if merge_kind == NativeMergeKind::FromInputs
         && crate::optimizer::sir::promote_fused_comb_static_slots(&mut sir_eu).map_err(
             |source| {
                 codegen_err(CodegenError::Optimization {
@@ -140,7 +121,7 @@ pub(super) fn prepare_merged_sir(
         NativeMergeKind::Partial => {
             crate::optimizer::sir::pass_eliminate_working_round_trip::eliminate_partial_working_round_trip(&mut sir_eu);
         }
-        NativeMergeKind::Complete | NativeMergeKind::FusedCombAndFf => {
+        NativeMergeKind::Complete | NativeMergeKind::FromInputs => {
             crate::optimizer::sir::pass_eliminate_working_round_trip::eliminate_working_round_trip(
                 &mut sir_eu,
                 &boundaries,
@@ -166,7 +147,7 @@ pub(super) fn prepare_merged_sir(
         &mut sir_eu,
         layout,
         four_state,
-        merge_kind == NativeMergeKind::FusedCombAndFf,
+        merge_kind == NativeMergeKind::FromInputs,
         diagnostics,
         || cancelled(cancel),
     )
@@ -202,7 +183,6 @@ pub(super) fn compile_units(
         four_state,
         label,
         NativeMergeKind::Complete,
-        None,
         x86_options,
         capture_trace,
         diagnostics,
@@ -216,7 +196,6 @@ pub(in crate::backend::native) fn compile_unit_refs(
     four_state: bool,
     label: &str,
     merge_kind: NativeMergeKind,
-    first_ff_unit: Option<usize>,
     x86_options: &crate::backend::X86BackendOptions,
     capture_trace: bool,
     diagnostics: &crate::optimizer::SirDiagnostics,
@@ -228,7 +207,6 @@ pub(in crate::backend::native) fn compile_unit_refs(
         four_state,
         label,
         merge_kind,
-        first_ff_unit,
         x86_options,
         capture_trace,
         diagnostics,
@@ -248,7 +226,6 @@ pub(in crate::backend::native) fn compile_unit_refs_inspected(
     four_state: bool,
     label: &str,
     merge_kind: NativeMergeKind,
-    first_ff_unit: Option<usize>,
     x86_options: &crate::backend::X86BackendOptions,
     capture_trace: bool,
     diagnostics: &crate::optimizer::SirDiagnostics,
@@ -346,7 +323,6 @@ pub(in crate::backend::native) fn compile_unit_refs_inspected(
         four_state,
         label,
         merge_kind,
-        first_ff_unit,
         timed_diagnostics.as_ref().unwrap_or(diagnostics),
         cancel,
         x86_options.baseline,
@@ -561,7 +537,6 @@ pub(super) struct NativeCompileTask<'a> {
     pub(super) units: Vec<&'a crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>>,
     pub(super) label: &'static str,
     pub(super) merge_kind: NativeMergeKind,
-    pub(super) first_ff_unit: Option<usize>,
     pub(super) bindings: Vec<String>,
 }
 
@@ -569,11 +544,7 @@ pub(super) type NativeTaskBindings = HashMap<(&'static str, AbsoluteAddr), usize
 
 pub(super) type NativeUnit = crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>;
 
-/// Classes of structurally equal execution units. Each distinct unit is
-/// hashed once and compared only against the units of its hash, so tasks
-/// whose unit lists share whole programs, such as every unfused comb-apply
-/// task starting with all of `eval_comb`, are told apart by their class
-/// lists instead of by comparing the programs again for each trigger.
+/// Intern structurally equal units so identical event entries can use one native function.
 #[derive(Default)]
 pub(super) struct NativeUnitClasses<'a> {
     pub(super) by_unit: HashMap<*const NativeUnit, usize>,
@@ -626,7 +597,7 @@ pub(super) fn native_unit_hash(unit: &NativeUnit) -> u64 {
     hasher.finish()
 }
 
-pub(super) fn collect_ff_compile_tasks(
+pub(super) fn collect_event_compile_tasks(
     sir: &LaidOutProgram,
 ) -> (Vec<NativeCompileTask<'_>>, NativeTaskBindings) {
     let mut tasks = Vec::new();
@@ -635,14 +606,15 @@ pub(super) fn collect_ff_compile_tasks(
     // Edge tasks of every label share one index: a task is reused for any
     // edge trigger with equal units.
     let mut ff_tasks = HashMap::default();
-    for (ff_map, label) in [
-        (&sir.sir.eval_apply_ffs, "eval_apply_ff"),
-        (&sir.sir.eval_only_ffs, "eval_only_ff"),
-        (&sir.sir.apply_ffs, "apply_ff"),
+    for (entry, label) in [
+        (celox_sir::UpdateEntry::Transition, "eval_apply_ff"),
+        (celox_sir::UpdateEntry::Sample, "eval_only_ff"),
+        (celox_sir::UpdateEntry::Publish, "apply_ff"),
+        (celox_sir::UpdateEntry::FromInputs, "eval_comb_apply_ff"),
     ] {
-        collect_ff_compile_tasks_from(
+        collect_event_entry_tasks(
             sir,
-            ff_map,
+            entry,
             label,
             &mut classes,
             &mut ff_tasks,
@@ -650,67 +622,19 @@ pub(super) fn collect_ff_compile_tasks(
             &mut task_bindings,
         );
     }
-    collect_comb_apply_compile_tasks(sir, &mut classes, &mut tasks, &mut task_bindings);
     (tasks, task_bindings)
 }
 
-pub(super) fn collect_comb_apply_compile_tasks<'a>(
+pub(super) fn collect_event_entry_tasks<'a>(
     sir: &'a LaidOutProgram,
-    classes: &mut NativeUnitClasses<'a>,
-    tasks: &mut Vec<NativeCompileTask<'a>>,
-    task_bindings: &mut NativeTaskBindings,
-) {
-    const LABEL: &str = "eval_comb_apply_ff";
-    let mut comb_tasks = HashMap::<(Option<usize>, Vec<usize>), usize>::default();
-    for addr in sir.sir.eval_apply_ffs.keys() {
-        // A shared tick calls the comb and FF functions compiled anyway.
-        let (unit_refs, first_ff_unit) = match sir.sir.comb_apply(addr) {
-            Some(celox_sir::CombApply::Fused(fused_units)) => {
-                (fused_units.iter().collect::<Vec<_>>(), None)
-            }
-            Some(celox_sir::CombApply::Merged { comb, ff }) => {
-                let mut unit_refs = comb.iter().collect::<Vec<_>>();
-                let first_ff_unit =
-                    (!unit_refs.is_empty() && !ff.is_empty()).then_some(unit_refs.len());
-                unit_refs.extend(ff);
-                (unit_refs, first_ff_unit)
-            }
-            Some(celox_sir::CombApply::Shared) | None => continue,
-        };
-        let binding = format!("{LABEL} trigger={}", sir.get_path(addr));
-        let key = (first_ff_unit, classes.classes(&unit_refs));
-        let index = if let Some(&index) = comb_tasks.get(&key) {
-            tasks[index].bindings.push(binding);
-            index
-        } else {
-            let index = tasks.len();
-            tasks.push(NativeCompileTask {
-                units: unit_refs,
-                label: LABEL,
-                merge_kind: NativeMergeKind::FusedCombAndFf,
-                first_ff_unit,
-                bindings: vec![binding],
-            });
-            comb_tasks.insert(key, index);
-            index
-        };
-        task_bindings.insert((LABEL, *addr), index);
-    }
-}
-
-pub(super) fn collect_ff_compile_tasks_from<'a>(
-    sir: &LaidOutProgram,
-    ff_map: &'a HashMap<
-        AbsoluteAddr,
-        Vec<crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>>,
-    >,
+    entry: celox_sir::UpdateEntry,
     label: &'static str,
     classes: &mut NativeUnitClasses<'a>,
     ff_tasks: &mut HashMap<Vec<usize>, usize>,
     tasks: &mut Vec<NativeCompileTask<'a>>,
     task_bindings: &mut NativeTaskBindings,
 ) {
-    for (addr, units) in ff_map {
+    for (addr, units) in sir.sir.updates.groups(entry) {
         let unit_refs = units.iter().collect::<Vec<_>>();
         let binding = format!("{label} trigger={}", sir.get_path(addr));
         let key = classes.classes(&unit_refs);
@@ -722,8 +646,11 @@ pub(super) fn collect_ff_compile_tasks_from<'a>(
             tasks.push(NativeCompileTask {
                 units: unit_refs,
                 label,
-                merge_kind: NativeMergeKind::Complete,
-                first_ff_unit: None,
+                merge_kind: if entry == celox_sir::UpdateEntry::FromInputs {
+                    NativeMergeKind::FromInputs
+                } else {
+                    NativeMergeKind::Complete
+                },
                 bindings: vec![binding],
             });
             ff_tasks.insert(key, index);

@@ -194,7 +194,7 @@ impl WasmBackend {
 
         // Compile eval_comb
         let comb_wasm = wasm_codegen::compile_units_calling(
-            &sir.sir.eval_comb,
+            &sir.sir.updates.observe,
             &sir.sir.functions,
             &layout,
             options.four_state,
@@ -213,17 +213,14 @@ impl WasmBackend {
         let (mut addr_to_id, mut id_to_addr) = super::event_ids(sir);
         let mut next_id = id_to_addr.len();
 
-        let compile_ffs = |ff_map: &HashMap<
-            AbsoluteAddr,
-            Vec<crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>>,
-        >,
+        let compile_ffs = |entry: celox_sir::UpdateEntry,
                            modules: &mut Vec<(AbsoluteAddr, Module)>,
                            emap: &mut HashMap<AbsoluteAddr, WasmEventRef>,
                            addr_to_id: &mut HashMap<AbsoluteAddr, usize>,
                            next_id: &mut usize,
                            id_to_addr: &mut Vec<AbsoluteAddr>|
          -> Result<(), crate::SimulatorError> {
-            for (clock, units) in ff_map {
+            for (clock, units) in sir.sir.updates.groups(entry) {
                 let canonical = sir.design.events.canonical(*clock);
                 let id = *addr_to_id.entry(canonical).or_insert_with(|| {
                     let id = *next_id;
@@ -256,7 +253,7 @@ impl WasmBackend {
         };
 
         compile_ffs(
-            &sir.sir.eval_apply_ffs,
+            celox_sir::UpdateEntry::Transition,
             &mut event_modules,
             &mut event_map,
             &mut addr_to_id,
@@ -264,7 +261,7 @@ impl WasmBackend {
             &mut id_to_addr,
         )?;
         compile_ffs(
-            &sir.sir.eval_only_ffs,
+            celox_sir::UpdateEntry::Sample,
             &mut eval_only_modules,
             &mut eval_only_event_map,
             &mut addr_to_id,
@@ -272,7 +269,7 @@ impl WasmBackend {
             &mut id_to_addr,
         )?;
         compile_ffs(
-            &sir.sir.apply_ffs,
+            celox_sir::UpdateEntry::Publish,
             &mut apply_modules,
             &mut apply_event_map,
             &mut addr_to_id,

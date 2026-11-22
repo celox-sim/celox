@@ -567,13 +567,7 @@ pub(super) fn check_pass(pass: &dyn ExecutionUnitPass) {
 /// A context for the passes built from a program's design facts.
 fn with_context<T>(build: impl FnOnce(&OptimizationContext<'_>) -> T) -> T {
     let mut sir = SirProgram {
-        eval_comb: Vec::new(),
-        eval_apply_ffs: HashMap::default(),
-        eval_comb_apply_ffs: HashMap::default(),
-        merge_comb_apply: false,
-        eval_comb_stateful: None,
-        eval_only_ffs: HashMap::default(),
-        apply_ffs: HashMap::default(),
+        updates: Default::default(),
         parallel: None,
         processes: Vec::new(),
         functions: Vec::new(),
@@ -857,13 +851,7 @@ fn function_units_are_optimized_with_frame_slots_as_locations() {
         &[(0, 8), (1, 8), (2, 8), (FRAME, 32)],
     );
     let mut sir = SirProgram {
-        eval_comb: vec![caller],
-        eval_apply_ffs: HashMap::default(),
-        eval_comb_apply_ffs: HashMap::default(),
-        merge_comb_apply: false,
-        eval_comb_stateful: None,
-        eval_only_ffs: HashMap::default(),
-        apply_ffs: HashMap::default(),
+        updates: celox_sir::StateUpdates::from_groups(vec![caller], None, []),
         parallel: None,
         processes: Vec::new(),
         functions: vec![
@@ -916,7 +904,7 @@ fn function_units_are_optimized_with_frame_slots_as_locations() {
     assert_eq!(loads_of(body, slot), 0, "{body}");
     assert_eq!(loads_of(body, x), 2, "{body}");
     // A program with calls runs the ordinary pipeline.
-    let caller = &context.sir.eval_comb[0];
+    let caller = &context.sir.updates.observe[0];
     assert_eq!(loads_of(caller, y), 1, "{caller}");
     assert!(context.sir.calls_summarized());
 }
@@ -964,13 +952,7 @@ fn a_function_keeps_a_frame_slot_value_it_overwrites_later() {
     );
     let before = execute(&body, 1);
     let mut sir = SirProgram {
-        eval_comb: vec![caller],
-        eval_apply_ffs: HashMap::default(),
-        eval_comb_apply_ffs: HashMap::default(),
-        merge_comb_apply: false,
-        eval_comb_stateful: None,
-        eval_only_ffs: HashMap::default(),
-        apply_ffs: HashMap::default(),
+        updates: celox_sir::StateUpdates::from_groups(vec![caller], None, []),
         parallel: None,
         processes: Vec::new(),
         functions: vec![celox_sir::FunctionUnit {

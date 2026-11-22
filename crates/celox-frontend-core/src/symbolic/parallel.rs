@@ -9,7 +9,7 @@
 //! keeps working on data already in its core's cache.
 
 use celox_design::{DeadStorePolicy, InstanceId, RegionedAbsoluteAddrBase};
-use celox_sir::{ExecutionUnit, LaneUnit, ParallelFfKernel, SIRInstruction, StateAccess};
+use celox_sir::{ExecutionUnit, LaneUnit, ParallelEventKernel, SIRInstruction, StateAccess};
 
 use crate::symbolic::artifact::FfPart;
 use crate::{HashMap, HashSet, SourceAddr, SourceVarId};
@@ -311,7 +311,7 @@ pub(crate) fn plan_parallel_ff_kernels(
     comb_units: &[LaneUnit<RegionedAbsoluteAddr>],
     sizes: ObjectSizes<'_>,
     options: &ParallelScheduleOptions,
-) -> HashMap<AbsoluteAddr, ParallelFfKernel<RegionedAbsoluteAddr>> {
+) -> HashMap<AbsoluteAddr, ParallelEventKernel<RegionedAbsoluteAddr>> {
     let lanes = options.lanes.max(1);
     let mut kernels = HashMap::default();
     if lanes < 2 {
@@ -485,7 +485,7 @@ pub(crate) fn plan_parallel_ff_kernels(
         let evaluation_count = evaluations.len();
         kernels.insert(
             *event,
-            ParallelFfKernel {
+            ParallelEventKernel {
                 evaluations: evaluations
                     .into_iter()
                     .enumerate()

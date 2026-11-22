@@ -389,7 +389,7 @@ fn find_stores_to_var(
         .expect("runtime state projection is complete")
         .address;
     let mut stores = Vec::new();
-    for unit in &program.sir.eval_comb {
+    for unit in &program.sir.updates.observe {
         for block in unit.blocks.values() {
             for inst in &block.instructions {
                 if let crate::ir::SIRInstruction::Store(addr, _, bits, _, _, _) = inst {
@@ -422,5 +422,5 @@ fn test_assign_partial_no_cycle() {
 
     let program = setup_and_parse(code, "Top");
 
-    assert!(!program.sir.eval_comb.is_empty());
+    assert!(!program.sir.updates.observe.is_empty());
 }

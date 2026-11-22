@@ -387,7 +387,7 @@ pub(crate) fn attach(program: &mut LaidOutProgram, wiring_clocks: bool, outline:
                         // the settle's own code instead of a copy.
                         let instrumented = plan.settle_instrumentation(program, &schema.slots);
                         for (unit, instrumented) in
-                            program.sir.eval_comb.iter_mut().zip(instrumented)
+                            program.sir.updates.observe.iter_mut().zip(instrumented)
                         {
                             if let Some(instrumented) = instrumented {
                                 *unit = instrumented;
@@ -482,12 +482,29 @@ fn domain_waits(program: &LaidOutProgram) -> Vec<bool> {
     let sir = &program.sir;
     let mut written = HashSet::default();
     for unit in sir
-        .eval_comb
+        .updates
+        .observe
         .iter()
-        .chain(sir.eval_apply_ffs.values().flatten())
-        .chain(sir.eval_comb_apply_ffs.values().flatten())
-        .chain(sir.eval_only_ffs.values().flatten())
-        .chain(sir.apply_ffs.values().flatten())
+        .chain(
+            sir.updates
+                .groups(celox_sir::UpdateEntry::Transition)
+                .flat_map(|(_, units)| units),
+        )
+        .chain(
+            sir.updates
+                .groups(celox_sir::UpdateEntry::FromInputs)
+                .flat_map(|(_, units)| units),
+        )
+        .chain(
+            sir.updates
+                .groups(celox_sir::UpdateEntry::Sample)
+                .flat_map(|(_, units)| units),
+        )
+        .chain(
+            sir.updates
+                .groups(celox_sir::UpdateEntry::Publish)
+                .flat_map(|(_, units)| units),
+        )
         .chain(
             sir.parallel
                 .iter()

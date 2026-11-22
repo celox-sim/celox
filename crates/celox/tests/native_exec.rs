@@ -253,7 +253,7 @@ fn compile_and_run_inner(
     let sir = trace.trace.post_optimized_sir.unwrap();
     let layout = MemoryLayout::build(&sir, false, MemoryLayoutMode::ElementStrided);
 
-    let eu = &sir.sir.eval_comb[0];
+    let eu = &sir.sir.updates.observe[0];
 
     #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
     let emit_result = {
@@ -723,7 +723,7 @@ fn test_debug_let_bitslice_write() {
 
     let layout = celox::MemoryLayout::build(&sir, false, MemoryLayoutMode::ElementStrided);
 
-    for (eu_idx, eu) in sir.sir.eval_comb.iter().enumerate() {
+    for (eu_idx, eu) in sir.sir.updates.observe.iter().enumerate() {
         #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
         let emit_result = {
             use celox::native_backend::{emit, isel, regalloc};

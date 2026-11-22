@@ -51,7 +51,7 @@ pub(super) fn settle_partitioning(
         SettlePartitionMode::Off => None,
         SettlePartitionMode::Always => Some(1),
         SettlePartitionMode::Estimated => {
-            if events <= MERGED_COMB_APPLY_EVENTS {
+            if events <= MAX_SPECIALIZED_EVENTS {
                 return None;
             }
             let cost: usize = comb_blocks

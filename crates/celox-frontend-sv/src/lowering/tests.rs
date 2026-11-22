@@ -177,7 +177,8 @@ fn stateless_function_scratch_loops_do_not_become_runtime_loops() {
         let instructions: usize = output
             .scheduled
             .sir
-            .eval_comb
+            .updates
+            .observe
             .iter()
             .flat_map(|unit| unit.blocks.values())
             .map(|block| block.instructions.len())

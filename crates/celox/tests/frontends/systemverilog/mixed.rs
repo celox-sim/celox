@@ -1,6 +1,20 @@
 use super::*;
 
 sv_backends! {
+    fn both_languages_sample_a_shared_clock_before_publication(sim) {
+        @setup {
+            let veryl = "module Top(clk: input clock, d: input logic<8>, q: output logic<8>, delayed: output logic<8>) { inst child: $sv::Child(clk, d, q); always_ff(clk) { if d != 0 { delayed = q; } } }";
+            let sv = "module Child(input logic clk, input logic [7:0] d, output logic [7:0] q); always_ff @(posedge clk) q <= d; endmodule";
+        }
+        @build Simulator::from_mixed_sources(vec![(veryl, Path::new("top.veryl"))], vec![(sv, Path::new("child.sv"))], "Top");
+        let (clk,d,q,delayed) = (sim.event("clk"),sim.signal("d"),sim.signal("q"),sim.signal("delayed"));
+        for (input, prior) in [(3u8, 0u8), (5, 3), (8, 5)] {
+            sim.modify(|io| io.set(d,input)).unwrap();
+            sim.tick(clk).unwrap();
+            assert_eq!((sim.get(q),sim.get(delayed)), (input.into(), prior.into()));
+        }
+    }
+
     fn avoids_authored_interface_names_in_probes(sim) {
         @setup {
             let veryl = "module Top(a: input logic<8>, y: output logic<8>) { inst bus: $sv::Bus; assign bus.req = a; assign y = bus.rsp; }";

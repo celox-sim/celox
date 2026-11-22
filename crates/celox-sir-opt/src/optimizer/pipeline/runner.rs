@@ -4,15 +4,20 @@ use super::cache::optimize_unit_groups_cached;
 use super::*;
 use crate::optimizer::passes::memory::{pass_commit_sinking, pass_inline_commit_forwarding};
 
-fn optimize_unified_commit_groups(
-    groups: &mut crate::HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+fn optimize_unified_commit_groups<'a>(
+    groups: impl IntoIterator<
+        Item = (
+            &'a AbsoluteAddr,
+            &'a mut Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
+        ),
+    >,
     sink: bool,
     forward: bool,
 ) {
     if !sink && !forward {
         return;
     }
-    for units in groups.values_mut() {
+    for (_, units) in groups {
         if units.is_empty() {
             continue;
         }
@@ -36,10 +41,15 @@ fn optimize_unified_commit_groups(
     }
 }
 
-fn move_sparse_commits_to_event_tail(
-    groups: &mut crate::HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+fn move_sparse_commits_to_event_tail<'a>(
+    groups: impl IntoIterator<
+        Item = (
+            &'a AbsoluteAddr,
+            &'a mut Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
+        ),
+    >,
 ) {
-    for units in groups.values_mut() {
+    for (_, units) in groups {
         if units.len() <= 1 {
             continue;
         }
@@ -86,8 +96,18 @@ pub(super) fn canonicalize_required(program: &mut OptimizationContext<'_>) {
     // Sparse next-state data must stay invisible until every evaluator for the
     // event has sampled STABLE. Keep the commit in a final EU even at O0,
     // where all optional SIR transforms are disabled.
-    move_sparse_commits_to_event_tail(&mut program.sir.eval_apply_ffs);
-    move_sparse_commits_to_event_tail(&mut program.sir.eval_comb_apply_ffs);
+    move_sparse_commits_to_event_tail(
+        program
+            .sir
+            .updates
+            .groups_mut(celox_sir::UpdateEntry::Transition),
+    );
+    move_sparse_commits_to_event_tail(
+        program
+            .sir
+            .updates
+            .groups_mut(celox_sir::UpdateEntry::FromInputs),
+    );
 }
 
 pub(super) fn optimize_with_options(
@@ -146,7 +166,11 @@ pub(super) fn optimize_with_options(
     // 1. Unified Case (Fast Path): Full optimizations are safe.
     let phase_start = timing.then(crate::timing::now);
     if timing {
-        for (trigger, units) in &program.sir.eval_apply_ffs {
+        for (trigger, units) in program
+            .sir
+            .updates
+            .groups(celox_sir::UpdateEntry::Transition)
+        {
             for (index, eu) in units.iter().enumerate() {
                 let instruction_count: usize = eu
                     .blocks
@@ -176,80 +200,75 @@ pub(super) fn optimize_with_options(
     let ff_post_passes = pipeline_builder.fused_ff_post();
     let comb_passes = pipeline_builder.combinational(program);
 
-    let ff_eu_count: usize = program.sir.eval_apply_ffs.values().map(Vec::len).sum();
-    let comb_ff_eu_count: usize = program.sir.eval_comb_apply_ffs.values().map(Vec::len).sum();
+    let ff_eu_count: usize = program
+        .sir
+        .updates
+        .groups(celox_sir::UpdateEntry::Transition)
+        .map(|(_, units)| units.len())
+        .sum();
+    let comb_ff_eu_count: usize = program
+        .sir
+        .updates
+        .groups(celox_sir::UpdateEntry::FromInputs)
+        .map(|(_, units)| units.len())
+        .sum();
     let eu_count = ff_eu_count + comb_ff_eu_count;
     let comb_phase_start = timing.then(crate::timing::now);
-    let comb_eu_count = program.sir.eval_comb.len();
+    let comb_eu_count = program.sir.updates.observe.len();
     let sir = &mut *program.sir;
-    #[cfg(target_arch = "wasm32")]
-    {
-        for (i, eu) in sir.eval_comb.iter_mut().enumerate() {
+    let mut optimize_observations = || {
+        for (i, eu) in sir.updates.observe.iter_mut().enumerate() {
             if timing {
                 let inst_count: usize = eu.blocks.values().map(|b| b.instructions.len()).sum();
-                let block_count = eu.blocks.len();
                 tracing::debug!(
-                    "[phase] eval_comb eu[{i}]: blocks={block_count} insts={inst_count}"
+                    "[phase] observe eu[{i}]: blocks={} insts={inst_count}",
+                    eu.blocks.len()
                 );
             }
             comb_passes.run(eu, &options);
         }
-
-        optimize_unit_groups_cached(&mut sir.eval_apply_ffs, &ff_passes, &options);
-        optimize_unit_groups_cached(&mut sir.eval_comb_apply_ffs, &comb_ff_passes, &options);
-        optimize_unit_groups_cached(&mut sir.eval_comb_apply_ffs, &comb_ff_late_passes, &options);
-        optimize_unified_commit_groups(
-            &mut sir.eval_apply_ffs,
-            on(SirPass::CommitSinking),
-            on(SirPass::InlineCommitForwarding),
-        );
-        optimize_unified_commit_groups(
-            &mut sir.eval_comb_apply_ffs,
-            on(SirPass::CommitSinking),
-            on(SirPass::InlineCommitForwarding),
-        );
-        optimize_unit_groups_cached(&mut sir.eval_apply_ffs, &ff_post_passes, &options);
-        optimize_unit_groups_cached(&mut sir.eval_comb_apply_ffs, &ff_post_passes, &options);
+    };
+    let mut optimize_events = || {
+        for (at, first_passes) in [
+            (celox_sir::UpdateEntry::Transition, &ff_passes),
+            (celox_sir::UpdateEntry::FromInputs, &comb_ff_passes),
+        ] {
+            optimize_unit_groups_cached(
+                at.groups_mut(&mut sir.updates.events),
+                first_passes,
+                &options,
+            );
+            if at == celox_sir::UpdateEntry::FromInputs {
+                optimize_unit_groups_cached(
+                    at.groups_mut(&mut sir.updates.events),
+                    &comb_ff_late_passes,
+                    &options,
+                );
+            }
+            optimize_unified_commit_groups(
+                at.groups_mut(&mut sir.updates.events),
+                on(SirPass::CommitSinking),
+                on(SirPass::InlineCommitForwarding),
+            );
+            optimize_unit_groups_cached(
+                at.groups_mut(&mut sir.updates.events),
+                &ff_post_passes,
+                &options,
+            );
+        }
+    };
+    #[cfg(target_arch = "wasm32")]
+    {
+        optimize_observations();
+        optimize_events();
     }
     #[cfg(not(target_arch = "wasm32"))]
     std::thread::scope(|scope| {
-        let comb_worker = scope.spawn(|| {
-            for (i, eu) in sir.eval_comb.iter_mut().enumerate() {
-                if timing {
-                    let inst_count: usize = eu.blocks.values().map(|b| b.instructions.len()).sum();
-                    let block_count = eu.blocks.len();
-                    tracing::debug!(
-                        "[phase] eval_comb eu[{i}]: blocks={block_count} insts={inst_count}"
-                    );
-                }
-                comb_passes.run(eu, &options);
-            }
-        });
-
-        optimize_unit_groups_cached(&mut sir.eval_apply_ffs, &ff_passes, &options);
-        optimize_unit_groups_cached(&mut sir.eval_comb_apply_ffs, &comb_ff_passes, &options);
-
-        // The late comb pipeline must start from the CFG produced by the complete
-        // initial pipeline. Keep it in the same exact-equivalence cache: clock
-        // and reset triggers commonly share the complete fused body.
-        optimize_unit_groups_cached(&mut sir.eval_comb_apply_ffs, &comb_ff_late_passes, &options);
-
-        optimize_unified_commit_groups(
-            &mut sir.eval_apply_ffs,
-            on(SirPass::CommitSinking),
-            on(SirPass::InlineCommitForwarding),
-        );
-        optimize_unified_commit_groups(
-            &mut sir.eval_comb_apply_ffs,
-            on(SirPass::CommitSinking),
-            on(SirPass::InlineCommitForwarding),
-        );
-        optimize_unit_groups_cached(&mut sir.eval_apply_ffs, &ff_post_passes, &options);
-        optimize_unit_groups_cached(&mut sir.eval_comb_apply_ffs, &ff_post_passes, &options);
-
-        comb_worker
+        let worker = scope.spawn(&mut optimize_observations);
+        optimize_events();
+        worker
             .join()
-            .expect("combinational SIR optimization worker must not panic");
+            .expect("observation SIR optimization worker must not panic");
     });
     if let Some(s) = phase_start {
         tracing::debug!("[phase] eval_apply_ffs ({eu_count} EUs): {:?}", s.elapsed());
@@ -263,8 +282,20 @@ pub(super) fn optimize_with_options(
     let phase_start = timing.then(crate::timing::now);
     let eval_only_passes = pipeline_builder.eval_only(program);
 
-    let eu_count: usize = program.sir.eval_only_ffs.values().map(|v| v.len()).sum();
-    optimize_unit_groups_cached(&mut program.sir.eval_only_ffs, &eval_only_passes, &options);
+    let eu_count: usize = program
+        .sir
+        .updates
+        .groups(celox_sir::UpdateEntry::Sample)
+        .map(|(_, units)| units.len())
+        .sum();
+    optimize_unit_groups_cached(
+        program
+            .sir
+            .updates
+            .groups_mut(celox_sir::UpdateEntry::Sample),
+        &eval_only_passes,
+        &options,
+    );
     if let Some(s) = phase_start {
         tracing::debug!("[phase] eval_only_ffs ({eu_count} EUs): {:?}", s.elapsed());
     }
@@ -273,8 +304,18 @@ pub(super) fn optimize_with_options(
     let phase_start = timing.then(crate::timing::now);
     let apply_passes = pipeline_builder.apply_only();
 
-    let eu_count: usize = program.sir.apply_ffs.values().map(|v| v.len()).sum();
-    for units in program.sir.apply_ffs.values_mut() {
+    let eu_count: usize = program
+        .sir
+        .updates
+        .groups(celox_sir::UpdateEntry::Publish)
+        .map(|(_, units)| units.len())
+        .sum();
+    for units in program
+        .sir
+        .updates
+        .groups_mut(celox_sir::UpdateEntry::Publish)
+        .map(|(_, units)| units)
+    {
         for eu in units {
             apply_passes.run(eu, &options);
         }
@@ -321,6 +362,6 @@ pub(super) fn optimize_with_options(
     super::late::optimize_late_comb(program, opt, &options, &unpacked_element_widths);
     super::parallel::optimize_late_parallel_comb(program, opt, &options);
     if opt.diagnostics.mux_chain_stats {
-        super::diagnostics::dump_mux_chain_stats(&program.sir.eval_comb);
+        super::diagnostics::dump_mux_chain_stats(&program.sir.updates.observe);
     }
 }

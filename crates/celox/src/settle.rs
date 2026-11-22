@@ -159,7 +159,7 @@ pub(crate) fn cone_source_homes(program: &LaidOutProgram) -> crate::HashSet<usiz
     };
     let flags = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, partitioning.flags);
     let Some(marks) = cone::publish_marks(
-        &program.sir.eval_comb,
+        &program.sir.updates.observe,
         &flags,
         settle.partitions,
         &layout.offsets,
@@ -216,18 +216,20 @@ pub(crate) fn instrument_ff_units(program: &mut LaidOutProgram, wide_commits: bo
         marker.collect_homes();
         // The frontend splits the commits of a trigger over many small
         // units: joined, they form the runs the words commit.
-        for units in sir.apply_ffs.values_mut() {
+        for units in sir
+            .updates
+            .groups_mut(celox_sir::UpdateEntry::Publish)
+            .map(|(_, units)| units)
+        {
             merge_straight_units(units);
         }
     }
     let mut stats = WideStats::default();
     for unit in sir
-        .eval_apply_ffs
+        .updates
+        .events
         .values_mut()
-        .chain(sir.eval_comb_apply_ffs.values_mut())
-        .chain(sir.eval_only_ffs.values_mut())
-        .chain(sir.apply_ffs.values_mut())
-        .flatten()
+        .flat_map(|event| event.units_mut())
     {
         stats.add(&marker.instrument(unit));
     }
@@ -265,12 +267,10 @@ fn instrument_units(program: &mut LaidOutProgram, first: usize, all: bool, wide_
     );
     if all {
         for unit in sir
-            .eval_apply_ffs
+            .updates
+            .events
             .values_mut()
-            .chain(sir.eval_comb_apply_ffs.values_mut())
-            .chain(sir.eval_only_ffs.values_mut())
-            .chain(sir.apply_ffs.values_mut())
-            .flatten()
+            .flat_map(|event| event.units_mut())
         {
             marker.instrument(unit);
         }

@@ -177,8 +177,12 @@ impl<'a> PlanBuilder<'a> {
                 }
                 needs_ordered = true;
             }
-            let nba_stores: HashSet<_> =
-                sir.apply_ffs.values().flatten().flat_map(stores).collect();
+            let nba_stores: HashSet<_> = sir
+                .updates
+                .groups(celox_sir::UpdateEntry::Publish)
+                .flat_map(|(_, units)| units)
+                .flat_map(stores)
+                .collect();
             let primary = |index: &usize| edged.contains(index) && !rtl_written.contains(index);
             for (source, clocks) in &topology.combinational_derived {
                 for clock in clocks {
@@ -305,11 +309,19 @@ impl<'a> PlanBuilder<'a> {
         // their edges handled before entering the scheduler. Callable kernels,
         // like host writes, can only run outside this unit.
         let scheduled_stores: HashSet<AbsoluteAddr> = sir
-            .eval_apply_ffs
-            .values()
-            .flatten()
-            .chain(sir.eval_only_ffs.values().flatten())
-            .chain(sir.apply_ffs.values().flatten())
+            .updates
+            .groups(celox_sir::UpdateEntry::Transition)
+            .flat_map(|(_, units)| units)
+            .chain(
+                sir.updates
+                    .groups(celox_sir::UpdateEntry::Sample)
+                    .flat_map(|(_, units)| units),
+            )
+            .chain(
+                sir.updates
+                    .groups(celox_sir::UpdateEntry::Publish)
+                    .flat_map(|(_, units)| units),
+            )
             .flat_map(stores)
             .chain(
                 kernel_stores
@@ -445,7 +457,7 @@ impl<'a> PlanBuilder<'a> {
                 let active_stores: HashSet<_> = model
                     .active_commits
                     .iter()
-                    .filter_map(|event| sir.eval_only_ffs.get(event))
+                    .filter_map(|event| sir.updates.at(event, celox_sir::UpdateEntry::Sample))
                     .flatten()
                     .flat_map(instructions)
                     .flat_map(written_storage)
@@ -570,12 +582,12 @@ impl<'a> PlanBuilder<'a> {
                 deferred_settles = plan.lazy.is_some(),
                 skips_unchanged_settles = plan.settle_reads.is_some(),
                 comb_effects = effects,
-                comb_fallible = sir.eval_comb.iter().any(fails),
-                stateful_targets = ?sir.eval_comb_stateful.as_ref().map(Vec::len),
+                comb_fallible = sir.updates.observe.iter().any(fails),
+                stateful_targets = ?sir.updates.retained.as_ref().map(Vec::len),
                 watched_targets = watched_comb.len(),
                 retained_targets = retained.len(),
                 ?eager_candidate_instructions,
-                comb_instructions = sir.eval_comb.iter().flat_map(instructions).count(),
+                comb_instructions = sir.updates.observe.iter().flat_map(instructions).count(),
                 eager_instructions = plan.lazy.as_ref().map(|lazy| lazy.eager.iter().flat_map(instructions).count()),
                 active_commits = ?active_commits.iter().map(|&event| program.get_path(&plan.events[event].signal)).collect::<Vec<_>>(),
                 kernels = ?plan.fallback.iter().enumerate().map(|(index, reason)| (index, schema.process_origins.get(index).map(ToString::to_string), reason, written(&sir.processes[index]).iter().map(|&event| program.get_path(&plan.events[event].signal)).collect::<Vec<_>>())).collect::<Vec<_>>(),

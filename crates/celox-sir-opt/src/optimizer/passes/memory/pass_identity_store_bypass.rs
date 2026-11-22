@@ -126,7 +126,7 @@ pub(in crate::optimizer) fn optimize_program_identity_stores(
 
     let settle = settle(program);
     optimize_eval_comb_identity_stores(
-        &mut program.sir.eval_comb,
+        &mut program.sir.updates.observe,
         &metadata,
         &blocked_aliases,
         &external,
@@ -243,14 +243,19 @@ pub(crate) fn retain_final_identity_aliases(program: &mut OptimizationContext, f
 
     let settle = settle(program);
     retain_aliases_valid_for_units(
-        &program.sir.eval_comb,
+        &program.sir.updates.observe,
         &aliases,
         &metadata,
         four_state,
         settle.as_ref(),
         &mut valid,
     );
-    for units in program.sir.eval_comb_apply_ffs.values() {
+    for units in program
+        .sir
+        .updates
+        .groups(celox_sir::UpdateEntry::FromInputs)
+        .map(|(_, units)| units)
+    {
         retain_aliases_valid_for_units(
             units,
             &aliases,
@@ -287,20 +292,20 @@ fn with_parallel_comb_units(
     let Some(parallel) = program.sir.parallel.as_mut() else {
         return;
     };
-    if parallel.eval_comb.is_empty() {
+    if parallel.observe.is_empty() {
         return;
     }
     let lanes = parallel
-        .eval_comb
+        .observe
         .iter()
         .map(|unit| unit.lane)
         .collect::<Vec<_>>();
-    let mut units = std::mem::take(&mut parallel.eval_comb)
+    let mut units = std::mem::take(&mut parallel.observe)
         .into_iter()
         .map(|unit| unit.unit)
         .collect::<Vec<_>>();
     body(&mut units);
-    parallel.eval_comb = lanes
+    parallel.observe = lanes
         .into_iter()
         .zip(units)
         .map(|(lane, unit)| celox_sir::LaneUnit::new(lane, unit))
@@ -320,13 +325,18 @@ pub(crate) fn remove_final_identity_alias_stores(
     let metadata = address_metadata(program);
     let settle = settle(program);
     remove_proven_alias_stores(
-        &mut program.sir.eval_comb,
+        &mut program.sir.updates.observe,
         validated_aliases,
         &metadata,
         four_state,
         settle.as_ref(),
     );
-    for units in program.sir.eval_comb_apply_ffs.values_mut() {
+    for units in program
+        .sir
+        .updates
+        .groups_mut(celox_sir::UpdateEntry::FromInputs)
+        .map(|(_, units)| units)
+    {
         remove_proven_alias_stores(
             units,
             validated_aliases,
@@ -385,12 +395,10 @@ pub(crate) fn redirect_final_alias_accesses(
     };
     let sir = &mut *program.sir;
     let units = sir
-        .eval_comb
+        .updates
+        .observe
         .iter_mut()
-        .chain(sir.eval_apply_ffs.values_mut().flatten())
-        .chain(sir.eval_comb_apply_ffs.values_mut().flatten())
-        .chain(sir.eval_only_ffs.values_mut().flatten())
-        .chain(sir.apply_ffs.values_mut().flatten())
+        .chain(sir.updates.events.values_mut().flat_map(|e| e.units_mut()))
         .chain(sir.processes.iter_mut())
         .chain(
             sir.parallel
@@ -1563,22 +1571,22 @@ fn ff_referenced_addresses(program: &OptimizationContext) -> Option<ExternalAcce
     // selected and therefore remain the authoritative FF-state inventory.
     let units = program
         .sir
-        .eval_apply_ffs
-        .values()
-        .flat_map(|units| units.iter())
+        .updates
+        .groups(celox_sir::UpdateEntry::Transition)
+        .flat_map(|(_, units)| units)
         .chain(
             program
                 .sir
-                .eval_only_ffs
-                .values()
-                .flat_map(|units| units.iter()),
+                .updates
+                .groups(celox_sir::UpdateEntry::Sample)
+                .flat_map(|(_, units)| units),
         )
         .chain(
             program
                 .sir
-                .apply_ffs
-                .values()
-                .flat_map(|units| units.iter()),
+                .updates
+                .groups(celox_sir::UpdateEntry::Publish)
+                .flat_map(|(_, units)| units),
         )
         // A process kernel reads and writes state at times the
         // combinational schedule does not see, like an FF domain does.

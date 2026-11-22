@@ -169,8 +169,12 @@ fn prepend_call(unit: &mut ExecutionUnit<RegionedAbsoluteAddr>, function: Functi
 
 /// Run `function` first in every settle, the fused ones included.
 fn settle_first(sir: &mut SirProgram, function: FunctionId) {
-    sir.eval_comb.insert(0, caller(function));
-    for units in sir.eval_comb_apply_ffs.values_mut() {
+    sir.updates.observe.insert(0, caller(function));
+    for units in sir
+        .updates
+        .groups_mut(celox_sir::UpdateEntry::FromInputs)
+        .map(|(_, units)| units)
+    {
         units.insert(0, caller(function));
     }
 }
@@ -178,8 +182,8 @@ fn settle_first(sir: &mut SirProgram, function: FunctionId) {
 /// The settle computes `b = a + 100` in a function, before the
 /// logic that reads `b`.
 fn comb_adder(sir: &mut SirProgram) {
-    let a = object(&sir.eval_comb, INPUT, false);
-    let b = object(&sir.eval_comb, OUTPUT, false);
+    let a = object(&sir.updates.observe, INPUT, false);
+    let b = object(&sir.updates.observe, OUTPUT, false);
     let adder = push_adder(sir, a, b, Vec::new());
     settle_first(sir, adder);
     sir.summarize_calls();
@@ -265,11 +269,10 @@ fn inventories_count_what_calls_touch() {
             })
     };
     for unit in sir
-        .eval_apply_ffs
+        .updates
+        .events
         .values_mut()
-        .chain(sir.eval_only_ffs.values_mut())
-        .chain(sir.apply_ffs.values_mut())
-        .flatten()
+        .flat_map(celox_sir::EventUpdate::units_mut)
     {
         for block in unit.blocks.values_mut() {
             block
@@ -277,18 +280,24 @@ fn inventories_count_what_calls_touch() {
                 .retain(|instruction| !touches(instruction));
         }
     }
-    for unit in sir.eval_apply_ffs.values_mut().flatten() {
+    for unit in sir
+        .updates
+        .groups_mut(celox_sir::UpdateEntry::Transition)
+        .flat_map(|(_, units)| units)
+    {
         prepend_call(unit, adder);
     }
-    sir.eval_comb.clear();
-    sir.eval_comb_apply_ffs.clear();
+    sir.updates.observe.clear();
+    for event in sir.updates.events.values_mut() {
+        event.take(celox_sir::UpdateEntry::FromInputs);
+    }
     sir.parallel = Some(celox_sir::ParallelSirProgram {
         lanes: 2,
-        eval_comb: vec![celox_sir::LaneUnit {
+        observe: vec![celox_sir::LaneUnit {
             lane: 1,
             unit: caller(adder),
         }],
-        eval_apply_ffs: HashMap::default(),
+        events: HashMap::default(),
     });
     sir.summarize_calls();
     let program = crate::ir::OptimizedSir {
@@ -363,7 +372,7 @@ fn strided_layouts_follow_the_accesses_of_callees() {
     )]);
     unit.register_map.insert(RegisterId(0), bits(14));
     let function = push_function(&mut sir, unit);
-    sir.eval_comb.push(caller(function));
+    sir.updates.observe.push(caller(function));
     sir.summarize_calls();
     assert!(!layout(&sir).contains_key(&mem));
 }
@@ -396,7 +405,7 @@ endmodule
 /// the only other access of `a` is the initial process's write.
 fn timed_adder(sir: &mut SirProgram) {
     let a = object(&sir.processes, INPUT, true);
-    let b = object(&sir.eval_comb, OUTPUT, false);
+    let b = object(&sir.updates.observe, OUTPUT, false);
     let adder = push_adder(sir, a, b, Vec::new());
     settle_first(sir, adder);
     sir.summarize_calls();
@@ -406,12 +415,17 @@ fn timed_adder(sir: &mut SirProgram) {
 fn timed_adder_clearing_the_clock(sir: &mut SirProgram) {
     let clk = clock(sir);
     let clearer = push_clearer(sir, clk);
-    sir.eval_comb.push(caller(clearer));
+    sir.updates.observe.push(caller(clearer));
     timed_adder(sir);
 }
 
 fn clock(sir: &SirProgram) -> RegionedAbsoluteAddr {
-    let mut events: Vec<_> = sir.eval_apply_ffs.keys().copied().collect();
+    let mut events: Vec<_> = sir
+        .updates
+        .groups(celox_sir::UpdateEntry::Transition)
+        .map(|(event, _)| event)
+        .copied()
+        .collect();
     events.sort_unstable();
     assert_eq!(events.len(), 1);
     RegionedAbsoluteAddr::from_absolute_addr(celox_design::STABLE_REGION, events[0])
@@ -528,7 +542,7 @@ fn no_calls(_: &mut SirProgram) {}
 /// The counter's process calls a function that cannot fail.
 fn process_calls_a_quiet_function(sir: &mut SirProgram) {
     let a = object(&sir.processes, INPUT, true);
-    let b = object(&sir.eval_comb, OUTPUT, false);
+    let b = object(&sir.updates.observe, OUTPUT, false);
     let adder = push_adder(sir, a, b, Vec::new());
     let process = incrementer(sir);
     prepend_call(&mut sir.processes[process], adder);
@@ -546,7 +560,7 @@ fn process_calls_a_failing_function(sir: &mut SirProgram) {
 /// The settle calls a function that may fail.
 fn settle_calls_a_failing_function(sir: &mut SirProgram) {
     let failing = push_failing(sir);
-    sir.eval_comb.push(caller(failing));
+    sir.updates.observe.push(caller(failing));
     sir.summarize_calls();
 }
 
@@ -580,7 +594,7 @@ fn only_units_with_failing_calls_lose_lazy_settles() {
 /// that writes `a` calls one that records one too.
 fn recording_calls(sir: &mut SirProgram) {
     let a = object(&sir.processes, INPUT, true);
-    let b = object(&sir.eval_comb, OUTPUT, false);
+    let b = object(&sir.updates.observe, OUTPUT, false);
     let event = || SIRInstruction::RuntimeEvent {
         site_id: 0,
         args: Vec::new(),
@@ -622,12 +636,10 @@ endmodule
 fn ff_finish_in_a_function(sir: &mut SirProgram) {
     let mut recorder = None;
     let units = sir
-        .eval_apply_ffs
+        .updates
+        .events
         .values_mut()
-        .chain(sir.eval_comb_apply_ffs.values_mut())
-        .chain(sir.eval_only_ffs.values_mut())
-        .chain(sir.apply_ffs.values_mut())
-        .flatten();
+        .flat_map(|event| event.units_mut());
     let mut functions = Vec::new();
     for unit in units {
         let mut frame = unit.register_map.keys().map(|r| r.0 + 1).max().unwrap_or(0);
@@ -790,7 +802,15 @@ fn clock_aliases_written_by_calls_are_not_wiring() {
             _ => None,
         })
         .unwrap();
-    let d = object(program.sir.eval_apply_ffs.values().flatten(), 8, false);
+    let d = object(
+        program
+            .sir
+            .updates
+            .groups(celox_sir::UpdateEntry::Transition)
+            .flat_map(|(_, units)| units),
+        8,
+        false,
+    );
     let with_call = |program: &LaidOutProgram,
                      effects: celox_sir::CallEffects<RegionedAbsoluteAddr>| {
         let mut program = program.clone();
@@ -804,7 +824,7 @@ fn clock_aliases_written_by_calls_are_not_wiring() {
                 *call = std::sync::Arc::new(effects.clone());
             }
         }
-        program.sir.eval_comb.push(unit);
+        program.sir.updates.observe.push(unit);
         crate::clock_aliases::extract(&program, clock).is_some()
     };
     assert!(with_call(

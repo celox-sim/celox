@@ -575,16 +575,18 @@ fn generate(
         .collect();
     let mut cones = Cones {
         observed: !program.runtime.runtime_schema.comb_observers.is_empty(),
-        slicer: CombSlicer::new(&program.sir.eval_comb, program.shared_storage()),
+        slicer: CombSlicer::new(&program.sir.updates.observe, program.shared_storage()),
         size: program
             .sir
-            .eval_comb
+            .updates
+            .observe
             .iter()
             .map(|unit| instructions(unit).count())
             .sum(),
         stateful: program
             .sir
-            .eval_comb_stateful
+            .updates
+            .retained
             .iter()
             .flatten()
             .map(|target| target.absolute_addr())
@@ -754,7 +756,7 @@ fn generate(
         put(&mut g, m.control[TB_EXIT], code);
         g.b.seal_block(SIRTerminator::Return);
     }
-    emit_settle(&mut g, m, &program.sir.eval_comb, finish, overflow);
+    emit_settle(&mut g, m, &program.sir.updates.observe, finish, overflow);
     let mut unit = g.finish();
     count_events(&mut unit, m);
     unit

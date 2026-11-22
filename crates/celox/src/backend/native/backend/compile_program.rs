@@ -66,10 +66,11 @@ pub(super) fn compile_program_with_outlining_threshold(
     let function_jits = compile_function_units(sir, layout, options, cancel)?;
     let force_bindings =
         build_force_bindings(sir.runtime(), layout, &options.signal_access.force_signals)?;
-    let (compile_tasks, task_bindings) = collect_ff_compile_tasks(sir);
+    let (compile_tasks, task_bindings) = collect_event_compile_tasks(sir);
     let comb_blocks = sir
         .sir
-        .eval_comb
+        .updates
+        .observe
         .iter()
         .map(|unit| unit.blocks.len())
         .sum::<usize>();
@@ -83,7 +84,7 @@ pub(super) fn compile_program_with_outlining_threshold(
                 .sum::<usize>(),
         )
     };
-    let comb_size = size(&sir.sir.eval_comb.iter().collect::<Vec<_>>());
+    let comb_size = size(&sir.sir.updates.observe.iter().collect::<Vec<_>>());
     // Execution units already communicate through state. Keep large units
     // separate instead of rebuilding a single allocator problem, and dispatch
     // them through the same bounded pool as the FF functions.
@@ -91,7 +92,7 @@ pub(super) fn compile_program_with_outlining_threshold(
         feature = "x86_64-codegen",
         all(target_arch = "x86_64", not(feature = "arm64-codegen"))
     )) && !capture_trace
-        && sir.sir.eval_comb.len() > 1
+        && sir.sir.updates.observe.len() > 1
         && comb_size.1 >= outline_threshold;
     // The compiled scheduler's callees take the slots after the function
     // units, before the generated kernels. A callee that is a unit of the
@@ -108,7 +109,7 @@ pub(super) fn compile_program_with_outlining_threshold(
     let settle_callees: Vec<Option<usize>> = sir
         .scheduler_callees
         .iter()
-        .map(|callee| match &sir.sir.eval_comb[..] {
+        .map(|callee| match &sir.sir.updates.observe[..] {
             [comb] if is_settle_unit(comb, callee) => Some(0),
             units if split_comb => units
                 .iter()
@@ -180,7 +181,8 @@ pub(super) fn compile_program_with_outlining_threshold(
     // Keep small circuits inline, where cross-boundary optimization is cheap.
     let comb_instructions = sir
         .sir
-        .eval_comb
+        .updates
+        .observe
         .iter()
         .flat_map(|unit| unit.blocks.values())
         .map(|block| block.instructions.len())
@@ -246,7 +248,6 @@ pub(super) fn compile_program_with_outlining_threshold(
             options.four_state,
             &format!("process[{index}]"),
             NativeMergeKind::Complete,
-            None,
             process_options,
             capture_trace,
             &options.optimize_options.diagnostics,
@@ -324,7 +325,7 @@ pub(super) fn compile_program_with_outlining_threshold(
         )?
     } else if serial {
         let comb_jit = compile_units(
-            &sir.sir.eval_comb,
+            &sir.sir.updates.observe,
             layout,
             options.four_state,
             "eval_comb",
@@ -346,7 +347,6 @@ pub(super) fn compile_program_with_outlining_threshold(
                 options.four_state,
                 task.label,
                 task.merge_kind,
-                task.first_ff_unit,
                 &options.x86_options,
                 capture_trace,
                 &options.optimize_options.diagnostics,
@@ -485,7 +485,6 @@ fn compile_scheduler_callees(
                 options.four_state,
                 &format!("scheduler_callee[{index}]"),
                 NativeMergeKind::Complete,
-                None,
                 &options.x86_options,
                 capture_trace,
                 &options.optimize_options.diagnostics,
@@ -610,7 +609,6 @@ fn compile_function_units(
                 options.four_state,
                 &format!("function[{index}]"),
                 NativeMergeKind::Complete,
-                None,
                 &function_options,
                 false,
                 &options.optimize_options.diagnostics,
@@ -713,7 +711,7 @@ fn compile_split_comb(
     let sizes = task_sizes
         .iter()
         .copied()
-        .chain(sir.sir.eval_comb.iter().map(|unit| size(&[unit])))
+        .chain(sir.sir.updates.observe.iter().map(|unit| size(&[unit])))
         .collect::<Vec<_>>();
     let mut order = (0..sizes.len()).collect::<Vec<_>>();
     order.sort_by_key(|&index| std::cmp::Reverse(sizes[index]));
@@ -725,7 +723,7 @@ fn compile_split_comb(
     if options.x86_options.diagnostics.phase_timing {
         tracing::debug!(
             "[native-timing] comb_chunks={} workers={workers}",
-            sir.sir.eval_comb.len()
+            sir.sir.updates.observe.len()
         );
     }
     let codes = super::super::compile_resources::compile_tasks(&order, workers, |index| {
@@ -740,7 +738,6 @@ fn compile_split_comb(
                 options.four_state,
                 task.label,
                 task.merge_kind,
-                task.first_ff_unit,
                 &options.x86_options,
                 false,
                 &options.optimize_options.diagnostics,
@@ -748,12 +745,11 @@ fn compile_split_comb(
             )
         } else {
             compile_unit_refs_inspected(
-                &[&sir.sir.eval_comb[index - ff_count]],
+                &[&sir.sir.updates.observe[index - ff_count]],
                 layout,
                 options.four_state,
                 "eval_comb_chunk",
                 NativeMergeKind::Partial,
-                None,
                 &options.x86_options,
                 false,
                 &options.optimize_options.diagnostics,
@@ -798,7 +794,6 @@ fn compile_split_comb(
         options.four_state,
         "eval_comb",
         NativeMergeKind::Complete,
-        None,
         &caller_options,
         false,
         &options.optimize_options.diagnostics,
@@ -849,7 +844,7 @@ fn compile_comb_and_tasks_threaded(
                 return Err(cancelled_error());
             }
             compile_units(
-                &sir.sir.eval_comb,
+                &sir.sir.updates.observe,
                 layout,
                 four_state,
                 "eval_comb",
@@ -888,7 +883,6 @@ fn compile_comb_and_tasks_threaded(
                             four_state,
                             task.label,
                             task.merge_kind,
-                            task.first_ff_unit,
                             x86_options,
                             capture_trace,
                             &options.optimize_options.diagnostics,
@@ -943,7 +937,8 @@ fn compile_force_comb_units(
         options.native_force_support && options.optimize_options.opt_level() == crate::OptLevel::O0;
     let comb_runtime_units = if options.native_force_support {
         sir.sir
-            .eval_comb
+            .updates
+            .observe
             .iter()
             .flat_map(|unit| {
                 if force_store_boundaries {
@@ -969,7 +964,6 @@ fn compile_force_comb_units(
                 options.four_state,
                 &format!("eval_comb_unit[{index}]"),
                 NativeMergeKind::Complete,
-                None,
                 &options.x86_options,
                 false,
                 &options.optimize_options.diagnostics,
@@ -1309,10 +1303,7 @@ fn bind_native_events(
     let mut event_map = HashMap::default();
     let mut eval_only_event_map = HashMap::default();
     let mut apply_event_map = HashMap::default();
-    let compile_ff_group = |ff_map: &HashMap<
-        AbsoluteAddr,
-        Vec<crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>>,
-    >,
+    let compile_ff_group = |entry: celox_sir::UpdateEntry,
                             label: &'static str,
                             event_map_out: &mut HashMap<AbsoluteAddr, NativeEventImageRef>,
                             addr_to_id: &mut HashMap<AbsoluteAddr, usize>,
@@ -1322,7 +1313,7 @@ fn bind_native_events(
                             id_to_addr: &mut Vec<AbsoluteAddr>,
                             id_to_event: &mut Vec<NativeEventImageRef>|
      -> Result<(), SimulatorError> {
-        for addr in ff_map.keys() {
+        for (addr, _) in sir.sir.updates.groups(entry) {
             let canonical = sir.design.events.canonical(*addr);
             if let Some(&event) = event_map_out.get(&canonical) {
                 event_map_out.insert(*addr, event);
@@ -1364,7 +1355,7 @@ fn bind_native_events(
     };
 
     compile_ff_group(
-        &sir.sir.eval_apply_ffs,
+        celox_sir::UpdateEntry::Transition,
         "eval_apply_ff",
         &mut event_map,
         &mut addr_to_id,
@@ -1375,7 +1366,7 @@ fn bind_native_events(
         &mut id_to_event,
     )?;
     compile_ff_group(
-        &sir.sir.eval_only_ffs,
+        celox_sir::UpdateEntry::Sample,
         "eval_only_ff",
         &mut eval_only_event_map,
         &mut addr_to_id,
@@ -1386,7 +1377,7 @@ fn bind_native_events(
         &mut id_to_event,
     )?;
     compile_ff_group(
-        &sir.sir.apply_ffs,
+        celox_sir::UpdateEntry::Publish,
         "apply_ff",
         &mut apply_event_map,
         &mut addr_to_id,

@@ -215,16 +215,15 @@ pub(super) fn relocate_units(
         &mut HashMap<AbsoluteAddr, Vec<(InstanceId, FfPart<RegionedAbsoluteAddr>)>>,
     >,
     split_commits: &mut SplitCommits,
+    four_state: bool,
     trace_opts: &crate::FrontendTraceOptions,
     trace: &mut Option<&mut crate::FrontendTrace>,
     startup_ready: Option<AbsoluteAddr>,
 ) -> Result<
     (
         SLTNodeArena<AbsoluteAddr>,
-        HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+        ScheduledUpdates,
         EventEvaluations,
-        HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
-        HashMap<AbsoluteAddr, Vec<FfAccessSummary<RegionedAbsoluteAddr>>>,
         HashMap<InstanceId, FfRuntimeRelocation>,
         Vec<celox_slt::LogicPath<AbsoluteAddr>>,
         Vec<CombObserver<AbsoluteAddr>>,
@@ -242,13 +241,8 @@ pub(super) fn relocate_units(
 > {
     let mut global_arena = SLTNodeArena::<AbsoluteAddr>::new();
     let mut processes = Vec::new();
-    let mut eval_apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>> =
-        HashMap::default();
+    let mut updates = ScheduledUpdates::default();
     let mut evaluations = EventEvaluations::default();
-    let mut apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>> =
-        HashMap::default();
-    let mut ff_access_summaries: HashMap<AbsoluteAddr, Vec<FfAccessSummary<RegionedAbsoluteAddr>>> =
-        HashMap::default();
     let mut ff_runtime_relocations = HashMap::default();
     let mut comb_blocks = Vec::new();
     let mut comb_observers = Vec::new();
@@ -295,7 +289,6 @@ pub(super) fn relocate_units(
             root_name,
             expanded,
             indexed_instances,
-            &mut ff_access_summaries,
             &mut next_runtime_error_code,
             &mut runtime_errors,
             &mut ff_runtime_relocations,
@@ -326,7 +319,12 @@ pub(super) fn relocate_units(
         // Lane-partitioning units of every trigger group: its independently
         // lowered parts when present, otherwise its whole evaluate/apply pair.
         if let Some(parallel_ff_units) = parallel_ff_units.as_deref_mut() {
-            relocate_parallel_ff_parts(&instance, parallel_ff_units);
+            relocate_parallel_ff_parts(
+                &instance,
+                parallel_ff_units,
+                unpacked_element_widths,
+                four_state,
+            )?;
         }
 
         relocate_comb_logic(
@@ -346,16 +344,11 @@ pub(super) fn relocate_units(
         )?;
 
         // Relocate sequential blocks for this instance
-        relocate_ff_evaluations(
-            &instance,
-            &mut eval_apply_ffs,
-            &mut evaluations,
-            &mut global_arena,
-        )?;
+        relocate_event_evaluations(&instance, &mut evaluations, &mut global_arena)?;
 
         relocate_processes(&instance, &rebase, &mut processes);
 
-        relocate_ff_applications(&instance, split_commits, &mut apply_ffs);
+        relocate_publications(&instance, split_commits, &mut updates);
     }
     if let Some(ready) = startup_ready.filter(|_| gated_startup) {
         comb_blocks.push(startup_ready_path(
@@ -366,10 +359,8 @@ pub(super) fn relocate_units(
     }
     Ok((
         global_arena,
-        eval_apply_ffs,
+        updates,
         evaluations,
-        apply_ffs,
-        ff_access_summaries,
         ff_runtime_relocations,
         comb_blocks,
         comb_observers,
@@ -413,7 +404,6 @@ fn number_instance<'a>(
     root_name: &str,
     expanded: &HashMap<InstancePath, InstanceId>,
     indexed_instances: &HashSet<InstanceId>,
-    ff_access_summaries: &mut HashMap<AbsoluteAddr, Vec<FfAccessSummary<RegionedAbsoluteAddr>>>,
     next_runtime_error_code: &mut i64,
     runtime_errors: &mut HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
     ff_runtime_relocations: &mut HashMap<InstanceId, FfRuntimeRelocation>,
@@ -429,56 +419,6 @@ fn number_instance<'a>(
             None,
         )
     })?;
-    let relocate_ff_summary = |summary: &FfAccessSummary<RegionedVarAddr>| {
-        let relocate_addr =
-            |addr: RegionedVarAddr| bindings.locate_regioned(addr.region, *id, addr.var_id);
-        FfAccessSummary {
-            reads: summary
-                .reads
-                .iter()
-                .map(|read| VarAtomBase {
-                    id: relocate_addr(read.id),
-                    access: read.access,
-                })
-                .collect(),
-            writes: summary
-                .writes
-                .iter()
-                .map(|write| VarAtomBase {
-                    id: relocate_addr(write.id),
-                    access: write.access,
-                })
-                .collect(),
-            dynamic_writes: summary
-                .dynamic_writes
-                .iter()
-                .copied()
-                .map(relocate_addr)
-                .collect(),
-        }
-    };
-    for (trigger_set, summary) in &sim_module.ff_access_summaries {
-        let clock_addr = bindings.locate(*id, trigger_set.clock);
-        let canonical_clock = clock_domains
-            .get(&clock_addr)
-            .copied()
-            .unwrap_or(clock_addr);
-        ff_access_summaries
-            .entry(canonical_clock)
-            .or_default()
-            .push(relocate_ff_summary(summary));
-        for &reset in &trigger_set.resets {
-            let reset_addr = bindings.locate(*id, reset);
-            let canonical_reset = clock_domains
-                .get(&reset_addr)
-                .copied()
-                .unwrap_or(reset_addr);
-            ff_access_summaries
-                .entry(canonical_reset)
-                .or_default()
-                .push(relocate_ff_summary(summary));
-        }
-    }
     let mut runtime_error_codes = HashMap::default();
     for (&local_code, info) in &sim_module.runtime_errors {
         let global_code = *next_runtime_error_code;
@@ -626,7 +566,9 @@ fn relocate_functions(
 fn relocate_parallel_ff_parts(
     instance: &InstanceRelocation<'_>,
     parallel_ff_units: &mut HashMap<AbsoluteAddr, Vec<(InstanceId, FfPart<RegionedAbsoluteAddr>)>>,
-) {
+    element_widths: &HashMap<AbsoluteAddr, usize>,
+    four_state: bool,
+) -> Result<(), ParserError> {
     let &InstanceRelocation {
         id,
         sim_module,
@@ -648,7 +590,7 @@ fn relocate_parallel_ff_parts(
             function_base,
         )
     };
-    let mut trigger_sets = sim_module.eval_only_ff_blocks.keys().collect::<Vec<_>>();
+    let mut trigger_sets = sim_module.event_bodies.keys().collect::<Vec<_>>();
     trigger_sets.sort_unstable();
     for trigger_set in trigger_sets {
         let parts = match sim_module.parallel_ff_parts.get(trigger_set) {
@@ -657,12 +599,53 @@ fn relocate_parallel_ff_parts(
                 .map(|part| part.map_units(relocate))
                 .collect::<Vec<_>>(),
             None => {
-                let Some(apply) = sim_module.apply_ff_blocks.get(trigger_set) else {
+                let body = &sim_module.event_bodies[trigger_set];
+                let evaluate = if let Some(sample) = &body.sample {
+                    relocate(sample)
+                } else if let Some(plan) = sim_module.next_state.evaluations.get(trigger_set) {
+                    let parts = plan
+                        .iter()
+                        .map(|batch| match batch {
+                            EdgeEvaluation::Procedure(unit) => Ok(relocate(unit)),
+                            EdgeEvaluation::Graph(form) => {
+                                let mut arena = SLTNodeArena::new();
+                                let form = form
+                                    .relocate(&sim_module.arena, &mut arena, &|var| {
+                                        bindings.locate(*id, *var)
+                                    })
+                                    .map_err(|e| {
+                                        ParserError::illegal_context(
+                                            "parallel event",
+                                            e.to_string(),
+                                            None,
+                                        )
+                                    })?;
+                                lower_transition(
+                                    &arena,
+                                    &form,
+                                    Publication::Deferred,
+                                    four_state,
+                                    |addr, region| {
+                                        RegionedAbsoluteAddr::from_absolute_addr(region, addr)
+                                    },
+                                    element_widths,
+                                )
+                                .map_err(|e| {
+                                    ParserError::illegal_context("parallel event", e, None)
+                                })
+                            }
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if parts.is_empty() {
+                        continue;
+                    }
+                    celox_sir::merge_sir_eus(&parts).0
+                } else {
                     continue;
                 };
                 vec![FfPart {
-                    evaluate: relocate(&sim_module.eval_only_ff_blocks[trigger_set]),
-                    apply: relocate(apply),
+                    evaluate,
+                    apply: relocate(&body.publish),
                 }]
             }
         };
@@ -680,6 +663,7 @@ fn relocate_parallel_ff_parts(
                 .extend(parts.iter().cloned().map(|part| (*id, part)));
         }
     }
+    Ok(())
 }
 
 /// Flatten the combinational logic of the instance into the arena of the
@@ -761,9 +745,8 @@ fn relocate_comb_logic(
 
 /// Relocate the flip-flop units of the instance that evaluate, with or
 /// without applying, under the canonical event of every trigger.
-fn relocate_ff_evaluations(
+fn relocate_event_evaluations(
     instance: &InstanceRelocation<'_>,
-    eval_apply_ffs: &mut HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     evaluations: &mut EventEvaluations,
     arena: &mut SLTNodeArena<AbsoluteAddr>,
 ) -> Result<(), ParserError> {
@@ -792,17 +775,6 @@ fn relocate_ff_evaluations(
         let address = bindings.locate(*id, signal);
         clock_domains.get(&address).copied().unwrap_or(address)
     };
-    for (trigger, unit) in &sim_module.eval_apply_ff_blocks {
-        if sim_module.next_state.evaluations.contains_key(trigger) {
-            continue;
-        }
-        for event in std::iter::once(trigger.clock).chain(trigger.resets.iter().copied()) {
-            eval_apply_ffs
-                .entry(canonical(event))
-                .or_default()
-                .push(relocate(unit));
-        }
-    }
     let mut record = |trigger: &celox_design::TriggerSet<SourceVarId>, plan: Vec<_>| {
         for reset in &trigger.resets {
             evaluations
@@ -830,7 +802,8 @@ fn relocate_ff_evaluations(
             .collect::<Result<Vec<_>, _>>()?;
         record(trigger, plan);
     }
-    for (trigger, unit) in &sim_module.eval_only_ff_blocks {
+    for (trigger, body) in &sim_module.event_bodies {
+        let Some(unit) = &body.sample else { continue };
         if sim_module.next_state.evaluations.contains_key(trigger) {
             continue;
         }
@@ -938,23 +911,23 @@ pub(super) fn lower_event_evaluations(
     events: EventEvaluations,
     arena: &SLTNodeArena<AbsoluteAddr>,
     elements: &HashMap<AbsoluteAddr, usize>,
-    apply: &FfUnits,
+    updates: &mut ScheduledUpdates,
     direct_events: &HashSet<AbsoluteAddr>,
-    combined: &mut FfUnits,
-) -> Result<FfUnits, ParserError> {
+    four_state: bool,
+) -> Result<(), ParserError> {
     let lower = |form: &NextStateForm<_>, publication| {
         lower_transition(
             arena,
             form,
             publication,
-            false,
+            four_state,
             |addr, region| RegionedAbsoluteAddr::from_absolute_addr(region, addr),
             elements,
         )
         .map_err(|e| ParserError::illegal_context("clock evaluation", e, None))
     };
-    let mut result = HashMap::default();
     for (event, evaluations) in events {
+        let update = updates.events.entry(event).or_default();
         let mut units = Vec::new();
         let mut pending = NextStateForm::default();
         let mut reads = HashSet::default();
@@ -1030,7 +1003,8 @@ pub(super) fn lower_event_evaluations(
         if !pending.roots.is_empty() || !pending.ports.is_empty() {
             if direct_events.contains(&event) {
                 direct_unit = Some(lower(&pending, Publication::Direct)?);
-            } else if let Some(applications) = apply.get(&event)
+            } else if !four_state
+                && let Some(applications) = update.entry(UpdateEntry::Publish)
                 && let Some(direct) =
                     sampled::combined(arena, &pending, elements, &units, applications)?
             {
@@ -1039,22 +1013,37 @@ pub(super) fn lower_event_evaluations(
             units.push(lower(&pending, Publication::Deferred)?);
         }
         if let Some(direct) = direct_unit {
-            combined.insert(event, vec![direct]);
-        } else if roots + ports > 0 || combined.get(&event).is_some_and(|group| group.len() > 1) {
-            let publications = apply.get(&event).ok_or_else(|| {
+            update.set(UpdateEntry::Transition, vec![direct]);
+        } else {
+            let publications = update.entry(UpdateEntry::Publish).ok_or_else(|| {
                 ParserError::illegal_context(
                     "event assembly",
                     "event has no publication phase",
                     None,
                 )
             })?;
-            let phases = units.iter().chain(publications).collect::<Vec<_>>();
-            combined.insert(event, vec![celox_sir::merge_sir_eu_refs(&phases).0]);
+            // An unconditional error or nonreturning procedure ends the event.
+            // Only returning samples can reach a later sample or publication.
+            let mut phases = Vec::new();
+            for unit in units.iter().chain(publications) {
+                phases.push(unit);
+                if !unit
+                    .blocks
+                    .values()
+                    .any(|b| matches!(b.terminator, celox_sir::SIRTerminator::Return))
+                {
+                    break;
+                }
+            }
+            update.set(
+                UpdateEntry::Transition,
+                vec![celox_sir::merge_sir_eu_refs(&phases).0],
+            );
         }
         tracing::debug!(target: "celox::edge_graph", ?event, roots, ports, procedures, graphs = units.len()-procedures, "scheduled edge evaluations");
-        result.insert(event, units);
+        update.set(UpdateEntry::Sample, units);
     }
-    Ok(result)
+    Ok(())
 }
 
 /// Relocate the process kernels of the instance, keyed by the instance and
@@ -1105,10 +1094,10 @@ fn relocate_processes(
 
 /// Relocate the flip-flop units of the instance that apply, and their
 /// split commits, under the canonical event of every trigger.
-fn relocate_ff_applications(
+fn relocate_publications(
     instance: &InstanceRelocation<'_>,
     split_commits: &mut SplitCommits,
-    apply_ffs: &mut HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+    updates: &mut ScheduledUpdates,
 ) {
     let &InstanceRelocation {
         id,
@@ -1121,7 +1110,8 @@ fn relocate_ff_applications(
         ref extern_function_map,
         ..
     } = instance;
-    for (trigger_set, eu) in &sim_module.apply_ff_blocks {
+    for (trigger_set, body) in &sim_module.event_bodies {
+        let eu = &body.publish;
         let clock_addr = bindings.locate(*id, trigger_set.clock);
         let canonical_addr = clock_domains
             .get(&clock_addr)
@@ -1165,9 +1155,11 @@ fn relocate_ff_applications(
                 .or_default()
                 .push(split.clone());
         }
-        apply_ffs
+        updates
+            .events
             .entry(canonical_addr)
             .or_default()
+            .entry_or_default(UpdateEntry::Publish)
             .push(relocate_executation_unit_with_errors(
                 eu,
                 &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
@@ -1183,16 +1175,19 @@ fn relocate_ff_applications(
                 .get(&reset_addr)
                 .copied()
                 .unwrap_or(reset_addr);
-            apply_ffs.entry(canonical_addr).or_default().push(
-                relocate_executation_unit_with_errors(
+            updates
+                .events
+                .entry(canonical_addr)
+                .or_default()
+                .entry_or_default(UpdateEntry::Publish)
+                .push(relocate_executation_unit_with_errors(
                     eu,
                     &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
                     runtime_error_codes,
                     runtime_event_site_map,
                     extern_function_map,
                     function_base,
-                ),
-            );
+                ));
         }
     }
 }

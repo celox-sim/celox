@@ -195,12 +195,37 @@ pub(crate) fn collect_strided_array_layouts(
     };
     for eu in program
         .sir
-        .eval_comb
+        .updates
+        .observe
         .iter()
-        .chain(program.sir.eval_apply_ffs.values().flatten())
-        .chain(program.sir.eval_comb_apply_ffs.values().flatten())
-        .chain(program.sir.eval_only_ffs.values().flatten())
-        .chain(program.sir.apply_ffs.values().flatten())
+        .chain(
+            program
+                .sir
+                .updates
+                .groups(celox_sir::UpdateEntry::Transition)
+                .flat_map(|(_, units)| units),
+        )
+        .chain(
+            program
+                .sir
+                .updates
+                .groups(celox_sir::UpdateEntry::FromInputs)
+                .flat_map(|(_, units)| units),
+        )
+        .chain(
+            program
+                .sir
+                .updates
+                .groups(celox_sir::UpdateEntry::Sample)
+                .flat_map(|(_, units)| units),
+        )
+        .chain(
+            program
+                .sir
+                .updates
+                .groups(celox_sir::UpdateEntry::Publish)
+                .flat_map(|(_, units)| units),
+        )
         .chain(
             program
                 .sir
@@ -257,14 +282,26 @@ fn collect_ff_referenced_addresses(program: &OptimizedSir) -> crate::HashSet<Abs
     // identity alias.
     let ff_eus = program
         .sir
-        .eval_apply_ffs
-        .values()
-        .flat_map(|v| v.iter())
-        .chain(program.sir.eval_only_ffs.values().flat_map(|v| v.iter()))
-        .chain(program.sir.apply_ffs.values().flat_map(|v| v.iter()))
+        .updates
+        .groups(celox_sir::UpdateEntry::Transition)
+        .flat_map(|(_, units)| units)
+        .chain(
+            program
+                .sir
+                .updates
+                .groups(celox_sir::UpdateEntry::Sample)
+                .flat_map(|(_, units)| units),
+        )
+        .chain(
+            program
+                .sir
+                .updates
+                .groups(celox_sir::UpdateEntry::Publish)
+                .flat_map(|(_, units)| units),
+        )
         .chain(program.sir.parallel.iter().flat_map(|parallel| {
             parallel
-                .eval_apply_ffs
+                .events
                 .values()
                 .flat_map(|kernel| kernel.units().map(|unit| &unit.unit))
         }))

@@ -59,7 +59,8 @@ impl Plan {
         let captures = self.observers.is_some();
         program
             .sir
-            .eval_comb
+            .updates
+            .observe
             .iter()
             .map(|unit| {
                 let finishes = !self.finish_sites.is_empty()
@@ -400,7 +401,7 @@ impl Plan {
         g.store(slots.next, SCHEDULER_TIME_WIDTH, unknown);
         g.b.seal_block(SIRTerminator::Jump(stopped, Vec::new()));
         g.emit_settle(
-            &program.sir.eval_comb,
+            &program.sir.updates.observe,
             finish_exit,
             internal_exit,
             updates.map(|service| (service, &checks[..], &self.events[..])),

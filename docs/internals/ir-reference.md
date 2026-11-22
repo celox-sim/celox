@@ -63,12 +63,17 @@ pub struct RuntimeProgram {
     pub testbench: Option<TestbenchProgram<AbsoluteAddr>>,
 }
 
-pub struct SirProgram {
-    pub eval_comb: Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
-    pub eval_apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
-    pub eval_comb_apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
-    pub eval_only_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
-    pub apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+pub struct SirProgram<EventAddr, StateAddr> {
+    pub updates: StateUpdates<EventAddr, StateAddr>,
+    pub parallel: Option<ParallelSirProgram<EventAddr, StateAddr>>,
+    pub processes: Vec<ExecutionUnit<StateAddr>>,
+    pub functions: Vec<FunctionUnit<StateAddr>>,
+}
+
+pub struct StateUpdates<E, A> {
+    pub observe: Vec<ExecutionUnit<A>>,
+    pub retained: Option<Vec<A>>,
+    pub events: HashMap<E, EventUpdate<A>>,
 }
 ```
 
@@ -76,10 +81,9 @@ pub struct SirProgram {
 -   **`OptimizedSir`**: The only pre-layout artifact accepted by layout construction.
 -   **`LaidOutProgram`**: Immutable SIR plus finalized physical layout accepted by concrete backends. Layout requirements have been consumed.
 -   **`RuntimeProgram`**: Normalized runtime design, runtime schema, and compiled testbench retained after code generation. `RuntimeDesign` is the sole owner of semantic state metadata, hierarchy, and path/source lookup indices; frontend module tables have already been discarded. It cannot contain SIR or layout requirements.
--   **`eval_apply_ffs`**: Standard synchronous flip-flop evaluation. Used when operating in a single domain.
--   **`eval_comb_apply_ffs`**: Fused comb/FF evaluation selected by the frontend scheduler.
--   **`eval_only_ffs`**: Phase that only computes the next state and writes it to the Working region.
--   **`apply_ffs`**: Phase that commits values from the Working region to the Stable region.
+-   `updates.observe` refreshes observable outputs. `retained` identifies storage whose value can carry over to the next observation.
+-   Each event selects its own transition. `Transition` runs with observations current. An optional `FromInputs` entry computes the inputs the transition needs directly. When it is absent, the executor can refresh observations and enter `Transition`.
+-   When several edges must see the same old state, the scheduler can enter `Sample` for the active events before entering `Publish`. Scalar updates can use staged slots, and indexed memory writes can use sparse staging.
 -   **`layout_requirements`**: Semantic physical-layout constraints, including validated candidates mapping non-canonical → canonical state homes. `IdentityStoreBypass` populates these aliases; layout verifies representation compatibility before sharing memory and consumes the requirements when producing `LaidOutProgram`.
 
 Cranelift oversized-function plans and x86 MIR/register allocation are backend-private results;

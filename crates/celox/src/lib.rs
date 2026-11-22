@@ -81,6 +81,7 @@ pub use celox_runtime::{
 };
 #[doc(hidden)]
 pub use celox_runtime::{KernelSchedule, SchedulerMode, SchedulerStats};
+pub use celox_sir::{EventUpdate, StateUpdates, UpdateEntry};
 pub use celox_slt::scheduler::SchedulerError;
 pub use celox_state_layout::STATE_HEADER_SIZE;
 pub use celox_state_layout::SettleProfile;

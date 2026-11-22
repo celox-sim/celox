@@ -23,7 +23,7 @@ pub(super) fn optimize_late_comb(
         if !opt.diagnostics.verify_passes {
             return;
         }
-        for (unit, eu) in program.sir.eval_comb.iter().enumerate() {
+        for (unit, eu) in program.sir.updates.observe.iter().enumerate() {
             if let Err(error) = crate::verify_memory_offset_contract(program.design, eu) {
                 panic!("after late comb stage {stage} in unit {unit}: {error}");
             }
@@ -44,7 +44,8 @@ pub(super) fn optimize_late_comb(
     }
     let branchify_watermarks = program
         .sir
-        .eval_comb
+        .updates
+        .observe
         .iter()
         .map(|eu| eu.blocks.keys().map(|block| block.0).max().unwrap_or(0))
         .collect::<Vec<_>>();
@@ -71,7 +72,7 @@ pub(super) fn optimize_late_comb(
 
     // Identity-store bypass can make an entire expression DAG dead.
     if on(SirPass::LoopIdiom) {
-        for eu in &mut program.sir.eval_comb {
+        for eu in &mut program.sir.updates.observe {
             pass_manager::run_pass(&LoopIdiomPass, eu, options);
         }
     }
@@ -82,7 +83,7 @@ pub(super) fn optimize_late_comb(
     }
     if on(SirPass::PackedScatterStore) {
         let packed_scatter_store = PackedScatterStorePass::for_program(program);
-        for eu in &mut program.sir.eval_comb {
+        for eu in &mut program.sir.updates.observe {
             pass_manager::run_pass(&packed_scatter_store, eu, options);
         }
     }
@@ -93,7 +94,7 @@ pub(super) fn optimize_late_comb(
     }
     if on(SirPass::IndexedStoreRecovery) {
         let indexed_store_recovery = IndexedStoreRecoveryPass::for_program(program);
-        for eu in &mut program.sir.eval_comb {
+        for eu in &mut program.sir.updates.observe {
             pass_manager::run_pass(&indexed_store_recovery, eu, options);
         }
     }
@@ -103,7 +104,7 @@ pub(super) fn optimize_late_comb(
         tracing::debug!("[branchify-stats] late indexed");
     }
     if on(SirPass::GuardedRegionSinking) {
-        for eu in &mut program.sir.eval_comb {
+        for eu in &mut program.sir.updates.observe {
             pass_manager::run_pass(&GuardedRegionSinkingPass, eu, options);
         }
     }
@@ -118,7 +119,7 @@ pub(super) fn optimize_late_comb(
         if trace {
             tracing::debug!("[branchify-stats] late sparse constructed");
         }
-        for eu in &mut program.sir.eval_comb {
+        for eu in &mut program.sir.updates.observe {
             pass_manager::run_pass(&sparse_case_pass, eu, options);
         }
     }
@@ -131,7 +132,13 @@ pub(super) fn optimize_late_comb(
     // Recover control dependence created by the program-wide transforms, then
     // repair value placement and correlated merge state on that final CFG.
     if on(SirPass::BranchifyMux) {
-        for (eu, watermark) in program.sir.eval_comb.iter_mut().zip(branchify_watermarks) {
+        for (eu, watermark) in program
+            .sir
+            .updates
+            .observe
+            .iter_mut()
+            .zip(branchify_watermarks)
+        {
             // These stages follow the opt-in of the passes they belong to.
             if pass_manager::ExecutionUnitPass::handles_calls(&BranchifyMuxPass)
                 || !pass_manager::makes_calls(eu)
@@ -139,7 +146,7 @@ pub(super) fn optimize_late_comb(
                 pass_branchify_mux::run_late_branchify_mux(eu, options, watermark);
             }
         }
-        for eu in &mut program.sir.eval_comb {
+        for eu in &mut program.sir.updates.observe {
             if pass_manager::ExecutionUnitPass::handles_calls(&GuardedRegionSinkingPass)
                 || !pass_manager::makes_calls(eu)
             {
@@ -154,14 +161,14 @@ pub(super) fn optimize_late_comb(
     // Final canonicalization must precede native lowering, which fixes live
     // ranges and spill slots.
     if on(SirPass::Gvn) {
-        for eu in &mut program.sir.eval_comb {
+        for eu in &mut program.sir.updates.observe {
             pass_manager::run_pass(&GvnPass, eu, options);
         }
     }
     verify_stage(program, "final GVN");
     checkpoint!("final GVN");
     if on(SirPass::ControlFlowSimplify) {
-        for eu in &mut program.sir.eval_comb {
+        for eu in &mut program.sir.updates.observe {
             pass_manager::run_pass(&ControlFlowSimplifyPass, eu, options);
         }
     }

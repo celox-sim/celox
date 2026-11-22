@@ -99,9 +99,7 @@ struct StateGraph {
 
 /// The relocated units of a design and what relocating them numbered.
 struct Units {
-    eval_apply_ffs: FfUnits,
-    eval_only_ffs: FfUnits,
-    apply_ffs: FfUnits,
+    updates: ScheduledUpdates,
     processes: Vec<RelocatedProcess>,
     functions: Vec<celox_sir::FunctionUnit<RegionedAbsoluteAddr>>,
     function_frames: Vec<celox_design::FunctionFrame>,
@@ -115,7 +113,7 @@ struct Units {
 
 pub fn schedule_symbolic_rtl_reporting_loops(
     symbolic: SymbolicRtl,
-    fused_ff_factory: Option<&dyn FusedFfLoweringFactory>,
+    event_factory: Option<&dyn EventLoweringFactory>,
     ignored_loops: &[(
         (Vec<(String, usize)>, Vec<String>),
         (Vec<(String, usize)>, Vec<String>),
@@ -150,10 +148,28 @@ pub fn schedule_symbolic_rtl_reporting_loops(
     let flatten_timing = trace_opts.phase_timing;
     let (mut design, instance_values) =
         expand_design(symbolic, flatten_timing, trace_opts, &mut trace)?;
-    let (mut logic, mut units, mut parallel_ff_units, mut split_commits) =
-        relocate_design(&design, parallel, flatten_timing, trace_opts, &mut trace)?;
+    let (mut logic, mut units, mut parallel_ff_units, mut split_commits) = relocate_design(
+        &design,
+        parallel,
+        four_state,
+        flatten_timing,
+        trace_opts,
+        &mut trace,
+    )?;
     let variables = variable_shapes(&design);
     let measure_graphs = tracing::enabled!(target: "celox::next_state", tracing::Level::INFO);
+    let actions = if event_factory.is_some() {
+        build_event_actions(
+            &design.bindings,
+            &design.modules,
+            &design.instance_modules,
+            &design.clock_domains,
+            &units.ff_runtime_relocations,
+        )
+    } else {
+        HashMap::default()
+    };
+    let has_source_actions = !actions.is_empty();
     let EventSchedule {
         graph_clocks,
         write_domains,
@@ -166,7 +182,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         &variables,
         parallel,
         four_state,
-        fused_ff_factory.is_some(),
+        &actions,
         measure_graphs,
     )?;
     let (counted, declaration_probes, occurrence_probes) = instrument_occurrences(
@@ -215,9 +231,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         "analyze_clock_dependencies",
         analyze_clock_dependencies(
             &design.bindings,
-            &mut units.eval_apply_ffs,
-            &mut units.eval_only_ffs,
-            &mut units.apply_ffs,
+            &mut units.updates,
             &logic.comb_blocks,
             &logic.global_arena,
             &design.clock_domains,
@@ -229,11 +243,10 @@ pub fn schedule_symbolic_rtl_reporting_loops(
 
     let var_widths = prepare_comb_logic(&design, &mut logic, &mut units, trace_opts, &mut trace)?;
 
-    let fused_inputs = fused_ff_inputs(
-        fused_ff_factory,
+    let source_inputs = source_update_inputs(
+        actions,
         &design,
         &logic,
-        &units.ff_runtime_relocations,
         &var_widths,
         &ignored_loops,
         &true_loops,
@@ -252,7 +265,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         comb_process_state(&logic, &variables, four_state);
     let inlined_nets = inline_unobserved_nets(
         parallel,
-        fused_ff_factory,
+        has_source_actions,
         four_state,
         &design,
         &mut logic,
@@ -311,12 +324,12 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             &design.unpacked_element_widths,
         )
     } else {
-        FfUnits::default()
+        EventUnits::default()
     };
     let sched_start = flatten_timing.then(std::time::Instant::now);
     let grouping = if let Some(request) = settle_flags.clone() {
         scheduler::CombGrouping::Partitioned(request)
-    } else if !parallel.enabled() && !units.eval_apply_ffs.is_empty() {
+    } else if !parallel.enabled() && !units.updates.events.is_empty() {
         scheduler::CombGrouping::EventDomains(write_domains)
     } else {
         scheduler::CombGrouping::Whole
@@ -383,21 +396,28 @@ pub fn schedule_symbolic_rtl_reporting_loops(
     // Keep a single settle program when it owns a calculation shared with
     // another clock or an observer, or when copying it for every event is
     // too expensive. Partitioned settles also retain skipped outputs.
-    let merge_comb_apply = units.eval_apply_ffs.len() <= MERGED_COMB_APPLY_EVENTS
+    let specialize_inputs = units.updates.groups(UpdateEntry::Transition).count()
+        <= MAX_SPECIALIZED_EVENTS
         && settle_flags.is_none()
         && shared_calculations.is_empty();
-    let (mut eval_comb_apply_ffs, fused_direct_ff_writes) = schedule_fused_ffs(
-        fused_ff_factory,
-        fused_inputs,
-        &mut units.eval_apply_ffs,
-        merge_comb_apply,
+    let direct_writes_by_event = schedule_source_updates(
+        event_factory,
+        source_inputs,
+        &mut units.updates,
+        specialize_inputs,
         four_state,
         units.next_runtime_error_code,
         flatten_timing,
     )?;
 
-    eval_comb_apply_ffs.extend(graph_ticks);
-
+    for (event, body) in graph_ticks {
+        units
+            .updates
+            .events
+            .entry(event)
+            .or_default()
+            .set(UpdateEntry::FromInputs, body);
+    }
     if let Some(t) = trace
         && trace_opts.scheduled_units
     {
@@ -408,8 +428,9 @@ pub fn schedule_symbolic_rtl_reporting_loops(
     // functions are needed only when scheduling can evaluate several active
     // domains or must cascade through a derived clock.
     let active_ff_domains = units
-        .eval_apply_ffs
-        .values()
+        .updates
+        .groups(UpdateEntry::Transition)
+        .map(|(_, units)| units)
         .filter(|units| !units.is_empty())
         .count();
     // With process kernels, a round in which a zero delay is pending after
@@ -420,7 +441,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         active_ff_domains > 1 || !clocks.cascaded_clocks.is_empty() || !units.processes.is_empty();
     let parallel_sir = plan_parallel_sir(
         parallel,
-        &units.eval_apply_ffs,
+        &units.updates,
         parallel_ff_units,
         &lane0_objects,
         parallel_eval_comb,
@@ -432,11 +453,12 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         &comb_sources,
         &design.clock_domains,
     );
-    (units.eval_only_ffs, units.apply_ffs) = if needs_split_path {
-        (units.eval_only_ffs, units.apply_ffs)
-    } else {
-        (HashMap::default(), HashMap::default())
-    };
+    if !needs_split_path {
+        for update in units.updates.events.values_mut() {
+            update.take(UpdateEntry::Sample);
+            update.take(UpdateEntry::Publish);
+        }
+    }
 
     size_scheduler_slots(&mut design, &counted, &units.timing, four_state);
     let (mod_vars, mod_path_idx) = module_variables(&design.modules);
@@ -451,30 +473,26 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         four_state,
     )?;
     let runtime_comb_observers = runtime_comb_observers(&logic.comb_observers);
+    units.updates.observe = eval_comb;
+    units.updates.retained = eval_comb_stateful;
     stage_nba_sites(
         &design,
         &clocks,
         &mut units,
-        &eval_comb,
-        &eval_comb_apply_ffs,
         &runtime_comb_observers,
         &comb_sources,
     );
-    check_function_stores(&design, &clocks, &units, &eval_comb, &eval_comb_apply_ffs)?;
+    check_function_stores(&design, &clocks, &units)?;
     project_design(
         design,
         clocks,
         units,
         reset_clock_map,
-        eval_comb,
-        eval_comb_stateful,
-        eval_comb_apply_ffs,
-        merge_comb_apply,
         parallel_sir,
         state_objects,
         initial_memory_values,
         runtime_comb_observers,
-        fused_direct_ff_writes,
+        direct_writes_by_event,
         counted,
         active_commits,
         settle_flags,

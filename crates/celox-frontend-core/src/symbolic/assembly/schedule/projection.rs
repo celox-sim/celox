@@ -10,15 +10,11 @@ pub(super) fn project_design(
     clocks: ClockAnalysis,
     units: Units,
     reset_clock_map: HashMap<AbsoluteAddr, AbsoluteAddr>,
-    eval_comb: Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
-    eval_comb_stateful: Option<Vec<RegionedAbsoluteAddr>>,
-    eval_comb_apply_ffs: FfUnits,
-    merge_comb_apply: bool,
     parallel_sir: Option<ParallelSirProgram<AbsoluteAddr, RegionedAbsoluteAddr>>,
     state_objects: HashMap<AbsoluteAddr, VariableMetadata>,
     initial_memory_values: Vec<InitialStateValue<AbsoluteAddr>>,
     runtime_comb_observers: Vec<RuntimeCombObserver<AbsoluteAddr>>,
-    fused_direct_ff_writes: HashMap<AbsoluteAddr, Vec<VarAtomBase<RegionedAbsoluteAddr>>>,
+    direct_writes_by_event: HashMap<AbsoluteAddr, Vec<VarAtomBase<RegionedAbsoluteAddr>>>,
     counted: BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>>,
     active_commits: Vec<AbsoluteAddr>,
     settle_flags: Option<scheduler::SettlePartitioning<AbsoluteAddr>>,
@@ -49,9 +45,7 @@ pub(super) fn project_design(
         ..
     } = design;
     let Units {
-        eval_apply_ffs,
-        eval_only_ffs,
-        apply_ffs,
+        updates,
         processes,
         functions,
         function_frames,
@@ -84,13 +78,7 @@ pub(super) fn project_design(
         ..
     } = timing;
     let mut source_sir = SirProgram {
-        eval_apply_ffs,
-        eval_comb_apply_ffs,
-        merge_comb_apply,
-        eval_comb_stateful,
-        eval_only_ffs,
-        apply_ffs,
-        eval_comb,
+        updates,
         parallel: parallel_sir,
         processes: process_kernels,
         functions,
@@ -140,7 +128,7 @@ pub(super) fn project_design(
     let (runtime_errors, comb_observers, direct_ff_writes) = project_runtime_tables(
         runtime_errors,
         runtime_comb_observers,
-        fused_direct_ff_writes,
+        direct_writes_by_event,
         project,
         project_regioned,
     );
@@ -310,7 +298,7 @@ pub(super) fn project_design(
 
     Ok(ScheduledRtlOutput {
         scheduled,
-        fused_optimization_hints: FusedSirOptimizationHints { direct_ff_writes },
+        event_write_hints: EventWriteHints { direct_ff_writes },
     })
 }
 
@@ -452,7 +440,7 @@ fn project_events(
 fn project_runtime_tables(
     runtime_errors: HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
     runtime_comb_observers: Vec<RuntimeCombObserver<AbsoluteAddr>>,
-    fused_direct_ff_writes: HashMap<AbsoluteAddr, Vec<VarAtomBase<RegionedAbsoluteAddr>>>,
+    direct_writes_by_event: HashMap<AbsoluteAddr, Vec<VarAtomBase<RegionedAbsoluteAddr>>>,
     project: impl Fn(AbsoluteAddr) -> StateAddr + Copy,
     project_regioned: impl Fn(RegionedAbsoluteAddr) -> RegionedStateAddr + Copy,
 ) -> (
@@ -493,7 +481,7 @@ fn project_runtime_tables(
             written_inputs: observer.written_inputs.into_iter().map(project).collect(),
         })
         .collect();
-    let direct_ff_writes = fused_direct_ff_writes
+    let direct_ff_writes = direct_writes_by_event
         .into_iter()
         .map(|(source, writes)| {
             (
@@ -517,15 +505,7 @@ fn rtl_writes(
     state_objects: &HashMap<StateAddr, VariableMetadata>,
 ) -> HashSet<VarAtomBase<StateAddr>> {
     let mut rtl_writes = HashSet::default();
-    for unit in sir
-        .eval_comb
-        .iter()
-        .chain(sir.eval_apply_ffs.values().flatten())
-        .chain(sir.eval_comb_apply_ffs.values().flatten())
-        .chain(sir.eval_only_ffs.values().flatten())
-        .chain(sir.apply_ffs.values().flatten())
-        .chain(&sir.processes)
-    {
+    for unit in sir.updates.units().chain(&sir.processes) {
         for block in unit.blocks.values() {
             for instruction in &block.instructions {
                 for (address, access) in written_bits(instruction) {

@@ -4,8 +4,7 @@ use celox_design::{InstanceId, ModuleId};
 use veryl_analyzer::ir::{Expression, Function, Statement, VarId, VarPath};
 
 use crate::{
-    FrontendLookup, FusedSirOptimizationHints, HashMap, ScheduledRtl, ScheduledRtlOutput,
-    SourceVarId,
+    EventWriteHints, FrontendLookup, HashMap, ScheduledRtl, ScheduledRtlOutput, SourceVarId,
 };
 
 pub type RegionedVarAddr = celox_design::RegionedVarAddrBase<VarId>;
@@ -175,7 +174,7 @@ impl fmt::Debug for VerylTestbenchSource {
 #[derive(Clone, Debug)]
 pub struct VerylScheduledRtlOutput {
     pub scheduled: ScheduledRtl,
-    pub fused_optimization_hints: FusedSirOptimizationHints,
+    pub event_write_hints: EventWriteHints,
     pub testbench_source: VerylTestbenchSource,
     /// Bound checks resolved in each process owner's elaborated instance scope.
     pub dynamic_for_diagnostics: Vec<crate::FrontendDiagnostic>,
@@ -187,7 +186,7 @@ impl VerylScheduledRtlOutput {
         debug_assert!(self.testbench_source.is_empty());
         ScheduledRtlOutput {
             scheduled: self.scheduled,
-            fused_optimization_hints: self.fused_optimization_hints,
+            event_write_hints: self.event_write_hints,
         }
     }
 }

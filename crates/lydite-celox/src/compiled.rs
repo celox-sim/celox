@@ -114,12 +114,20 @@ fn groups(groups: impl IntoIterator<Item = (StateAddr, Vec<Unit>)>) -> Vec<Event
 }
 impl From<SirProgram<StateAddr, RegionedStateAddr>> for Sir {
     fn from(sir: SirProgram<StateAddr, RegionedStateAddr>) -> Self {
+        let mut events = sir.updates.events;
+        let mut take = |entry| {
+            groups(
+                events
+                    .iter_mut()
+                    .filter_map(|(&addr, event)| Some((addr, event.take(entry)?))),
+            )
+        };
         Self {
-            eval_comb: sir.eval_comb,
-            eval_apply_ffs: groups(sir.eval_apply_ffs),
-            eval_comb_apply_ffs: groups(sir.eval_comb_apply_ffs),
-            eval_only_ffs: groups(sir.eval_only_ffs),
-            apply_ffs: groups(sir.apply_ffs),
+            eval_comb: sir.updates.observe,
+            eval_apply_ffs: take(celox_sir::UpdateEntry::Transition),
+            eval_comb_apply_ffs: take(celox_sir::UpdateEntry::FromInputs),
+            eval_only_ffs: take(celox_sir::UpdateEntry::Sample),
+            apply_ffs: take(celox_sir::UpdateEntry::Publish),
         }
     }
 }

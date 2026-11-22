@@ -109,9 +109,8 @@ pub fn external_signatures_named(
             name: module.name,
             variables: module.variables.clone(),
             ff_access_summaries: HashMap::default(),
-            eval_only_ff_blocks: HashMap::default(),
-            apply_ff_blocks: HashMap::default(),
-            eval_apply_ff_blocks: HashMap::default(),
+            event_graphs: HashMap::default(),
+            event_bodies: HashMap::default(),
             parallel_ff_parts: HashMap::default(),
             instances: Default::default(),
             port_refs: Vec::new(),
@@ -172,9 +171,11 @@ pub struct VerylSimModule {
     pub name: StrId,
     pub variables: HashMap<VarId, Variable>,
     pub ff_access_summaries: HashMap<TriggerSet<VarId>, FfAccessSummary<RegionedVarAddr>>,
-    pub eval_only_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedVarAddr>>,
-    pub apply_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedVarAddr>>,
-    pub eval_apply_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedVarAddr>>,
+    pub event_graphs: HashMap<TriggerSet<VarId>, celox_slt::next_state::NextStateForm<VarId>>,
+    pub event_bodies: HashMap<
+        TriggerSet<VarId>,
+        celox_frontend_core::symbolic::artifact::EventBody<RegionedVarAddr>,
+    >,
     /// Independently evaluated parts of each FF trigger group, lowered only
     /// for lane-partitioned builds.
     pub parallel_ff_parts:
@@ -206,9 +207,7 @@ impl fmt::Debug for VerylSimModule {
             .field("name", &self.name)
             .field("variables", &"<omitted>")
             .field("ff_access_summaries", &self.ff_access_summaries)
-            .field("eval_only_ff_blocks", &self.eval_only_ff_blocks)
-            .field("apply_ff_blocks", &self.apply_ff_blocks)
-            .field("eval_apply_ff_blocks", &self.eval_apply_ff_blocks)
+            .field("event_bodies", &self.event_bodies)
             .field("instances", &self.instances)
             .field("indexed_instance_names", &self.indexed_instance_names)
             .field("comb_blocks", &self.comb_blocks)
@@ -565,13 +564,19 @@ pub(crate) fn project_module_with_ids(
         .map(|observer| map_observer(observer, &module.arena, &mut arena, &mut cache, &ids))
         .collect::<Result<_, _>>()?;
 
-    let map_units = |units: &HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedVarAddr>>| {
-        units
-            .iter()
-            .map(|(trigger, unit)| (map_trigger(trigger, &ids), map_execution_unit(unit, &ids)))
-            .collect()
-    };
-
+    let mut next_state = crate::symbolic::artifact::NextStateForms::default();
+    for (trigger, form) in &module.event_graphs {
+        let form = form.map(map_id, |node| {
+            module
+                .arena
+                .get(node)
+                .map_addr(node, &module.arena, &mut arena, &mut cache, &map_id)
+        })?;
+        next_state.evaluations.insert(
+            map_trigger(trigger, &ids),
+            vec![crate::symbolic::artifact::EdgeEvaluation::Graph(form)],
+        );
+    }
     Ok((
         crate::symbolic::artifact::SimModule {
             time_precision: None,
@@ -616,9 +621,22 @@ pub(crate) fn project_module_with_ids(
                     )
                 })
                 .collect(),
-            eval_only_ff_blocks: map_units(&module.eval_only_ff_blocks),
-            apply_ff_blocks: map_units(&module.apply_ff_blocks),
-            eval_apply_ff_blocks: map_units(&module.eval_apply_ff_blocks),
+            event_bodies: module
+                .event_bodies
+                .iter()
+                .map(|(trigger, body)| {
+                    (
+                        map_trigger(trigger, &ids),
+                        celox_frontend_core::symbolic::artifact::EventBody {
+                            sample: body
+                                .sample
+                                .as_ref()
+                                .map(|unit| map_execution_unit(unit, &ids)),
+                            publish: map_execution_unit(&body.publish, &ids),
+                        },
+                    )
+                })
+                .collect(),
             split_commit_ff_blocks: HashMap::default(),
             parallel_ff_parts: module
                 .parallel_ff_parts
@@ -717,7 +735,7 @@ pub(crate) fn project_module_with_ids(
             time_slot: None,
             sample_shadows: Vec::new(),
             initial_copies: Vec::new(),
-            next_state: Default::default(),
+            next_state,
         },
         ids,
         inferred_latch_diagnostics,

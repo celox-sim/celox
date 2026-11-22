@@ -141,11 +141,24 @@ struct Found {
 
 /// The units of RTL logic: combinational logic and the domains of the events.
 fn rtl_units_of(sir: &crate::ir::SirProgram) -> impl Iterator<Item = &Unit> {
-    sir.eval_comb
+    sir.updates
+        .observe
         .iter()
-        .chain(sir.eval_apply_ffs.values().flatten())
-        .chain(sir.eval_only_ffs.values().flatten())
-        .chain(sir.apply_ffs.values().flatten())
+        .chain(
+            sir.updates
+                .groups(celox_sir::UpdateEntry::Transition)
+                .flat_map(|(_, units)| units),
+        )
+        .chain(
+            sir.updates
+                .groups(celox_sir::UpdateEntry::Sample)
+                .flat_map(|(_, units)| units),
+        )
+        .chain(
+            sir.updates
+                .groups(celox_sir::UpdateEntry::Publish)
+                .flat_map(|(_, units)| units),
+        )
 }
 
 /// The home of an address: the representative of the storage it shares
@@ -262,7 +275,8 @@ impl Plan {
         }
         let sir = &program.sir;
         let comb_fatal = sir
-            .eval_comb
+            .updates
+            .observe
             .iter()
             .any(|unit| instructions(unit).any(crate::ir::may_raise_fatal_capture));
         if comb_fatal && !native_observers {
@@ -271,7 +285,11 @@ impl Plan {
         let rtl_units = || rtl_units_of(sir);
         let planned = || {
             rtl_units()
-                .chain(sir.eval_comb_apply_ffs.values().flatten())
+                .chain(
+                    sir.updates
+                        .groups(celox_sir::UpdateEntry::FromInputs)
+                        .flat_map(|(_, units)| units),
+                )
                 .chain(sir.processes.iter().take(schema.processes.len()))
                 .flat_map(instructions)
         };
@@ -289,7 +307,7 @@ impl Plan {
         // All dependency and settle slices inspect the same immutable units.
         // Index their definitions and control dependencies only once per plan,
         // and only if one of these consumers actually needs a slice.
-        let mut comb_slicer = Slicer::new(|| CombSlicer::new(&sir.eval_comb, shared.clone()));
+        let mut comb_slicer = Slicer::new(|| CombSlicer::new(&sir.updates.observe, shared.clone()));
         let mut builder = PlanBuilder {
             program,
             slots,

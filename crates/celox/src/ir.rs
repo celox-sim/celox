@@ -643,20 +643,7 @@ impl OptimizedSir {
     ) -> Self {
         // Frontend captures carry logical site IDs. Give every backend the
         // same nonzero fatal status, disjoint from positive loop/error codes.
-        for unit in sir
-            .eval_comb
-            .iter_mut()
-            .chain(sir.eval_apply_ffs.values_mut().flatten())
-            .chain(sir.eval_comb_apply_ffs.values_mut().flatten())
-            .chain(sir.eval_only_ffs.values_mut().flatten())
-            .chain(sir.apply_ffs.values_mut().flatten())
-            .chain(sir.processes.iter_mut())
-            .chain(
-                sir.parallel
-                    .iter_mut()
-                    .flat_map(|parallel| parallel.units_mut().map(|unit| &mut unit.unit)),
-            )
-        {
+        for unit in sir.units_mut() {
             for instruction in unit
                 .blocks
                 .values_mut()
@@ -1056,12 +1043,12 @@ impl OptimizedSir {
                 .state_aliases_mut()
                 .retain(|alias_addr, _| {
                     !comb_capture_enable_needs_unaliased_old_value(
-                        program.sir.eval_comb.iter().chain(
+                        program.sir.updates.observe.iter().chain(
                             program
                                 .sir
                                 .parallel
                                 .iter()
-                                .flat_map(|parallel| parallel.eval_comb.iter())
+                                .flat_map(|parallel| parallel.observe.iter())
                                 .map(|unit| &unit.unit),
                         ),
                         *alias_addr,
@@ -1147,7 +1134,7 @@ fn collect_comb_writes(program: &mut OptimizedSir) {
         .copied()
         .chain(program.runtime.runtime_schema.comb_writes.iter().copied())
         .collect();
-    for unit in &program.sir.eval_comb {
+    for unit in &program.sir.updates.observe {
         for block in unit.blocks.values() {
             for instruction in &block.instructions {
                 comb_writes.extend(
@@ -1166,12 +1153,37 @@ fn rebuild_rtl_writes(program: &mut OptimizedSir) {
     let mut rtl_writes = crate::HashSet::default();
     for unit in program
         .sir
-        .eval_comb
+        .updates
+        .observe
         .iter()
-        .chain(program.sir.eval_apply_ffs.values().flatten())
-        .chain(program.sir.eval_comb_apply_ffs.values().flatten())
-        .chain(program.sir.eval_only_ffs.values().flatten())
-        .chain(program.sir.apply_ffs.values().flatten())
+        .chain(
+            program
+                .sir
+                .updates
+                .groups(celox_sir::UpdateEntry::Transition)
+                .flat_map(|(_, units)| units),
+        )
+        .chain(
+            program
+                .sir
+                .updates
+                .groups(celox_sir::UpdateEntry::FromInputs)
+                .flat_map(|(_, units)| units),
+        )
+        .chain(
+            program
+                .sir
+                .updates
+                .groups(celox_sir::UpdateEntry::Sample)
+                .flat_map(|(_, units)| units),
+        )
+        .chain(
+            program
+                .sir
+                .updates
+                .groups(celox_sir::UpdateEntry::Publish)
+                .flat_map(|(_, units)| units),
+        )
         .chain(
             program
                 .sir
@@ -1529,12 +1541,37 @@ impl RuntimeProgram {
             let mut rtl_accesses = HashSet::default();
             for unit in scheduled
                 .sir
-                .eval_comb
+                .updates
+                .observe
                 .iter()
-                .chain(scheduled.sir.eval_apply_ffs.values().flatten())
-                .chain(scheduled.sir.eval_comb_apply_ffs.values().flatten())
-                .chain(scheduled.sir.eval_only_ffs.values().flatten())
-                .chain(scheduled.sir.apply_ffs.values().flatten())
+                .chain(
+                    scheduled
+                        .sir
+                        .updates
+                        .groups(celox_sir::UpdateEntry::Transition)
+                        .flat_map(|(_, units)| units),
+                )
+                .chain(
+                    scheduled
+                        .sir
+                        .updates
+                        .groups(celox_sir::UpdateEntry::FromInputs)
+                        .flat_map(|(_, units)| units),
+                )
+                .chain(
+                    scheduled
+                        .sir
+                        .updates
+                        .groups(celox_sir::UpdateEntry::Sample)
+                        .flat_map(|(_, units)| units),
+                )
+                .chain(
+                    scheduled
+                        .sir
+                        .updates
+                        .groups(celox_sir::UpdateEntry::Publish)
+                        .flat_map(|(_, units)| units),
+                )
                 .chain(scheduled.sir.processes.iter())
             {
                 for inst in unit.blocks.values().flat_map(|block| &block.instructions) {
@@ -1696,15 +1733,31 @@ impl OptimizedSir {
     /// and every lane-partitioned FF kernel.
     fn ff_units(&self) -> impl Iterator<Item = &ExecutionUnit<RegionedAbsoluteAddr>> {
         self.sir
-            .eval_apply_ffs
-            .values()
-            .chain(self.sir.eval_comb_apply_ffs.values())
-            .chain(self.sir.eval_only_ffs.values())
-            .chain(self.sir.apply_ffs.values())
+            .updates
+            .groups(celox_sir::UpdateEntry::Transition)
+            .map(|(_, units)| units)
+            .chain(
+                self.sir
+                    .updates
+                    .groups(celox_sir::UpdateEntry::FromInputs)
+                    .map(|(_, units)| units),
+            )
+            .chain(
+                self.sir
+                    .updates
+                    .groups(celox_sir::UpdateEntry::Sample)
+                    .map(|(_, units)| units),
+            )
+            .chain(
+                self.sir
+                    .updates
+                    .groups(celox_sir::UpdateEntry::Publish)
+                    .map(|(_, units)| units),
+            )
             .flatten()
             .chain(self.sir.parallel.iter().flat_map(|parallel| {
                 parallel
-                    .eval_apply_ffs
+                    .events
                     .values()
                     .flat_map(|kernel| kernel.units().map(|unit| &unit.unit))
             }))
@@ -1714,16 +1767,27 @@ impl OptimizedSir {
         let mut addrs = crate::HashSet::default();
         let parallel_units = self.sir.parallel.iter().flat_map(|parallel| {
             parallel
-                .eval_apply_ffs
+                .events
                 .values()
                 .flat_map(|kernel| kernel.units().map(|unit| &unit.unit))
         });
         for eu in self
             .sir
-            .eval_apply_ffs
-            .values()
-            .chain(self.sir.eval_comb_apply_ffs.values())
-            .chain(self.sir.eval_only_ffs.values())
+            .updates
+            .groups(celox_sir::UpdateEntry::Transition)
+            .map(|(_, units)| units)
+            .chain(
+                self.sir
+                    .updates
+                    .groups(celox_sir::UpdateEntry::FromInputs)
+                    .map(|(_, units)| units),
+            )
+            .chain(
+                self.sir
+                    .updates
+                    .groups(celox_sir::UpdateEntry::Sample)
+                    .map(|(_, units)| units),
+            )
             .flatten()
             .chain(parallel_units)
         {
@@ -1810,17 +1874,19 @@ impl OptimizedSir {
                 }
             }
         }
-        fn sorted_values<V>(map: &HashMap<AbsoluteAddr, V>) -> impl Iterator<Item = &V> {
-            let mut keys = map.keys().collect::<Vec<_>>();
-            keys.sort_unstable();
-            keys.into_iter().map(|key| &map[key])
+        fn sorted_values<'a, V: 'a>(
+            groups: impl IntoIterator<Item = (&'a AbsoluteAddr, &'a V)>,
+        ) -> impl Iterator<Item = &'a V> {
+            let mut groups = groups.into_iter().collect::<Vec<_>>();
+            groups.sort_unstable_by_key(|(addr, _)| **addr);
+            groups.into_iter().map(|(_, v)| v)
         }
         let mut rank = HashMap::default();
         if let Some(parallel) = &self.sir.parallel {
             let units = parallel
-                .eval_comb
+                .observe
                 .iter()
-                .chain(sorted_values(&parallel.eval_apply_ffs).flat_map(|kernel| kernel.units()))
+                .chain(sorted_values(&parallel.events).flat_map(|kernel| kernel.units()))
                 .collect::<Vec<_>>();
             for lane in 0..parallel.lanes {
                 for unit in units.iter().filter(|unit| unit.lane == lane) {
@@ -1828,20 +1894,30 @@ impl OptimizedSir {
                 }
             }
         }
-        for unit in sorted_values(&self.sir.eval_apply_ffs)
-            .chain(sorted_values(&self.sir.eval_comb_apply_ffs))
-            .chain(sorted_values(&self.sir.apply_ffs))
+        for unit in sorted_values(self.sir.updates.groups(celox_sir::UpdateEntry::Transition))
+            .chain(sorted_values(
+                self.sir.updates.groups(celox_sir::UpdateEntry::FromInputs),
+            ))
+            .chain(sorted_values(
+                self.sir.updates.groups(celox_sir::UpdateEntry::Publish),
+            ))
             .flatten()
         {
             visit_commits(unit, &mut rank);
         }
         for unit in self
             .sir
-            .eval_comb
+            .updates
+            .observe
             .iter()
-            .chain(sorted_values(&self.sir.eval_apply_ffs).flatten())
-            .chain(sorted_values(&self.sir.eval_only_ffs).flatten())
-            .chain(sorted_values(&self.sir.apply_ffs).flatten())
+            .chain(
+                sorted_values(self.sir.updates.groups(celox_sir::UpdateEntry::Transition))
+                    .flatten(),
+            )
+            .chain(sorted_values(self.sir.updates.groups(celox_sir::UpdateEntry::Sample)).flatten())
+            .chain(
+                sorted_values(self.sir.updates.groups(celox_sir::UpdateEntry::Publish)).flatten(),
+            )
         {
             visit(unit, &mut rank);
         }

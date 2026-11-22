@@ -882,10 +882,9 @@ pub(super) fn attach_functions(
 
     fn for_each_unit_mut(module: &mut SimModule, kept: &[Option<u32>]) {
         let units = module
-            .eval_only_ff_blocks
+            .event_bodies
             .values_mut()
-            .chain(module.apply_ff_blocks.values_mut())
-            .chain(module.eval_apply_ff_blocks.values_mut())
+            .flat_map(|body| body.sample.iter_mut().chain([&mut body.publish]))
             .chain(
                 module
                     .split_commit_ff_blocks
@@ -920,10 +919,9 @@ pub(super) fn attach_functions(
 /// combinational process units.
 fn module_units(module: &SimModule) -> impl Iterator<Item = &ExecutionUnit<Addr>> {
     module
-        .eval_only_ff_blocks
+        .event_bodies
         .values()
-        .chain(module.apply_ff_blocks.values())
-        .chain(module.eval_apply_ff_blocks.values())
+        .flat_map(|body| body.sample.iter().chain([&body.publish]))
         .chain(
             module
                 .split_commit_ff_blocks

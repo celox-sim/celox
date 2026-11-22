@@ -30,7 +30,7 @@ use crate::symbolic::artifact::ExternalModule;
 pub use artifact::{VerylSimModule as SimModule, VerylSymbolicRtl};
 pub use artifact::{external_signatures, external_signatures_named};
 pub(crate) use celox_frontend_core::{
-    FrontendLookup, FrontendTrace, FrontendTraceOptions, FusedSirOptimizationHints, InstancePath,
+    EventWriteHints, FrontendLookup, FrontendTrace, FrontendTraceOptions, InstancePath,
     ScheduledRtl, ScheduledRtlOutput, SourceAddr, SourceVarId, VariableInfo, VariableKind,
 };
 pub use config::BuildConfig;

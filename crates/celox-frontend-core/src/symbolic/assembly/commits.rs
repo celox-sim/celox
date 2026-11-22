@@ -100,8 +100,7 @@ pub(super) fn through_comb(
 /// split keep them.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn split_observed_commits<'k>(
-    eval_only_ffs: &mut HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
-    apply_ffs: &mut HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+    updates: &mut ScheduledUpdates,
     split_commits: SplitCommits,
     comb_sources: &HashMap<AbsoluteAddr, HashSet<AbsoluteAddr>>,
     kernels: impl Iterator<Item = &'k ExecutionUnit<RegionedAbsoluteAddr>>,
@@ -114,8 +113,8 @@ pub(super) fn split_observed_commits<'k>(
     for kernel in kernels {
         unit_loads(kernel, &mut shared);
     }
-    let evaluation_loads: HashMap<AbsoluteAddr, HashSet<AbsoluteAddr>> = eval_only_ffs
-        .iter()
+    let evaluation_loads: HashMap<AbsoluteAddr, HashSet<AbsoluteAddr>> = updates
+        .groups(UpdateEntry::Sample)
         .map(|(event, units)| {
             let mut loads = HashSet::default();
             for unit in units {
@@ -129,7 +128,11 @@ pub(super) fn split_observed_commits<'k>(
         let Some(splits) = splits.into_iter().collect::<Option<Vec<_>>>() else {
             continue;
         };
-        if apply_ffs.get(&domain).map_or(0, Vec::len) != splits.len() {
+        if updates
+            .at(&domain, UpdateEntry::Publish)
+            .map_or(0, Vec::len)
+            != splits.len()
+        {
             continue;
         }
         let mut blocking = HashSet::default();
@@ -165,8 +168,9 @@ pub(super) fn split_observed_commits<'k>(
             .into_iter()
             .map(|split| (split.active, split.nba))
             .unzip();
-        eval_only_ffs.entry(domain).or_default().extend(active);
-        apply_ffs.insert(domain, nba);
+        let update = updates.events.entry(domain).or_default();
+        update.entry_or_default(UpdateEntry::Sample).extend(active);
+        update.set(UpdateEntry::Publish, nba);
         split.push(domain);
     }
     split.sort_unstable();

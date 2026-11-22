@@ -55,7 +55,7 @@ impl StateGraph {
         shapes: &HashMap<AbsoluteAddr, (usize, bool)>,
         parallel: &ParallelScheduleOptions,
         four_state: bool,
-        fused: bool,
+        source_actions: &HashMap<AbsoluteAddr, Vec<EventAction>>,
         measure_graphs: bool,
     ) -> Result<EventSchedule, ParserError> {
         let active_writes: HashMap<_, HashSet<_>> = split_commits
@@ -73,13 +73,13 @@ impl StateGraph {
                 (event, writes)
             })
             .collect();
-        let graph_clocks = if !fused && !four_state && !parallel.enabled() {
+        let graph_clocks = if !four_state && !parallel.enabled() {
             self.evaluations
                 .iter()
                 .filter_map(|(&event, plan)| {
-                    (!plan.is_empty()
+                    (!source_actions.contains_key(&event)
+                        && !plan.is_empty()
                         && active_writes.get(&event).is_none_or(HashSet::is_empty)
-                        && !units.eval_apply_ffs.contains_key(&event)
                         && plan
                             .iter()
                             .all(|batch| matches!(batch, EdgeEvaluation::Graph(_))))
@@ -90,35 +90,32 @@ impl StateGraph {
             Default::default()
         };
         let dependencies = StateDependencies::new(self, units);
-        let shared_calculations =
-            if !four_state && !parallel.enabled() && !fused && !self.evaluations.is_empty() {
-                let clocks: HashSet<_> = self
-                    .evaluations
-                    .keys()
-                    .chain(units.eval_apply_ffs.keys())
-                    .copied()
-                    .collect();
-                // Estimate demand before inlining moves any of these producers.
-                let full_settle = settle_partitioning(
-                    parallel,
-                    &self.comb_blocks,
-                    &self.global_arena,
-                    clocks.len(),
-                )
-                .is_none();
-                dependencies.shared_calculations(
-                    &self.global_arena,
-                    event_nets(&clocks, &design.clock_domains),
-                    full_settle.then_some(&self.evaluations),
-                )
-            } else {
-                HashSet::default()
-            };
+        let shared_calculations = if !four_state
+            && !parallel.enabled()
+            && source_actions.is_empty()
+            && !self.evaluations.is_empty()
+        {
+            let clocks: HashSet<_> = self.evaluations.keys().copied().collect();
+            // Estimate demand before inlining moves any of these producers.
+            let full_settle = settle_partitioning(
+                parallel,
+                &self.comb_blocks,
+                &self.global_arena,
+                clocks.len(),
+            )
+            .is_none();
+            dependencies.shared_calculations(
+                &self.global_arena,
+                event_nets(&clocks, &design.clock_domains),
+                full_settle.then_some(&self.evaluations),
+            )
+        } else {
+            HashSet::default()
+        };
         self.connect_samples(
             &dependencies,
             &shared_calculations,
             design,
-            units,
             initial,
             shapes,
             &active_writes,
@@ -136,13 +133,13 @@ impl StateGraph {
                 }
             }
         }
-        units.eval_only_ffs = lower_event_evaluations(
+        lower_event_evaluations(
             std::mem::take(&mut self.evaluations),
             &self.global_arena,
             &design.unpacked_element_widths,
-            &units.apply_ffs,
+            &mut units.updates,
             &graph_clocks,
-            &mut units.eval_apply_ffs,
+            four_state,
         )?;
         if measure_graphs {
             // A frontend may also provide non-executable forms to compare its
@@ -187,7 +184,7 @@ impl StateGraph {
         event_nets: &HashSet<AbsoluteAddr>,
         shared: &HashSet<AbsoluteAddr>,
         elements: &HashMap<AbsoluteAddr, usize>,
-    ) -> FfUnits {
+    ) -> EventUnits {
         if clocks.is_empty() {
             return Default::default();
         }
@@ -230,7 +227,7 @@ impl StateGraph {
         // A tick that needs a shared result runs after the shared settle.
         // The driven-leaf check below selects this path for that event.
         drivers.nets.retain(|net, _| !shared.contains(net));
-        let mut ticks = FfUnits::default();
+        let mut ticks = EventUnits::default();
         for clock in clocks {
             let Some(edge) = self.transitions.get(clock) else {
                 continue;

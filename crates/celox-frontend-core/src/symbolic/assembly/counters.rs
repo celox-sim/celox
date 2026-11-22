@@ -106,24 +106,22 @@ pub(super) fn add_copied_probes(
     }
 }
 
-pub(super) type FfUnits = HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>;
+pub(super) type EventUnits = HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>;
 
 pub(super) type FfParts = HashMap<AbsoluteAddr, Vec<(InstanceId, FfPart<RegionedAbsoluteAddr>)>>;
 
 /// The signals some flip-flop evaluation may store twice in its working
 /// state in one execution.
 pub(super) fn ff_multi_stored(
-    eval_apply_ffs: &FfUnits,
-    eval_only_ffs: &FfUnits,
+    updates: &ScheduledUpdates,
     parallel_ff_units: &FfParts,
 ) -> HashSet<AbsoluteAddr> {
     let working = |address: &RegionedAbsoluteAddr| {
         (address.region == WORKING_REGION).then(|| address.absolute_addr())
     };
-    eval_apply_ffs
-        .values()
-        .chain(eval_only_ffs.values())
-        .flatten()
+    [UpdateEntry::Transition, UpdateEntry::Sample]
+        .into_iter()
+        .flat_map(|entry| updates.groups(entry).flat_map(|(_, units)| units))
         .chain(
             parallel_ff_units
                 .values()
@@ -136,17 +134,16 @@ pub(super) fn ff_multi_stored(
 
 /// Run `f` on every flip-flop evaluation.
 pub(super) fn for_each_ff_evaluation(
-    eval_apply_ffs: &mut FfUnits,
-    eval_only_ffs: &mut FfUnits,
+    updates: &mut ScheduledUpdates,
     parallel_ff_units: &mut FfParts,
     mut f: impl FnMut(&mut ExecutionUnit<RegionedAbsoluteAddr>),
 ) {
-    for unit in eval_apply_ffs
-        .values_mut()
-        .chain(eval_only_ffs.values_mut())
-        .flatten()
-    {
-        f(unit);
+    for update in updates.events.values_mut() {
+        for at in [UpdateEntry::Transition, UpdateEntry::Sample] {
+            for unit in update.entry_mut(at).into_iter().flatten() {
+                f(unit);
+            }
+        }
     }
     for (_, part) in parallel_ff_units.values_mut().flatten() {
         f(&mut part.evaluate);

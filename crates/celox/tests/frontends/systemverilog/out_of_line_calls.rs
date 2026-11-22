@@ -532,7 +532,7 @@ endmodule
         .expect("compiles")
         .sir;
     assert_eq!(sir.functions.len(), 1);
-    let kernels = &sir.parallel.as_ref().expect("partitioned").eval_apply_ffs;
+    let kernels = &sir.parallel.as_ref().expect("partitioned").events;
     let calls = |unit: &celox_sir::ExecutionUnit<_>| {
         unit.blocks.values().any(|block| {
             block

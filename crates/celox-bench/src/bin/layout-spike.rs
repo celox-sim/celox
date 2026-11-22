@@ -10,6 +10,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use celox::UpdateEntry;
 use celox::{
     AbsoluteAddr, MemoryLayout, MemoryLayoutMode, OptLevel, OptimizeOptions, OptimizedSir,
     SirProgram, compile_to_sir,
@@ -247,7 +248,14 @@ fn build(
 }
 
 fn snapshots(program: &OptimizedSir, four_state: bool) -> [LayoutAndEvents; 2] {
-    let events = event_ids(&program.sir, &program.design.events.aliases);
+    let events = event_ids(
+        &program.sir,
+        &program.design.events.aliases,
+        &program
+            .design
+            .events
+            .execution_order(program.sir.updates.events.keys().copied()),
+    );
     // Native tiered execution uses ElementStrided; VCD and Cranelift use
     // Packed. Check both without recompiling the SIR for each layout.
     [MemoryLayoutMode::Packed, MemoryLayoutMode::ElementStrided].map(|mode| {
@@ -258,21 +266,25 @@ fn snapshots(program: &OptimizedSir, four_state: bool) -> [LayoutAndEvents; 2] {
     })
 }
 
-fn event_ids(sir: &SirProgram, aliases: &FxHashMap<AbsoluteAddr, AbsoluteAddr>) -> EventIds {
-    // Mirror InterpBackend::new: one first-seen ID space across the three
-    // schedule maps in their original iteration order. Sorting is safe only
-    // for reporting, after the IDs have been assigned.
-    let mut addr_to_id = FxHashMap::default();
+fn event_ids(
+    sir: &SirProgram,
+    aliases: &FxHashMap<AbsoluteAddr, AbsoluteAddr>,
+    order: &[AbsoluteAddr],
+) -> EventIds {
+    let addr_to_id: FxHashMap<_, _> = order
+        .iter()
+        .enumerate()
+        .map(|(index, addr)| (*addr, index))
+        .collect();
     let mut events = EventIds::default();
     for (group, units) in [
-        ("eval-apply", &sir.eval_apply_ffs),
-        ("eval-only", &sir.eval_only_ffs),
-        ("apply-only", &sir.apply_ffs),
+        ("eval-apply", UpdateEntry::Transition),
+        ("eval-only", UpdateEntry::Sample),
+        ("apply-only", UpdateEntry::Publish),
     ] {
         let mut group_ids = FxHashMap::default();
-        for addr in units.keys() {
-            let next_id = addr_to_id.len();
-            let id = *addr_to_id.entry(*addr).or_insert(next_id);
+        for (addr, _) in sir.updates.groups(units) {
+            let id = addr_to_id[aliases.get(addr).unwrap_or(addr)];
             group_ids.insert(*addr, id);
         }
         // Aliases reuse the canonical event's ID and are present only in
@@ -355,13 +367,7 @@ mod tests {
 
     fn empty_sir() -> SirProgram {
         SirProgram {
-            eval_comb: Vec::new(),
-            eval_apply_ffs: FxHashMap::default(),
-            eval_comb_apply_ffs: FxHashMap::default(),
-            merge_comb_apply: true,
-            eval_comb_stateful: None,
-            eval_only_ffs: FxHashMap::default(),
-            apply_ffs: FxHashMap::default(),
+            updates: Default::default(),
             parallel: None,
             processes: Vec::new(),
             functions: Vec::new(),
@@ -372,14 +378,24 @@ mod tests {
     fn event_ids_share_one_space_and_expand_aliases_per_group() {
         let [a, b, c, alias_a, alias_b, unresolved] = [0, 1, 2, 3, 4, 5].map(address);
         let mut sir = empty_sir();
-        sir.eval_apply_ffs.insert(a, Vec::new());
-        sir.eval_only_ffs = [(a, Vec::new()), (b, Vec::new())].into_iter().collect();
-        sir.apply_ffs = [(a, Vec::new()), (c, Vec::new())].into_iter().collect();
+        for (addr, entry) in [
+            (a, UpdateEntry::Transition),
+            (a, UpdateEntry::Sample),
+            (b, UpdateEntry::Sample),
+            (a, UpdateEntry::Publish),
+            (c, UpdateEntry::Publish),
+        ] {
+            sir.updates
+                .events
+                .entry(addr)
+                .or_default()
+                .set(entry, Vec::new());
+        }
         let aliases = [(alias_a, a), (alias_b, b), (unresolved, address(99))]
             .into_iter()
             .collect();
         assert_eq!(
-            event_ids(&sir, &aliases),
+            event_ids(&sir, &aliases, &[a, b, c]),
             [
                 (("eval-apply", a), 0),
                 (("eval-apply", alias_a), 0),
@@ -397,21 +413,29 @@ mod tests {
     }
 
     #[test]
-    fn identical_membership_with_different_iteration_order_has_different_ids() {
+    fn event_ids_are_independent_of_map_iteration_order() {
         let mut cheap = empty_sir();
-        cheap.eval_apply_ffs = (0..16).map(|id| (address(id), Vec::new())).collect();
+        for id in 0..16 {
+            cheap
+                .updates
+                .events
+                .entry(address(id))
+                .or_default()
+                .set(UpdateEntry::Transition, Vec::new());
+        }
         let mut full = empty_sir();
-        full.eval_apply_ffs.reserve(256);
-        full.eval_apply_ffs.extend(cheap.eval_apply_ffs.clone());
-        assert_eq!(cheap.eval_apply_ffs, full.eval_apply_ffs);
+        full.updates.events.reserve(256);
+        full.updates.events.extend(cheap.updates.events.clone());
+        assert_eq!(cheap.updates.events.len(), full.updates.events.len());
         assert_ne!(
-            cheap.eval_apply_ffs.keys().collect::<Vec<_>>(),
-            full.eval_apply_ffs.keys().collect::<Vec<_>>()
+            cheap.updates.events.keys().collect::<Vec<_>>(),
+            full.updates.events.keys().collect::<Vec<_>>()
         );
-        let cheap_ids = event_ids(&cheap, &FxHashMap::default());
-        let full_ids = event_ids(&full, &FxHashMap::default());
+        let order = (0..16).map(address).collect::<Vec<_>>();
+        let cheap_ids = event_ids(&cheap, &FxHashMap::default(), &order);
+        let full_ids = event_ids(&full, &FxHashMap::default(), &order);
         assert!(cheap_ids.keys().all(|key| full_ids.contains_key(key)));
-        assert_ne!(cheap_ids, full_ids);
+        assert_eq!(cheap_ids, full_ids);
     }
 
     #[test]
@@ -431,16 +455,36 @@ mod tests {
             false,
         );
         assert!(!program.design.events.aliases.is_empty());
-        let actual = event_ids(&program.sir, &program.design.events.aliases);
+        let actual = event_ids(
+            &program.sir,
+            &program.design.events.aliases,
+            &program
+                .design
+                .events
+                .execution_order(program.sir.updates.events.keys().copied()),
+        );
         let laid_out = program.into_laid_out_with_mode(false, MemoryLayoutMode::ElementStrided);
         let interpreter = InterpBackend::new(&laid_out, &SimulatorOptions::default()).unwrap();
         let mut expected = EventIds::default();
         for addr in laid_out
             .sir
-            .eval_apply_ffs
-            .keys()
-            .chain(laid_out.sir.eval_only_ffs.keys())
-            .chain(laid_out.sir.apply_ffs.keys())
+            .updates
+            .groups(UpdateEntry::Transition)
+            .map(|(event, _)| event)
+            .chain(
+                laid_out
+                    .sir
+                    .updates
+                    .groups(UpdateEntry::Sample)
+                    .map(|(event, _)| event),
+            )
+            .chain(
+                laid_out
+                    .sir
+                    .updates
+                    .groups(UpdateEntry::Publish)
+                    .map(|(event, _)| event),
+            )
             .chain(laid_out.design.events.aliases.keys())
         {
             for (group, event) in [

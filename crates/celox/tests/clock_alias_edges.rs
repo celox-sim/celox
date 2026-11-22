@@ -156,7 +156,14 @@ fn replicated_bits_of_a_cell_clock_share_its_domain() {
     // event shared by the copies sensed at the falling edge: they stay
     // apart from the rising domain but are one signal and edge. Without the
     // wiring, every kid clock is an event.
-    assert_eq!(program.sir.eval_apply_ffs.len(), 1 + 1);
+    assert_eq!(
+        program
+            .sir
+            .updates
+            .groups(celox_sir::UpdateEntry::Transition)
+            .count(),
+        1 + 1
+    );
 
     let mut sim = Simulation::from_sv_sources(
         vec![(REPLICATED_CLOCKS, std::path::Path::new("replicated.sv"))],
@@ -199,7 +206,11 @@ fn a_bit_read_before_its_write_is_not_a_copy() {
     let program = result.trace.post_optimized_sir.unwrap();
     let g = program.get_addr(&[], &["g"]).unwrap();
     assert!(
-        program.sir.eval_apply_ffs.contains_key(&g),
+        program
+            .sir
+            .updates
+            .at(&g, celox_sir::UpdateEntry::Transition)
+            .is_some(),
         "`g` is a clock of its own"
     );
 }

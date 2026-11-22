@@ -40,7 +40,7 @@ impl PreparedHotspotScheduler {
         let base = program.runtime().runtime_schema.extern_functions.len();
         let shared: Vec<_> = outlined
             .iter()
-            .map(|unit| matches!(&program.sir.eval_comb[..], [comb] if unit == comb))
+            .map(|unit| matches!(&program.sir.updates.observe[..], [comb] if unit == comb))
             .collect();
         let calls = shared
             .iter()
@@ -58,7 +58,6 @@ impl PreparedHotspotScheduler {
             options.four_state,
             "hotspot",
             NativeMergeKind::Partial,
-            None,
             &options.optimize_options.diagnostics,
             Some(cancel),
             native.baseline,
@@ -165,7 +164,6 @@ impl HotspotCode {
             options.four_state,
             "hotspot",
             NativeMergeKind::Partial,
-            None,
             &native,
             false,
             &options.optimize_options.diagnostics,

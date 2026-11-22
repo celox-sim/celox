@@ -319,17 +319,9 @@ pub(super) fn check_package_variable_drivers(
         let module = &modules[module_id];
         // Publication units also describe the destinations of symbolic edge
         // plans, which only become executable after hierarchy expansion.
-        let triggers: BTreeSet<_> = module
-            .eval_apply_ff_blocks
-            .keys()
-            .chain(module.eval_only_ff_blocks.keys())
-            .chain(module.apply_ff_blocks.keys())
-            .collect();
+        let triggers: BTreeSet<_> = module.event_bodies.keys().collect();
         for (group, trigger) in triggers.into_iter().enumerate() {
-            let legacy = module
-                .eval_apply_ff_blocks
-                .get(trigger)
-                .or_else(|| module.eval_only_ff_blocks.get(trigger));
+            let body = &module.event_bodies[trigger];
             let procedures = module
                 .next_state
                 .evaluations
@@ -340,11 +332,7 @@ pub(super) fn check_package_variable_drivers(
                     crate::symbolic::artifact::EdgeEvaluation::Procedure(unit) => Some(unit),
                     _ => None,
                 });
-            for unit in legacy
-                .into_iter()
-                .chain(module.apply_ff_blocks.get(trigger))
-                .chain(procedures)
-            {
+            for unit in body.sample.iter().chain([&body.publish]).chain(procedures) {
                 for block in unit.blocks.values() {
                     for instruction in &block.instructions {
                         for (address, access) in written_bits(instruction) {

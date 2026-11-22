@@ -254,8 +254,8 @@ fn plan_report(program: &crate::ir::LaidOutProgram, warnings: &[CompilationWarni
     let _ = writeln!(
         report,
         "sir: eval_comb {} units {} instructions; processes {} units {} instructions",
-        sir.eval_comb.len(),
-        instructions(&sir.eval_comb),
+        sir.updates.observe.len(),
+        instructions(&sir.updates.observe),
         sir.processes.len(),
         instructions(&sir.processes),
     );

@@ -44,8 +44,8 @@ pub(super) fn optimize_parallel_units(
     let Some(parallel) = program.sir.parallel.as_mut() else {
         return;
     };
-    run_lane_units(&mut parallel.eval_comb, comb_passes, options);
-    for kernel in parallel.eval_apply_ffs.values_mut() {
+    run_lane_units(&mut parallel.observe, comb_passes, options);
+    for kernel in parallel.events.values_mut() {
         run_lane_units(&mut kernel.evaluations, eval_only_passes, options);
         run_lane_units(&mut kernel.applications, apply_passes, options);
     }
@@ -72,12 +72,12 @@ pub(super) fn publish_parallel_ff_directly(program: &mut OptimizationContext<'_>
     let Some(parallel) = program.sir.parallel.as_mut() else {
         return;
     };
-    for kernel in parallel.eval_apply_ffs.values_mut() {
+    for kernel in parallel.events.values_mut() {
         publish_kernel_directly(kernel);
     }
 }
 
-fn publish_kernel_directly(kernel: &mut celox_sir::ParallelFfKernel<RegionedAbsoluteAddr>) {
+fn publish_kernel_directly(kernel: &mut celox_sir::ParallelEventKernel<RegionedAbsoluteAddr>) {
     use crate::optimizer::pass_eliminate_working_round_trip::eliminate_working_round_trip;
 
     if kernel.evaluations.len() != kernel.applications.len() {
@@ -284,7 +284,7 @@ pub(super) fn optimize_late_parallel_comb(
         .sir
         .parallel
         .as_ref()
-        .is_none_or(|parallel| parallel.eval_comb.is_empty())
+        .is_none_or(|parallel| parallel.observe.is_empty())
     {
         return;
     }
@@ -300,7 +300,7 @@ pub(super) fn optimize_late_parallel_comb(
         .parallel
         .as_mut()
         .expect("checked parallel program above");
-    for LaneUnit { unit, .. } in &mut parallel.eval_comb {
+    for LaneUnit { unit, .. } in &mut parallel.observe {
         let watermark = unit.blocks.keys().map(|block| block.0).max().unwrap_or(0);
         if on(SirPass::LoopIdiom) {
             pass_manager::run_pass(&LoopIdiomPass, unit, options);
@@ -343,7 +343,7 @@ pub(super) fn optimize_late_parallel_comb(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use celox_sir::{LaneUnit, ParallelFfKernel};
+    use celox_sir::{LaneUnit, ParallelEventKernel};
 
     fn address(region: u32, var: u32) -> RegionedAbsoluteAddr {
         RegionedAbsoluteAddr {
@@ -405,13 +405,13 @@ mod tests {
 
     /// Two parts staging objects 0 and 1. The second evaluation reads
     /// object 0 when `later_reader` is set.
-    fn kernel(later_reader: bool) -> ParallelFfKernel<RegionedAbsoluteAddr> {
+    fn kernel(later_reader: bool) -> ParallelEventKernel<RegionedAbsoluteAddr> {
         let mut second = vec![commit(STABLE_REGION, WORKING_REGION, 1)];
         if later_reader {
             second.push(load(STABLE_REGION, 0));
         }
         second.push(store(WORKING_REGION, 1));
-        ParallelFfKernel {
+        ParallelEventKernel {
             evaluations: vec![
                 unit(vec![
                     commit(STABLE_REGION, WORKING_REGION, 0),
