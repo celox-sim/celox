@@ -2,7 +2,7 @@
 
 use super::passes::control_flow::{pass_effect_case_dispatch, pass_guarded_region_sinking};
 use super::passes::dataflow::{
-    pass_circular_priority, pass_pack_concat_phi, pass_vectorize_concat,
+    pass_circular_priority, pass_concat_folding, pass_pack_concat_phi, pass_vectorize_concat,
 };
 use super::*;
 use std::sync::Arc;
@@ -192,6 +192,9 @@ pub fn optimize_merged_chain(
         changed = true;
         verify(eu, "after native final pure-value placement")?;
     }
+    // The schedule and packed-store decisions are final. Removing a pack
+    // here cannot change which settle regions execute on an input change.
+    changed |= pass_concat_folding::fold_private_concat_consumers(eu, four_state);
     if changed {
         pass_vectorize_concat::remove_dead_definitions(eu);
         verify(eu, "after native merged-chain DCE")?;

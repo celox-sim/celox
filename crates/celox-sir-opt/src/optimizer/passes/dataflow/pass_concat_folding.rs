@@ -1,6 +1,9 @@
 //! Concat folding: merge consecutive Slices/Loads in Concat args into
 //! wider operations, reducing ISel's shl+or expansion.
 
+mod private;
+pub(in crate::optimizer) use private::fold_private_concat_consumers;
+
 use super::pass_manager::ExecutionUnitPass;
 use super::shared::{StateWritePositions, collect_all_used_registers, is_unused_definition};
 use crate::HashMap;

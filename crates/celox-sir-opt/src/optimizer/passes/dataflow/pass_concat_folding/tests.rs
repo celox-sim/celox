@@ -317,3 +317,107 @@ fn folding_unpacked_bit_elements_emits_explicit_packed_elements_load() {
         )
     }));
 }
+
+#[test]
+fn packs_only_the_fields_observed_by_a_private_slice() {
+    let [a, b, c, d, packed, result] = std::array::from_fn(RegisterId);
+    let regs = [2, 3, 4, 1, 10, 7]
+        .into_iter()
+        .enumerate()
+        .map(|(id, width)| {
+            (
+                RegisterId(id),
+                RegisterType::Bit {
+                    width,
+                    signed: false,
+                },
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    for (offset, shared, expected) in [(1, false, true), (1, true, false), (2, false, false)] {
+        let event_args = if shared {
+            vec![packed, result]
+        } else {
+            vec![result]
+        };
+        let mut eu = make_eu(
+            vec![
+                SIRInstruction::Concat(packed, vec![a, b, c, d]),
+                SIRInstruction::Slice(result, packed, offset, 7),
+                SIRInstruction::RuntimeEvent {
+                    site_id: 0,
+                    args: event_args,
+                },
+            ],
+            regs.clone(),
+        );
+        let changed = fold_private_concat_consumers(&mut eu, false);
+        assert_eq!(changed, expected);
+        crate::optimizer::remove_dead_sir_definitions(&mut eu);
+        let inst = &eu.blocks[&BlockId(0)].instructions;
+        assert_eq!(
+            inst.iter().any(
+                |i| matches!(i,SIRInstruction::Concat(id,args) if *id==result && args==&[b,c])
+            ),
+            expected
+        );
+        assert_eq!(
+            inst.iter()
+                .any(|i| matches!(i,SIRInstruction::Concat(id,_) if *id==packed)),
+            !expected
+        );
+    }
+}
+
+#[test]
+fn reduces_a_private_pair_of_bits_without_packing() {
+    let [a, b, packed, result] = std::array::from_fn(RegisterId);
+    for (reduction, op) in [
+        (UnaryOp::And, BinaryOp::And),
+        (UnaryOp::Or, BinaryOp::Or),
+        (UnaryOp::Xor, BinaryOp::Xor),
+    ] {
+        for (shared, four_state) in [(false, false), (true, false), (false, true)] {
+            let regs = [1, 1, 2, 1]
+                .into_iter()
+                .enumerate()
+                .map(|(id, width)| {
+                    (
+                        RegisterId(id),
+                        RegisterType::Bit {
+                            width,
+                            signed: false,
+                        },
+                    )
+                })
+                .collect();
+            let args = if shared {
+                vec![result, packed]
+            } else {
+                vec![result]
+            };
+            let mut eu = make_eu(
+                vec![
+                    SIRInstruction::Concat(packed, vec![a, b]),
+                    SIRInstruction::Unary(result, reduction, packed),
+                    SIRInstruction::RuntimeEvent { site_id: 0, args },
+                ],
+                regs,
+            );
+            assert_eq!(
+                fold_private_concat_consumers(&mut eu, four_state),
+                !shared && !four_state
+            );
+            crate::optimizer::remove_dead_sir_definitions(&mut eu);
+            let inst = &eu.blocks[&BlockId(0)].instructions;
+            assert_eq!(
+                inst.contains(&SIRInstruction::Binary(result, a, op, b)),
+                !shared && !four_state
+            );
+            assert_eq!(
+                inst.iter().any(|i| matches!(i, SIRInstruction::Concat(..))),
+                shared || four_state
+            );
+        }
+    }
+}
