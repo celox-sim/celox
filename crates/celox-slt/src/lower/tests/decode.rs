@@ -305,3 +305,135 @@ fn state_table_matches_every_control_word_including_the_unlisted_state() {
         }
     }
 }
+
+fn multi_label_arm(
+    arena: &mut SLTNodeArena<u32>,
+    selector: NodeId,
+    labels: &[u64],
+    value: NodeId,
+    tail: NodeId,
+) -> NodeId {
+    let width = crate::get_width(selector, arena);
+    let mut cond = None;
+    for &label in labels {
+        let literal = constant(arena, label, width);
+        let eq = arena
+            .alloc(SLTNode::Binary(selector, BinaryOp::EqCase, literal))
+            .unwrap();
+        let eq = arena
+            .alloc(SLTNode::Unary(UnaryOp::ToTwoState, eq))
+            .unwrap();
+        cond = Some(match cond {
+            None => eq,
+            Some(prev) => arena
+                .alloc(SLTNode::Binary(prev, BinaryOp::LogicOr, eq))
+                .unwrap(),
+        });
+    }
+    arena
+        .alloc(SLTNode::Mux {
+            cond: cond.unwrap(),
+            then_expr: value,
+            else_expr: tail,
+        })
+        .unwrap()
+}
+
+#[test]
+fn multi_label_decode_preserves_priority_and_holes_across_prefixes() {
+    let mut arena = SLTNodeArena::new();
+    let selector = input(&mut arena, 0, 8);
+    let data = input(&mut arena, 1, 8);
+    let fallback = constant(&mut arena, 0, 8);
+    let second = constant(&mut arena, 19, 8);
+    let first_labels: Vec<_> = (16..32).chain(144..160).collect();
+    let second_labels: Vec<_> = (24..40).chain(220..228).collect();
+    let last = multi_label_arm(&mut arena, selector, &second_labels, second, fallback);
+    let middle = multi_label_arm(&mut arena, selector, &first_labels, data, last);
+    // The first item selects the default explicitly for two later matches.
+    let original = multi_label_arm(&mut arena, selector, &[19, 222], fallback, middle);
+    let mut root = original;
+    reduce_two_state_decodes(&mut arena, [&mut root]).unwrap();
+    assert_ne!(root, original);
+    let mut builder = SIRBuilder::new();
+    let result =
+        SLTToSIRLowerer::new(false).lower(&mut builder, root, &arena, &mut Default::default());
+    let unit = finish_lowering(builder);
+    let mut baseline = SIRBuilder::new();
+    SLTToSIRLowerer::new(false).lower(&mut baseline, original, &arena, &mut Default::default());
+    let instructions = |unit: &ExecutionUnit<u32>| {
+        unit.blocks
+            .values()
+            .map(|block| block.instructions.len())
+            .sum::<usize>()
+    };
+    assert!(instructions(&unit) < instructions(&finish_lowering(baseline)));
+    for address in 0..256 {
+        let expected: u8 = if [19, 222].contains(&address) {
+            0
+        } else if first_labels.contains(&address) {
+            71
+        } else if second_labels.contains(&address) {
+            19
+        } else {
+            0
+        };
+        let memory = [(0, address), (1, 71)]
+            .into_iter()
+            .map(|(addr, v)| {
+                (
+                    addr,
+                    TestSIRValue {
+                        payload: v.into(),
+                        mask: 0u8.into(),
+                    },
+                )
+            })
+            .collect();
+        assert_eq!(
+            execute_fold_group_sir_with_memory(&unit, &memory)[&result].payload,
+            BigUint::from(expected),
+            "address {address}"
+        );
+    }
+}
+
+#[test]
+fn multi_label_decode_checks_all_high_selector_bits() {
+    let mut arena = SLTNodeArena::new();
+    let selector = input(&mut arena, 0, 64);
+    let yes = constant(&mut arena, 1, 1);
+    let no = constant(&mut arena, 0, 1);
+    let bases = [0u64, 1 << 63, u64::MAX - 63];
+    let labels = bases
+        .into_iter()
+        .flat_map(|base| [0, 2, 5, 8, 17, 31, 41, 63].map(|low| base + low))
+        .collect::<Vec<_>>();
+    let original = multi_label_arm(&mut arena, selector, &labels, yes, no);
+    let mut root = original;
+    reduce_two_state_decodes(&mut arena, [&mut root]).unwrap();
+    let mut builder = SIRBuilder::new();
+    let result =
+        SLTToSIRLowerer::new(false).lower(&mut builder, root, &arena, &mut Default::default());
+    let unit = finish_lowering(builder);
+    for base in bases.into_iter().chain([64, 1 << 62, (1 << 63) + 64]) {
+        for low in 0..64 {
+            let addr = base + low;
+            let memory = [(
+                0,
+                TestSIRValue {
+                    payload: addr.into(),
+                    mask: 0u8.into(),
+                },
+            )]
+            .into_iter()
+            .collect();
+            let value = execute_fold_group_sir_with_memory(&unit, &memory);
+            assert_eq!(
+                value[&result].payload,
+                BigUint::from(u8::from(labels.contains(&addr))),
+                "selector {addr:#x}"
+            );
+        }
+    }
+}
