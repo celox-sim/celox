@@ -212,10 +212,9 @@ pub(super) fn fused_ff_inputs(
 
 /// The event signals and their aliases.
 pub(super) fn event_nets(
-    topological_clocks: &[AbsoluteAddr],
+    events: &HashSet<AbsoluteAddr>,
     clock_domains: &HashMap<AbsoluteAddr, AbsoluteAddr>,
 ) -> HashSet<AbsoluteAddr> {
-    let events = topological_clocks.iter().copied().collect::<HashSet<_>>();
     events
         .iter()
         .copied()

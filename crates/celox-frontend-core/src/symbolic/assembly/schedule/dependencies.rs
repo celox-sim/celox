@@ -3,6 +3,8 @@
 //! edge to each input and from each output it declares; its internal order
 //! stays in the kernel.
 
+mod sharing;
+
 use super::*;
 use crate::symbolic::artifact::EdgeEvaluation;
 use crate::symbolic::{read_objects, written_objects};
@@ -110,7 +112,20 @@ impl StateDependencies {
                     };
                     deps.insert(update, reads, [stable(target.id)]);
                 }
-                LogicPathTarget::Process { unit, .. } => {
+                LogicPathTarget::Process {
+                    unit,
+                    sensitivity_counters,
+                    ..
+                } => {
+                    if !sensitivity_counters.is_empty() {
+                        deps.insert(
+                            Update::Procedure(None),
+                            sensitivity_counters
+                                .iter()
+                                .map(|(source, _)| stable(source.id)),
+                            [],
+                        );
+                    }
                     deps.kernel(Update::Procedure(None), unit, |a| stable(*a))
                 }
                 LogicPathTarget::CombCaptureEvent {

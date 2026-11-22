@@ -36,6 +36,12 @@ pub(super) fn lower_clock(
     )
 }
 
+pub(super) struct EventSchedule {
+    pub(super) graph_clocks: HashSet<AbsoluteAddr>,
+    pub(super) write_domains: HashMap<AbsoluteAddr, Vec<AbsoluteAddr>>,
+    pub(super) shared_calculations: HashSet<AbsoluteAddr>,
+}
+
 impl StateGraph {
     /// Resolve samples against the whole design before choosing executable
     /// kernels. Pure events can publish directly; every event also has a
@@ -51,13 +57,7 @@ impl StateGraph {
         four_state: bool,
         fused: bool,
         measure_graphs: bool,
-    ) -> Result<
-        (
-            HashSet<AbsoluteAddr>,
-            HashMap<AbsoluteAddr, Vec<AbsoluteAddr>>,
-        ),
-        ParserError,
-    > {
+    ) -> Result<EventSchedule, ParserError> {
         let active_writes: HashMap<_, HashSet<_>> = split_commits
             .iter()
             .map(|(&event, groups)| {
@@ -90,8 +90,33 @@ impl StateGraph {
             Default::default()
         };
         let dependencies = StateDependencies::new(self, units);
+        let shared_calculations =
+            if !four_state && !parallel.enabled() && !fused && !self.evaluations.is_empty() {
+                let clocks: HashSet<_> = self
+                    .evaluations
+                    .keys()
+                    .chain(units.eval_apply_ffs.keys())
+                    .copied()
+                    .collect();
+                // Estimate demand before inlining moves any of these producers.
+                let full_settle = settle_partitioning(
+                    parallel,
+                    &self.comb_blocks,
+                    &self.global_arena,
+                    clocks.len(),
+                )
+                .is_none();
+                dependencies.shared_calculations(
+                    &self.global_arena,
+                    event_nets(&clocks, &design.clock_domains),
+                    full_settle.then_some(&self.evaluations),
+                )
+            } else {
+                HashSet::default()
+            };
         self.connect_samples(
             &dependencies,
+            &shared_calculations,
             design,
             units,
             initial,
@@ -146,7 +171,11 @@ impl StateGraph {
                 }
             }
         }
-        Ok((graph_clocks, dependencies.write_domains()))
+        Ok(EventSchedule {
+            graph_clocks,
+            write_domains: dependencies.write_domains(),
+            shared_calculations,
+        })
     }
 
     /// Select the writes and event signals needed by this edge. The runtime
@@ -156,6 +185,7 @@ impl StateGraph {
         &self,
         clocks: &HashSet<AbsoluteAddr>,
         event_nets: &HashSet<AbsoluteAddr>,
+        shared: &HashSet<AbsoluteAddr>,
         elements: &HashMap<AbsoluteAddr, usize>,
     ) -> FfUnits {
         if clocks.is_empty() {
@@ -193,10 +223,13 @@ impl StateGraph {
                 return Default::default();
             }
         }
-        let drivers = Drivers::new(&self.global_arena, &self.comb_blocks);
+        let mut drivers = Drivers::new(&self.global_arena, &self.comb_blocks);
         if drivers.nets.len() != driven.len() {
             return Default::default();
         }
+        // A tick that needs a shared result runs after the shared settle.
+        // The driven-leaf check below selects this path for that event.
+        drivers.nets.retain(|net, _| !shared.contains(net));
         let mut ticks = FfUnits::default();
         for clock in clocks {
             let Some(edge) = self.transitions.get(clock) else {
