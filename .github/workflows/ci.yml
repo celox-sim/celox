@@ -583,7 +583,8 @@ jobs:
     needs: [changes, sv-tests]
     if: ${{ !cancelled() && needs.sv-tests.result == 'success' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # UVM cases run serially and runner variance can push a shard past an hour.
+    timeout-minutes: ${{ matrix.set == 'library' && 90 || 60 }}
     strategy:
       fail-fast: false
       matrix:
@@ -629,10 +630,8 @@ jobs:
 
       # The unmodified upstream tools/runner owns test selection and judgement.
       # Improvements also require review before changing the retained results.
-      # The UVM shards' 480-second case timeout absorbs runner variance at
-      # their memory peak (uvm_test_init, 12.8 GB, once took over 300 seconds);
-      # it comes back down to 300 once the memory stack (#3881-#3883, #3886)
-      # lands.
+      # The four-state uvm_register_mem_example can exceed 480 seconds
+      # on hosted runners (#4519).
       - name: Compare official runner verdicts with the retained expectations
         env:
           PYTHONDONTWRITEBYTECODE: "1"
@@ -642,7 +641,7 @@ jobs:
           --driver "$RUNNER_TEMP/driver/sv_tests"
           --out-dir "$RUNNER_TEMP/sv-tests-results"
           --jobs ${{ matrix.set == 'library' && 1 || 4 }}
-          --case-timeout ${{ matrix.set == 'library' && 480 || 78 }}
+          --case-timeout ${{ matrix.set == 'library' && 600 || 78 }}
           --state-mode both
           --shard ${{ matrix.shard }}/${{ matrix.of }}
           ${{ matrix.set == 'library' && '--only-library-cases' || '--exclude-library-cases' }}
