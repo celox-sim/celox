@@ -203,7 +203,7 @@ fn execute_fold_group_sir_with_memory(
                                         &lhs.payload >> shift as usize
                                     }
                                 }
-                                BinaryOp::Eq | BinaryOp::EqWildcard => {
+                                BinaryOp::Eq | BinaryOp::EqCase | BinaryOp::EqWildcard => {
                                     BigUint::from(lhs.payload == rhs.payload)
                                 }
                                 BinaryOp::Ne => BigUint::from(lhs.payload != rhs.payload),
