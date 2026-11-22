@@ -517,3 +517,210 @@ fn settles_of_deferred_fold_groups_are_cut_between_roots() {
     }
     assert_eq!(whole_mem.read(50, 0, 8), BigUint::from(0x77u8));
 }
+
+#[test]
+fn clocked_and_combinational_writes_share_nested_selectors() {
+    use crate::next_state::{NextStateForm, Publication, ValueRoot, lower_transition};
+    let mut arena = SLTNodeArena::new();
+    let selects = [100, 101, 102].map(|variable| {
+        arena
+            .alloc(SLTNode::Input {
+                variable,
+                signed: false,
+                index: Vec::new(),
+                access: BitAccess::new(0, 0),
+            })
+            .unwrap()
+    });
+    let mut paths = Vec::new();
+    let mut form = NextStateForm::default();
+    for target in 0..12 {
+        let mut path = simple_path(&mut arena, target, None);
+        // The narrow leaf must widen at the join for an eight-bit output.
+        let mut expr = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(target),
+                BigUint::zero(),
+                4,
+                false,
+            ))
+            .unwrap();
+        // The repeated test of the outer predicate is already decided.
+        for depth in [0, 0, 1, 2].into_iter().rev() {
+            let cond = selects[depth];
+            let other = arena
+                .alloc(SLTNode::Constant(
+                    BigUint::from(target + 16 * (depth as u32 + 1)),
+                    BigUint::zero(),
+                    8,
+                    false,
+                ))
+                .unwrap();
+            expr = arena
+                .alloc(SLTNode::Mux {
+                    cond,
+                    then_expr: expr,
+                    else_expr: other,
+                })
+                .unwrap();
+        }
+        path.expr = expr;
+        path.sources = (100..=102).map(|id| VarAtomBase::new(id, 0, 0)).collect();
+        paths.push(path);
+        form.roots.push(ValueRoot {
+            target,
+            access: BitAccess::new(0, 7),
+            value: expr,
+        });
+    }
+    let comb = super::sort_with_unit_limits(
+        paths,
+        &arena,
+        &Default::default(),
+        &Default::default(),
+        false,
+        &Default::default(),
+        &Default::default(),
+        1,
+        None,
+        UnitLimits::DEFAULT,
+    )
+    .unwrap()
+    .execution_units;
+    let addr = |id, region| region * 1000 + id;
+    let ff = lower_transition(
+        &arena,
+        &form,
+        Publication::Deferred,
+        false,
+        addr,
+        &Default::default(),
+    )
+    .unwrap();
+    for (units, region) in [
+        (&comb[..], celox_design::STABLE_REGION),
+        (std::slice::from_ref(&ff), celox_design::WORKING_REGION),
+    ] {
+        let branch_count = units
+            .iter()
+            .flat_map(|u| u.blocks.values())
+            .filter(|b| matches!(b.terminator, celox_sir::SIRTerminator::Branch { .. }))
+            .count();
+        assert_eq!(branch_count, 3);
+        let stores = units
+            .iter()
+            .flat_map(|unit| unit.blocks.values())
+            .flat_map(|block| &block.instructions)
+            .filter(|instruction| matches!(instruction, celox_sir::SIRInstruction::Store(..)))
+            .count();
+        // All nested decisions return their 12 values to one publication site.
+        assert_eq!(stores, 2 * 12);
+        for bits in 0u32..8 {
+            let mut mem = Memory::default();
+            for bit in 0..3 {
+                mem.write(100 + bit, 0, 1, &BigUint::from((bits >> bit) & 1));
+            }
+            settle(units, &mut mem);
+            for target in 0..12 {
+                let value = (0..3)
+                    .find(|&b| bits & (1 << b) == 0)
+                    .map_or(target, |depth| target + 16 * (depth + 1));
+                assert_eq!(mem.read(addr(target, region), 0, 8), BigUint::from(value));
+            }
+        }
+    }
+}
+
+#[test]
+fn inner_selector_written_by_the_region_is_read_at_each_assignment() {
+    check_ordered_reads(true);
+}
+
+#[test]
+fn merged_decision_keeps_stores_visible_to_later_values() {
+    check_ordered_reads(false);
+}
+
+fn check_ordered_reads(writes_selector: bool) {
+    let mut arena = SLTNodeArena::new();
+    let mut load = |variable| {
+        arena
+            .alloc(SLTNode::Input {
+                variable,
+                signed: false,
+                index: Vec::new(),
+                access: BitAccess::new(0, 0),
+            })
+            .unwrap()
+    };
+    let outer = load(100);
+    let previous = load(1);
+    let inner = if writes_selector { previous } else { load(101) };
+    let [zero, one, two, three] = [0u8, 1, 2, 3].map(|value| {
+        arena
+            .alloc(SLTNode::Constant(value.into(), 0u8.into(), 8, false))
+            .unwrap()
+    });
+    // Enough distinct muxes that sharing the inner selector would be profitable.
+    // Path 1 changes a value used by path 2.
+    let third = if writes_selector {
+        (two, three)
+    } else {
+        (previous, two)
+    };
+    let mut values = vec![(one, zero), (zero, one), third];
+    for value in 4u8..13 {
+        let extra = arena
+            .alloc(SLTNode::Constant(value.into(), 0u8.into(), 8, false))
+            .unwrap();
+        values.push((extra, zero));
+    }
+    let mut paths = Vec::new();
+    for (id, (yes, no)) in values.into_iter().enumerate() {
+        let selected = arena
+            .alloc(SLTNode::Mux {
+                cond: inner,
+                then_expr: yes,
+                else_expr: no,
+            })
+            .unwrap();
+        let mut path = simple_path(&mut arena, id as u32, None);
+        path.expr = arena
+            .alloc(SLTNode::Mux {
+                cond: outer,
+                then_expr: selected,
+                else_expr: zero,
+            })
+            .unwrap();
+        paths.push(path);
+    }
+    let mut b = celox_sir::SIRBuilder::new();
+    super::emit_scheduled_guard_region(
+        &mut crate::SLTToSIRLowerer::new(false),
+        &mut b,
+        outer,
+        &(0..paths.len()).collect::<Vec<_>>(),
+        &paths,
+        &arena,
+        &mut Default::default(),
+        &mut Default::default(),
+        &mut Default::default(),
+        &Default::default(),
+    );
+    let unit = b.flush_eu().unwrap();
+    unit.verify();
+    for old in [0u8, 1] {
+        let mut mem = Memory::default();
+        mem.write(100, 0, 1, &1u8.into());
+        mem.write(101, 0, 1, &old.into());
+        mem.write(1, 0, 1, &old.into());
+        settle(std::slice::from_ref(&unit), &mut mem);
+        assert_eq!(mem.read(0, 0, 8), old.into());
+        let expected = if writes_selector {
+            2 + old
+        } else {
+            2 * (1 - old)
+        };
+        assert_eq!(mem.read(2, 0, 8), expected.into());
+    }
+}

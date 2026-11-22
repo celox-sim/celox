@@ -1,5 +1,6 @@
 //! Lower the sampled roots and indexed writes of one state transition together.
 use super::{NextStateForm, ValueRoot};
+use crate::condition_groups::{self, Merge, Write};
 use crate::{HashMap, HashSet, NodeId, SLTNode, SLTNodeArena, SLTToSIRLowerer};
 use celox_design::{SPARSE_WORKING_REGION, STABLE_REGION, WORKING_REGION};
 use celox_sir::{
@@ -192,18 +193,17 @@ fn lower_edge<A: Copy + Eq + Hash + Debug + Display, B: Copy + Eq + Hash + Debug
     // Deferred destinations cannot change any graph input. Keep a common
     // selector as control flow, even when the clock also owns unrelated
     // registers or RAM ports. Captured SSA values must dominate publication.
-    let mux = |id| match *mapped.get(id) {
-        SLTNode::Mux {
-            cond,
-            then_expr,
-            else_expr,
-        } => Some((cond, then_expr, else_expr)),
+    let target = |i: usize| form.roots[i].target;
+    let selector = |w: &Write| match *mapped.get(w.value) {
+        SLTNode::Mux { cond, .. } => Some(cond),
         _ => None,
     };
-    let target = |i: usize| form.roots[i].target;
-    let selector = |i: usize| mux(root_nodes[i]).map(|(cond, ..)| cond);
     let group = stream && !four_state;
-    let mut order: Vec<_> = (0..root_nodes.len()).collect();
+    let mut order: Vec<_> = root_nodes
+        .iter()
+        .enumerate()
+        .map(|(index, &value)| Write { index, value })
+        .collect();
     if group {
         group_staged_roots(
             &mut order,
@@ -213,13 +213,14 @@ fn lower_edge<A: Copy + Eq + Hash + Debug + Display, B: Copy + Eq + Hash + Debug
         );
     }
     let mut enables = HashMap::default();
-    for bank in order.chunk_by(|&a, &b| {
+    for bank in order.chunk_by(|a, b| {
         group
-            && !captured.contains(&target(a))
-            && !captured.contains(&target(b))
+            && !captured.contains(&target(a.index))
+            && !captured.contains(&target(b.index))
             && selector(a).is_some_and(|cond| selector(b) == Some(cond))
     }) {
-        if let &[i] = bank {
+        if let [write] = bank {
+            let i = write.index;
             let root = &form.roots[i];
             let capture = captured.contains(&root.target);
             let feedback = (capture && group && unchanged.contains(&root.target))
@@ -264,87 +265,66 @@ fn lower_edge<A: Copy + Eq + Hash + Debug + Display, B: Copy + Eq + Hash + Debug
             }
             continue;
         }
-        let (condition, ..) = mux(root_nodes[bank[0]]).expect("a bank of muxes");
-        let cond = lowerer.lower(&mut b, condition, &mapped, &mut lowered);
-        let yes = b.new_block();
-        let no = b.new_block();
-        let done = b.new_block();
-        b.seal_block(SIRTerminator::Branch {
-            cond,
-            true_block: (yes, Vec::new()),
-            false_block: (no, Vec::new()),
-        });
-        for arm in [yes, no] {
-            b.switch_to_block(arm);
-            let mut local = Vec::new();
-            let arm_value = |i: usize| {
-                let (_, then_expr, else_expr) = mux(root_nodes[i]).expect("a bank of muxes");
-                if arm == yes { then_expr } else { else_expr }
-            };
-            let feedback = |i: usize| {
-                let root = &form.roots[i];
-                feedback_arm(&mapped, arm_value(i), stable(&root.target), root.access)
-            };
-            // Registers can share a reset but have different enables on its
-            // inactive arm. Stage each independent enabled bank together.
-            let enable = |i| feedback(i).map(|(condition, polarity, _)| (condition, polarity));
-            let mut order = bank.to_vec();
-            group_staged_roots(
-                &mut order,
-                |i| address(target(i), WORKING_REGION),
-                |_| false,
-                |i| enable(i).map(|(condition, _)| condition),
-            );
-            for bank in order.chunk_by(|&a, &b| enable(a).is_some() && enable(a) == enable(b)) {
-                let nested_join = if bank.len() > 1 {
-                    let (condition, polarity) =
-                        enable(bank[0]).expect("a bank with a shared enable");
-                    let cond = lowerer.lower(&mut b, condition, &mapped, &mut lowered);
-                    local.extend(lowerer.take_scheduled_region_insertions());
-                    Some(open_enabled_bank(
-                        &mut b,
-                        cond,
-                        polarity,
-                        bank.iter().map(|&i| &form.roots[i]),
-                        &address,
-                        Publication::Deferred,
-                    ))
-                } else {
-                    None
+        let condition = selector(&bank[0]).expect("a bank of muxes");
+        condition_groups::emit(
+            bank.to_vec(),
+            condition,
+            &mapped,
+            &mut lowerer,
+            &mut b,
+            &mut lowered,
+            |writes, selector| {
+                group_staged_roots(
+                    writes,
+                    |i| address(target(i), WORKING_REGION),
+                    |_| false,
+                    selector,
+                );
+            },
+            |cond, group| {
+                let feedback = |w: &Write| {
+                    let root = &form.roots[w.index];
+                    feedback_arm(&mapped, w.value, stable(&root.target), root.access).is_some()
                 };
-                let checkpoint = local.len();
-                for &i in bank {
-                    let root = &form.roots[i];
-                    let expr = if nested_join.is_some() {
-                        feedback(i).expect("an enabled write").2
-                    } else {
-                        arm_value(i)
-                    };
-                    let value = lowerer.lower(&mut b, expr, &mapped, &mut lowered);
-                    let value =
-                        lowerer.cast_reg_width(&mut b, value, crate::get_width(root.value, dag));
-                    local.extend(lowerer.take_scheduled_region_insertions());
-                    b.emit(root_store(
-                        &b,
-                        root,
-                        address(root.target, WORKING_REGION),
-                        value,
-                    )?);
+                if group.iter().all(feedback) {
+                    Merge::Branch
+                } else if !condition_groups::profitable(
+                    &mapped,
+                    cond,
+                    group.iter().map(|w| w.value),
+                ) {
+                    Merge::Separate
+                } else if group.iter().any(feedback) {
+                    Merge::Branch
+                } else {
+                    Merge::BranchWithIndependentWrites
                 }
-                if let Some(done) = nested_join {
-                    b.seal_block(SIRTerminator::Jump(done, Vec::new()));
-                    b.switch_to_block(done);
-                    for node in local.drain(checkpoint..) {
-                        lowered.remove(&node);
-                    }
+            },
+            |w, prepared, lowerer, b, cache, local| {
+                let root = &form.roots[w.index];
+                let working = address(root.target, WORKING_REGION);
+                if matches!(mapped.get(w.value),SLTNode::Input {variable,access,index,..}
+                    if *variable == stable(&root.target) && *access == root.access && index.is_empty())
+                {
+                    b.emit(SIRInstruction::Commit(
+                        stable(&root.target),
+                        working,
+                        SIROffset::Static(root.access.lsb),
+                        root.access.msb - root.access.lsb + 1,
+                        Vec::new(),
+                    ));
+                } else {
+                    let value = prepared.unwrap_or_else(|| {
+                        let value = lowerer.lower(b, w.value, &mapped, cache);
+                        local.extend(lowerer.take_scheduled_region_insertions());
+                        value
+                    });
+                    let value = lowerer.cast_reg_width(b, value, crate::get_width(root.value, dag));
+                    b.emit(root_store(b, root, working, value)?);
                 }
-            }
-            for node in local {
-                lowered.remove(&node);
-            }
-            b.seal_block(SIRTerminator::Jump(done, Vec::new()));
-        }
-        b.switch_to_block(done);
+                Ok::<_, String>(())
+            },
+        )?;
     }
     for (port, nodes) in form.ports.iter().zip(port_nodes.as_chunks::<3>().0) {
         let [index, value, guard] =
@@ -479,26 +459,26 @@ fn feedback_arm<A: Clone + Eq + Hash>(
 /// writes at the first use of their selector. Keep captured values in place,
 /// and preserve source order for multiple writes to the same staging slot.
 fn group_staged_roots<B: Copy + Eq + Hash>(
-    order: &mut [usize],
+    order: &mut [Write],
     target: impl Fn(usize) -> B,
-    captured: impl Fn(usize) -> bool,
-    selector: impl Fn(usize) -> Option<NodeId>,
+    barrier: impl Fn(usize) -> bool,
+    selector: impl Fn(&Write) -> Option<NodeId>,
 ) {
     let mut seen = HashSet::default();
     let repeated: HashSet<_> = order
         .iter()
-        .copied()
-        .map(&target)
+        .map(|w| target(w.index))
         .filter(|&addr| !seen.insert(addr))
         .collect();
-    for run in order.split_mut(|&i| captured(i) || repeated.contains(&target(i))) {
+    for run in order.split_mut(|item| barrier(item.index) || repeated.contains(&target(item.index)))
+    {
         let mut first = HashMap::default();
-        for &i in run.iter() {
+        for i in run.iter() {
             if let Some(cond) = selector(i) {
-                first.entry(cond).or_insert(i);
+                first.entry(cond).or_insert(i.index);
             }
         }
-        run.sort_by_cached_key(|&i| selector(i).map_or(i, |cond| first[&cond]));
+        run.sort_by_cached_key(|i| selector(i).map_or_else(|| i.index, |cond| first[&cond]));
     }
 }
 
@@ -711,15 +691,18 @@ mod tests {
 
     #[test]
     fn overlapping_writes_and_captured_values_keep_their_positions() {
-        let mut order = [0, 1, 2, 3, 4, 5, 6, 7];
+        let mut order = std::array::from_fn::<_, 8, _>(|index| Write {
+            index,
+            value: NodeId(index),
+        });
         let slots = [0, 1, 2, 3, 3, 5, 6, 7];
         let guards = [0, 1, 0, 0, 1, 0, 1, 0];
         group_staged_roots(
             &mut order,
             |i| slots[i],
             |i| i == 6,
-            |i| Some(NodeId(guards[i])),
+            |w| Some(NodeId(guards[w.index])),
         );
-        assert_eq!(order, [0, 2, 1, 3, 4, 5, 6, 7]);
+        assert_eq!(order.map(|w| w.index), [0, 2, 1, 3, 4, 5, 6, 7]);
     }
 }

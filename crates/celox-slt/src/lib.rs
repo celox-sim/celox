@@ -9,6 +9,7 @@ use celox_design::VarAtomBase;
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 pub mod canon;
+mod condition_groups;
 pub mod const_inline;
 mod lower;
 pub mod net_inline;
