@@ -2308,6 +2308,7 @@ impl MBlock {
 #[derive(Debug, Clone)]
 pub struct MFunction {
     /// Entered from generated code with its state base and pinned XMMs live.
+    #[cfg(any(target_arch = "x86_64", feature = "cross-codegen"))]
     pub(crate) region_entry: bool,
     /// Basic blocks in layout order. `blocks[0]` is the unique CFG entry and
     /// no block may branch back to it; loops therefore have a distinct header.
@@ -2346,6 +2347,7 @@ impl MFunction {
             blocks: Vec::new(),
             spill_descs,
             vregs,
+            #[cfg(any(target_arch = "x86_64", feature = "cross-codegen"))]
             region_entry: false,
             x86_vec_count: 0,
             constant_tables: Vec::new(),

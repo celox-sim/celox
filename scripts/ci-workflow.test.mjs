@@ -690,7 +690,8 @@ test("sv-tests shards reuse one driver and together cover every case", () => {
   assert.ok(fullSets.main > 1 && fullSets.library > 1);
   assert.match(shard, /--shard \$\{\{ matrix\.shard \}\}\/\$\{\{ matrix\.of \}\}\n/);
   assert.match(shard, /--jobs \$\{\{ matrix\.set == 'library' && 1 \|\| 4 \}\}\n/);
-  assert.match(shard, /--case-timeout \$\{\{ matrix\.set == 'library' && \d+ \|\| 78 \}\}\n/);
+  assert.match(shard, /--case-timeout \$\{\{ matrix\.set == 'library' && 600 \|\| 78 \}\}\n/);
+  assert.match(shard, /timeout-minutes: \$\{\{ matrix\.set == 'library' && 90 \|\| 60 \}\}/);
   assert.match(
     shard,
     /\n\s+\$\{\{ matrix\.set == 'library' && '--only-library-cases' \|\| '--exclude-library-cases' \}\}\n/,
