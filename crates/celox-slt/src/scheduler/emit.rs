@@ -277,75 +277,66 @@ pub(super) fn emit_scheduled_guard_region<
         collect_logic_path_input_deps(&input[path], arena, dep_memo, inverse_dep_memo);
     }
 
-    let condition_value = lowerer.lower(builder, condition, arena, lower_cache);
-    let then_block = builder.new_block();
-    let else_block = builder.new_block();
-    let merge_block = builder.new_block();
-    builder.seal_block(SIRTerminator::Branch {
-        cond: condition_value,
-        true_block: (then_block, Vec::new()),
-        false_block: (else_block, Vec::new()),
-    });
-
-    let mut affected = paths
+    use crate::condition_groups::{self, Merge, Write};
+    let writes = paths
         .iter()
-        .filter_map(|path| input[*path].target.var())
-        .filter_map(|target| inverse_dep_memo.get(&target.id))
-        .flatten()
-        .copied()
-        .collect::<Vec<_>>();
-    affected.sort_unstable();
-    affected.dedup();
-    let saved_cache = affected
+        .map(|&index| Write {
+            index,
+            value: input[index].expr,
+        })
+        .collect();
+    // An earlier path can publish a new selector value in this region.
+    // Merge only predicates which all of its writes leave invariant.
+    let targets = paths
         .iter()
-        .filter_map(|node| lower_cache.get(node).copied().map(|value| (*node, value)))
-        .collect::<Vec<_>>();
-
-    let mut emit_arm = |builder: &mut SIRBuilder<Addr>,
-                        lower_cache: &mut HashMap<NodeId, RegisterId>,
-                        take_true: bool| {
-        let mut inserted = Vec::new();
-        for &path in paths {
-            let (_, then_expr, else_expr) = scheduled_root_mux(&input[path], arena)
-                .expect("scheduled guard region must retain root Muxes");
-            let root = if take_true { then_expr } else { else_expr };
-            // Keep the existing per-LogicPath lowering model for nested
-            // decisions. The scheduled region owns only the common outer
-            // guard; changing fanout/cost facts for all nested Muxes at once
-            // would silently replace the established branch decisions.
-            let value = lowerer.lower(builder, root, arena, lower_cache);
-            inserted.extend(lowerer.take_scheduled_region_insertions());
+        .filter_map(|&i| input[i].target.var().map(|t| t.id))
+        .collect();
+    let mut stable = HashMap::default();
+    let result = condition_groups::emit(
+        writes,
+        condition,
+        arena,
+        lowerer,
+        builder,
+        lower_cache,
+        |_, _| {}, // Keep visibility of earlier combinational assignments.
+        |cond, group| {
+            if !*stable
+                .entry(cond)
+                .or_insert_with(|| !condition_reads_target(cond, &targets, arena))
+                || !condition_groups::profitable(arena, cond, group.iter().map(|w| w.value))
+            {
+                return Merge::Separate;
+            }
+            let mut written = HashSet::default();
+            for w in group {
+                if !dep_memo[&w.value].is_disjoint(&written) {
+                    return Merge::Branch;
+                }
+                written.insert(input[w.index].target.var().expect("guarded variable").id);
+            }
+            Merge::BranchWithIndependentWrites
+        },
+        |write, prepared, lowerer, builder, cache, local| {
+            let path = &input[write.index];
+            let value = prepared.unwrap_or_else(|| {
+                let value = lowerer.lower(builder, write.value, arena, cache);
+                local.extend(lowerer.take_scheduled_region_insertions());
+                value
+            });
+            let value = lowerer.cast_reg_width(builder, value, crate::get_width(path.expr, arena));
             emit_logic_path_store_with_result(
                 lowerer,
                 builder,
-                &input[path],
+                path,
                 arena,
-                lower_cache,
+                cache,
                 unpacked_element_widths,
                 Some(value),
             );
-            invalidate_logic_path_target(&input[path], inverse_dep_memo, lower_cache);
-        }
-        builder.seal_block(SIRTerminator::Jump(merge_block, Vec::new()));
-        for node in inserted {
-            lower_cache.remove(&node);
-        }
-        for node in &affected {
-            lower_cache.remove(node);
-        }
-        lower_cache.extend(saved_cache.iter().copied());
-    };
-
-    builder.switch_to_block(then_block);
-    emit_arm(builder, lower_cache, true);
-    builder.switch_to_block(else_block);
-    emit_arm(builder, lower_cache, false);
-    builder.switch_to_block(merge_block);
-
-    // Both arms publish every path target, so cached expressions reading any
-    // such target are invalid at the merge even when both arm caches happened
-    // to contain the same SLT node identity.
-    for node in affected {
-        lower_cache.remove(&node);
-    }
+            invalidate_logic_path_target(path, inverse_dep_memo, cache);
+            Ok::<_, std::convert::Infallible>(())
+        },
+    );
+    let Ok(()) = result;
 }
