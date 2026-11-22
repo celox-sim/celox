@@ -20,6 +20,12 @@ impl Ff<'_, '_> {
                 .m
                 .id(&canonical.var)
                 .is_some_and(|id| self.m.is_hidden(id) || runs_without_others(body))
+            // A real loop variable takes real values, which the integral
+            // unrolling would store as its bits (6.12).
+            && self
+                .m
+                .id(&canonical.var)
+                .is_some_and(|id| self.m.var(id).float.is_none())
             && let Some((values, last)) = self.unrolled_values(&canonical, condition, step, body)?
         {
             return self.unroll(&canonical, &values, last, body);
@@ -289,29 +295,43 @@ impl Ff<'_, '_> {
         } else {
             header
         };
-        // Latch: the step, then the condition again. A counted loop whose
-        // step leaves its variable unchanged would never end; it stops the
-        // simulation with an error instead.
+        // Latch: the step, then the condition again. Compare a real loop
+        // variable by its stored bits (6.12, 20.5). A stalled real step
+        // implies that the test stays true only if the test has no calls
+        // and the body cannot change its inputs, exit or let other processes run.
         self.b.switch_to_block(latch);
-        let progress = match kind {
-            sv::ir::LoopKind::For => canonical_for_loop(init, condition, step)
-                .and_then(|canonical| Some((canonical.var.clone(), self.m.id(&canonical.var)?))),
+        let progress = match (kind, condition) {
+            (sv::ir::LoopKind::For, Some(test)) => counted_for_loop(init, Some(test), step)
+                .and_then(|shape| {
+                    let id = self.m.id(shape.var)?;
+                    let integral_step = shape.integral_step().is_some();
+                    let check = if self.m.var(id).float.is_some() {
+                        (integral_step || shape.has_real_step())
+                            && self.real_loop_test_is_invariant(test, body)
+                    } else {
+                        integral_step
+                    };
+                    check.then_some((shape.var, id))
+                }),
             _ => None,
         };
-        let previous = match &progress {
+        let previous = match progress {
             Some((var, id)) => {
-                let (width, signed) = (self.m.var(*id).width, self.m.var(*id).signed);
+                let variable = self.m.var(id);
+                let width = variable.width;
+                let signed = variable.float.is_none() && variable.signed;
+                let observed = self.sampled_value(sv::ir::Expr::Ident(var.to_owned()));
                 let (temp, temp_name) = self.m.temp("progress", width, signed, false);
-                let value = self.eval(&sv::ir::Expr::Ident(var.clone()), Some((width, signed)))?;
+                let value = self.eval(&observed, Some((width, signed)))?;
                 self.store(temp, SIROffset::Static(0), width, value);
-                Some(temp_name)
+                Some((id, observed, temp_name))
             }
             None => None,
         };
         if self.exec_block(step)? {
-            if let (Some((var, id)), Some(previous)) = (&progress, previous) {
+            if let Some((id, observed, previous)) = previous {
                 let stalled = sv::ir::Expr::Binary {
-                    left: Box::new(sv::ir::Expr::Ident(var.clone())),
+                    left: Box::new(observed),
                     op: sv::ir::BinaryOp::EqCase,
                     right: Box::new(sv::ir::Expr::Ident(previous)),
                 };
@@ -323,12 +343,12 @@ impl Ff<'_, '_> {
                     false_block: (header, Vec::new()),
                 });
                 self.b.switch_to_block(error_block);
-                let source = self.m.var(*id).path[0].clone();
+                let source = self.m.var(id).path[0].clone();
                 let code = self.m.runtime_error(format!(
                     "Non-progressing for loop in always_ff (loop variable `{source}`)"
                 ));
                 if let Some(info) = self.m.runtime.errors.get_mut(&code) {
-                    info.signals.push(*id);
+                    info.signals.push(id);
                 }
                 self.b.seal_block(SIRTerminator::Error(code));
             } else {
@@ -337,6 +357,28 @@ impl Ff<'_, '_> {
         }
         self.b.switch_to_block(exit);
         Ok(true)
+    }
+
+    fn real_loop_test_is_invariant(&self, test: &sv::ir::Expr, body: &[sv::ir::Stmt]) -> bool {
+        if expr_calls(test, &mut |_| true)
+            || stmts_may_jump(body, false)
+            || !runs_without_others(body)
+        {
+            return false;
+        }
+        let mut reads = HashSet::default();
+        expr_idents(test, &mut reads);
+        let mut changes_test = !self.m.written_names(body).is_disjoint(&reads);
+        for stmt in body {
+            stmt.walk(&mut |stmt| {
+                changes_test |= match stmt {
+                    sv::ir::Stmt::ForceStore { lhs, .. } => reads.contains(lhs.name()),
+                    sv::ir::Stmt::DeferActive => true,
+                    _ => false,
+                };
+            });
+        }
+        !changes_test
     }
 
     /// The back edge of a kernel loop that may not suspend: count the

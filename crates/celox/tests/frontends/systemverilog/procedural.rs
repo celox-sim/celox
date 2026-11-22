@@ -101,6 +101,44 @@ endmodule
 }
 
 sv_backends! {
+    fn real_for_loop_without_progress_reports_an_error(sim) {
+        // A step below the precision of the variable leaves its bits as they
+        // are, so the loop would never end.
+        @setup { let source = r#"
+            module Top(input bit clk, output int q);
+                real r;
+                always_ff @(posedge clk) begin
+                    q = 0;
+                    for (r = 1e20; r < 1e21; r = r + 1) q = q + 1;
+                end
+            endmodule
+        "#; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("real_loop_stall.sv"))], "Top");
+        let clk = sim.event("clk");
+        let error = sim.tick(clk).unwrap_err().to_string();
+        assert!(error.contains("Non-progressing for loop"), "{error}");
+    }
+}
+
+sv_backends! {
+    fn shortreal_for_loop_without_progress_reports_an_error(sim) {
+        @setup { let source = r#"
+            module Top(input bit clk, output int q);
+                shortreal r;
+                always_ff @(posedge clk) begin
+                    q = 0;
+                    for (r = 16777216.0; r < 16777232.0; r = r + 1.0) q = q + 1;
+                end
+            endmodule
+        "#; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("shortreal_loop_stall.sv"))], "Top");
+        let clk = sim.event("clk");
+        let error = sim.tick(clk).unwrap_err().to_string();
+        assert!(error.contains("Non-progressing for loop"), "{error}");
+    }
+}
+
+sv_backends! {
     fn static_function_real_storage_restores_checkpoint(sim) {
         @setup { let source = r#"
             module Top(input bit clk, output logic [63:0] value);
