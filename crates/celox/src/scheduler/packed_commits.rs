@@ -104,7 +104,8 @@ fn copy_words(
         let src = constant(b, (run[0].range.working + offset) as u64);
         let dst = constant(b, (run[0].range.stable + offset) as u64);
         let value = read(b, src);
-        let partial = len < 8;
+        let direct_store = NativeMemoryOp::state_store(len.min(8));
+        let partial = direct_store.is_none();
         let notify = lanes.iter().any(|(readers, _)| *readers != 0);
         let value = if partial || notify {
             let old = read(b, dst);
@@ -126,7 +127,9 @@ fn copy_words(
         };
         b.emit(SIRInstruction::ExternCall {
             dst: None,
-            func: NativeMemoryOp::WriteState.function(),
+            func: direct_store
+                .unwrap_or(NativeMemoryOp::WriteState)
+                .function(),
             args: vec![dst, value],
         });
     }

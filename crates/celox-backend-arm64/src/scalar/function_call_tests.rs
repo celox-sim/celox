@@ -1271,6 +1271,10 @@ fn native_memory_operations_access_state_and_indirect_words() {
                 binary(7, 5, BinaryOp::Add, 6),
                 imm(8, 0),
                 call(None, Memory::WriteIndirect, &[3, 8, 7]),
+                imm(10, (layout.offsets[&object(KEEP)] + 1) as u64),
+                call(None, Memory::WriteState32, &[10, 1]),
+                call(None, Memory::WriteState16, &[2, 1]),
+                call(None, Memory::WriteState8, &[10, 1]),
                 load(9, state(KEEP), 32),
                 store(state(SP), 32, 9),
             ],
@@ -1278,7 +1282,7 @@ fn native_memory_operations_access_state_and_indirect_words() {
         )]
         .into_iter()
         .collect(),
-        register_map: (0..=9)
+        register_map: (0..=10)
             .map(|id| (reg(id), bit(if id == 9 { 32 } else { 64 })))
             .collect(),
     };
@@ -1295,8 +1299,12 @@ fn native_memory_operations_access_state_and_indirect_words() {
             memory[out..out + 8].copy_from_slice(&0x0123_4567_89ab_cdefu64.to_le_bytes())
         });
         assert_eq!(status, 0);
-        assert_eq!(word(&layout, &memory, KEEP), 0x89ab_cdef);
-        assert_eq!(word(&layout, &memory, SP), 0x89ab_cdef);
+        let keep = layout.offsets[&object(KEEP)];
+        assert_eq!(
+            memory[keep..keep + 8],
+            [0xef, 0xef, 0xcd, 0xab, 0x89, 0x45, 0x23, 0x01]
+        );
+        assert_eq!(word(&layout, &memory, SP), 0xabcd_efef);
         assert_eq!(*words, [42, 41]);
     }
     let _ = (compiled, &mut words);

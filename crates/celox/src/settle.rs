@@ -386,10 +386,7 @@ pub(crate) fn is_wide_commit_access(instruction: &SIRInstruction<RegionedAbsolut
     matches!(
         instruction,
         SIRInstruction::ExternCall { func, .. }
-            if matches!(
-                NativeMemoryOp::decode(*func),
-                Some(NativeMemoryOp::ReadState | NativeMemoryOp::WriteState)
-            )
+            if NativeMemoryOp::decode(*func).is_some_and(NativeMemoryOp::accesses_state)
     )
 }
 
@@ -406,7 +403,7 @@ pub(crate) fn without_shadow_commits(
         matches!(
             instruction,
             SIRInstruction::ExternCall { func, .. }
-                if NativeMemoryOp::decode(*func) == Some(NativeMemoryOp::WriteState)
+                if NativeMemoryOp::decode(*func).and_then(NativeMemoryOp::state_store_bytes).is_some()
         )
     };
     let shadows = |instructions: &[SIRInstruction<RegionedAbsoluteAddr>]| {
@@ -1345,7 +1342,8 @@ impl<'a> Marker<'a> {
                 BinaryOp::Xor,
                 stable,
             ));
-            let new = if len < 8 {
+            let direct_store = NativeMemoryOp::state_store(len);
+            let new = if direct_store.is_none() {
                 // The bytes after the run keep their stable value.
                 let mask = alloc.register(unit, word_type());
                 segment
@@ -1372,7 +1370,9 @@ impl<'a> Marker<'a> {
             };
             segment.instructions.push(SIRInstruction::ExternCall {
                 dst: None,
-                func: NativeMemoryOp::WriteState.function(),
+                func: direct_store
+                    .unwrap_or(NativeMemoryOp::WriteState)
+                    .function(),
                 args: vec![stable_address, new],
             });
             offset += len;
@@ -1394,7 +1394,7 @@ impl<'a> Marker<'a> {
             segment
                 .instructions
                 .push(SIRInstruction::Imm(zero, SIRValue::new(0u64)));
-            let tested = if watched == window {
+            let tested = if watched == u64::MAX || (direct_store.is_none() && watched == window) {
                 differing
             } else {
                 let mask = alloc.register(unit, word_type());
@@ -1680,7 +1680,7 @@ mod tests {
         let is_commit = |instruction: &&SIRInstruction<RegionedAbsoluteAddr>| {
             matches!(instruction, SIRInstruction::Commit(..))
         };
-        let mut wide_runs = 0;
+        let mut narrow_runs = 0;
         for [first, second, third] in [[0, 1, 2], [1, 2, 0], [0, 2, 1]] {
             // Two whole registers, then part of a third: the part cannot
             // join the run.
@@ -1710,7 +1710,13 @@ mod tests {
                 // The two are not neighbours in both regions.
                 continue;
             }
-            wide_runs += 1;
+            if layout.offsets[&registers[first]].abs_diff(layout.offsets[&registers[second]]) == 1 {
+                assert!(
+                    instructions().any(|i| matches!(i, SIRInstruction::ExternCall { func, .. }
+                    if NativeMemoryOp::decode(*func) == Some(NativeMemoryOp::WriteState16)))
+                );
+                narrow_runs += 1;
+            }
             assert_eq!(instructions().filter(is_commit).count(), 3);
             let stripped = without_shadow_commits(&unit);
             let kept: Vec<_> = stripped
@@ -1721,6 +1727,9 @@ mod tests {
                 .collect();
             assert_eq!(kept, [&part]);
         }
-        assert_ne!(wide_runs, 0, "no two of the registers commit by words");
+        assert_ne!(
+            narrow_runs, 0,
+            "no adjacent register pair committed together"
+        );
     }
 }

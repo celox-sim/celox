@@ -1251,21 +1251,26 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
         // instead of calling an extern function.
         if let Some(op) = celox_sir::native_memory::NativeMemoryOp::decode(func) {
             use celox_sir::native_memory::NativeMemoryOp as Op;
-            let in_bounds = |offset: u64| {
+            let in_bounds = |offset: u64, bytes: usize| {
                 offset
-                    .checked_add(8)
+                    .checked_add(bytes as u64)
                     .is_some_and(|end| end <= (self.memory.len() as u64) * 8)
             };
             return match op {
-                Op::ReadState if args.len() == 1 && in_bounds(args[0]) => {
+                Op::ReadState if args.len() == 1 && in_bounds(args[0], 8) => {
                     // Safety: the bounds check above keeps the access
                     // inside the merged allocation.
                     Ok(unsafe { self.read_u64(args[0] as usize) })
                 }
-                Op::WriteState if args.len() == 2 && in_bounds(args[0]) => {
-                    // Safety: the bounds check above keeps the access
-                    // inside the merged allocation.
-                    unsafe { self.write_u64(args[0] as usize, args[1]) };
+                op if let Some(bytes) = op.state_store_bytes()
+                    && args.len() == 2
+                    && in_bounds(args[0], bytes) =>
+                {
+                    // Safety: the checked range is inside the state image.
+                    let target = unsafe {
+                        std::slice::from_raw_parts_mut(self.byte_mut(args[0] as usize), bytes)
+                    };
+                    target.copy_from_slice(&args[1].to_le_bytes()[..bytes]);
                     Ok(0)
                 }
                 _ => Err(InterpError::UnsupportedOperation(format!(

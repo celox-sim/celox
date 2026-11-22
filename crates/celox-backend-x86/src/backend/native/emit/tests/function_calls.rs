@@ -1439,6 +1439,13 @@ fn native_scheduler_memory_stays_in_generated_code() {
                     operation(Op::ReadState, Some(5), &[2]),
                     imm(6, 32),
                     operation(Op::WriteIndirect, None, &[0, 6, 5]),
+                    // Overlapping, unaligned state stores preserve the neighbouring bytes.
+                    imm(12, (offset + 1) as u64),
+                    operation(Op::WriteState32, None, &[12, 3]),
+                    imm(13, (offset + 2) as u64),
+                    operation(Op::WriteState16, None, &[13, 3]),
+                    imm(14, (offset + 3) as u64),
+                    operation(Op::WriteState8, None, &[14, 3]),
                     SIRInstruction::Slice(reg(11), reg(10), 8, 8),
                     store(state(OUT), 8, 11),
                 ],
@@ -1451,6 +1458,9 @@ fn native_scheduler_memory_stays_in_generated_code() {
                 .chain([
                     (reg(10), RegisterType::Logic { width: 100 }),
                     (reg(11), RegisterType::Logic { width: 8 }),
+                    (reg(12), bit(64)),
+                    (reg(13), bit(64)),
+                    (reg(14), bit(64)),
                 ])
                 .collect(),
         };
@@ -1469,6 +1479,10 @@ fn native_scheduler_memory_stays_in_generated_code() {
         assert_eq!(status, 0);
         assert_eq!(arena[3], 0xfedc_ba98_7654_3210);
         assert_eq!(arena[4], arena[3]);
+        assert_eq!(
+            memory[offset..offset + 8],
+            [0x10, 0x10, 0x10, 0x10, 0x76, 0xba, 0xdc, 0xfe]
+        );
         assert_eq!(
             memory[layout.offsets[&object(OUT)]],
             0xcd,

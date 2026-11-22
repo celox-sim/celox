@@ -237,6 +237,7 @@ fn lower_native_memory(
     args: &[RegisterId],
 ) {
     use celox_sir::native_memory::NativeMemoryOp::*;
+    let store_size = ISelContext::op_size_for_width(op.state_store_bytes().unwrap_or(8) * 8);
     let words: Vec<_> = args.iter().map(|&arg| ctx.reg_map.get(arg)).collect();
     let result = dst.map(|_| ctx.alloc_vreg(SpillDesc::transient()));
     match op {
@@ -263,12 +264,12 @@ fn lower_native_memory(
             size: OpSize::S64,
             alias_range: None,
         }),
-        WriteState => block.push(MInst::StoreIndexed {
+        WriteState | WriteState8 | WriteState16 | WriteState32 => block.push(MInst::StoreIndexed {
             base: BaseReg::SimState,
             offset: 0,
             index: words[0],
             src: words[1],
-            size: OpSize::S64,
+            size: store_size,
             alias_range: None,
         }),
     }
