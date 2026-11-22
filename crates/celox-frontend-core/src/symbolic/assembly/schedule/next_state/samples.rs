@@ -11,6 +11,7 @@ impl StateGraph {
     pub(in super::super) fn connect_samples(
         &mut self,
         dependencies: &StateDependencies,
+        shared: &HashSet<AbsoluteAddr>,
         design: &Design,
         units: &mut Units,
         initial: &[InstanceValue],
@@ -95,6 +96,9 @@ impl StateGraph {
                 .all(|input| available.contains(&input))
         });
 
+        // Each consumer samples the stored result of a shared calculation.
+        // Its inputs still qualify as ordinary settled leaves above.
+        drivers.nets.retain(|target, _| !shared.contains(target));
         let moved = feedback_producers(&drivers, dependencies, &mut settled_reads);
         drivers.nets.retain(|target, ranges| {
             let (_, expr) = ranges[0];

@@ -744,4 +744,43 @@ mod tests {
         assert_eq!(additions(false), 2);
         assert_eq!(additions(true), 1);
     }
+
+    #[test]
+    fn conditional_clock_reads_reuse_an_independently_observed_value() {
+        use celox_design::BinaryOp;
+        use celox_sir::SIRInstruction;
+
+        let source = r#"
+module Top(input bit src, a, b, ena, enb, input bit [7:0] d,
+           output bit [7:0] qa, qb, output int changes);
+    bit [7:0] x;
+    always_ff @(posedge src) x <= d;
+    wire [7:0] product = x * x;
+    always_ff @(posedge a) qa <= ena ? product : 8'd0;
+    always_ff @(posedge b) qb <= enb ? product : 8'd0;
+    OBSERVER
+endmodule"#;
+        for observed in [false, true] {
+            let watch = if observed {
+                "initial forever begin @(product); changes++; end"
+            } else {
+                ""
+            };
+            let source = source.replace("OBSERVER", watch);
+            let sir = schedule(&source, true, DeadStorePolicy::PreserveTopPorts);
+            let products = sir
+                .eval_apply_ffs
+                .values()
+                .flatten()
+                .flat_map(|unit| unit.blocks.values())
+                .flat_map(|block| &block.instructions)
+                .filter(|inst| matches!(inst, SIRInstruction::Binary(_, _, BinaryOp::Mul, _)))
+                .count();
+            assert_eq!(
+                products,
+                if observed { 0 } else { 2 },
+                "observed={observed}"
+            );
+        }
+    }
 }

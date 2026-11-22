@@ -154,7 +154,11 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         relocate_design(&design, parallel, flatten_timing, trace_opts, &mut trace)?;
     let variables = variable_shapes(&design);
     let measure_graphs = tracing::enabled!(target: "celox::next_state", tracing::Level::INFO);
-    let (graph_clocks, write_domains) = logic.lower_events(
+    let EventSchedule {
+        graph_clocks,
+        write_domains,
+        shared_calculations,
+    } = logic.lower_events(
         &design,
         &mut units,
         &instance_values,
@@ -237,7 +241,10 @@ pub fn schedule_symbolic_rtl_reporting_loops(
 
     // The event signals and their aliases: a partitioned settle keeps their
     // paths apart from the rest.
-    let clock_nets = event_nets(&clocks.topological_clocks, &design.clock_domains);
+    let clock_nets = event_nets(
+        &clocks.topological_clocks.iter().copied().collect(),
+        &design.clock_domains,
+    );
     // Stores to event signals update shared trigger bytes; their writers stay
     // in one lane of a partitioned schedule.
     let lane0_objects = parallel.enabled().then(|| clock_nets.clone());
@@ -297,7 +304,12 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         && ignored_loops.is_empty()
         && true_loops.is_empty()
     {
-        logic.tick_programs(&graph_clocks, &clock_nets, &design.unpacked_element_widths)
+        logic.tick_programs(
+            &graph_clocks,
+            &clock_nets,
+            &shared_calculations,
+            &design.unpacked_element_widths,
+        )
     } else {
         FfUnits::default()
     };
@@ -367,15 +379,13 @@ pub fn schedule_symbolic_rtl_reporting_loops(
     }
     let (eval_comb_stateful, eval_comb, parallel_eval_comb) =
         stable_comb_units(schedule, parallel_comb, &mut units.runtime_errors);
-    // Every event's combined comb-then-FF tick gets its own program, with
-    // the combinational program in it, only while there are a handful of
-    // events; that copy lets the FF part use comb values in registers.
-    // Beyond that the copies would multiply the design by its event count,
-    // so the ticks share the one `eval_comb` program instead.
-    // A merged program drops comb stores the next full settle would redo;
-    // a partitioned settle keeps what its skipped partitions stored.
-    let merge_comb_apply =
-        units.eval_apply_ffs.len() <= MERGED_COMB_APPLY_EVENTS && settle_flags.is_none();
+    // Merging a small design lets the FF sample comb values in registers.
+    // Keep a single settle program when it owns a calculation shared with
+    // another clock or an observer, or when copying it for every event is
+    // too expensive. Partitioned settles also retain skipped outputs.
+    let merge_comb_apply = units.eval_apply_ffs.len() <= MERGED_COMB_APPLY_EVENTS
+        && settle_flags.is_none()
+        && shared_calculations.is_empty();
     let (mut eval_comb_apply_ffs, fused_direct_ff_writes) = schedule_fused_ffs(
         fused_ff_factory,
         fused_inputs,
