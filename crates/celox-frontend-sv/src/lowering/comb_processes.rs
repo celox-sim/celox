@@ -154,10 +154,11 @@ pub(super) fn lower_comb_processes(
                 return Err(driver_error(process));
             }
             pm.runtime.event_sites = std::mem::take(&mut sites);
+            let reads = pm.comb_reads(process);
             comb_blocks.extend(
                 ff::Ff::new(&mut pm, random_seeds[&(2, index)]).lower_comb_process(
                     process.body(),
-                    process.sensitivity_body(),
+                    reads,
                     process.kind(),
                     allow_inferred_latches,
                     process.site(),
@@ -320,10 +321,11 @@ pub(super) fn lower_comb_processes(
                 // interpreting held values as a combinational feedback loop.
                 drop(comb);
                 pm.runtime.event_sites = std::mem::take(&mut sites);
+                let reads = pm.comb_reads(process);
                 comb_blocks.extend(
                     ff::Ff::new(&mut pm, random_seeds[&(2, index)]).lower_comb_process(
                         process.body(),
-                        process.sensitivity_body(),
+                        reads,
                         process.kind(),
                         allow_inferred_latches,
                         process.site(),
@@ -344,12 +346,7 @@ pub(super) fn lower_comb_processes(
         }) {
             // Symbolic array reads may conservatively depend on every element.
             // Process activation follows the syntactic static selection instead.
-            let include_functions = process.kind() != sv::ir::CombProcessKind::AlwaysStar;
-            let mut reads = comb.m.implicit_reads(process.body(), include_functions);
-            reads.extend(
-                comb.m
-                    .implicit_reads(process.sensitivity_body(), include_functions),
-            );
+            let reads = comb.m.comb_reads(process);
             for observer in &mut comb.events.observers {
                 observer.sensitivity = observer
                     .sensitivity
@@ -436,9 +433,10 @@ pub(super) fn lower_comb_processes(
     for (target, body) in port_assignments {
         pm.call_unit();
         pm.runtime.event_sites = std::mem::take(&mut sites);
+        let reads = pm.implicit_reads(body, true);
         comb_blocks.extend(ff::Ff::new(&mut pm, 0).lower_comb_process(
             body,
-            &[],
+            reads,
             sv::ir::CombProcessKind::ContinuousAssign,
             false,
             None,
@@ -516,11 +514,12 @@ fn lower_comb_alternative(
     let checkpoint = pm.checkpoint();
     pm.attempt_calls();
     let mut scratch = SLTNodeArena::new();
+    let reads = pm.comb_reads(process);
     let lowered = ff::Ff::new(pm, random_seed)
         .without_input_occurrences()
         .lower_comb_process(
             process.body(),
-            process.sensitivity_body(),
+            reads,
             process.kind(),
             false,
             process.site(),

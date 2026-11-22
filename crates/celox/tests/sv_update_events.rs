@@ -45,6 +45,60 @@ macro_rules! update_events {
                     .count()
             }
 
+            /// The imperative alternative for a graph decoder must wake on
+            /// the authored part-select, and replay a blocking 1 -> 0 -> 1.
+            #[test]
+            fn explicit_decoder_replays_writes_only_on_its_selected_bits() {
+                let mut sim = simulation(
+                    "bit [3:0] word;
+                     always @(word[1:0]) begin
+                         c = 0;
+                         if (|word[1:0]) c = 1;
+                     end
+                     initial #1 forever begin @(negedge c); count++; end
+                     initial begin #2 word = 1; #2 word = 5; #2 word = 7; end",
+                );
+                for (time, expected_edges) in [(3, 0), (5, 0), (7, 1)] {
+                    sim.run_until(time).unwrap();
+                    assert_eq!(value(&mut sim, "c"), 1);
+                    assert_eq!(value(&mut sim, "count"), expected_edges, "time={time}");
+                }
+            }
+
+            #[test]
+            fn explicit_decoder_preserves_time_zero_in_both_state_modes() {
+                let source = "`timescale 1ns/1ns
+                module Top;
+                    bit [3:0] word;
+                    bit y;
+                    initial y = 1;
+                    always @(word[1:0]) begin y = 0; if (|word[1:0]) y = 1; end
+                    initial #2 word = 1;
+                endmodule";
+                for four_state in [false, true] {
+                    let mut sim = celox::Simulation::from_sv_sources(
+                        vec![(source, Path::new("decoder_startup.sv"))],
+                        "Top",
+                    )
+                    .four_state(four_state)
+                    .scheduler_mode(scheduler_mode())
+                    .$backend()
+                    .unwrap();
+                    sim.run_until(1).unwrap();
+                    assert_eq!(
+                        value(&mut sim, "y"),
+                        u64::from(four_state),
+                        "startup four_state={four_state}"
+                    );
+                    sim.run_until(3).unwrap();
+                    assert_eq!(
+                        value(&mut sim, "y"),
+                        1,
+                        "after event four_state={four_state}"
+                    );
+                }
+            }
+
             /// The assertion failures of `sim` until `time`.
             fn failures(sim: &mut celox::Simulation<impl celox::SimBackend>, time: u64) -> usize {
                 sim.run_until(time).unwrap();

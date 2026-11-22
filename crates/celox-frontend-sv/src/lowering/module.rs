@@ -610,8 +610,8 @@ fn lower_module_with_overrides(
     // The level-sensitive lowering below changes processes only: one table
     // of the subroutines serves every lowering of the module.
     let tables = procedural::ModuleTables::new(module);
-    // `always @(list)` naming exactly the reads of its statement is
-    // `always @*` (IEEE 1800-2023 9.4.2.2), which needs no process.
+    // A combinational definition can replace a level-sensitive process
+    // when the authored events cover the inputs that determine its result.
     let level_sensitive = match level_lists {
         LevelLists::Processes => None,
         LevelLists::Lowered { demoted } => Some(demoted),
@@ -637,7 +637,7 @@ fn lower_module_with_overrides(
             !demoted.contains(&process.creation_order())
                 && process
                     .level_sensitive()
-                    .is_some_and(|(items, body)| pm.is_implicit_event_list(items, body))
+                    .is_some_and(|(items, body)| pm.can_lower_level_list(items, body))
         })
     });
     let module = level_sensitive.as_ref().unwrap_or(module);

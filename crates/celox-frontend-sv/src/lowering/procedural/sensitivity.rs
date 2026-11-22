@@ -4,30 +4,14 @@
 use super::*;
 
 impl ProcModule<'_> {
-    /// Whether `always @(items) body` simulates like `always @* body`. The
-    /// body must neither suspend nor make a nonblocking assignment, directly
-    /// or in a call. Then either
-    /// - the items name exactly the variables the implicit event expression
-    ///   of `body` has (IEEE 1800-2023 9.4.2.2), a part-select of a whole
-    ///   variable naming it, or exactly the bits it has, or
-    /// - the items cover every bit `body` reads, and running `body` when
-    ///   none of those bits changed is unobservable: it has no side effects,
-    ///   reads no variable it writes, and stores each variable at most once
-    ///   per run, so it writes the values it wrote last time without
-    ///   pulsing a variable for the waiters on it (4.3, 9.4.2).
-    pub fn is_implicit_event_list(
+    fn level_reads(
         &self,
         items: &[sv::ir::EventItem],
-        body: &[sv::ir::Stmt],
-    ) -> bool {
-        if self.suspends_or_defers(body) {
-            return false;
-        }
+    ) -> Option<HashSet<VarAtomBase<SourceVarId>>> {
         let mut listed: HashSet<VarAtomBase<SourceVarId>> = HashSet::default();
-        let mut exact = true;
         for item in items {
             if item.iff.is_some() {
-                return false;
+                return None;
             }
             let (name, range) = match &item.expr {
                 sv::ir::Expr::Ident(name) => (name, None),
@@ -38,9 +22,9 @@ impl ProcModule<'_> {
                     ..
                 } => {
                     let sv::ir::Expr::Ident(name) = &**base else {
-                        return false;
+                        return None;
                     };
-                    let Some(range) = sv::typecheck::eval_const_expr_with_types(
+                    let range = sv::typecheck::eval_const_expr_with_types(
                         msb,
                         self.constants,
                         self.parameter_types,
@@ -52,23 +36,43 @@ impl ProcModule<'_> {
                     ))
                     .and_then(|(msb, lsb)| {
                         packed_expr_select_offsets(base, msb, lsb, self.variables, self.name_to_id)
-                    }) else {
-                        return false;
-                    };
+                    })?;
                     (name, Some((range.0.min(range.1), range.0.max(range.1))))
                 }
-                _ => return false,
+                _ => return None,
             };
-            let Some(id) = self.id(name).filter(|id| !self.is_hidden(*id)) else {
-                return false;
-            };
+            let id = self.id(name).filter(|id| !self.is_hidden(*id))?;
             let width = self.var(id).width;
             let (lsb, msb) = range.unwrap_or((0, width - 1));
-            exact &= lsb == 0 && msb == width - 1;
             listed.insert(VarAtomBase::new(id, lsb, msb));
         }
+        Some(listed)
+    }
+
+    pub fn comb_reads(&self, process: &sv::ir::CombProcess) -> HashSet<VarAtomBase<SourceVarId>> {
+        if let Some(items) = process.explicit_sensitivity() {
+            return self
+                .level_reads(items)
+                .expect("validated static level sensitivity");
+        }
+        let include_functions = process.kind() != sv::ir::CombProcessKind::AlwaysStar;
+        let mut reads = self.implicit_reads(process.body(), include_functions);
+        reads.extend(self.implicit_reads(process.sensitivity_body(), include_functions));
+        reads
+    }
+
+    /// Admit an equivalent implicit list, or a pure body whose inputs the
+    /// authored list covers. With repeated writes, keep the exact bit guard
+    /// so an unrelated change cannot publish an intermediate transition.
+    pub fn can_lower_level_list(&self, items: &[sv::ir::EventItem], body: &[sv::ir::Stmt]) -> bool {
+        if self.suspends_or_defers(body) {
+            return false;
+        }
+        let Some(listed) = self.level_reads(items) else {
+            return false;
+        };
         let reads = self.implicit_reads(body, false);
-        if exact && listed == reads {
+        if listed == reads {
             return true;
         }
         // The same bits, partitioned differently (`w[7:0] or w[31:8]` for
@@ -95,11 +99,12 @@ impl ProcModule<'_> {
         if reads.iter().any(|read| written.contains(&read.id)) {
             return false;
         }
+        let inputs = self.implicit_reads(body, true);
         if stores_twice(body, &mut HashSet::default()) {
-            return false;
+            return !self.four_state && bits(&inputs) == bits(&listed);
         }
         // Longest static prefixes: constant selects keep their bits.
-        self.implicit_reads(body, true).iter().all(|read| {
+        inputs.iter().all(|read| {
             (read.access.lsb..=read.access.msb).all(|bit| {
                 listed.iter().any(|item| {
                     item.id == read.id && item.access.lsb <= bit && bit <= item.access.msb
