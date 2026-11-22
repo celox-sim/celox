@@ -1999,3 +1999,35 @@ endmodule
   (top Top) (run_until 5)
   (assert_eq counted 9) (assert_eq ended 0x4029000000000000)
   (assert_eq timed 3) (assert_eq timed_end 0x4008000000000000))
+
+; A rounded-away step does not prevent the body from ending a real loop.
+(case real_for_loop_body_can_end_the_loop
+  (source "real_for_loop_body.sv" #"
+module Top(input bit clk, output int variable_count, bound_count, break_count);
+  real r, limit;
+  always_ff @(posedge clk) begin
+    variable_count = 0;
+    for (r = 1e20; r < 1e21; r = r + 0.5) begin
+      variable_count++;
+      r = 1e21;
+    end
+
+    limit = 1e21;
+    bound_count = 0;
+    for (r = 1e20; r < limit; r = r + 1) begin
+      bound_count++;
+      if (bound_count == 2) limit = 1e20;
+    end
+
+    break_count = 0;
+    for (r = 1e20; r < 1e21; r = r + 0.5) begin
+      break_count++;
+      if (break_count == 3) break;
+    end
+  end
+endmodule
+"#)
+  (top Top) (tick clk)
+  (assert_eq variable_count 1)
+  (assert_eq bound_count 2)
+  (assert_eq break_count 3))

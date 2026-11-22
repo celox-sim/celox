@@ -295,19 +295,24 @@ impl Ff<'_, '_> {
         } else {
             header
         };
-        // Latch: the step, then the condition again. A counted loop whose
-        // step leaves its variable unchanged would never end; it stops the
-        // simulation with an error instead.
+        // Latch: the step, then the condition again. Compare a real loop
+        // variable by its stored bits (6.12, 20.5). A stalled real step
+        // implies that the test stays true only if the test has no calls
+        // and the body cannot change its inputs, exit or let other processes run.
         self.b.switch_to_block(latch);
-        // A real loop variable is compared by its bits, which a step smaller
-        // than its precision leaves unchanged (6.12, 20.5).
-        let progress = match kind {
-            sv::ir::LoopKind::For => counted_for_loop(init, condition, step).and_then(|shape| {
-                let id = self.m.id(shape.var)?;
-                (shape.integral_step().is_some()
-                    || (self.m.var(id).float.is_some() && shape.has_real_step()))
-                .then_some((shape.var, id))
-            }),
+        let progress = match (kind, condition) {
+            (sv::ir::LoopKind::For, Some(test)) => counted_for_loop(init, Some(test), step)
+                .and_then(|shape| {
+                    let id = self.m.id(shape.var)?;
+                    let integral_step = shape.integral_step().is_some();
+                    let check = if self.m.var(id).float.is_some() {
+                        (integral_step || shape.has_real_step())
+                            && self.real_loop_test_is_invariant(test, body)
+                    } else {
+                        integral_step
+                    };
+                    check.then_some((shape.var, id))
+                }),
             _ => None,
         };
         let previous = match progress {
@@ -352,6 +357,28 @@ impl Ff<'_, '_> {
         }
         self.b.switch_to_block(exit);
         Ok(true)
+    }
+
+    fn real_loop_test_is_invariant(&self, test: &sv::ir::Expr, body: &[sv::ir::Stmt]) -> bool {
+        if expr_calls(test, &mut |_| true)
+            || stmts_may_jump(body, false)
+            || !runs_without_others(body)
+        {
+            return false;
+        }
+        let mut reads = HashSet::default();
+        expr_idents(test, &mut reads);
+        let mut changes_test = !self.m.written_names(body).is_disjoint(&reads);
+        for stmt in body {
+            stmt.walk(&mut |stmt| {
+                changes_test |= match stmt {
+                    sv::ir::Stmt::ForceStore { lhs, .. } => reads.contains(lhs.name()),
+                    sv::ir::Stmt::DeferActive => true,
+                    _ => false,
+                };
+            });
+        }
+        !changes_test
     }
 
     /// The back edge of a kernel loop that may not suspend: count the
