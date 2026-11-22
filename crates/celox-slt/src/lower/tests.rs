@@ -1,6 +1,7 @@
 mod concat;
 mod cost;
 mod count_idioms;
+mod decode;
 mod loops;
 mod mask_constants;
 mod mux;
