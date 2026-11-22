@@ -247,16 +247,20 @@ impl Module {
                 retained.push(process);
                 continue;
             };
-            // The reads of branches that constant folding removed count too.
-            let reads = process
-                .body
-                .iter()
-                .chain(&process.sensitivity_body)
-                .cloned()
-                .collect();
-            let wait = Stmt::WaitImplicit {
-                reads,
-                always_comb: false,
+            let wait = if let Some(items) = process.explicit_sensitivity {
+                Stmt::WaitEvent(items)
+            } else {
+                // Include reads from branches removed by constant folding.
+                let reads = process
+                    .body
+                    .iter()
+                    .chain(&process.sensitivity_body)
+                    .cloned()
+                    .collect();
+                Stmt::WaitImplicit {
+                    reads,
+                    always_comb: false,
+                }
             };
             let mut body = Vec::new();
             let mut loop_body = Vec::new();
@@ -326,26 +330,24 @@ impl Module {
     }
 
     /// Represent selected [`InitialProcess::level_sensitive`] processes as
-    /// `always @*`. The caller selects a process only when its list is the
-    /// implicit event expression of its statement (IEEE 1800-2023 9.4.2.2).
+    /// combinational logic. Preserve the authored event expression for a
+    /// guarded implementation that must replay intermediate writes.
     pub fn lower_level_sensitive_processes(
         mut self,
         mut select: impl FnMut(&InitialProcess) -> bool,
     ) -> Self {
         let mut retained = Vec::new();
         for process in std::mem::take(&mut self.initial_processes) {
-            let Some(body) = process
-                .level_sensitive()
-                .filter(|_| select(&process))
-                .map(|(_, body)| body.to_vec())
-            else {
+            let Some((items, body)) = process.level_sensitive().filter(|_| select(&process)) else {
                 retained.push(process);
                 continue;
             };
             let at = self
                 .comb_processes
                 .partition_point(|comb| comb.creation_order <= process.creation_order);
-            let mut comb = CombProcess::new(CombProcessKind::AlwaysStar, None, Vec::new(), body);
+            let mut comb =
+                CombProcess::new(CombProcessKind::AlwaysStar, None, Vec::new(), body.to_vec());
+            comb.explicit_sensitivity = Some(items.to_vec());
             comb.creation_order = process.creation_order;
             self.comb_processes.insert(at, comb);
         }
@@ -1651,6 +1653,7 @@ pub struct CombProcess {
     assignments: Vec<Assignment>,
     body: Vec<Stmt>,
     sensitivity_body: Vec<Stmt>,
+    explicit_sensitivity: Option<Vec<EventItem>>,
     drive_strength: bool,
 }
 
@@ -1675,6 +1678,11 @@ impl CombProcess {
         &self.sensitivity_body
     }
 
+    /// The authored level-sensitive list of a process lowered to combinational logic.
+    pub fn explicit_sensitivity(&self) -> Option<&[EventItem]> {
+        self.explicit_sensitivity.as_deref()
+    }
+
     /// Position among elaborated module items, shared across process kinds.
     pub fn creation_order(&self) -> usize {
         self.creation_order
@@ -1691,6 +1699,7 @@ impl CombProcess {
             site: None,
             process_site: None,
             sensitivity_body: Vec::new(),
+            explicit_sensitivity: None,
             drive_strength: false,
             kind,
             condition,

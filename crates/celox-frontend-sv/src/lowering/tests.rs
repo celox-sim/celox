@@ -613,6 +613,34 @@ fn level_lists_equal_to_the_implicit_reads_bitwise_are_combinational() {
     assert_eq!(procedure_kernels(more_bits), 2);
 }
 
+/// A decoder with a default and an override can join the graph even when
+/// its sensitivity covers only part of a word. Omitting a read must still
+/// leave it as an event process.
+#[test]
+fn multi_store_decoder_with_an_exact_level_list_joins_the_graph() {
+    for (list, kernels) in [("s[5:4], s[1:0]", 1), ("s[5:4], s[0]", 2)] {
+        let source = format!(
+            "module Top(input bit [7:0] s, output bit [1:0] y);
+            always @({list}) begin
+                y = 0;
+                if (s[1:0] == 2'b01) y = s[5:4];
+            end
+            initial #1 $finish;
+        endmodule"
+        );
+        assert_eq!(procedure_kernels(&source), kernels, "{list}");
+    }
+}
+
+#[test]
+fn a_delayed_update_on_selected_bits_remains_an_event_process() {
+    let source = "module Top(input bit [7:0] s, output bit [1:0] y);
+        always @(s[1:0]) y <= #1 s[1:0];
+        initial #2 $finish;
+    endmodule";
+    assert_eq!(procedure_kernels(source), 2);
+}
+
 /// Only the `always @(list)` processes of a combinational loop stay
 /// processes; one `initial` block drives each design.
 #[test]
