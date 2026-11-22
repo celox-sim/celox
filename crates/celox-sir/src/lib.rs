@@ -12,6 +12,7 @@ pub use celox_design::{
 
 pub mod analysis;
 pub mod builder;
+pub mod byte_lookup;
 mod calls;
 pub mod cfg;
 pub mod effects;

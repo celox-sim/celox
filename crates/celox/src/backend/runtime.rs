@@ -150,7 +150,10 @@ enum CraneliftEvalCombPlan {
 }
 
 impl CraneliftEvalCombPlan {
-    fn build(sir: &crate::ir::LaidOutProgram, options: &SimulatorOptions) -> Self {
+    fn build(
+        units: &[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
+        options: &SimulatorOptions,
+    ) -> Self {
         if !options.cranelift_options.tail_call_split {
             return Self::Unsplit;
         }
@@ -161,7 +164,7 @@ impl CraneliftEvalCombPlan {
                 CLIF_INST_THRESHOLD, FUNCTION_VALUE_THRESHOLD, estimate_eu_cost,
                 estimate_eu_value_count,
             };
-            for (i, eu) in sir.sir.eval_comb.iter().enumerate() {
+            for (i, eu) in units.iter().enumerate() {
                 let inst_cost = estimate_eu_cost(eu, options.four_state);
                 let value_count = estimate_eu_value_count(eu, options.four_state);
                 tracing::debug!(
@@ -179,9 +182,7 @@ impl CraneliftEvalCombPlan {
         use celox_backend_cranelift::tail_call_split;
         // Multi-block units need memory-spilled chunks. Select them first so
         // an oversized EU is not hidden inside an EU-boundary tail-call plan.
-        if let Some(plan) =
-            tail_call_split::split_if_needed_spilled(&sir.sir.eval_comb, options.four_state)
-        {
+        if let Some(plan) = tail_call_split::split_if_needed_spilled(units, options.four_state) {
             if let Some(start) = split_start {
                 tracing::debug!(
                     "[split] MemorySpilled: {} chunks, scratch={}B, took {:?}",
@@ -191,9 +192,7 @@ impl CraneliftEvalCombPlan {
                 );
             }
             Self::MemorySpilled(plan)
-        } else if let Some(chunks) =
-            tail_call_split::split_if_needed(&sir.sir.eval_comb, options.four_state)
-        {
+        } else if let Some(chunks) = tail_call_split::split_if_needed(units, options.four_state) {
             if let Some(start) = split_start {
                 tracing::debug!(
                     "[split] TailCallChunks: {} chunks, took {:?}",
@@ -237,18 +236,15 @@ impl JitBackend {
         // superlinear compile time would dominate. The threshold is half the
         // CLIF instruction limit — at this size, code quality differences
         // between allocators are negligible compared to compile time savings.
+        let comb = celox_sir::byte_lookup::scalarize_units(&sir.sir.eval_comb, options.four_state);
         let mut options = options.clone();
         {
             use celox_backend_cranelift::cost_model::*;
-            let _comb_cost: usize = sir
-                .sir
-                .eval_comb
+            let _comb_cost: usize = comb
                 .iter()
                 .map(|eu| estimate_eu_cost(eu, options.four_state))
                 .sum();
-            let comb_vregs: usize = sir
-                .sir
-                .eval_comb
+            let comb_vregs: usize = comb
                 .iter()
                 .map(|eu| estimate_eu_value_count(eu, options.four_state))
                 .sum();
@@ -266,7 +262,7 @@ impl JitBackend {
             }
         }
 
-        let eval_comb_plan = CraneliftEvalCombPlan::build(sir, &options);
+        let eval_comb_plan = CraneliftEvalCombPlan::build(&comb, &options);
         let layout = laid_out
             .layout()
             .clone()
@@ -324,7 +320,7 @@ impl JitBackend {
                 engine.compile_chunks(chunks, pre_clif_ptr, post_clif_ptr, native_ptr)
             }
             CraneliftEvalCombPlan::Unsplit => {
-                engine.compile_units(&sir.sir.eval_comb, pre_clif_ptr, post_clif_ptr, native_ptr)
+                engine.compile_units(&comb, pre_clif_ptr, post_clif_ptr, native_ptr)
             }
         };
 

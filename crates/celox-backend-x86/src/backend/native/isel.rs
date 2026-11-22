@@ -1136,9 +1136,11 @@ fn lower_execution_unit_for_target(
         let constants = exact_constants
             .as_ref()
             .expect("two-state lowering must collect exact constants");
+        let byte_lookups = celox_sir::byte_lookup::collect(eu);
         for &block_id in &block_ids {
             let block = &eu.blocks[&block_id];
-            let mut plans = find_dense_lookup_plans(block, &eu.register_map, constants, uses);
+            let mut plans =
+                find_dense_lookup_plans(block, &eu.register_map, constants, uses, &byte_lookups);
             let mut root_indices: Vec<_> = plans.roots.keys().copied().collect();
             root_indices.sort_unstable();
             for root_idx in root_indices {
@@ -2548,9 +2550,15 @@ struct DenseLookupPlan {
     dst: RegisterId,
     selector: RegisterId,
     selector_width: usize,
-    default: RegisterId,
+    source: LookupSource,
     entries: Vec<u64>,
     table: Option<ConstantTableId>,
+}
+
+#[derive(Clone, Debug)]
+enum LookupSource {
+    Cases(RegisterId),
+    PackedBytes,
 }
 
 struct DenseLookupCandidate {
@@ -2569,10 +2577,41 @@ fn find_dense_lookup_plans(
     register_types: &HashMap<RegisterId, RegisterType>,
     constants: &HashMap<RegisterId, ExactSirConstant>,
     uses: &HashMap<RegisterId, Vec<SirUseSite>>,
+    byte_lookups: &HashMap<RegisterId, celox_sir::byte_lookup::ByteLookup<'_>>,
 ) -> DenseLookupPlans {
     let defs = collect_sir_defs(block);
     let mut candidates = Vec::new();
     for (root_idx, inst) in block.instructions.iter().enumerate() {
+        if let SIRInstruction::Slice(dst, ..) = inst
+            && let Some(lookup) = byte_lookups.get(dst)
+        {
+            let mut covered_indices = HashSet::from_iter([root_idx]);
+            covered_indices.extend(
+                [lookup.shifted, lookup.table]
+                    .iter()
+                    .filter_map(|reg| defs.get(reg).copied()),
+            );
+            let entries = lookup
+                .bytes()
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|bytes| u64::from_le_bytes(*bytes))
+                .collect();
+            candidates.push(DenseLookupCandidate {
+                plan: DenseLookupPlan {
+                    root_idx,
+                    dst: *dst,
+                    selector: lookup.offset,
+                    selector_width: lookup.offset_width,
+                    source: LookupSource::PackedBytes,
+                    entries,
+                    table: None,
+                },
+                covered_indices,
+            });
+            continue;
+        }
         let SIRInstruction::Mux(root_dst, ..) = inst else {
             continue;
         };
@@ -2777,7 +2816,7 @@ fn collect_dense_lookup_candidate(
             dst: root_dst,
             selector,
             selector_width,
-            default,
+            source: LookupSource::Cases(default),
             entries,
             table: None,
         },
@@ -3193,37 +3232,9 @@ fn emit_dense_lookup(
     plan: &DenseLookupPlan,
     cache: &mut DenseLookupEmitCache,
 ) {
-    debug_assert_eq!(
-        ctx.sir_width(&plan.default),
-        ctx.sir_width(&plan.dst),
-        "full-domain lookup default must have the result width",
-    );
     let table = plan
         .table
         .expect("dense lookup table must be interned before instruction selection");
-    let byte_index = *cache
-        .byte_indices
-        .entry((plan.selector, plan.selector_width))
-        .or_insert_with(|| {
-            let selector = ctx.reg_map.get(plan.selector);
-            let masked = ctx.alloc_vreg(SpillDesc::transient());
-            // The SIR type width is not enough to make a memory access safe:
-            // materialized registers can still carry stale upper bits.  Keep
-            // this explicit even when known-bits analysis could elide it.
-            block.push(MInst::AndImm {
-                dst: masked,
-                src: selector,
-                imm: mask_for_width(plan.selector_width),
-            });
-            ctx.known_bits.insert(masked, plan.selector_width);
-            let scaled = ctx.alloc_vreg(SpillDesc::transient());
-            block.push(MInst::ShlImm {
-                dst: scaled,
-                src: masked,
-                imm: 3,
-            });
-            scaled
-        });
     let table_addr = *cache.table_addrs.entry(table).or_insert_with(|| {
         let table_addr = ctx.alloc_vreg(SpillDesc::transient());
         block.push(MInst::LoadConstantTableAddr {
@@ -3232,13 +3243,57 @@ fn emit_dense_lookup(
         });
         table_addr
     });
+    let (byte_index, size) = match plan.source {
+        LookupSource::PackedBytes => {
+            let offset = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::AndImm {
+                dst: offset,
+                src: ctx.reg_map.get(plan.selector),
+                imm: mask_for_width(plan.selector_width),
+            });
+            let byte = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::ShrImm {
+                dst: byte,
+                src: offset,
+                imm: 3,
+            });
+            (byte, OpSize::S8)
+        }
+        LookupSource::Cases(default) => {
+            debug_assert_eq!(ctx.sir_width(&default), ctx.sir_width(&plan.dst));
+            let byte_index = *cache
+                .byte_indices
+                .entry((plan.selector, plan.selector_width))
+                .or_insert_with(|| {
+                    let selector = ctx.reg_map.get(plan.selector);
+                    let masked = ctx.alloc_vreg(SpillDesc::transient());
+                    // The SIR type width is not enough to make a memory access safe:
+                    // materialized registers can still carry stale upper bits.  Keep
+                    // this explicit even when known-bits analysis could elide it.
+                    block.push(MInst::AndImm {
+                        dst: masked,
+                        src: selector,
+                        imm: mask_for_width(plan.selector_width),
+                    });
+                    ctx.known_bits.insert(masked, plan.selector_width);
+                    let scaled = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::ShlImm {
+                        dst: scaled,
+                        src: masked,
+                        imm: 3,
+                    });
+                    scaled
+                });
+            (byte_index, OpSize::S64)
+        }
+    };
     let dst = ctx.reg_map.get(plan.dst);
     block.push(MInst::LoadPtrIndexed {
         dst,
         ptr: table_addr,
         offset: 0,
         index: byte_index,
-        size: OpSize::S64,
+        size,
     });
     ctx.known_bits.insert(dst, ctx.sir_width(&plan.dst));
 }

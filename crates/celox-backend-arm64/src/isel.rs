@@ -151,7 +151,8 @@ pub(crate) fn lower_execution_unit_with_functions(
     diagnostics: &crate::NativeDiagnostics,
     functions: Option<crate::FunctionCalls<'_>>,
 ) -> MFunction {
-    let expanded = strided::expand_strided_accesses(eu, layout);
+    let scalar = celox_sir::byte_lookup::scalarize(eu, four_state);
+    let expanded = strided::expand_strided_accesses(scalar.as_ref(), layout);
     let eu = expanded.as_ref();
     if cfg!(debug_assertions) || diagnostics.verify_sir {
         if let Err(error) = eu.verify_result() {
