@@ -197,11 +197,11 @@ pub(super) fn emit_branch_predicate(
             Ok(EmittedBranchCondition::Compare(kind))
         }
         BranchPredicate::CompareImm { lhs, imm, kind } => {
-            let lhs = preg_to_reg64(resolve(assignment, lhs));
+            let lhs = resolve(assignment, lhs);
             if imm == 0 && matches!(kind, CmpKind::Eq | CmpKind::Ne) {
-                asm.test(lhs, lhs)?;
+                asm.test_zero(lhs)?;
             } else {
-                asm.cmp(lhs, imm)?;
+                asm.cmp(preg_to_reg64(lhs), imm)?;
             }
             Ok(EmittedBranchCondition::Compare(kind))
         }

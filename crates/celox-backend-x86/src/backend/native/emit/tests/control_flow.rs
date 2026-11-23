@@ -1,6 +1,47 @@
 use super::*;
 
 #[test]
+fn zero_tests_reuse_only_full_register_results_in_the_same_block() {
+    use iced_x86::Mnemonic;
+
+    let mut asm = EmitAssembler::new(64).unwrap();
+    asm.and(eax, 7).unwrap();
+    asm.test_zero(PhysReg::RAX).unwrap();
+    assert_eq!(asm.instructions().last().unwrap().mnemonic(), Mnemonic::And);
+    asm.neg(rax).unwrap();
+    asm.test_zero(PhysReg::RAX).unwrap();
+    assert_eq!(asm.instructions().last().unwrap().mnemonic(), Mnemonic::Neg);
+
+    asm.test_zero(PhysReg::RCX).unwrap();
+    assert_eq!(
+        asm.instructions().last().unwrap().mnemonic(),
+        Mnemonic::Test
+    );
+    asm.neg(ax).unwrap();
+    asm.test_zero(PhysReg::RAX).unwrap();
+    assert_eq!(
+        asm.instructions().last().unwrap().mnemonic(),
+        Mnemonic::Test
+    );
+    // A zero shift count preserves the old flags.
+    asm.shl(rax, cl).unwrap();
+    asm.test_zero(PhysReg::RAX).unwrap();
+    assert_eq!(
+        asm.instructions().last().unwrap().mnemonic(),
+        Mnemonic::Test
+    );
+
+    asm.neg(rax).unwrap();
+    let mut label = asm.create_label();
+    asm.set_label(&mut label).unwrap();
+    asm.test_zero(PhysReg::RAX).unwrap();
+    assert_eq!(
+        asm.instructions().last().unwrap().mnemonic(),
+        Mnemonic::Test
+    );
+}
+
+#[test]
 fn error_returns_preserve_the_full_signed_status() {
     for code in [
         1,

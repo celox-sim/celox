@@ -232,26 +232,25 @@ bb0:
   0x0000002a  movzx eax,byte [gs:31h]
   0x00000033  not rax
   0x00000036  and eax,1
-  0x0000003b  test rax,rax
-  0x0000003e  jne short 0000000000000053h
+  0x0000003b  jne short 0000000000000050h
 bb2:
-  0x00000040  movzx eax,byte [gs:32h]
-  0x00000049  mov [gs:30h],al
-  0x00000051  jmp short 000000000000005Ch
+  0x0000003d  movzx eax,byte [gs:32h]
+  0x00000046  mov [gs:30h],al
+  0x0000004e  jmp short 0000000000000059h
 bb1:
-  0x00000053  mov byte [gs:30h],0
+  0x00000050  mov byte [gs:30h],0
 bb3:
-  0x0000005c  movq rax,xmm15
-  0x00000061  dec rax
-  0x00000064  movq xmm15,rax
-  0x00000069  je short 000000000000006Dh
-  0x0000006b  jmp short 000000000000002Ah
-  0x0000006d  xor eax,eax
-  0x0000006f  movq r10,xmm15
-  0x00000074  mov [gs:8],r10
-  0x0000007d  mov r11,[gs:520h]
-  0x00000086  wrgsbase r11
-  0x0000008b  ret
+  0x00000059  movq rax,xmm15
+  0x0000005e  dec rax
+  0x00000061  movq xmm15,rax
+  0x00000066  je short 000000000000006Ah
+  0x00000068  jmp short 000000000000002Ah
+  0x0000006a  xor eax,eax
+  0x0000006c  movq r10,xmm15
+  0x00000071  mov [gs:8],r10
+  0x0000007a  mov r11,[gs:520h]
+  0x00000083  wrgsbase r11
+  0x00000088  ret
 
 === Native function eval_only_ff[0] ===
 Bindings:
