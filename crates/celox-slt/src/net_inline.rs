@@ -472,9 +472,25 @@ pub fn inline_nets_with_arrays<A: Copy + Eq + Hash + Ord + Debug + Display>(
     // own.
     let signedness = crate::SLTToSIRLowerer::new(false);
     let mut eligible: HashMap<A, Candidate> = HashMap::default();
+    let mut removable = HashSet::default();
     'vars: for (var, list) in &drivers {
-        if pinned.contains(var) || cyclic.contains(var) {
+        if pinned.contains(var)
+            || cyclic.contains(var)
+            || !list.iter().all(|&i| {
+                plain[i]
+                    && !ordered.contains(&i)
+                    && paths[i].comb_capture_enable_sites.is_empty()
+                    && !paths[i].comb_capture_enable_always
+                    && paths[i].order_before.is_empty()
+            })
+        {
             continue;
+        }
+        // An unread pure driver can go even if assigning it to state would
+        // convert its width, signedness or unknown bits. Substitution below
+        // requires those conversions to be identities.
+        if readers.contains_key(var) {
+            removable.insert(*var);
         }
         let mut pieces = Vec::with_capacity(list.len());
         for &index in list {
@@ -482,12 +498,7 @@ pub fn inline_nets_with_arrays<A: Copy + Eq + Hash + Ord + Debug + Display>(
             let LogicPathTarget::Var(target) = &path.target else {
                 continue 'vars;
             };
-            if !plain[index]
-                || ordered.contains(&index)
-                || !path.comb_capture_enable_sites.is_empty()
-                || path.comb_capture_enable_always
-                || !path.order_before.is_empty()
-                || crate::get_width(path.expr, arena) != target.access.msb - target.access.lsb + 1
+            if crate::get_width(path.expr, arena) != target.access.msb - target.access.lsb + 1
                 || has_unknown_constant(path.expr, arena)
                 // The reads it replaces are unsigned, and the lowering
                 // extends the operands of a comparison by their signedness.
@@ -557,7 +568,6 @@ pub fn inline_nets_with_arrays<A: Copy + Eq + Hash + Ord + Debug + Display>(
             }
         }
     }
-    report.dead = dead.len();
     let candidates: HashMap<A, Candidate> = eligible
         .into_iter()
         .filter(|(var, _)| !dead.contains(var))
@@ -650,13 +660,6 @@ pub fn inline_nets_with_arrays<A: Copy + Eq + Hash + Ord + Debug + Display>(
             inlined.insert(*var);
         }
     }
-    report.inlined = inlined
-        .iter()
-        .filter(|var| evaluations[*var] != Readers::Several)
-        .count();
-    report.duplicated = inlined.len() - report.inlined;
-    report.removed = inlined.iter().chain(&dead).copied().collect();
-    report.removed.sort_unstable();
     if inlined.is_empty() && dead.is_empty() {
         return Ok(report);
     }
@@ -667,6 +670,9 @@ pub fn inline_nets_with_arrays<A: Copy + Eq + Hash + Ord + Debug + Display>(
     let mut resolved_sources: HashMap<A, Vec<(BitAccess, HashSet<VarAtomBase<A>>)>> =
         HashMap::default();
     let mut cache: HashMap<NodeId, NodeId> = HashMap::default();
+    // Operand positions in the original DAG: the condition of a folded mux
+    // or the input masked by a forwarded zero.
+    let mut discarded_operand = HashMap::default();
     let remaining_sources =
         |path: &LogicPath<A>,
          resolved_sources: &HashMap<A, Vec<(BitAccess, HashSet<VarAtomBase<A>>)>>| {
@@ -688,25 +694,46 @@ pub fn inline_nets_with_arrays<A: Copy + Eq + Hash + Ord + Debug + Display>(
             sources
         };
     for var in &order {
-        if !inlined.contains(var) {
-            continue;
-        }
-        let mut ranges = Vec::with_capacity(candidates[var].pieces.len());
-        let mut sources = Vec::with_capacity(candidates[var].pieces.len());
-        for piece in &candidates[var].pieces {
+        let candidate = &candidates[var];
+        let mut ranges = Vec::with_capacity(candidate.pieces.len());
+        for piece in &candidate.pieces {
             ranges.push((
                 piece.target,
-                substitute(piece.expr, &resolved, arena, &mut cache)?,
+                substitute(
+                    piece.expr,
+                    &resolved,
+                    arena,
+                    &mut cache,
+                    &mut discarded_operand,
+                )?,
             ));
-            sources.push((
-                piece.target,
-                remaining_sources(&paths[piece.path], &resolved_sources),
-            ));
+        }
+        // Copy costs were estimated before substituting the drivers. A mux
+        // tree that now returns a literal is cheap even with several readers.
+        if !inlined.contains(var) {
+            if !ranges
+                .iter()
+                .all(|(_, node)| matches!(arena.get(*node), SLTNode::Constant(..)))
+            {
+                continue;
+            }
+            inlined.insert(*var);
+        }
+        let mut sources = Vec::with_capacity(candidate.pieces.len());
+        for (piece, &(_, expr)) in candidate.pieces.iter().zip(&ranges) {
+            let path = &mut paths[piece.path];
+            prune_folded_inputs(path, expr, &discarded_operand, arena);
+            sources.push((piece.target, remaining_sources(path, &resolved_sources)));
         }
         resolved.insert(*var, ranges);
         resolved_sources.insert(*var, sources);
     }
-    let removed: HashSet<usize> = inlined
+    report.inlined = inlined
+        .iter()
+        .filter(|var| evaluations[*var] != Readers::Several)
+        .count();
+    report.duplicated = inlined.len() - report.inlined;
+    let mut removed: HashSet<usize> = inlined
         .iter()
         .flat_map(|var| candidates[var].pieces.iter().map(|piece| piece.path))
         .chain(dead_paths.iter().copied())
@@ -718,9 +745,69 @@ pub fn inline_nets_with_arrays<A: Copy + Eq + Hash + Ord + Debug + Display>(
         {
             continue;
         }
-        path.expr = substitute(path.expr, &resolved, arena, &mut cache)?;
+        let expr = substitute(
+            path.expr,
+            &resolved,
+            arena,
+            &mut cache,
+            &mut discarded_operand,
+        )?;
+        prune_folded_inputs(path, expr, &discarded_operand, arena);
+        path.expr = expr;
         path.sources = remaining_sources(path, &resolved_sources);
     }
+    // Revisit initially read drivers after folding. Start at paths whose
+    // writes must remain and follow their reads in the rewritten graph.
+    if !discarded_operand.is_empty() {
+        let mut live = HashSet::default();
+        let mut seen = HashSet::default();
+        let mut pending: Vec<_> = paths
+            .iter()
+            .enumerate()
+            .filter_map(|(i, path)| {
+                (!removed.contains(&i)
+                    && !path.target.var().is_some_and(|v| removable.contains(&v.id)))
+                .then_some(i)
+            })
+            .collect();
+        while let Some(i) = pending.pop() {
+            let mut read = |var: &A| {
+                if removable.contains(var) && live.insert(*var) {
+                    pending.extend(
+                        drivers[var]
+                            .iter()
+                            .copied()
+                            .filter(|j| !removed.contains(j)),
+                    );
+                }
+            };
+            for source in &paths[i].sources {
+                read(&source.id);
+            }
+            if plain[i] {
+                let mut expr = vec![paths[i].expr];
+                while let Some(id) = expr.pop() {
+                    if !seen.insert(id) {
+                        continue;
+                    }
+                    match arena.get(id) {
+                        SLTNode::Input { variable, .. } => read(variable),
+                        node => operands(node, &mut expr),
+                    }
+                }
+            }
+        }
+        for var in removable
+            .difference(&live)
+            .filter(|var| !inlined.contains(*var))
+        {
+            dead.insert(*var);
+            removed.extend(drivers[var].iter().copied());
+        }
+    }
+    report.dead = dead.len();
+    report.removed = inlined.iter().chain(&dead).copied().collect();
+    report.removed.sort_unstable();
     // Drop the removed paths and renumber what orders the rest.
     let mut renumber: Vec<Option<usize>> = Vec::with_capacity(paths.len());
     let mut next = 0;
@@ -747,6 +834,60 @@ pub fn inline_nets_with_arrays<A: Copy + Eq + Hash + Ord + Debug + Display>(
     }
     report.paths_after = paths.len();
     Ok(report)
+}
+
+/// Drop a data dependency only when it was read solely in operands removed
+/// by folding. A declared read can cover several narrower expression reads.
+fn prune_folded_inputs<A: Copy + Eq + Hash>(
+    path: &mut LogicPath<A>,
+    expr: NodeId,
+    discarded_operand: &HashMap<NodeId, usize>,
+    arena: &SLTNodeArena<A>,
+) {
+    if expr == path.expr
+        || discarded_operand.is_empty()
+        || path.comb_capture_enable_always
+        || !path.comb_capture_enable_sites.is_empty()
+    {
+        return;
+    }
+    let mut discarded = HashSet::default();
+    let mut live = HashSet::default();
+    let mut pending = vec![(path.expr, false)];
+    let mut seen = HashSet::default();
+    let mut children = Vec::new();
+    while let Some((id, unused)) = pending.pop() {
+        if !seen.insert((id, unused)) {
+            continue;
+        }
+        let node = arena.get(id);
+        match node {
+            SLTNode::Input {
+                variable, access, ..
+            } => {
+                if unused {
+                    discarded.insert(VarAtomBase {
+                        id: *variable,
+                        access: *access,
+                    });
+                } else {
+                    live.insert(*variable);
+                }
+            }
+            _ => {
+                operands(node, &mut children);
+                let skip = discarded_operand.get(&id).copied();
+                pending.extend(
+                    children
+                        .drain(..)
+                        .enumerate()
+                        .map(|(i, child)| (child, unused || skip == Some(i))),
+                );
+            }
+        }
+    }
+    path.sources
+        .retain(|source| !discarded.contains(source) || live.contains(&source.id));
 }
 
 /// The bits `access` of a substituted net: the part of each of its ranges
@@ -788,6 +929,7 @@ fn substitute<A: Copy + Eq + Hash>(
     resolved: &HashMap<A, Vec<(BitAccess, NodeId)>>,
     arena: &mut SLTNodeArena<A>,
     cache: &mut HashMap<NodeId, NodeId>,
+    discarded_operand: &mut HashMap<NodeId, usize>,
 ) -> Result<NodeId, SLTNodeFactsError> {
     // Operands first, without recursion: the cones are deep.
     let mut work = vec![(root, false)];
@@ -839,6 +981,15 @@ fn substitute<A: Copy + Eq + Hash>(
                 let (new_lhs, new_rhs) = (cache[&lhs], cache[&rhs]);
                 if new_lhs == lhs && new_rhs == rhs {
                     node
+                } else if op == celox_design::BinaryOp::And
+                    && let Some((side, zero)) = [new_lhs, new_rhs].into_iter().enumerate().find(|(_, id)| {
+                        matches!(arena.get(*id), SLTNode::Constant(value, mask, width, false)
+                            if value.bits() == 0 && mask.bits() == 0 && Some(*width) == arena.node_width(node))
+                    })
+                {
+                    // The unsigned zero already has the result's width and signedness.
+                    discarded_operand.insert(node, 1 - side);
+                    zero
                 } else {
                     arena.alloc(SLTNode::Binary(new_lhs, op, new_rhs))?
                 }
@@ -861,11 +1012,18 @@ fn substitute<A: Copy + Eq + Hash>(
                 if new_cond == cond && new_then == then_expr && new_else == else_expr {
                     node
                 } else {
-                    arena.alloc(SLTNode::Mux {
-                        cond: new_cond,
-                        then_expr: new_then,
-                        else_expr: new_else,
-                    })?
+                    let result = crate::canon::intern(
+                        arena,
+                        SLTNode::Mux {
+                            cond: new_cond,
+                            then_expr: new_then,
+                            else_expr: new_else,
+                        },
+                    )?;
+                    if result == new_then && new_then == new_else {
+                        discarded_operand.insert(node, 0);
+                    }
+                    result
                 }
             }
             SLTNode::Concat(parts) => {
@@ -967,6 +1125,156 @@ mod tests {
         assert_eq!(targets(&paths), vec![13]);
         assert_eq!(paths[0].expr, in10);
         assert_eq!(sources(&paths[0]), vec![10]);
+    }
+
+    #[test]
+    fn substituted_literal_crosses_a_mux_tree_with_several_readers() {
+        let mut arena = SLTNodeArena::new();
+        let zero = arena
+            .alloc(SLTNode::Constant(0u8.into(), 0u8.into(), 8, false))
+            .unwrap();
+        let mut expr = input(&mut arena, 10, 0, 7);
+        let mut driver = path(11, 0, 7, expr, &[10, 99]);
+        for selector in 1..=3 {
+            let cond = input(&mut arena, selector, 0, 0);
+            expr = arena
+                .alloc(SLTNode::Mux {
+                    cond,
+                    then_expr: zero,
+                    else_expr: expr,
+                })
+                .unwrap();
+            driver.sources.insert(VarAtomBase::new(selector, 0, 0));
+        }
+        driver.expr = expr;
+        let bus = input(&mut arena, 11, 0, 7);
+        let mut paths = vec![
+            path(10, 0, 7, zero, &[]),
+            driver,
+            path(20, 0, 7, bus, &[11]),
+            path(21, 0, 7, bus, &[11]),
+        ];
+        inline_nets(&mut paths, &mut arena, &pinned(&[20, 21])).unwrap();
+        assert_eq!(targets(&paths), [20, 21]);
+        for reader in paths {
+            assert_eq!(reader.expr, zero);
+            assert_eq!(
+                sources(&reader),
+                [99],
+                "keep the separately declared dependency"
+            );
+        }
+    }
+
+    #[test]
+    fn a_forwarded_zero_mask_drops_only_the_masked_input_at_the_result_width() {
+        let mut arena = SLTNodeArena::new();
+        let zero = arena
+            .alloc(SLTNode::Constant(0u8.into(), 0u8.into(), 8, false))
+            .unwrap();
+        let bit_zero = arena
+            .alloc(SLTNode::Constant(0u8.into(), 0u8.into(), 1, false))
+            .unwrap();
+        let data = input(&mut arena, 1, 0, 7);
+        let mask = input(&mut arena, 10, 0, 7);
+        let bit_mask = input(&mut arena, 11, 0, 0);
+        let masked = and(&mut arena, data, mask);
+        let narrow = and(&mut arena, data, bit_mask);
+        let mut narrow_reader = path(21, 0, 7, narrow, &[1]);
+        narrow_reader.sources.insert(VarAtomBase::new(11, 0, 0));
+        let mut paths = vec![
+            path(10, 0, 7, zero, &[]),
+            path(11, 0, 0, bit_zero, &[]),
+            path(20, 0, 7, masked, &[1, 10, 99]),
+            narrow_reader,
+        ];
+        inline_nets(&mut paths, &mut arena, &pinned(&[20, 21])).unwrap();
+        assert_eq!(paths[0].expr, zero);
+        assert_eq!(sources(&paths[0]), [99]);
+        assert_eq!(crate::get_width(paths[1].expr, &arena), 8);
+    }
+
+    #[test]
+    fn folded_readers_drop_a_shared_driver_only_after_its_last_read() {
+        let mut arena = SLTNodeArena::new();
+        let zero = arena
+            .alloc(SLTNode::Constant(0u8.into(), 0u8.into(), 8, false))
+            .unwrap();
+        let mut expensive = input(&mut arena, 1, 0, 7);
+        for var in 2..=4 {
+            let next = input(&mut arena, var, 0, 7);
+            expensive = and(&mut arena, expensive, next);
+        }
+        // The unknown default requires a conversion on assignment: the
+        // driver may be removed when unread, but cannot be substituted.
+        let unknown = arena
+            .alloc(SLTNode::Constant(0u8.into(), 255u8.into(), 8, false))
+            .unwrap();
+        let select = input(&mut arena, 5, 0, 0);
+        expensive = arena
+            .alloc(SLTNode::Mux {
+                cond: select,
+                then_expr: expensive,
+                else_expr: unknown,
+            })
+            .unwrap();
+        let data = input(&mut arena, 12, 0, 7);
+        let mask = input(&mut arena, 10, 0, 7);
+        let masked = and(&mut arena, data, mask);
+        let original = vec![
+            path(10, 0, 7, zero, &[]),
+            path(12, 0, 7, expensive, &[1, 2, 3, 4]),
+            path(20, 0, 7, masked, &[10, 12]),
+            path(21, 0, 7, masked, &[10, 12]),
+        ];
+        let mut paths = original.clone();
+        let report = inline_nets(&mut paths, &mut arena, &pinned(&[20, 21])).unwrap();
+        assert_eq!(report.dead, 1);
+        assert_eq!(targets(&paths), [20, 21]);
+
+        let mut paths = original.clone();
+        inline_nets(&mut paths, &mut arena, &pinned(&[12, 20, 21])).unwrap();
+        assert_eq!(
+            targets(&paths),
+            [12, 20, 21],
+            "keep externally observed storage"
+        );
+
+        // The expression itself is also a read, even if its path has no
+        // separately declared dependency on the driver.
+        let mut paths = original;
+        paths.push(path(22, 0, 7, data, &[]));
+        inline_nets(&mut paths, &mut arena, &pinned(&[20, 21, 22])).unwrap();
+        assert_eq!(targets(&paths), [12, 20, 21, 22]);
+    }
+
+    #[test]
+    fn a_folded_mux_preserves_shared_reads_and_capture_dependencies() {
+        let mut arena = SLTNodeArena::new();
+        let data = input(&mut arena, 1, 0, 7);
+        let wire = input(&mut arena, 10, 0, 7);
+        let cond = input(&mut arena, 2, 0, 0);
+        let mux = arena
+            .alloc(SLTNode::Mux {
+                cond,
+                then_expr: data,
+                else_expr: wire,
+            })
+            .unwrap();
+        let mut reader = path(20, 0, 7, mux, &[1, 10]);
+        reader.sources.insert(VarAtomBase::new(2, 0, 0));
+        let mut capture = reader.clone();
+        capture.target = LogicPathTarget::Var(VarAtomBase::new(21, 0, 7));
+        capture.comb_capture_enable_always = true;
+        let mut shared = reader.clone();
+        shared.target = LogicPathTarget::Var(VarAtomBase::new(22, 0, 7));
+        shared.expr = and(&mut arena, mux, cond);
+        let mut paths = vec![path(10, 0, 7, data, &[1]), reader, capture, shared];
+        inline_nets(&mut paths, &mut arena, &pinned(&[20, 21, 22])).unwrap();
+        assert_eq!(paths[0].expr, data);
+        assert_eq!(sources(&paths[0]), [1]);
+        assert_eq!(sources(&paths[1]), [1, 2]);
+        assert_eq!(sources(&paths[2]), [1, 2]);
     }
 
     /// A net nothing reads goes with its driver, and so does the net only
