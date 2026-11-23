@@ -1,4 +1,6 @@
 //! Lower the sampled roots and indexed writes of one state transition together.
+mod readback;
+
 use super::{NextStateForm, ValueRoot};
 use crate::condition_groups::{self, Merge, Write};
 use crate::{HashMap, HashSet, NodeId, SLTNode, SLTNodeArena, SLTToSIRLowerer};
@@ -208,12 +210,25 @@ fn lower_edge<A: Copy + Eq + Hash + Debug + Display, B: Copy + Eq + Hash + Debug
         _ => None,
     };
     let group = stream && !four_state;
+    let (port_nodes, guard_nodes) = port_nodes.split_at(form.ports.len() * 3);
     let mut order: Vec<_> = root_nodes
         .iter()
         .enumerate()
         .filter(|(index, _)| !deferred_bank(&form.roots[*index]))
         .map(|(index, &value)| Write { index, value })
         .collect();
+    let readbacks = if group && !form.ports.is_empty() {
+        readback::schedule(
+            form,
+            &mut order,
+            port_nodes.as_chunks::<3>().0,
+            &mapped,
+            &address,
+            captured,
+        )
+    } else {
+        HashMap::default()
+    };
     if group {
         group_staged_roots(
             &mut order,
@@ -336,7 +351,6 @@ fn lower_edge<A: Copy + Eq + Hash + Debug + Display, B: Copy + Eq + Hash + Debug
             },
         )?;
     }
-    let (port_nodes, guard_nodes) = port_nodes.split_at(form.ports.len() * 3);
     if publication == Publication::Deferred {
         let mut banks = Vec::new();
         let mut indices = HashMap::default();
@@ -392,28 +406,50 @@ fn lower_edge<A: Copy + Eq + Hash + Debug + Display, B: Copy + Eq + Hash + Debug
             b.switch_to_block(next);
         }
     }
-    for (port, nodes) in form.ports.iter().zip(port_nodes.as_chunks::<3>().0) {
-        let [index, value, guard] =
-            nodes.map(|node| lowerer.lower(&mut b, node, &mapped, &mut lowered));
+    for (i, (port, &[index, value, guard])) in form
+        .ports
+        .iter()
+        .zip(port_nodes.as_chunks::<3>().0)
+        .enumerate()
+    {
+        let index = lowerer.lower(&mut b, index, &mapped, &mut lowered);
         let capture = captured.contains(&port.array);
         let region = if !capture && publication == Publication::Deferred {
             SPARSE_WORKING_REGION
         } else {
             STABLE_REGION
         };
-        let store = SIRInstruction::Store(
-            address(port.array, region),
-            SIROffset::Element {
-                index,
-                element_width: port.element_width,
-                bit_offset: port.access.lsb,
-                dynamic_bit_offset: None,
-            },
-            port.access.msb - port.access.lsb + 1,
-            value,
-            Vec::new(),
-            Vec::new(),
-        );
+        let store = |value| {
+            SIRInstruction::Store(
+                address(port.array, region),
+                SIROffset::Element {
+                    index,
+                    element_width: port.element_width,
+                    bit_offset: port.access.lsb,
+                    dynamic_bit_offset: None,
+                },
+                port.access.msb - port.access.lsb + 1,
+                value,
+                Vec::new(),
+                Vec::new(),
+            )
+        };
+        if let Some(readback) = readbacks.get(&i) {
+            let root = &form.roots[readback.root];
+            readback.emit(
+                &mut b,
+                &mapped,
+                &mut lowerer,
+                &mut lowered,
+                root,
+                address(root.target, WORKING_REGION),
+                value,
+                store,
+            )?;
+            continue;
+        }
+        let store = store(lowerer.lower(&mut b, value, &mapped, &mut lowered));
+        let guard = lowerer.lower(&mut b, guard, &mapped, &mut lowered);
         if capture {
             samples.push(SampledStore {
                 store,
