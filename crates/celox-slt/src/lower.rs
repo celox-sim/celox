@@ -8,6 +8,7 @@ mod concat;
 mod constants;
 mod cost;
 mod count_idioms;
+mod index_bounds;
 mod inputs;
 mod loops;
 mod mask_constants;

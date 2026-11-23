@@ -306,3 +306,54 @@ fn for_fold_is_not_a_pure_mux_arm() {
 
     assert!(!SLTToSIRLowerer::new(false).is_speculatable_pure(fold, &arena));
 }
+
+#[test]
+fn two_state_array_read_guards_require_the_entire_index_range_to_fit() {
+    let mut arena = SLTNodeArena::new();
+    let address = input(&mut arena, 0, 8);
+    let high = constant(&mut arena, 255, 8);
+    let reversed = arena
+        .alloc(SLTNode::Binary(high, BinaryOp::Sub, address))
+        .unwrap();
+    let two_state = arena
+        .alloc(SLTNode::Unary(UnaryOp::ToTwoState, address))
+        .unwrap();
+    let known = arena
+        .alloc(SLTNode::Binary(two_state, BinaryOp::EqCase, address))
+        .unwrap();
+    let mut two = SLTToSIRLowerer::new(false);
+    let mut four = SLTToSIRLowerer::new(true);
+    let zero = constant(&mut arena, 0, 8);
+    let wrapped = arena
+        .alloc(SLTNode::Binary(zero, BinaryOp::Sub, address))
+        .unwrap();
+    // As an eight-bit signed value, 255 is -1. Choosing the first arm
+    // here would incorrectly prove that this index is always below 1.
+    let direction = arena
+        .alloc(SLTNode::Binary(high, BinaryOp::GeS, zero))
+        .unwrap();
+    let signed_index = arena
+        .alloc(SLTNode::Mux {
+            cond: direction,
+            then_expr: zero,
+            else_expr: address,
+        })
+        .unwrap();
+    for (index, limit, width, expected) in [
+        (reversed, 256, 64, Some(true)),
+        (reversed, 255, 64, None),
+        (reversed, 256, 8, None),
+        (wrapped, 1, 64, None),
+        (signed_index, 1, 64, None),
+    ] {
+        let end = constant(&mut arena, limit, width);
+        let inside = arena
+            .alloc(SLTNode::Binary(index, BinaryOp::LtU, end))
+            .unwrap();
+        let guard = arena
+            .alloc(SLTNode::Binary(inside, BinaryOp::LogicAnd, known))
+            .unwrap();
+        assert_eq!(two.constant_condition(guard, &arena), expected);
+        assert_eq!(four.constant_condition(guard, &arena), None);
+    }
+}
