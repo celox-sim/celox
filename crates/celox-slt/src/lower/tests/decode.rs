@@ -529,6 +529,28 @@ fn dense_input_bank_selects_each_register_and_preserves_holes_and_priority() {
     let reg =
         SLTToSIRLowerer::new(false).lower(&mut builder, root, &arena, &mut Default::default());
     let unit = finish_lowering(builder);
+    let entry = &unit.blocks[&unit.entry_block_id];
+    let SIRTerminator::Switch { cases, default, .. } = &entry.terminator else {
+        panic!("expected the register address to select a single load");
+    };
+    assert!(
+        entry
+            .instructions
+            .iter()
+            .all(|inst| !matches!(inst, SIRInstruction::Load(_, address, ..) if *address >= 2))
+    );
+    for target in cases.iter().map(|case| case.target).chain([*default]) {
+        let block = &unit.blocks[&target];
+        assert!(
+            block
+                .instructions
+                .iter()
+                .filter(|inst| matches!(inst, SIRInstruction::Load(..)))
+                .count()
+                <= 1
+        );
+        assert!(matches!(block.terminator, SIRTerminator::Jump(..)));
+    }
     for word in 0..16u32 {
         for enabled in [0u32, 1] {
             let memory = (0..32)
@@ -584,4 +606,68 @@ fn dense_input_bank_keeps_priority_for_a_possibly_unknown_selector() {
     let original = root;
     reduce_two_state_decodes(&mut arena, [&mut root]).unwrap();
     assert_eq!(root, original);
+}
+
+#[test]
+fn input_bank_respects_materialized_selector_bits_and_four_state_muxes() {
+    let mut arena = SLTNodeArena::new();
+    let selector = input(&mut arena, 0, 3);
+    let mut bank: Vec<_> = (1..=8).map(|id| input(&mut arena, id, 8)).collect();
+    let mut bits = Vec::new();
+    for bit in 0..3 {
+        let cond = arena
+            .alloc(SLTNode::Slice {
+                expr: selector,
+                access: BitAccess::new(bit, bit),
+            })
+            .unwrap();
+        bits.push(cond);
+        bank = bank
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| {
+                arena
+                    .alloc(SLTNode::Mux {
+                        cond,
+                        then_expr: pair[1],
+                        else_expr: pair[0],
+                    })
+                    .unwrap()
+            })
+            .collect();
+    }
+    for four_state in [false, true] {
+        let mut builder = SIRBuilder::new();
+        let mut cache = crate::HashMap::default();
+        if !four_state {
+            // Capture the low selector bit before the current memory snapshot.
+            let saved = builder.alloc_bit(1, false);
+            builder.emit(SIRInstruction::Imm(saved, SIRValue::new(0u8)));
+            cache.insert(bits[0], saved);
+        }
+        let value =
+            SLTToSIRLowerer::new(four_state).lower(&mut builder, bank[0], &arena, &mut cache);
+        let unit = finish_lowering(builder);
+        assert!(
+            unit.blocks
+                .values()
+                .all(|block| !matches!(block.terminator, SIRTerminator::Switch { .. }))
+        );
+        let memory = (0..=8)
+            .map(|id| {
+                (
+                    id,
+                    TestSIRValue {
+                        payload: (if id == 0 { 7 } else { id }).into(),
+                        mask: 0u8.into(),
+                    },
+                )
+            })
+            .collect();
+        assert_eq!(
+            execute_fold_group_sir_with_memory(&unit, &memory)[&value].payload,
+            BigUint::from(if four_state { 8u8 } else { 7 })
+        );
+    }
 }

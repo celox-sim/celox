@@ -176,7 +176,10 @@ fn any<A: Clone + Eq + Hash>(
 
 // Even with two-state storage, an expression can introduce unknown bits.
 // A bit-select tree is equivalent to exact comparisons only for a known address.
-fn known_selector<A: Clone + Eq + Hash>(arena: &SLTNodeArena<A>, selector: NodeId) -> bool {
+pub(super) fn known_selector<A: Clone + Eq + Hash>(
+    arena: &SLTNodeArena<A>,
+    selector: NodeId,
+) -> bool {
     let mut pending = vec![selector];
     let mut seen = HashSet::default();
     while let Some(node) = pending.pop() {
