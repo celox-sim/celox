@@ -30,6 +30,7 @@ mod gvn_liveness;
 mod immediates;
 mod increment_change;
 mod known_bits;
+mod load_table;
 mod loop_guard;
 mod masks;
 mod memory_forward;
