@@ -212,6 +212,64 @@ fn small_constant_lookup_keeps_its_individual_rows() {
 }
 
 #[test]
+fn shallow_state_transitions_fit_in_a_small_byte_table() {
+    let mut arena = SLTNodeArena::new();
+    let selector = input(&mut arena, 0, 3);
+    let states = [0, 1, 2, 3, 7].map(|v| constant(&mut arena, v, 3));
+    let mut root = states[4];
+    for state in (0..4).rev() {
+        let enable = input(&mut arena, state as u32 + 1, 1);
+        let next = arena
+            .alloc(SLTNode::Mux {
+                cond: enable,
+                then_expr: states[(state + 1) % 4],
+                else_expr: states[state],
+            })
+            .unwrap();
+        root = arm(&mut arena, selector, state as u64, next, root);
+    }
+    reduce_two_state_decodes(&mut arena, [&mut root]).unwrap();
+    let mut builder = SIRBuilder::new();
+    let result =
+        SLTToSIRLowerer::new(false).lower(&mut builder, root, &arena, &mut Default::default());
+    let unit = finish_lowering(builder);
+    assert!(unit.blocks.values().all(|b| {
+        !b.instructions
+            .iter()
+            .any(|i| matches!(i, SIRInstruction::Mux(..)))
+    }));
+    for bits in 0..128u8 {
+        let state = bits & 7;
+        let enables = bits >> 3;
+        let memory = (0..5)
+            .map(|i| {
+                let value = if i == 0 {
+                    state
+                } else {
+                    (enables >> (i - 1)) & 1
+                };
+                (
+                    i,
+                    TestSIRValue {
+                        payload: value.into(),
+                        mask: 0u8.into(),
+                    },
+                )
+            })
+            .collect();
+        let expected = if state >= 4 {
+            7
+        } else {
+            (state + ((enables >> state) & 1)) % 4
+        };
+        assert_eq!(
+            execute_fold_group_sir_with_memory(&unit, &memory)[&result].payload,
+            expected.into()
+        );
+    }
+}
+
+#[test]
 fn state_table_matches_every_control_word_including_the_unlisted_state() {
     let mut arena = SLTNodeArena::new();
     let selector = input(&mut arena, 0, 3);
