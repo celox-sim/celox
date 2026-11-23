@@ -1,0 +1,1 @@
+Address PR #4595 review: check overlapping write ranges for ref-port drivers and propagate working-region tracking across same-instance ref aliases in always_ff
