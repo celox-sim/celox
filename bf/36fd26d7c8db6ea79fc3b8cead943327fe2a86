@@ -1,1 +1,7 @@
-Rebase onto master (203040a); resolve conflicts by applying scoped_type before bind_declared in ports_from_scope and keeping both hierarchy tests
+Revision history for #3665:
+
+rev 3 (content) 2026-11-23 16:19 UTC — Rebase onto master (203040a); resolve conflicts by applying scoped_type before bind_declared in ports_from_scope and keeping both hierarchy tests
+rev 2 (content) 2026-11-12 21:47 UTC
+rev 1 (initial) 2026-11-12 21:47 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":3665,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"922fd48caec98daa228ae2e776946d9e8b649bc4","timestamp_iso":"2026-11-12T21:47:45Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"922fd48caec98daa228ae2e776946d9e8b649bc4","new_sha":"35b2430b6439a0424b92bd0f6aa921f0c13fed62","timestamp_iso":"2026-11-12T21:47:45Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/922fd48caec98daa228ae2e776946d9e8b649bc4...35b2430b6439a0424b92bd0f6aa921f0c13fed62"},{"number":3,"change_type":"content","old_sha":"35b2430b6439a0424b92bd0f6aa921f0c13fed62","new_sha":"bf36fd26d7c8db6ea79fc3b8cead943327fe2a86","timestamp_iso":"2026-11-23T16:19:46Z","reason":"Rebase onto master (203040a); resolve conflicts by applying scoped_type before bind_declared in ports_from_scope and keeping both hierarchy tests","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/35b2430b6439a0424b92bd0f6aa921f0c13fed62...bf36fd26d7c8db6ea79fc3b8cead943327fe2a86"}]} -->
