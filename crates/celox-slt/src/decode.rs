@@ -219,11 +219,25 @@ fn input_bank<A: Clone + Eq + Hash>(
         return Ok(None);
     }
     let entries = 1usize << width;
+    let is_scalar_input =
+        |node| matches!(arena.get(node), SLTNode::Input { index, .. } if index.is_empty());
+    // All arms have the result width. A scalar read from two-state storage
+    // and a literal with a zero mask already have their converted payload.
+    let bank_value = |value| match *arena.get(value) {
+        SLTNode::Unary(UnaryOp::ToTwoState, inner)
+            if is_scalar_input(inner)
+                || matches!(arena.get(inner), SLTNode::Constant(_, mask, ..) if mask.is_zero()) =>
+        {
+            inner
+        }
+        _ => value,
+    };
     // Limit table growth for sparse decodes and keep value grouping for
     // cases dominated by repeated constants.
-    let scalar_inputs = groups.iter().filter(|(value, _)| {
-        matches!(arena.get(*value), SLTNode::Input { index, .. } if index.is_empty())
-    }).count();
+    let scalar_inputs = groups
+        .iter()
+        .filter(|(value, _)| is_scalar_input(bank_value(*value)))
+        .count();
     if scalar_inputs < 8
         || scalar_inputs < groups.len().div_ceil(2)
         || groups.iter().map(|(_, labels)| labels.len()).sum::<usize>() < entries / 2
@@ -233,10 +247,11 @@ fn input_bank<A: Clone + Eq + Hash>(
     if !known_selector(arena, selector) {
         return Ok(None);
     }
-    let mut values = vec![default; entries];
+    let mut values = vec![bank_value(default); entries];
     for (value, labels) in groups {
+        let value = bank_value(*value);
         for &(label, _) in labels {
-            values[label as usize] = *value;
+            values[label as usize] = value;
         }
     }
     for bit in 0..width {
