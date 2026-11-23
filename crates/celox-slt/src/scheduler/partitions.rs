@@ -204,6 +204,58 @@ pub(super) fn process_interacts_with_host<Addr: Clone + Eq + Hash>(path: &LogicP
     }
 }
 
+/// Keep consecutive assignments with identical activation inputs together.
+/// A run large enough to fill a partition also gets boundaries at both ends:
+/// an unrelated write would otherwise wake every destination in the run.
+fn partition_fanout_boundaries<A: Clone + Eq + Hash>(
+    prepared: &PreparedSchedule<A>,
+    path_costs: &[usize],
+    target_cost: usize,
+) -> (Vec<bool>, Vec<bool>) {
+    let paths: Vec<_> = prepared
+        .scheduled_work
+        .iter()
+        .map(|work| {
+            let ScheduledWork::CombPath(id) = *work else {
+                return None;
+            };
+            let path = &prepared.input[id];
+            (matches!(path.target, LogicPathTarget::Var(_))
+                && !path.sources.is_empty()
+                && path.previous_sources.is_empty()
+                && !path_has_effects(path)
+                && !prepared.adj[id].contains(&id))
+            .then_some(id)
+        })
+        .collect();
+    let mut cuts = vec![false; paths.len() + 1];
+    let mut inside = vec![false; paths.len()];
+    let mut start = 0;
+    for run in paths.chunk_by(|a, b| {
+        a.zip(*b).is_some_and(|(a, b)| {
+            let (a, b) = (&prepared.input[a], &prepared.input[b]);
+            a.sources == b.sources && a.address_sources == b.address_sources
+        })
+    }) {
+        let end = start + run.len();
+        if run.len() > 1 {
+            inside[start + 1..end].fill(true);
+            if run
+                .iter()
+                .flatten()
+                .map(|&id| path_costs[id])
+                .sum::<usize>()
+                >= target_cost
+            {
+                cuts[start] = true;
+                cuts[end] = true;
+            }
+        }
+        start = end;
+    }
+    (cuts, inside)
+}
+
 /// Cut a combinational schedule into partitions of about
 /// `partitioning.target_cost`, or `None` when it would be one.
 pub(super) fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
@@ -301,6 +353,9 @@ pub(super) fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Cop
     let mut first_work = Vec::new();
     let mut cost = 0;
     let mut previous_clocked = false;
+    let path_costs: Vec<_> = input.iter().map(|path| path_cost(arena, path)).collect();
+    let (fanout_cuts, inside_fanout) =
+        partition_fanout_boundaries(prepared, &path_costs, partitioning.target_cost);
     for (index, work) in prepared.scheduled_work.iter().enumerate() {
         if skipped_work.contains(&index) {
             continue;
@@ -320,7 +375,9 @@ pub(super) fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Cop
         });
         if first_work.is_empty()
             || (!held[index]
-                && ((cost >= partitioning.target_cost && !extend) || clocked != previous_clocked))
+                && ((cost >= partitioning.target_cost && !extend && !inside_fanout[index])
+                    || clocked != previous_clocked
+                    || fanout_cuts[index]))
         {
             first_work.push(index);
             cost = 0;
@@ -335,7 +392,7 @@ pub(super) fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Cop
         previous_clocked = clocked;
         cost += work_paths(work)
             .iter()
-            .map(|&path| path_cost(arena, &input[path]))
+            .map(|&path| path_costs[path])
             .sum::<usize>();
     }
     if first_work.len() < 2 {
@@ -369,7 +426,7 @@ pub(super) fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Cop
         let partition = partition_of_work[index];
         for &path_index in work_paths(work) {
             let path = &input[path_index];
-            costs[partition] += path_cost(arena, path);
+            costs[partition] += path_costs[path_index];
             pinned[partition] |= path_has_effects(path);
             let atoms = path
                 .sources
