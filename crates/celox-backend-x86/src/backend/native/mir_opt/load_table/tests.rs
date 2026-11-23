@@ -94,6 +94,43 @@ fn bank_offsets_select_one_load_and_preserve_constant_arms() {
 }
 
 #[test]
+fn regularly_spaced_homes_use_one_scaled_load_with_the_original_bounds() {
+    for stride in [1, 2, 4, 8] {
+        let offsets = std::array::from_fn(|i| 32 + i as i32 * stride);
+        let mut f = bank(&offsets);
+        // Replace the repeated first home after the interval with the fallback.
+        let Some(MInst::JumpTable { targets, .. }) = f.blocks[0].insts.last_mut() else {
+            unreachable!();
+        };
+        targets[10] = BlockId(10);
+        run(&mut f);
+        f.verify_result().unwrap();
+        assert!(f.constant_tables().is_empty());
+        assert!(f.blocks.iter().flat_map(|b| &b.insts).any(|inst| matches!(
+            inst, MInst::LoadIndexed { offset: 32, scale, alias_range, .. }
+                if i32::from(*scale) == stride
+                    && *alias_range == MemoryAliasRange::new(32, (7 * stride + 2) as usize)
+        )));
+
+        let alloc = regalloc::run_regalloc(&mut f).unwrap();
+        let emitted = emit::emit(&f, &alloc.assignment, alloc.spill_frame_size).unwrap();
+        let code = JitCode::new(&emitted.code).unwrap();
+        let mut state: Vec<u8> = (0..emitted.required_state_size).map(|i| i as u8).collect();
+        for key in 0u8..16 {
+            state[0] = key;
+            let expected = if (2..10).contains(&key) {
+                let pos = offsets[(key - 2) as usize] as usize;
+                [state[pos], state[pos + 1]]
+            } else {
+                0xa55au16.to_le_bytes()
+            };
+            assert_eq!(unsafe { code.call(&mut state) }, 0);
+            assert_eq!(state[4..6], expected);
+        }
+    }
+}
+
+#[test]
 fn ineligible_arms_keep_the_jump_table() {
     for variant in 0..4 {
         let mut f = bank(&[21, 34, 43, 55, 62, 74, 88, 93]);

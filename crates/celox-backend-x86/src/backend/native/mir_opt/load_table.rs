@@ -103,11 +103,18 @@ fn plan(
 }
 
 impl Plan {
-    fn apply(self, func: &mut MFunction, dead: &mut HashSet<BlockId>) {
-        let load = func.blocks[self.load].id;
-        let fallback = self.constant.map(|i| func.blocks[i].id);
-        let min = *self.offsets.iter().min().unwrap();
-        let span = (*self.offsets.iter().max().unwrap() - min) as usize;
+    /// Return the index and x86 scale for a load based at the lowest home.
+    fn address_index(&self, func: &mut MFunction, key: VReg, min: i32, span: usize) -> (VReg, u8) {
+        let stride = self.offsets[1] - self.offsets[0];
+        if matches!(stride, 1 | 2 | 4 | 8)
+            && self
+                .offsets
+                .windows(2)
+                .all(|pair| pair[1] - pair[0] == stride)
+        {
+            return (key, stride as u8);
+        }
+
         let entry = if span <= u8::MAX as usize {
             OpSize::S8
         } else if span <= u16::MAX as usize {
@@ -124,34 +131,7 @@ impl Plan {
         }
         let table = func.intern_constant_table(words);
         let mut temp = || alloc_transient_vreg(&mut func.vregs, &mut func.spill_descs);
-        let parent = &mut func.blocks[self.dispatch];
-        parent.insts.pop();
-        let key = if self.first == 0 {
-            self.index
-        } else {
-            let dst = temp();
-            parent.push(MInst::SubImm {
-                dst,
-                src: self.index,
-                imm: self.first as i32,
-            });
-            dst
-        };
-        if let Some(false_bb) = fallback {
-            parent.push(MInst::BranchPred {
-                predicate: BranchPredicate::CompareImm {
-                    lhs: key,
-                    imm: self.offsets.len() as i32,
-                    kind: CmpKind::LtU,
-                },
-                true_bb: load,
-                false_bb,
-            });
-        } else {
-            parent.push(MInst::Jump { target: load });
-        }
         let block = &mut func.blocks[self.load];
-        block.insts.clear();
         let table_ptr = temp();
         block.push(MInst::LoadConstantTableAddr {
             dst: table_ptr,
@@ -176,15 +156,51 @@ impl Plan {
             index: byte_index,
             size: entry,
         });
+        (offset, 1)
+    }
+
+    fn apply(self, func: &mut MFunction, dead: &mut HashSet<BlockId>) {
+        let load = func.blocks[self.load].id;
+        let fallback = self.constant.map(|i| func.blocks[i].id);
+        let min = *self.offsets.iter().min().unwrap();
+        let span = (*self.offsets.iter().max().unwrap() - min) as usize;
+        let parent = &mut func.blocks[self.dispatch];
+        parent.insts.pop();
+        let key = if self.first == 0 {
+            self.index
+        } else {
+            let dst = alloc_transient_vreg(&mut func.vregs, &mut func.spill_descs);
+            parent.push(MInst::SubImm {
+                dst,
+                src: self.index,
+                imm: self.first as i32,
+            });
+            dst
+        };
+        if let Some(false_bb) = fallback {
+            parent.push(MInst::BranchPred {
+                predicate: BranchPredicate::CompareImm {
+                    lhs: key,
+                    imm: self.offsets.len() as i32,
+                    kind: CmpKind::LtU,
+                },
+                true_bb: load,
+                false_bb,
+            });
+        } else {
+            parent.push(MInst::Jump { target: load });
+        }
+        func.blocks[self.load].insts.clear();
+        let (index, scale) = self.address_index(func, key, min, span);
         // The old load can have spill metadata for its fixed home. The new
         // result depends on the selector and needs its own temporary.
-        let result = temp();
-        block.push(MInst::LoadIndexed {
+        let result = alloc_transient_vreg(&mut func.vregs, &mut func.spill_descs);
+        func.blocks[self.load].push(MInst::LoadIndexed {
             dst: result,
             base: BaseReg::SimState,
             offset: min,
-            index: offset,
-            scale: 1,
+            index,
+            scale,
             size: self.size,
             alias_range: MemoryAliasRange::new(min, span + self.size.bytes() as usize),
         });
