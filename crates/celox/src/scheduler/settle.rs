@@ -205,7 +205,16 @@ impl Generator<'_> {
                 }
                 self.b.seal_block(SIRTerminator::Jump(done, Vec::new()));
                 self.b.switch_to_block(full);
-                for unit in units {
+                let units = match (cone.untracked, self.program.layout().settle.as_ref()) {
+                    (Some((flags, _)), Some(settle)) => crate::settle::full_settle(
+                        units,
+                        stable(flags),
+                        settle,
+                        &self.program.layout().offsets,
+                    ),
+                    _ => std::borrow::Cow::Borrowed(units),
+                };
+                for unit in units.iter() {
                     self.inline_with_exit(unit, None);
                 }
                 self.b.seal_block(SIRTerminator::Jump(done, Vec::new()));
