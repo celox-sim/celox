@@ -146,7 +146,7 @@ impl SLTToSIRLowerer {
                             let width = self
                                 .get_width(*then_expr, arena)
                                 .max(self.get_width(*else_expr, arena));
-                            if let Some(take_then) = Self::constant_condition(*cond, arena) {
+                            if let Some(take_then) = self.constant_condition(*cond, arena) {
                                 self.with_mux_stats(|stats| stats.constant_folded += 1);
                                 work.push(Frame::Cast(width));
                                 work.push(Frame::Visit(if take_then {
@@ -307,7 +307,7 @@ impl SLTToSIRLowerer {
                             && access.msb < self.get_width(*else_expr, arena) =>
                         {
                             self.with_mux_stats(|stats| stats.slice_seen += 1);
-                            if let Some(take_then) = Self::constant_condition(*cond, arena) {
+                            if let Some(take_then) = self.constant_condition(*cond, arena) {
                                 self.with_mux_stats(|stats| stats.constant_folded += 1);
                                 work.push(Frame::VisitSlice(
                                     if take_then { *then_expr } else { *else_expr },
