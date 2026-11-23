@@ -619,6 +619,82 @@ fn a_chain_in_one_event_domain_needs_no_intermediate_publication() {
 }
 
 #[test]
+fn settle_recovers_a_single_register_through_packed_slices() {
+    fn plan(high_bit: usize, high_source: u32) -> Vec<super::SettlePartition<u32>> {
+        let mut arena = SLTNodeArena::new();
+        let mut slice = |source, low, high| {
+            let mut path = simple_path(&mut arena, 11, Some(source));
+            let access = BitAccess::new(low, high);
+            path.target = LogicPathTarget::Var(VarAtomBase::new(11, low, high));
+            path.expr = arena
+                .alloc(SLTNode::Input {
+                    variable: source,
+                    index: Vec::new(),
+                    access,
+                    signed: false,
+                })
+                .unwrap();
+            path.sources = [VarAtomBase::new(source, low, high)].into_iter().collect();
+            path
+        };
+        let low = slice(10, 0, 3);
+        let high = slice(high_source, 4, high_bit);
+        let consumer = simple_path(&mut arena, 12, Some(11));
+        partitioned_sort_with_domains(
+            vec![low, high, consumer],
+            &arena,
+            [(10, vec![1, 2]), (13, vec![1, 2])].into_iter().collect(),
+        )
+        .partitions
+    }
+    assert!(plan(7, 10).is_empty());
+    for parts in [plan(6, 10), plan(7, 13)] {
+        assert_eq!(parts.last().unwrap().writes, [12]);
+    }
+}
+
+#[test]
+fn settle_tests_the_stored_join_before_running_its_readers() {
+    let mut arena = SLTNodeArena::new();
+    let mut join = simple_path(&mut arena, 11, Some(10));
+    let other = simple_path(&mut arena, 11, Some(13));
+    join.expr = arena
+        .alloc(SLTNode::Binary(join.expr, BinaryOp::Xor, other.expr))
+        .unwrap();
+    join.sources.extend(other.sources);
+    let mut paths = vec![join];
+    for (bit, target) in [(0, 12), (1, 14)] {
+        let mut reader = simple_path(&mut arena, target, Some(11));
+        reader.sources = [VarAtomBase::new(11, bit, bit)].into_iter().collect();
+        reader.expr = arena
+            .alloc(SLTNode::Input {
+                variable: 11,
+                index: Vec::new(),
+                access: BitAccess::new(bit, bit),
+                signed: false,
+            })
+            .unwrap();
+        paths.push(reader);
+    }
+    let parts = partitioned_sort_with_domains(
+        paths,
+        &arena,
+        [(10, vec![1]), (13, vec![1])].into_iter().collect(),
+    )
+    .partitions;
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0].writes, [11]);
+    assert_eq!(parts[1].writes, [12, 14]);
+    assert!(
+        parts[0]
+            .plan
+            .watched
+            .iter()
+            .any(|w| w.object == 11 && w.readers == [1])
+    );
+}
+
+#[test]
 fn fanout_shares_a_run_but_independent_registers_on_the_same_clock_do_not() {
     let mut arena = SLTNodeArena::new();
     let paths = vec![
