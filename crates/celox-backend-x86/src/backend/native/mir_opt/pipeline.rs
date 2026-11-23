@@ -51,6 +51,7 @@ pub fn optimize(func: &mut MFunction) {
 
 pub fn optimize_with_diagnostics(func: &mut MFunction, diagnostics: &crate::NativeDiagnostics) {
     let mut runner = PassRunner::new(func, diagnostics);
+    runner.run("load_state_offset_tables", load_table::run);
     if runner.has_high_pressure() {
         run_high_pressure_pipeline(&mut runner);
     } else {
