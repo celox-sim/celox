@@ -179,14 +179,17 @@ pub(super) fn tabulate<A: Clone + Eq + Hash>(
         }
     }
     // Reserve table synthesis for dense decodes with substantial control logic.
-    if decisions.len() < 2 * groups.len() || bound_signed(original, arena) {
+    if decisions.len() < groups.len() || bound_signed(original, arena) {
         return Ok(None);
     }
     let Some(inputs) = TableInputs::new(arena, controls)? else {
         return Ok(None);
     };
     // One byte per row, at most 1 KiB of constant data per distinct table.
-    if inputs.atoms.len() + state_bits > 10 {
+    // A shallower transition saves fewer muxes per lookup. Keep its table
+    // within 256 bytes; deeper transitions can justify the full 1 KiB.
+    let index_bits = state_bits + inputs.atoms.len();
+    if index_bits > 10 || (index_bits > 8 && decisions.len() < 2 * groups.len()) {
         return Ok(None);
     }
     let mut states = vec![default; 1 << state_bits];
