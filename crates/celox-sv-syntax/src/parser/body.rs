@@ -62,6 +62,7 @@ impl Parser<'_> {
                 | "let"
                 | "nettype"
         ) || (matches!(self.peek(), "virtual" | "interface") && self.nth(1) == "class")
+            || (self.peek() == "const" && self.nth(1) == "ref")
         {
             return false;
         }

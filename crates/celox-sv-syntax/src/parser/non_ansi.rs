@@ -13,6 +13,7 @@ use super::*;
 /// A port declaration of a non-ANSI module body.
 struct PortDeclaration {
     name: Name,
+    constant: bool,
     direction: Direction,
     net_type: Option<String>,
     variable: bool,
@@ -56,7 +57,10 @@ impl Parser<'_> {
                 matches!(
                     kind,
                     BodyItemKind::Unconverted { category, .. }
-                        if matches!(category.as_str(), "input" | "output" | "inout" | "ref")
+                        if matches!(
+                            category.as_str(),
+                            "input" | "output" | "inout" | "ref" | "const ref"
+                        )
                 )
                 .then_some(*tokens)
             })
@@ -78,11 +82,12 @@ impl Parser<'_> {
                 items.push(item);
                 continue;
             };
-            let direction = match category.as_str() {
-                "input" => Direction::Input,
-                "output" => Direction::Output,
-                "inout" => Direction::Inout,
-                "ref" => Direction::Ref,
+            let (direction, constant) = match category.as_str() {
+                "input" => (Direction::Input, false),
+                "output" => (Direction::Output, false),
+                "inout" => (Direction::Inout, false),
+                "ref" => (Direction::Ref, false),
+                "const ref" => (Direction::Ref, true),
                 _ => {
                     items.push(item);
                     continue;
@@ -90,7 +95,7 @@ impl Parser<'_> {
             };
             let tokens = *tokens;
             self.at = self.indices.partition_point(|&index| index < tokens.start);
-            for (name, declaration) in self.port_declaration(direction)? {
+            for (name, declaration) in self.port_declaration(direction, constant)? {
                 if declarations.iter().any(|(declared, _)| *declared == name) {
                     self.at = resume;
                     return Err(self.error(format!("port `{name}` is declared more than once")));
@@ -294,6 +299,13 @@ impl Parser<'_> {
                     )));
                 }
                 declaration.net_type = net_type;
+                if declaration.direction == Direction::Ref && declaration.net_type.is_some() {
+                    self.at = resume;
+                    return Err(self.error_at(
+                        declaration.tokens,
+                        "a `ref` port cannot have a net type (IEEE 1800-2023 23.2.2.3)",
+                    ));
+                }
                 declaration.variable = variable;
                 declaration.data_type = data_type;
             }
@@ -361,11 +373,18 @@ impl Parser<'_> {
                         }
                         declaration.default = initializer;
                     }
+                    if declaration.direction == Direction::Ref && net_type.is_some() {
+                        return Err(self.error_at(
+                            declaration.tokens,
+                            "a `ref` port cannot have a net type (IEEE 1800-2023 23.2.2.3)",
+                        ));
+                    }
                     (net_type, variable, data_type, declared_type)
                 }
                 None => (None, false, declaration.data_type, None),
             }
         };
+        port.constant = declaration.constant;
         port.direction = Some(declaration.direction);
         port.net_type = net_type;
         port.variable = variable;
@@ -454,6 +473,7 @@ impl Parser<'_> {
     /// default net type.
     fn port_object(&mut self, declaration: PortDeclaration, unit: &mut Unit) -> Result<BodyItemId> {
         let variable = declaration.variable
+            || declaration.direction == Direction::Ref
             || (declaration.direction == Direction::Output
                 && declaration.net_type.is_none()
                 && !matches!(
@@ -483,7 +503,7 @@ impl Parser<'_> {
             let id = DataDeclarationId(self.data_declarations.len());
             self.data_declarations
                 .push(DataDeclaration::Variables(VariableDeclaration {
-                    constant: false,
+                    constant: declaration.constant,
                     var: declaration.variable,
                     lifetime: None,
                     data_type: declaration.data_type,
@@ -528,9 +548,16 @@ impl Parser<'_> {
     }
 
     /// The names a port declaration starting at the cursor declares.
-    fn port_declaration(&mut self, direction: Direction) -> Result<Vec<(String, PortDeclaration)>> {
+    fn port_declaration(
+        &mut self,
+        direction: Direction,
+        constant: bool,
+    ) -> Result<Vec<(String, PortDeclaration)>> {
         let start = self.at;
         self.attributes()?;
+        if constant {
+            self.expect("const")?;
+        }
         self.at += 1;
         let net_type = if matches!(
             self.peek(),
@@ -554,6 +581,12 @@ impl Parser<'_> {
         } else {
             None
         };
+        if direction == Direction::Ref && net_type.is_some() {
+            return Err(self.error_at(
+                self.range(start),
+                "a `ref` port cannot have a net type (IEEE 1800-2023 23.2.2.3)",
+            ));
+        }
         let variable = self.eat("var");
         let data_type = if self.starts_type() {
             self.data_type()?
@@ -573,6 +606,7 @@ impl Parser<'_> {
                 name.value().to_string(),
                 PortDeclaration {
                     name,
+                    constant,
                     direction,
                     net_type: net_type.clone(),
                     variable,
