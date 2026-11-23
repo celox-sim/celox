@@ -11,7 +11,7 @@ impl StateGraph {
     pub(in super::super) fn connect_samples(
         &mut self,
         dependencies: &StateDependencies,
-        shared: &HashSet<AbsoluteAddr>,
+        placement: &SamplePlacement,
         design: &Design,
         initial: &[InstanceValue],
         shapes: &HashMap<AbsoluteAddr, (usize, bool)>,
@@ -97,8 +97,15 @@ impl StateGraph {
 
         // Each consumer samples the stored result of a shared calculation.
         // Its inputs still qualify as ordinary settled leaves above.
-        drivers.nets.retain(|target, _| !shared.contains(target));
-        let moved = feedback_producers(&drivers, dependencies, &mut settled_reads);
+        drivers
+            .nets
+            .retain(|target, _| !placement.shared.contains(target));
+        let moved = exclusive_sample_producers(
+            &drivers,
+            dependencies,
+            &placement.conditional_packs,
+            &mut settled_reads,
+        );
         drivers.nets.retain(|target, ranges| {
             let (_, expr) = ranges[0];
             if moved.contains(target) {
@@ -216,11 +223,12 @@ impl StateGraph {
     }
 }
 
-/// Follow a register's state transitions back through their exclusive inputs.
+/// Follow a register's feedback and conditionally packed data through their exclusive inputs.
 /// An operand can move with the last settle reader of its stored value.
-fn feedback_producers(
+fn exclusive_sample_producers(
     drivers: &Drivers<'_>,
     dependencies: &StateDependencies,
+    conditional_packs: &HashSet<AbsoluteAddr>,
     settled_reads: &mut HashMap<AbsoluteAddr, usize>,
 ) -> HashSet<AbsoluteAddr> {
     let mut startup = None;
@@ -231,7 +239,7 @@ fn feedback_producers(
         .nets
         .iter()
         .filter(|(net, ranges)| {
-            dependencies.is_feedback(**net)
+            (dependencies.is_feedback(**net) || conditional_packs.contains(*net))
                 && !settled_reads.contains_key(net)
                 && starts_at_zero(ranges[0].1)
         })

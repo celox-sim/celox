@@ -931,3 +931,74 @@ endmodule"#;
         assert_eq!(sim.get(sampled), 25u8.into());
     }
 }
+
+/// Two independent clock enables can both sample a private bus without
+/// giving the bus an unconditional producer in the partitioned settle.
+#[test]
+fn partitioned_settle_leaves_a_guarded_bus_at_its_sampling_edges() {
+    let source = r#"
+module Top(input src, ca, cb, ena, enb, input [63:0] d,
+           output reg [63:0] qa, qb, output wire alive, other);
+    reg [7:0] b0, b1, b2, b3, b4, b5, b6, b7;
+    always_ff @(posedge src) begin
+        b0 <= d[7:0];
+        b1 <= d[15:8];
+        b2 <= d[23:16];
+        b3 <= d[31:24];
+        b4 <= d[39:32];
+        b5 <= d[47:40];
+        b6 <= d[55:48];
+        b7 <= d[63:56];
+    end
+    wire [31:0] upper = {b0,b1,b2,b3};
+    wire [31:0] lower = {b4,b5,b6,b7};
+    wire [63:0] bundle = {upper,lower};
+    always_ff @(posedge ca) if (ena) qa <= bundle;
+    always_ff @(posedge cb) if (enb) qb <= bundle;
+    assign alive = ^d;
+    assign other = ena ^ enb;
+endmodule"#;
+    let build = || {
+        Simulator::from_sv_sources(vec![(source, Path::new("guarded-bus.sv"))], "Top")
+            .four_state(false)
+            .opt_level(OptLevel::O2)
+            .settle_partition(SettlePartition::Always)
+    };
+    let plan = settle_plan(build());
+    for net in [".upper", ".lower", ".bundle"] {
+        assert!(!stores(&plan, net), "{net} was materialized in settle");
+    }
+    let retained = settle_plan(build().dead_store_policy(DeadStorePolicy::Off));
+    assert!(stores(&retained, ".bundle"));
+
+    fn run<B: celox::SimBackend>(mut sim: Simulator<B>) {
+        let [src, ca, cb] = ["src", "ca", "cb"].map(|name| sim.event(name));
+        let [ena, enb, d, qa, qb] = ["ena", "enb", "d", "qa", "qb"].map(|name| sim.signal(name));
+        let mut expected = [0u64; 2];
+        for (index, (enable_a, enable_b)) in
+            [(1u8, 0u8), (0, 1), (0, 0), (1, 1)].into_iter().enumerate()
+        {
+            let value = 0x0123_4567_89ab_cdefu64.rotate_left(index as u32 * 4);
+            sim.modify(|io| {
+                io.set(d, value);
+                io.set(ena, enable_a);
+                io.set(enb, enable_b);
+            })
+            .unwrap();
+            sim.tick(src).unwrap();
+            sim.tick(ca).unwrap();
+            sim.tick(cb).unwrap();
+            for ((signal, enable), previous) in [(qa, enable_a), (qb, enable_b)]
+                .into_iter()
+                .zip(&mut expected)
+            {
+                if enable != 0 {
+                    *previous = value.swap_bytes();
+                }
+                assert_eq!(sim.get(signal), (*previous).into());
+            }
+        }
+    }
+    run(build().build_interpreter().unwrap());
+    run(build().build().unwrap());
+}

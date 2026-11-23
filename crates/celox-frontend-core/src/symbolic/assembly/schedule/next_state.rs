@@ -14,6 +14,7 @@
 
 mod samples;
 
+use super::dependencies::SamplePlacement;
 use super::*;
 use crate::symbolic::artifact::EdgeEvaluation;
 use celox_slt::SLTNode;
@@ -90,31 +91,24 @@ impl StateGraph {
             Default::default()
         };
         let dependencies = StateDependencies::new(self, units);
-        let shared_calculations = if !four_state
+        let placement = if !four_state
             && !parallel.enabled()
             && source_actions.is_empty()
             && !self.evaluations.is_empty()
         {
             let clocks: HashSet<_> = self.evaluations.keys().copied().collect();
             // Estimate demand before inlining moves any of these producers.
-            let full_settle = settle_partitioning(
-                parallel,
-                &self.comb_blocks,
-                &self.global_arena,
-                clocks.len(),
-            )
-            .is_none();
-            dependencies.shared_calculations(
+            dependencies.sample_placement(
                 &self.global_arena,
                 event_nets(&clocks, &design.clock_domains),
-                full_settle.then_some(&self.evaluations),
+                &self.evaluations,
             )
         } else {
-            HashSet::default()
+            Default::default()
         };
         self.connect_samples(
             &dependencies,
-            &shared_calculations,
+            &placement,
             design,
             initial,
             shapes,
@@ -171,7 +165,7 @@ impl StateGraph {
         Ok(EventSchedule {
             graph_clocks,
             write_domains: dependencies.write_domains(),
-            shared_calculations,
+            shared_calculations: placement.shared,
         })
     }
 
