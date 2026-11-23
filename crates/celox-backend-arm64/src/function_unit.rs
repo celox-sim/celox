@@ -211,7 +211,8 @@ pub(crate) fn split_at_calls(
         crate::SIRInstruction::ExternCall { func, .. } => {
             celox_sir::extern_abi::native_kernel_index(*func).is_some()
                 || celox_sir::native_memory::NativeMemoryOp::decode(*func)
-                    == Some(celox_sir::native_memory::NativeMemoryOp::WriteState)
+                    .and_then(celox_sir::native_memory::NativeMemoryOp::state_store_bytes)
+                    .is_some()
         }
         _ => false,
     };

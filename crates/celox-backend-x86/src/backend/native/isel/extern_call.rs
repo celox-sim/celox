@@ -232,11 +232,13 @@ fn lower_native_memory(
     args: &[RegisterId],
 ) {
     use celox_sir::native_memory::NativeMemoryOp::*;
+    let store_size = ISelContext::op_size_for_width(op.state_store_bytes().unwrap_or(8) * 8);
     let words: Vec<_> = args.iter().map(|&arg| ctx.reg_map.get(arg)).collect();
     let result = dst.map(|_| ctx.alloc_vreg(SpillDesc::transient()));
     // A state access at a constant offset is a plain access of the state
     // image, with the offset in the displacement.
-    let static_offset = matches!(op, ReadState | WriteState)
+    let static_offset = op
+        .accesses_state()
         .then(|| ctx.consts.get(&args[0]).copied())
         .flatten()
         .and_then(|offset| i32::try_from(offset).ok());
@@ -247,12 +249,14 @@ fn lower_native_memory(
             offset,
             size: OpSize::S64,
         }),
-        (WriteState, Some(offset)) => block.push(MInst::Store {
-            base: BaseReg::SimState,
-            offset,
-            src: words[1],
-            size: OpSize::S64,
-        }),
+        (WriteState | WriteState8 | WriteState16 | WriteState32, Some(offset)) => {
+            block.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset,
+                src: words[1],
+                size: store_size,
+            })
+        }
         (op, _) => match op {
             ReadIndirect => block.push(MInst::LoadPtrIndexed {
                 dst: result.unwrap(),
@@ -277,14 +281,16 @@ fn lower_native_memory(
                 size: OpSize::S64,
                 alias_range: None,
             }),
-            WriteState => block.push(MInst::StoreIndexed {
-                base: BaseReg::SimState,
-                offset: 0,
-                index: words[0],
-                src: words[1],
-                size: OpSize::S64,
-                alias_range: None,
-            }),
+            WriteState | WriteState8 | WriteState16 | WriteState32 => {
+                block.push(MInst::StoreIndexed {
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    index: words[0],
+                    src: words[1],
+                    size: store_size,
+                    alias_range: None,
+                })
+            }
         },
     }
     if let Some(dst) = dst {
