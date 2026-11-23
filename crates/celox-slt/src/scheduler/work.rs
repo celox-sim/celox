@@ -224,21 +224,35 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
                 None => set_changes.push((readers, changed)),
             }
         }
-        // Whether anything compared changed, for the run counters.
-        let mut any_changed = None;
-        if self.settle_profile.is_some() {
-            for &(_, changed) in &set_changes {
-                any_changed = Some(match any_changed {
-                    None => changed,
-                    Some(any) => {
-                        let both = self.builder.alloc_bit(1, false);
-                        self.builder
-                            .emit(SIRInstruction::Binary(both, any, BinaryOp::Or, changed));
-                        both
-                    }
-                });
-            }
-        }
+        // When several independent sets of readers are watching, an unchanged
+        // partition can skip all their publication branches with one test.
+        let skip_unchanged = set_changes.len() >= 3;
+        let any_changed = if self.settle_profile.is_some() || skip_unchanged {
+            set_changes
+                .iter()
+                .map(|&(_, changed)| changed)
+                .reduce(|a, b| {
+                    let either = self.builder.alloc_bit(1, false);
+                    self.builder
+                        .emit(SIRInstruction::Binary(either, a, BinaryOp::Or, b));
+                    either
+                })
+        } else {
+            None
+        };
+        let unchanged_exit = if let (true, Some(cond)) = (skip_unchanged, any_changed) {
+            let dispatch = self.builder.new_block();
+            let done = self.builder.new_block();
+            self.builder.seal_block(SIRTerminator::Branch {
+                cond,
+                true_block: (dispatch, Vec::new()),
+                false_block: (done, Vec::new()),
+            });
+            self.builder.switch_to_block(dispatch);
+            Some(done)
+        } else {
+            None
+        };
         for (readers, changed) in set_changes {
             let publish = self.builder.new_block();
             let done = self.builder.new_block();
@@ -291,6 +305,11 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
                     left -= piece;
                 }
             }
+            self.builder
+                .seal_block(SIRTerminator::Jump(done, Vec::new()));
+            self.builder.switch_to_block(done);
+        }
+        if let Some(done) = unchanged_exit {
             self.builder
                 .seal_block(SIRTerminator::Jump(done, Vec::new()));
             self.builder.switch_to_block(done);

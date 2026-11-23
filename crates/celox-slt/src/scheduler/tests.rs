@@ -703,6 +703,64 @@ fn a_full_fanout_partition_excludes_unrelated_neighbors() {
 }
 
 #[test]
+fn unchanged_fanout_skips_all_three_publications() {
+    let mut arena = SLTNodeArena::new();
+    let mut paths: Vec<_> = [(10, 1), (11, 1), (12, 1), (20, 10), (21, 11), (22, 12)]
+        .into_iter()
+        .map(|(target, source)| simple_path(&mut arena, target, Some(source)))
+        .collect();
+    // Keep the three writes together, followed by their independent consumers.
+    for (id, path) in paths[..5].iter_mut().enumerate() {
+        path.order_before.insert(crate::LogicPathId(id + 1));
+    }
+    let result = partitioned_sort(paths, &arena);
+    let producer = result
+        .partitions
+        .iter()
+        .find(|p| p.writes.contains(&10))
+        .unwrap();
+    assert_eq!(producer.writes, [10, 11, 12]);
+
+    let unit = &result.execution_units[0];
+    let block = unit
+        .blocks
+        .values()
+        .find(|b| {
+            b.instructions
+                .iter()
+                .filter(|i| matches!(i, SIRInstruction::Binary(_, _, BinaryOp::NeCase, _)))
+                .count()
+                == 3
+        })
+        .unwrap();
+    let SIRTerminator::Branch {
+        cond,
+        true_block,
+        false_block,
+    } = &block.terminator
+    else {
+        panic!("the producer should branch on whether any watched output changed");
+    };
+    assert!(
+        block
+            .instructions
+            .iter()
+            .any(|i| matches!(i, SIRInstruction::Binary(dst, _, BinaryOp::Or, _) if dst == cond))
+    );
+    // Skipping each notification in turn reaches the same exit as the common guard.
+    let mut next = true_block.0;
+    for _ in 0..3 {
+        let SIRTerminator::Branch { false_block, .. } = &unit.blocks[&next].terminator else {
+            panic!("expected a per-reader change test");
+        };
+        next = false_block.0;
+    }
+    assert!(
+        matches!(unit.blocks[&next].terminator, SIRTerminator::Jump(exit, _) if exit == false_block.0)
+    );
+}
+
+#[test]
 fn settle_partitions_follow_schedule_and_guard_on_their_flags() {
     let mut arena = SLTNodeArena::new();
     let paths = vec![
