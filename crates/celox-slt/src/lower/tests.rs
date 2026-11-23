@@ -359,7 +359,7 @@ fn execute_fold_group_sir_with_memory(
             }
         }
 
-        let (next, args) = match &block.terminator {
+        let (next, args): (_, &[RegisterId]) = match &block.terminator {
             SIRTerminator::Jump(target, args) => (*target, args),
             SIRTerminator::Branch {
                 cond,
@@ -372,8 +372,16 @@ fn execute_fold_group_sir_with_memory(
                     (true_block.0, &true_block.1)
                 }
             }
-            SIRTerminator::Switch { .. } => {
-                panic!("unexpected Switch in grouped-fold lowering test")
+            SIRTerminator::Switch {
+                selector,
+                cases,
+                default,
+            } => {
+                let target = cases
+                    .iter()
+                    .find(|case| case.value == values[selector].payload)
+                    .map_or(*default, |case| case.target);
+                (target, &[])
             }
             SIRTerminator::Return => return values,
             SIRTerminator::Error(code) => panic!("unexpected Error({code})"),

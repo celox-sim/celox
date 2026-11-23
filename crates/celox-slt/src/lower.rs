@@ -9,6 +9,7 @@ mod constants;
 mod cost;
 mod count_idioms;
 mod index_bounds;
+mod input_bank;
 mod inputs;
 mod loops;
 mod mask_constants;
