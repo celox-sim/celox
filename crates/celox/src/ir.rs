@@ -1,3 +1,5 @@
+mod bank_layout;
+
 use crate::{HashMap, HashSet};
 pub use celox_design::PortTypeKind;
 pub(crate) use celox_design::{
@@ -1819,7 +1821,8 @@ impl OptimizedSir {
     /// word). Lane-partitioned kernels are visited lane by lane, so the
     /// homes one lane works on are contiguous. The sequential kernels
     /// follow, which ranks homes only they touch and orders single-threaded
-    /// programs.
+    /// programs. Shared scalar read banks take precedence so a bounded indexed
+    /// load can address their stable homes directly.
     pub(crate) fn access_rank(&self) -> HashMap<AbsoluteAddr, u32> {
         fn ordered_blocks(
             unit: &ExecutionUnit<RegionedAbsoluteAddr>,
@@ -1921,6 +1924,7 @@ impl OptimizedSir {
         {
             visit(unit, &mut rank);
         }
+        bank_layout::rank_shared_banks(self, &mut rank);
         rank
     }
 
