@@ -1101,6 +1101,56 @@ pub(in crate::ast) fn shape(
                         expression,
                         dimension,
                     } => {
+                        // An element of a dynamic array, a queue or an
+                        // associative array has the element type of the
+                        // container, whatever the index, which a query
+                        // does not evaluate (IEEE 1800-2023 20.6.2, 20.7).
+                        if matches!(
+                            dimension.kind,
+                            DimensionKind::Index(_) | DimensionKind::Queue(None)
+                        ) && let Some(container) =
+                            containers::native_type(*expression, native, tree, session, context)?
+                        {
+                            // The container is not evaluated either, but
+                            // the expression that produces it must still
+                            // be well typed: `native_type` above reads a
+                            // function result or a conditional from its
+                            // type metadata without checking the call's
+                            // arguments or the conditional's condition
+                            // and other branch. Validate the base
+                            // without using its value, as the normal
+                            // path validates the operand it enters.
+                            expression_binding::bind(*expression, tree, session, context)?;
+                            validate_index(*expression, tree, session, context)?;
+                            // The index is not evaluated, but it must
+                            // still be well typed, as on the `Job::Index`
+                            // path below (IEEE 1800-2023 20.7). So must
+                            // the indices of any container selects in the
+                            // base, which this shortcut also bypasses.
+                            if let DimensionKind::Index(index) = dimension.kind {
+                                validate_index(index, tree, session, context)?;
+                            }
+                            let mut base = *expression;
+                            while let ExprKind::Select {
+                                expression: inner,
+                                dimension: inner_dimension,
+                            } = &native.expression(base).kind
+                            {
+                                if let DimensionKind::Index(index) = inner_dimension.kind {
+                                    validate_index(index, tree, session, context)?;
+                                }
+                                base = *inner;
+                            }
+                            // An element that is itself a container is a
+                            // whole container, whose size depends on its
+                            // elements: reject it rather than describing
+                            // its handle as a packed range.
+                            if container.element.container.is_some() {
+                                return Err(unsupported("query of a container element"));
+                            }
+                            values.push(procedural::dimensions_from_type(&container.element));
+                            continue;
+                        }
                         match dimension.kind {
                             DimensionKind::Index(index) => jobs.push(Job::Index(Some(index))),
                             DimensionKind::Queue(None) => jobs.push(Job::Index(None)),
