@@ -183,7 +183,7 @@ workflows:
         - 'actions/checkout@v7'
         - 'actions/create-github-app-token@v3'
         - 'cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086'
-        - 'updatecli/updatecli-action@v3.10.0'
+        - 'updatecli/updatecli-action@v3.11.0'
     '.github/workflows/verify-lockfile.yml':
         - 'actions/checkout@v7'
     '.github/workflows/verilator-setup.yml':
@@ -336,9 +336,9 @@ dependencies:
         commit: 'sha1-86f7a0ffb25f40114606501a311ebcfaf882ea32'
         owner_id: 43724913
         repo_id: 442947557
-    'updatecli/updatecli-action@v3.10.0':
-        ref: 'v3.10.0'
-        commit: 'sha1-93ae2608256484ef8598e902aa675bbc9e278e4e'
+    'updatecli/updatecli-action@v3.11.0':
+        ref: 'v3.11.0'
+        commit: 'sha1-8aa7bec31d6463e47c947f06c6b1df7dba276e07'
         owner_id: 77246016
         repo_id: 360631255
     'veryl-lang/setup-verilator@v2':
