@@ -148,6 +148,7 @@ pub(super) fn cluster_clean_guards(func: &MFunction, order: Vec<usize>) -> Vec<u
     // Publication diamonds are also usually clean. Their taken arm only
     // writes notification flags and rejoins the unchanged continuation.
     // This changes placement alone; every branch and store is retained.
+    let mut skip_publication = vec![None; func.blocks.len()];
     for (index, block) in func.blocks.iter().enumerate() {
         if preferred[index].is_some() {
             continue;
@@ -189,6 +190,37 @@ pub(super) fn cluster_clean_guards(func: &MFunction, order: Vec<usize>) -> Vec<u
         });
         if only_flags && stores {
             preferred[index] = indices.get(&no).copied();
+            skip_publication[index] = preferred[index];
+        }
+    }
+    // An unchanged partition can skip a whole chain of reader notifications.
+    // Keep that continuation on the same trace as the partition guard.
+    for (index, block) in func.blocks.iter().enumerate() {
+        if preferred[index].is_some() {
+            continue;
+        }
+        let Some((yes, no)) = block.terminator().and_then(MInst::branch_targets) else {
+            continue;
+        };
+        let exit = indices[&no];
+        // A guard around a single store diamond need not be an aggregate
+        // change test (for example it can guard ordinary enabled work).
+        let Some(mut inner) = skip_publication[indices[&yes]] else {
+            continue;
+        };
+        if inner == exit {
+            continue;
+        }
+        // Layout is optional. Bound the search in large overlapping chains.
+        for _ in 0..64 {
+            let Some(next) = skip_publication[inner] else {
+                break;
+            };
+            if next == exit {
+                preferred[index] = Some(exit);
+                break;
+            }
+            inner = next;
         }
     }
     let mut placed = vec![false; func.blocks.len()];
