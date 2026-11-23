@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795441693841,
+  "lastUpdate": 1795447822276,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -464825,6 +464825,37 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-veryl-tiered-x86_64/heliodor_suite_smp_linux_boot_4hart_end_to_end",
             "unit": "ms",
             "value": 2605684.108894
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "0c158c514a9429bbbceb61f4bff659aa57221d41",
+          "message": "fix(deps): update url to 2.5.9 for RUSTSEC-2026-0592 (#4560)",
+          "timestamp": "2026-11-23T10:41:57Z",
+          "url": "https://github.com/celox-sim/celox/commit/0c158c514a9429bbbceb61f4bff659aa57221d41"
+        },
+        "date": 1795447822276,
+        "cpu": "AMD EPYC 7763",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-veryl-cc-x86_64/heliodor_suite_smp_linux_boot_8hart_compilation",
+            "unit": "ms",
+            "value": 528292.654117
+          },
+          {
+            "name": "heliodor-veryl-cc-x86_64/heliodor_suite_smp_linux_boot_8hart_execution",
+            "unit": "ms",
+            "value": 9557269.427254
           }
         ]
       }
