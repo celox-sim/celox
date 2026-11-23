@@ -467,6 +467,7 @@ fn select_spill_register_cache(
 
 /// Per-function emission state, owned alongside the instruction assembler.
 struct EmitAssembler {
+    label_start: usize,
     assembler: iced_x86::code_asm::CodeAssembler,
     context: EmissionContext,
 }
@@ -489,8 +490,41 @@ struct EmissionContext {
 }
 
 impl EmitAssembler {
+    fn set_label(&mut self, label: &mut CodeLabel) -> Result<(), IcedError> {
+        self.assembler.set_label(label)?;
+        self.label_start = self.instructions().len();
+        Ok(())
+    }
+
+    /// Establish ZF for a consumer that tests only zero/nonzero. A 32-bit
+    /// result zero-extends in x86-64, so its ZF also describes the full GPR.
+    fn test_zero(&mut self, reg: PhysReg) -> Result<(), IcedError> {
+        use iced_x86::{Mnemonic, OpKind, Register};
+        let wide = preg_to_reg64(reg);
+        if let Some(prev) = self.instructions()[self.label_start..].last()
+            && matches!(
+                prev.mnemonic(),
+                Mnemonic::And
+                    | Mnemonic::Or
+                    | Mnemonic::Xor
+                    | Mnemonic::Add
+                    | Mnemonic::Sub
+                    | Mnemonic::Inc
+                    | Mnemonic::Dec
+                    | Mnemonic::Neg
+            )
+            && prev.op0_kind() == OpKind::Register
+            && (prev.op0_register() == Register::from(wide)
+                || prev.op0_register() == Register::from(preg_to_reg32(reg)))
+        {
+            return Ok(());
+        }
+        self.test(wide, wide)
+    }
+
     fn new(bitness: u32) -> Result<Self, IcedError> {
         Ok(Self {
+            label_start: 0,
             assembler: iced_x86::code_asm::CodeAssembler::new(bitness)?,
             context: EmissionContext {
                 spill_base: 0,
@@ -1540,8 +1574,7 @@ fn emit_planned_with_callees(
                     true_bb,
                     false_bb,
                 } => {
-                    let c = preg_to_reg64(resolve(assignment, *cond));
-                    asm.test(c, c)?;
+                    asm.test_zero(resolve(assignment, *cond))?;
                     emit_branch_with_edge_copies(
                         &mut asm,
                         &block_labels,
