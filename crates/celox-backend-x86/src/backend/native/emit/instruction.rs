@@ -833,10 +833,9 @@ pub(super) fn emit_inst(
             false_val,
         } => {
             let d = preg_to_reg64(resolve(assignment, *dst));
-            let c = preg_to_reg64(resolve(assignment, *cond));
             let tv = preg_to_reg64(resolve(assignment, *true_val));
             let fv = preg_to_reg64(resolve(assignment, *false_val));
-            asm.test(c, c)?;
+            asm.test_zero(resolve(assignment, *cond))?;
             if d == tv {
                 // dst already holds true_val; conditionally overwrite with false_val
                 asm.cmove(d, fv)?;
