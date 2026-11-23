@@ -135,13 +135,22 @@ fn scalar_case_with_a_data_bit_lowers_to_one_word() {
 
 #[test]
 fn shared_scalar_bank_uses_consecutive_homes_in_selector_order() {
+    check_shared_scalar_bank("logic");
+}
+
+#[test]
+fn bit_assignments_preserve_shared_scalar_bank_layout() {
+    check_shared_scalar_bank("bit");
+}
+
+fn check_shared_scalar_bank(data_type: &str) {
     use celox::{OptLevel, Simulator};
     use std::fmt::Write;
     use std::path::Path;
 
-    let mut source = String::from("module Top(input bit [5:0] a, b, output logic [7:0] x, y");
+    let mut source = format!("module Top(input bit [5:0] a, b, output {data_type} [7:0] x, y");
     for i in (1..=33).rev() {
-        write!(source, ", input logic [7:0] data{i}").unwrap();
+        write!(source, ", input {data_type} [7:0] data{i}").unwrap();
     }
     source.push_str(");\n");
     for (key, result) in [("a", "x"), ("b", "y")] {
