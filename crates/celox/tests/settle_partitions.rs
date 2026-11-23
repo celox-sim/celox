@@ -429,6 +429,46 @@ endmodule
     }
 
     #[test]
+    fn register_equality_transitions_and_raw_readers() {
+        let source = r#"`timescale 1ns/1ns
+module Top(output logic [2:0] count, output logic matched, output logic [2:0] raw,
+           output logic raw_zero, output int changes);
+    bit clk = 0;
+    bit [2:0] observed = 0;
+    always #1 clk = ~clk;
+    always_ff @(posedge clk) begin
+        count <= count + 3'd1;
+        observed <= observed + 3'd3;
+    end
+    assign matched = count == 3'd5;
+    assign raw_zero = observed != 0;
+    assign raw = observed ^ 3'd5;
+    initial forever begin @(observed); changes++; end
+endmodule"#;
+        let samples = matches_single_pass(
+            source,
+            &["count", "matched", "raw", "raw_zero", "changes"],
+            35,
+        );
+        for (time, values) in samples.iter().enumerate() {
+            let edges = time.div_ceil(2) as u32;
+            let count = edges % 8;
+            let observed = edges * 3 % 8;
+            assert_eq!(
+                *values,
+                [
+                    count,
+                    u32::from(count == 5),
+                    observed ^ 5,
+                    u32::from(observed != 0),
+                    edges
+                ]
+                .map(BigUint::from)
+            );
+        }
+    }
+
+    #[test]
     fn latch_gated_clock_matches_single_pass() {
         let single = matches_single_pass(GATED, &["fast", "gated", "view"], 200);
         // The gated domain must have run.
