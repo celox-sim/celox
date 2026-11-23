@@ -1,19 +1,19 @@
 //! Prove that a two-state dynamic array index fits its declared element count.
 use super::*;
 
-/// The frontend checks both planes and bounds before loading an element.
-/// Only the range test can fail in two-state mode.
-pub(super) fn always_in_bounds<A: Hash + Eq + Clone>(
+/// The frontend checks both planes and bounds before accessing an element.
+/// Return the known-index predicate when the range test is always true.
+pub(super) fn in_bounds_knownness<A: Hash + Eq + Clone>(
     arena: &SLTNodeArena<A>,
     mut cond: NodeId,
-) -> bool {
+) -> Option<NodeId> {
     while let SLTNode::Unary(UnaryOp::Or | UnaryOp::Ident | UnaryOp::ToTwoState, inner) =
         *arena.get(cond)
     {
         cond = inner;
     }
     let SLTNode::Binary(a, BinaryOp::LogicAnd | BinaryOp::And, b) = *arena.get(cond) else {
-        return false;
+        return None;
     };
     for (known, test) in [(a, b), (b, a)] {
         let SLTNode::Binary(index, BinaryOp::LtU, limit) = *arena.get(test) else {
@@ -36,11 +36,13 @@ pub(super) fn always_in_bounds<A: Hash + Eq + Clone>(
                 // Range analysis is optional and shared DAG nodes can recur
                 // through several bounds. Limit the work per guard.
                 let mut budget = 128;
-                return bounds(arena, index, &mut budget).is_some_and(|(_, max)| max < limit);
+                return bounds(arena, index, &mut budget)
+                    .filter(|&(_, max)| max < limit)
+                    .map(|_| known);
             }
         }
     }
-    false
+    None
 }
 
 /// Closed unsigned intervals for the arithmetic used to flatten an index.
@@ -112,6 +114,7 @@ fn bounds<A: Hash + Eq + Clone>(
                         _ => (a.checked_sub(d)?, b.checked_sub(c)?),
                     }
                 }
+                BinaryOp::DivU if c == d && c > 0 => (a / c, b / c),
                 BinaryOp::LogicAnd => (u64::from(a > 0 && c > 0), u64::from(b > 0 && d > 0)),
                 BinaryOp::GeU => (u64::from(a >= d), u64::from(b >= c)),
                 BinaryOp::LeU => (u64::from(b <= c), u64::from(a <= d)),
