@@ -24,7 +24,10 @@ use crate::HashMap;
 use crate::PassOptions;
 use crate::ir::*;
 
-pub(in crate::optimizer) struct IfConversionPass;
+pub(in crate::optimizer) enum IfConversionPass {
+    General,
+    GuardedSelect,
+}
 
 /// The largest cost of a converted diamond: the arm instructions that now run
 /// unconditionally, plus one per 64-bit chunk of each selected value.
@@ -43,7 +46,10 @@ impl ExecutionUnitPass for IfConversionPass {
 
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, _options: &PassOptions) {
         let blocks = eu.blocks.len();
-        let converted = if_convert(eu, MAX_COST);
+        let converted = match self {
+            Self::General => if_convert(eu, MAX_COST),
+            Self::GuardedSelect => convert(eu, guarded_select_plan),
+        };
         if converted != 0 {
             tracing::debug!(
                 "[if_conversion] converted {converted} diamonds, {blocks} -> {} blocks",
@@ -93,11 +99,22 @@ struct Plan {
 
 /// Converts every diamond under `max_cost` to fixpoint and returns how many
 /// branches it removed.
-pub(in crate::optimizer) fn if_convert(
+fn if_convert(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, max_cost: usize) -> usize {
+    convert(eu, |eu, predecessors, pred| {
+        plan(eu, predecessors, pred, max_cost)
+    })
+}
+
+fn convert(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
-    max_cost: usize,
+    planner: impl Fn(
+        &ExecutionUnit<RegionedAbsoluteAddr>,
+        &HashMap<BlockId, usize>,
+        BlockId,
+    ) -> Option<Plan>,
 ) -> usize {
     let mut converted = 0;
+    let mut next_register = None;
     loop {
         let predecessors = predecessor_edge_counts(eu);
         let mut branching: Vec<BlockId> = eu
@@ -116,8 +133,11 @@ pub(in crate::optimizer) fn if_convert(
             if !eu.blocks.contains_key(&pred) {
                 continue;
             }
-            if let Some(plan) = plan(eu, &predecessors, pred, max_cost) {
-                apply(eu, plan);
+            if let Some(plan) = planner(eu, &predecessors, pred) {
+                let next = next_register.get_or_insert_with(|| {
+                    eu.register_map.keys().map(|r| r.0 + 1).max().unwrap_or(0)
+                });
+                apply(eu, plan, next);
                 converted += 1;
             }
         }
@@ -125,6 +145,60 @@ pub(in crate::optimizer) fn if_convert(
             return converted;
         }
     }
+}
+
+// A true edge of a one-bit two-state test proves that its source is one,
+// including when the test explicitly cleared unknown bits. Recover the
+// select once the expensive expressions in the original arms have gone.
+fn guarded_select_plan(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    predecessors: &HashMap<BlockId, usize>,
+    pred: BlockId,
+) -> Option<Plan> {
+    let head = &eu.blocks[&pred];
+    let SIRTerminator::Branch {
+        cond,
+        true_block: (yes, _),
+        false_block: (no, _),
+    } = &head.terminator
+    else {
+        return None;
+    };
+    let (last, constants) = eu.blocks[yes].instructions.split_last()?;
+    let SIRInstruction::Mux(value, select, on_true, _) = last else {
+        return None;
+    };
+    let result = &eu.register_map[value];
+    let source = &eu.register_map[on_true];
+    if result.width() != source.width()
+        || matches!(
+            (result, source),
+            (RegisterType::Bit { .. }, RegisterType::Logic { .. })
+        )
+        || !constants
+            .iter()
+            .chain(&eu.blocks[no].instructions)
+            .all(|i| matches!(i, SIRInstruction::Imm(..)))
+    {
+        return None;
+    }
+    if cond != select {
+        let converts_select = |inst: &SIRInstruction<_>| {
+            matches!(inst, SIRInstruction::Unary(dst, UnaryOp::ToTwoState, src)
+                if dst == cond && src == select)
+        };
+        if eu.register_map[select].width() != 1
+            || !head.instructions.iter().rev().any(converts_select)
+        {
+            return None;
+        }
+    }
+    let mut plan = plan(eu, predecessors, pred, MAX_COST)?;
+    if plan.then_arm.block != Some(*yes) || plan.then_arm.args.as_slice() != [*value] {
+        return None;
+    }
+    plan.then_arm.args[0] = *on_true;
+    Some(plan)
 }
 
 fn predecessor_edge_counts(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> HashMap<BlockId, usize> {
@@ -320,7 +394,7 @@ fn plan(
     })
 }
 
-fn apply(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, plan: Plan) {
+fn apply(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, plan: Plan, next_register: &mut usize) {
     let Plan {
         pred,
         cond,
@@ -340,7 +414,6 @@ fn apply(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, plan: Plan) {
             );
         }
     }
-    let mut next_register = eu.register_map.keys().map(|r| r.0 + 1).max().unwrap_or(0);
     let join_params = eu.blocks[&then_arm.join].params.clone();
     let mut join_args = Vec::with_capacity(join_params.len());
     for (param, (then_value, else_value)) in join_params
@@ -356,8 +429,8 @@ fn apply(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, plan: Plan) {
             let selected = if merge {
                 param
             } else {
-                let selected = RegisterId(next_register);
-                next_register += 1;
+                let selected = RegisterId(*next_register);
+                *next_register += 1;
                 eu.register_map
                     .insert(selected, eu.register_map[&param].clone());
                 selected
@@ -371,8 +444,8 @@ fn apply(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, plan: Plan) {
         let value = if then_value == else_value {
             then_value
         } else {
-            let value = RegisterId(next_register);
-            next_register += 1;
+            let value = RegisterId(*next_register);
+            *next_register += 1;
             // The selected value keeps the arms' masks, so it is four-state
             // unless both arms are two-state.
             let ty = match (&eu.register_map[&then_value], &eu.register_map[&else_value]) {
@@ -528,6 +601,48 @@ mod tests {
             block(3, vec![], vec![], SIRTerminator::Return).1,
         );
         eu
+    }
+
+    fn guarded_diamond() -> ExecutionUnit<RegionedAbsoluteAddr> {
+        let mut eu = reset_diamond();
+        eu.register_map
+            .insert(RegisterId(4), RegisterType::Logic { width: 1 });
+        eu.register_map.insert(RegisterId(5), bit(8));
+        eu.register_map.insert(RegisterId(6), bit(8));
+        eu.blocks.get_mut(&BlockId(0)).unwrap().instructions = vec![
+            load(4, 1, 1),
+            SIRInstruction::Unary(RegisterId(0), UnaryOp::ToTwoState, RegisterId(4)),
+        ];
+        eu.blocks.get_mut(&BlockId(1)).unwrap().instructions =
+            vec![imm(5, 255), imm(6, 1), mux(1, 4, 5, 6)];
+        eu.blocks.get_mut(&BlockId(2)).unwrap().instructions = vec![imm(2, 0)];
+        eu
+    }
+
+    #[test]
+    fn a_guarded_mux_uses_its_true_input_and_keeps_the_two_state_guard() {
+        let mut eu = guarded_diamond();
+        assert_eq!(convert(&mut eu, guarded_select_plan), 1);
+        let entry = &eu.blocks[&BlockId(0)];
+        assert_eq!(entry.terminator, SIRTerminator::Return);
+        // For X or Z the original branch takes its false edge.
+        assert!(entry.instructions.contains(&mux(3, 0, 5, 2)));
+    }
+
+    #[test]
+    fn keeps_guarded_muxes_with_a_different_predicate_or_a_lossy_conversion() {
+        let mut eu = guarded_diamond();
+        eu.blocks.get_mut(&BlockId(0)).unwrap().instructions[1] = load(0, 2, 1);
+        assert_eq!(convert(&mut eu, guarded_select_plan), 0);
+
+        let mut eu = guarded_diamond();
+        eu.register_map
+            .insert(RegisterId(5), RegisterType::Logic { width: 8 });
+        assert_eq!(convert(&mut eu, guarded_select_plan), 0);
+
+        let mut eu = guarded_diamond();
+        eu.register_map.insert(RegisterId(5), bit(4));
+        assert_eq!(convert(&mut eu, guarded_select_plan), 0);
     }
 
     #[test]
