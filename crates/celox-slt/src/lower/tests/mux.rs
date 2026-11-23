@@ -404,3 +404,148 @@ fn ram_write_validity_keeps_knownness_and_checks_partial_depths() {
         }
     }
 }
+
+#[test]
+fn write_through_ram_reads_only_on_the_disabled_edge() {
+    use crate::next_state::{
+        NextStateForm, Publication, RamWritePort, ValueRoot, lower_transition,
+    };
+
+    let mut arena = SLTNodeArena::new();
+    let enable = input(&mut arena, 0, 1);
+    let data = input(&mut arena, 1, 8);
+    let index = input(&mut arena, 2, 64);
+    let valid = input(&mut arena, 3, 1);
+    let guard = arena
+        .alloc(SLTNode::Binary(valid, BinaryOp::LogicAnd, enable))
+        .unwrap();
+    let byte = BitAccess::new(0, 7);
+    let read = arena
+        .alloc(SLTNode::Input {
+            variable: 4,
+            signed: false,
+            index: vec![crate::SLTIndex {
+                node: index,
+                stride: 8,
+                kind: crate::SLTIndexKind::Unpacked { element_width: 8 },
+            }],
+            access: byte,
+        })
+        .unwrap();
+    let output = arena
+        .alloc(SLTNode::Mux {
+            cond: enable,
+            then_expr: data,
+            else_expr: read,
+        })
+        .unwrap();
+    let mut form = NextStateForm {
+        roots: vec![ValueRoot {
+            target: 5,
+            access: byte,
+            value: output,
+            enable: None,
+        }],
+        ports: vec![RamWritePort {
+            array: 4,
+            index,
+            element_width: 8,
+            access: byte,
+            value: data,
+            guard,
+        }],
+    };
+    let address = |var, region| var + region * 16;
+    let lower = |form: &NextStateForm<u32>| {
+        lower_transition(
+            &arena,
+            form,
+            Publication::Deferred,
+            false,
+            address,
+            &[(4, 8)].into_iter().collect(),
+        )
+        .unwrap()
+    };
+    let unit = lower(&form);
+    unit.verify_result().unwrap();
+    let branch = |id| {
+        let SIRTerminator::Branch {
+            true_block,
+            false_block,
+            ..
+        } = &unit.blocks[&id].terminator
+        else {
+            panic!("expected branch\n{unit}")
+        };
+        (true_block.0, false_block.0)
+    };
+    let (write, read) = branch(unit.entry_block_id);
+    let (valid, invalid) = branch(write);
+    let SIRTerminator::Branch {
+        false_block: (_, bypass),
+        ..
+    } = &unit.blocks[&write].terminator
+    else {
+        unreachable!()
+    };
+    let SIRTerminator::Jump(join, written) = &unit.blocks[&valid].terminator else {
+        panic!("expected port write to rejoin")
+    };
+    assert_eq!(*join, invalid);
+    assert_eq!(bypass, written);
+    assert!(
+        matches!(written.as_slice(), [payload] if unit.blocks[&valid].instructions.iter().any(|op|
+        matches!(op,SIRInstruction::Store(_, SIROffset::Element { .. }, _, src, ..) if src == payload)))
+    );
+    assert_eq!(
+        instruction_count(&unit, |op| matches!(
+            op,
+            SIRInstruction::Store(_, SIROffset::Element { .. }, ..)
+        )),
+        1
+    );
+    assert_eq!(
+        instruction_count(&unit, |op| matches!(op, SIRInstruction::Load(_, 4, ..))),
+        1
+    );
+    assert!(
+        unit.blocks[&read]
+            .instructions
+            .iter()
+            .any(|op| matches!(op, SIRInstruction::Load(_, 4, ..)))
+    );
+    assert_eq!(
+        instruction_count(&unit, |op| matches!(op, SIRInstruction::Mux(..))),
+        0
+    );
+
+    // A later write to the same output takes priority. Moving the mux past
+    // that write would overwrite its result when the port branches.
+    form.roots.push(ValueRoot {
+        target: 5,
+        access: byte,
+        value: data,
+        enable: None,
+    });
+    let unit = lower(&form);
+    let stores: Vec<_> = unit.blocks[&unit.entry_block_id]
+        .instructions
+        .iter()
+        .filter_map(|i| match i {
+            SIRInstruction::Store(dst, SIROffset::Static(0), 8, value, ..)
+                if *dst == address(form.roots[0].target, celox_design::WORKING_REGION) =>
+            {
+                Some(*value)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(stores.len(), 2);
+    assert!(
+        unit.blocks[&unit.entry_block_id]
+            .instructions
+            .iter()
+            .any(|i| matches!(i, SIRInstruction::Load(dst, 1, ..) if *dst == stores[1]))
+    );
+}
