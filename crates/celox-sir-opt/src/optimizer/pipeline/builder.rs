@@ -89,7 +89,7 @@ impl<'a> PipelineBuilder<'a> {
     /// pass of theirs recovers branches from `Mux`es.
     fn add_if_conversion(&self, passes: &mut ExecutionUnitPassManager) {
         if self.on(SirPass::IfConversion) {
-            passes.add_pass(IfConversionPass);
+            passes.add_pass(IfConversionPass::General);
         }
     }
 
@@ -369,6 +369,9 @@ impl<'a> PipelineBuilder<'a> {
             });
         }
         self.add_packed_recovery(&mut passes, program);
+        if self.on(SirPass::IfConversion) {
+            passes.add_pass(IfConversionPass::GuardedSelect);
+        }
         if self.on(SirPass::Gvn) {
             passes.add_pass(GvnPass);
             if self.on(SirPass::ControlFlowSimplify) {
