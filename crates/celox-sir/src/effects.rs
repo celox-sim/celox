@@ -502,13 +502,8 @@ impl<A> SIRInstruction<A> {
             SIRInstruction::ExternCall { func, .. } => {
                 crate::extern_abi::native_kernel_index(*func).is_some()
                     || *func == crate::extern_abi::VALUE_CHANGE_ID
-                    || matches!(
-                        crate::native_memory::NativeMemoryOp::decode(*func),
-                        Some(
-                            crate::native_memory::NativeMemoryOp::ReadState
-                                | crate::native_memory::NativeMemoryOp::WriteState
-                        )
-                    )
+                    || crate::native_memory::NativeMemoryOp::decode(*func)
+                        .is_some_and(crate::native_memory::NativeMemoryOp::accesses_state)
             }
             _ => false,
         }

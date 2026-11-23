@@ -16,6 +16,9 @@ pub enum NativeMemoryOp {
     WriteIndirect,
     ReadState,
     WriteState,
+    WriteState8,
+    WriteState16,
+    WriteState32,
 }
 
 impl NativeMemoryOp {
@@ -25,6 +28,9 @@ impl NativeMemoryOp {
             Self::WriteIndirect => u32::MAX - 3,
             Self::ReadState => u32::MAX - 4,
             Self::WriteState => u32::MAX - 5,
+            Self::WriteState8 => u32::MAX - 7,
+            Self::WriteState16 => u32::MAX - 8,
+            Self::WriteState32 => u32::MAX - 9,
         }
     }
 
@@ -34,13 +40,45 @@ impl NativeMemoryOp {
             n if n == Self::WriteIndirect.function() => Some(Self::WriteIndirect),
             n if n == Self::ReadState.function() => Some(Self::ReadState),
             n if n == Self::WriteState.function() => Some(Self::WriteState),
+            n if n == Self::WriteState8.function() => Some(Self::WriteState8),
+            n if n == Self::WriteState16.function() => Some(Self::WriteState16),
+            n if n == Self::WriteState32.function() => Some(Self::WriteState32),
             _ => None,
         }
     }
 
+    /// A raw store copies exactly these low bytes of its word operand.
+    pub const fn state_store(bytes: usize) -> Option<Self> {
+        match bytes {
+            1 => Some(Self::WriteState8),
+            2 => Some(Self::WriteState16),
+            4 => Some(Self::WriteState32),
+            8 => Some(Self::WriteState),
+            _ => None,
+        }
+    }
+
+    pub const fn state_store_bytes(self) -> Option<usize> {
+        match self {
+            Self::WriteState8 => Some(1),
+            Self::WriteState16 => Some(2),
+            Self::WriteState32 => Some(4),
+            Self::WriteState => Some(8),
+            _ => None,
+        }
+    }
+
+    pub const fn accesses_state(self) -> bool {
+        matches!(self, Self::ReadState) || self.state_store_bytes().is_some()
+    }
+
     pub const fn arguments(self) -> usize {
         match self {
-            Self::ReadIndirect | Self::WriteState => 2,
+            Self::ReadIndirect
+            | Self::WriteState
+            | Self::WriteState8
+            | Self::WriteState16
+            | Self::WriteState32 => 2,
             Self::WriteIndirect => 3,
             Self::ReadState => 1,
         }
@@ -94,13 +132,19 @@ mod tests {
             NativeMemoryOp::WriteIndirect,
             NativeMemoryOp::ReadState,
             NativeMemoryOp::WriteState,
+            NativeMemoryOp::WriteState8,
+            NativeMemoryOp::WriteState16,
+            NativeMemoryOp::WriteState32,
         ] {
             assert_eq!(NativeMemoryOp::decode(op.function()), Some(op));
             assert!(crate::extern_abi::native_kernel_index(op.function()).is_none());
             let valid = unit(op, op.arguments(), op.reads(), false);
             valid.verify();
             let instruction = valid.blocks[&BlockId(0)].instructions.last().unwrap();
-            let state = matches!(op, NativeMemoryOp::ReadState | NativeMemoryOp::WriteState);
+            let state = !matches!(
+                op,
+                NativeMemoryOp::ReadIndirect | NativeMemoryOp::WriteIndirect
+            );
             assert_eq!(instruction.has_opaque_state_access(), state);
             assert_eq!(!instruction.state_reads().is_none(), state);
             assert_eq!(!instruction.state_writes().is_none(), state);
