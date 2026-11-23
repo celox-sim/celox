@@ -1,6 +1,78 @@
 use super::*;
 
 #[test]
+fn shared_one_bit_inequalities_materialize_as_xor() {
+    let addresses = std::array::from_fn::<_, 4, _>(|id| AbsoluteAddr {
+        instance_id: InstanceId(0),
+        var_id: VarId(id as u32),
+    });
+    let address = |i: usize| RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, addresses[i]);
+    let [lhs, rhs, cmp] = std::array::from_fn(RegisterId);
+    for op in [BinaryOp::Ne, BinaryOp::NeCase] {
+        for (width, shared, expect_xor) in [(1, true, true), (2, true, false), (1, false, false)] {
+            let mut instructions = vec![
+                SIRInstruction::Load(lhs, address(0), SIROffset::Static(0), width),
+                SIRInstruction::Load(rhs, address(1), SIROffset::Static(0), width),
+                SIRInstruction::Binary(cmp, lhs, op, rhs),
+            ];
+            for i in 2..if shared { 4 } else { 3 } {
+                instructions.push(SIRInstruction::Store(
+                    address(i),
+                    SIROffset::Static(0),
+                    1,
+                    cmp,
+                    vec![],
+                    vec![],
+                ));
+            }
+            let id = SirBlockId(0);
+            let unit = ExecutionUnit {
+                entry_block_id: id,
+                blocks: [(
+                    id,
+                    BasicBlock {
+                        id,
+                        params: vec![],
+                        instructions,
+                        terminator: SIRTerminator::Return,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                register_map: [(lhs, width), (rhs, width), (cmp, 1)]
+                    .into_iter()
+                    .map(|(reg, width)| {
+                        (
+                            reg,
+                            RegisterType::Bit {
+                                width,
+                                signed: false,
+                            },
+                        )
+                    })
+                    .collect(),
+            };
+            unit.verify();
+            let mut layout = empty_layout();
+            layout.offsets = addresses.into_iter().zip(0..4).collect();
+            layout.widths = addresses.into_iter().zip([width, width, 1, 1]).collect();
+            layout.total_size = 4;
+            layout.merged_total_size = 4;
+            let function = lower_execution_unit(&unit, &layout, false);
+            let has_xor = function
+                .blocks
+                .iter()
+                .flat_map(|b| &b.insts)
+                .any(|i| matches!(i, MInst::Xor { .. }));
+            assert_eq!(
+                has_xor, expect_xor,
+                "{op:?}, width={width}, shared={shared}"
+            );
+        }
+    }
+}
+
+#[test]
 fn guarded_signed_comparisons_preserve_operand_widths() {
     for width in [2, 8, 32, 63, 64] {
         for op in [BinaryOp::LtS, BinaryOp::LeS, BinaryOp::GtS, BinaryOp::GeS] {
