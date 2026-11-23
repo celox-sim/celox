@@ -567,6 +567,15 @@ fn partitioned_sort_with_domains(
     arena: &SLTNodeArena<u32>,
     write_domains: crate::HashMap<u32, Vec<u32>>,
 ) -> super::ScheduleResult<u32> {
+    partitioned_sort_with_cost(paths, arena, write_domains, 1)
+}
+
+fn partitioned_sort_with_cost(
+    paths: Vec<LogicPath<u32>>,
+    arena: &SLTNodeArena<u32>,
+    write_domains: crate::HashMap<u32, Vec<u32>>,
+    target_cost: usize,
+) -> super::ScheduleResult<u32> {
     let widths = (10..14).map(|id| (id, 8)).collect();
     super::sort_with_unpacked_element_widths(
         paths,
@@ -579,7 +588,7 @@ fn partitioned_sort_with_domains(
         1,
         Some(super::SettlePartitioning {
             flags: 99,
-            target_cost: 1,
+            target_cost,
             external_readers: crate::HashMap::default(),
             clock_nets: crate::HashSet::default(),
             write_domains,
@@ -628,6 +637,69 @@ fn fanout_shares_a_run_but_independent_registers_on_the_same_clock_do_not() {
         .map(|partition| partition.writes.as_slice())
         .collect();
     assert_eq!(writes, [&[11, 12][..], &[13][..]]);
+}
+
+#[test]
+fn fanout_of_the_same_input_bits_shares_a_partition_without_a_clock_domain() {
+    let mut arena = SLTNodeArena::new();
+    let paths = vec![
+        simple_path(&mut arena, 11, Some(1)),
+        simple_path(&mut arena, 12, Some(2)),
+        simple_path(&mut arena, 13, Some(1)),
+        simple_path(&mut arena, 14, Some(13)),
+    ];
+    let result = partitioned_sort(paths, &arena);
+    let producer = result
+        .partitions
+        .iter()
+        .position(|part| part.writes.contains(&11))
+        .unwrap();
+    assert_eq!(result.partitions[producer].writes, [11, 13]);
+    let consumer = result
+        .partitions
+        .iter()
+        .position(|part| part.writes.contains(&14))
+        .unwrap();
+    assert!(producer < consumer);
+}
+
+#[test]
+fn fanout_grouping_respects_an_intervening_order_dependency() {
+    let mut arena = SLTNodeArena::new();
+    let mut paths = vec![
+        simple_path(&mut arena, 11, Some(1)),
+        simple_path(&mut arena, 12, Some(2)),
+        simple_path(&mut arena, 13, Some(1)),
+    ];
+    paths[0].order_before.insert(crate::LogicPathId(1));
+    paths[1].order_before.insert(crate::LogicPathId(2));
+    let result = partitioned_sort(paths, &arena);
+    let writes: Vec<_> = result
+        .partitions
+        .iter()
+        .flat_map(|part| &part.writes)
+        .copied()
+        .collect();
+    assert_eq!(writes, [11, 12, 13]);
+}
+
+#[test]
+fn a_full_fanout_partition_excludes_unrelated_neighbors() {
+    let mut arena = SLTNodeArena::new();
+    let mut paths: Vec<_> = [(10, 1), (11, 2), (12, 2), (13, 3)]
+        .into_iter()
+        .map(|(target, source)| simple_path(&mut arena, target, Some(source)))
+        .collect();
+    for (id, path) in paths[..3].iter_mut().enumerate() {
+        path.order_before.insert(crate::LogicPathId(id + 1));
+    }
+    let result = partitioned_sort_with_cost(paths, &arena, Default::default(), 2);
+    let writes: Vec<_> = result
+        .partitions
+        .iter()
+        .map(|part| &part.writes[..])
+        .collect();
+    assert_eq!(writes, [&[10][..], &[11, 12][..], &[13][..]]);
 }
 
 #[test]
