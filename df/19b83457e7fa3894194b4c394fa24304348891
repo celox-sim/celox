@@ -1,0 +1,6 @@
+Revision history for #4578:
+
+rev 2 (rebase) 2026-11-23 17:31 UTC
+rev 1 (initial) 2026-11-23 17:31 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":4578,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"a8b5c774492ba00e0fd8c4a287be1143feeb31c2","timestamp_iso":"2026-11-23T17:31:06Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"a8b5c774492ba00e0fd8c4a287be1143feeb31c2","new_sha":"c766827689895c8a23a0deb3dee91521bf0897bc","timestamp_iso":"2026-11-23T17:31:06Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/a8b5c774492ba00e0fd8c4a287be1143feeb31c2...c766827689895c8a23a0deb3dee91521bf0897bc"}]} -->
