@@ -496,3 +496,92 @@ fn multi_label_decode_checks_all_high_selector_bits() {
         }
     }
 }
+
+#[test]
+fn dense_input_bank_selects_each_register_and_preserves_holes_and_priority() {
+    let mut arena = SLTNodeArena::new();
+    let addr = input(&mut arena, 0, 4);
+    let enable = input(&mut arena, 1, 1);
+    let zero = constant(&mut arena, 0, 4);
+    let selector = arena
+        .alloc(SLTNode::Mux {
+            cond: enable,
+            then_expr: addr,
+            else_expr: zero,
+        })
+        .unwrap();
+    let default = constant(&mut arena, 251, 8);
+    let mut root = default;
+    let shadowed = input(&mut arena, 31, 8);
+    root = arm(&mut arena, selector, 3, shadowed, root);
+    for label in (0..12).rev().filter(|&label| label != 6) {
+        let value = input(&mut arena, 2 + label as u32, 8);
+        root = arm(&mut arena, selector, label, value, root);
+    }
+    reduce_two_state_decodes(&mut arena, [&mut root]).unwrap();
+    let nodes = crate::canon::reachable(&arena, [root]);
+    assert!(
+        !nodes
+            .iter()
+            .any(|&n| matches!(arena.get(n), SLTNode::Binary(_, BinaryOp::Eq, _)))
+    );
+    let mut builder = SIRBuilder::new();
+    let reg =
+        SLTToSIRLowerer::new(false).lower(&mut builder, root, &arena, &mut Default::default());
+    let unit = finish_lowering(builder);
+    for word in 0..16u32 {
+        for enabled in [0u32, 1] {
+            let memory = (0..32)
+                .map(|n| {
+                    let value = match n {
+                        0 => word,
+                        1 => enabled,
+                        _ => n + 53,
+                    };
+                    (
+                        n,
+                        TestSIRValue {
+                            payload: value.into(),
+                            mask: 0u8.into(),
+                        },
+                    )
+                })
+                .collect();
+            let address = if enabled == 0 { 0 } else { word };
+            let expected = if address < 12 && address != 6 {
+                55 + address
+            } else {
+                251
+            };
+            assert_eq!(
+                execute_fold_group_sir_with_memory(&unit, &memory)[&reg].payload,
+                BigUint::from(expected)
+            );
+        }
+    }
+}
+
+#[test]
+fn dense_input_bank_keeps_priority_for_a_possibly_unknown_selector() {
+    let mut arena = SLTNodeArena::new();
+    let addr = input(&mut arena, 0, 4);
+    let enable = input(&mut arena, 1, 1);
+    let unknown = arena
+        .alloc(SLTNode::Constant(0u8.into(), 1u8.into(), 4, false))
+        .unwrap();
+    let selector = arena
+        .alloc(SLTNode::Mux {
+            cond: enable,
+            then_expr: addr,
+            else_expr: unknown,
+        })
+        .unwrap();
+    let mut root = constant(&mut arena, 0, 8);
+    for label in 0..12 {
+        let value = input(&mut arena, 2 + label as u32, 8);
+        root = arm(&mut arena, selector, label, value, root);
+    }
+    let original = root;
+    reduce_two_state_decodes(&mut arena, [&mut root]).unwrap();
+    assert_eq!(root, original);
+}

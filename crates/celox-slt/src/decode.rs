@@ -29,7 +29,7 @@ fn row<A: Clone + Eq + Hash>(arena: &SLTNodeArena<A>, node: NodeId) -> Option<Ro
     if arena.node_width(then_expr) != arena.node_width(else_expr) {
         return None;
     }
-    let (selector, _, label) = exact_label(arena, cond)?;
+    let (selector, _, label) = literal_comparison(arena, cond)?;
     Some(Row {
         selector,
         label,
@@ -54,6 +54,14 @@ fn boolean_child<A: Clone + Eq + Hash>(arena: &SLTNodeArena<A>, node: NodeId) ->
 /// A wildcard comparison is exact only when the right operand has no wildcard bits.
 pub(super) fn exact_label<A: Clone + Eq + Hash>(
     arena: &SLTNodeArena<A>,
+    predicate: NodeId,
+) -> Option<(NodeId, BinaryOp, u64)> {
+    let test = literal_comparison(arena, predicate)?;
+    matches!(arena.get(test.0), SLTNode::Input { index, .. } if index.is_empty()).then_some(test)
+}
+
+fn literal_comparison<A: Clone + Eq + Hash>(
+    arena: &SLTNodeArena<A>,
     mut predicate: NodeId,
 ) -> Option<(NodeId, BinaryOp, u64)> {
     while let Some(inner) = boolean_child(arena, predicate) {
@@ -73,11 +81,7 @@ pub(super) fn exact_label<A: Clone + Eq + Hash>(
     let SLTNode::Constant(bits, mask, width, _) = arena.get(literal) else {
         return None;
     };
-    if !mask.is_zero()
-        || !(1..=64).contains(width)
-        || arena.node_width(selector) != Some(*width)
-        || !matches!(arena.get(selector), SLTNode::Input { index, .. } if index.is_empty())
-    {
+    if !mask.is_zero() || !(1..=64).contains(width) || arena.node_width(selector) != Some(*width) {
         return None;
     }
     let label = bits.to_u64()?;
@@ -170,6 +174,90 @@ fn any<A: Clone + Eq + Hash>(
     Ok(conditions[0])
 }
 
+// Even with two-state storage, an expression can introduce unknown bits.
+// A bit-select tree is equivalent to exact comparisons only for a known address.
+fn known_selector<A: Clone + Eq + Hash>(arena: &SLTNodeArena<A>, selector: NodeId) -> bool {
+    let mut pending = vec![selector];
+    let mut seen = HashSet::default();
+    while let Some(node) = pending.pop() {
+        if !seen.insert(node) {
+            continue;
+        }
+        match arena.get(node) {
+            SLTNode::Input { index, .. } if index.is_empty() => {}
+            SLTNode::Constant(_, mask, ..) if mask.is_zero() => {}
+            SLTNode::Unary(UnaryOp::ToTwoState, _) | SLTNode::Binary(_, BinaryOp::EqCase, _) => {}
+            SLTNode::Slice { expr, access } if access.msb < crate::get_width(*expr, arena) => {
+                pending.push(*expr)
+            }
+            n @ (SLTNode::Concat(_)
+            | SLTNode::Mux { .. }
+            | SLTNode::Binary(_, BinaryOp::Eq | BinaryOp::And | BinaryOp::Or, _)
+            | SLTNode::Unary(
+                UnaryOp::Ident | UnaryOp::BitNot | UnaryOp::LogicNot | UnaryOp::Or,
+                _,
+            )) => pending.extend(canon::operands(n)),
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Read a dense bank of scalar inputs by the bits of its selector. Missing
+/// addresses use the original default, including its uninitialized bits.
+fn input_bank<A: Clone + Eq + Hash>(
+    arena: &mut SLTNodeArena<A>,
+    selector: NodeId,
+    groups: &[(NodeId, Vec<(u64, NodeId)>)],
+    default: NodeId,
+) -> Result<Option<NodeId>, SLTNodeFactsError> {
+    let width = crate::get_width(selector, arena);
+    if !(3..=8).contains(&width) || groups.len() < 8 {
+        return Ok(None);
+    }
+    let entries = 1usize << width;
+    // Limit table growth for sparse decodes and keep value grouping for
+    // cases dominated by repeated constants.
+    let scalar_inputs = groups.iter().filter(|(value, _)| {
+        matches!(arena.get(*value), SLTNode::Input { index, .. } if index.is_empty())
+    }).count();
+    if scalar_inputs < 8
+        || scalar_inputs < groups.len().div_ceil(2)
+        || groups.iter().map(|(_, labels)| labels.len()).sum::<usize>() < entries / 2
+    {
+        return Ok(None);
+    }
+    if !known_selector(arena, selector) {
+        return Ok(None);
+    }
+    let mut values = vec![default; entries];
+    for (value, labels) in groups {
+        for &(label, _) in labels {
+            values[label as usize] = *value;
+        }
+    }
+    for bit in 0..width {
+        let cond = arena.alloc(SLTNode::Slice {
+            expr: selector,
+            access: BitAccess::new(bit, bit),
+        })?;
+        for i in 0..values.len() / 2 {
+            let (low, high) = (values[2 * i], values[2 * i + 1]);
+            values[i] = if low == high {
+                low
+            } else {
+                arena.alloc(SLTNode::Mux {
+                    cond,
+                    then_expr: high,
+                    else_expr: low,
+                })?
+            };
+        }
+        values.truncate(values.len() / 2);
+    }
+    Ok(Some(values[0]))
+}
+
 fn reduce_chain<A: Clone + Eq + Hash>(
     arena: &mut SLTNodeArena<A>,
     node: NodeId,
@@ -200,6 +288,14 @@ fn reduce_chain<A: Clone + Eq + Hash>(
         }
     }
     let mut result = mapped(&cursor);
+    if let Some(bank) = input_bank(arena, selector, &groups, result)?
+        && bound_signed(bank, arena) == bound_signed(node, arena)
+    {
+        return Ok(Some(bank));
+    }
+    if !matches!(arena.get(selector), SLTNode::Input { index, .. } if index.is_empty()) {
+        return Ok(None);
+    }
     // Keep small constant tables recognizable as a whole by later lowering.
     // Grouping their rows separately can cost more than the original decode.
     let width = crate::get_width(selector, arena);
@@ -233,7 +329,7 @@ fn reduce_chain<A: Clone + Eq + Hash>(
     .then_some(result))
 }
 
-/// Replace repeated equal-valued arms and arms equal to the default. Call
+/// Group equal-valued arms and balance dense scalar-input selections. Call
 /// only for two-state storage: masking a differing selector bit would hide X/Z.
 pub fn reduce_two_state_decodes<'a, A: Clone + Eq + Hash>(
     arena: &mut SLTNodeArena<A>,
