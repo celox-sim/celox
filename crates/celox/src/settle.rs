@@ -823,6 +823,34 @@ fn byte_mask(first: usize, bytes: usize) -> u64 {
     mask << (first * 8)
 }
 
+/// A reader needs one notification if any of its bytes in the committed
+/// word changed. The outer word test already covers readers of every
+/// watched byte. Share tests for identical masks when doing so eliminates
+/// a conditional branch and duplicate flag stores.
+fn shared_reader_masks(
+    groups: &BTreeMap<&[u32], u64>,
+    watched: u64,
+) -> Option<BTreeMap<u64, Vec<u32>>> {
+    if groups.len() < 2 {
+        return None;
+    }
+    let mut masks = BTreeMap::<u32, u64>::new();
+    for (&readers, &mask) in groups {
+        for &reader in readers {
+            *masks.entry(reader).or_default() |= mask;
+        }
+    }
+    if masks.len() == groups.keys().map(|r| r.len()).sum::<usize>() {
+        return None;
+    }
+    let mut by_mask = BTreeMap::<_, Vec<_>>::new();
+    for (reader, mask) in masks {
+        by_mask.entry(mask).or_default().push(reader);
+    }
+    let tests = by_mask.len() - usize::from(by_mask.contains_key(&watched));
+    (tests < groups.len()).then_some(by_mask)
+}
+
 /// Insert a block ending in `terminator` into `unit`.
 fn insert_block(
     unit: &mut ExecutionUnit<RegionedAbsoluteAddr>,
@@ -1430,7 +1458,6 @@ impl<'a> Marker<'a> {
             if groups.is_empty() {
                 continue;
             }
-            tests += groups.len();
             let zero = alloc.register(unit, word_type());
             segment
                 .instructions
@@ -1473,11 +1500,21 @@ impl<'a> Marker<'a> {
                     Vec::new(),
                 ));
             }
+            let shared = shared_reader_masks(&groups, watched);
+            let groups = match &shared {
+                Some(masks) => itertools::Either::Left(
+                    masks
+                        .iter()
+                        .map(|(&mask, readers)| (readers.as_slice(), mask)),
+                ),
+                None => itertools::Either::Right(groups.into_iter()),
+            };
             for (readers, mask) in groups {
                 if mask == watched {
                     self.mark_flags(&mut body, one, readers);
                     continue;
                 }
+                tests += 1;
                 let group_mask = alloc.register(unit, word_type());
                 body.push(SIRInstruction::Imm(group_mask, SIRValue::new(mask)));
                 let group = alloc.register(unit, word_type());
@@ -1545,6 +1582,54 @@ mod tests {
     use super::*;
     use crate::ir::{AbsoluteAddr, BasicBlock, BlockId};
     use celox_state_layout::SettleObject;
+
+    #[test]
+    fn combine_overlapping_word_notifications_by_reader() {
+        let groups = BTreeMap::from([
+            (&[1, 2][..], 0xff),
+            (&[1, 3][..], 0xff00),
+            (&[1, 2, 3][..], 0xff0000),
+        ]);
+        let masks = shared_reader_masks(&groups, 0xffffff).unwrap();
+        assert_eq!(
+            masks,
+            BTreeMap::from([
+                (0xff00ff, vec![2]),
+                (0xffff00, vec![3]),
+                (0xffffff, vec![1])
+            ])
+        );
+        // All combinations of changes to the three watched bytes and an
+        // unwatched neighbour must notify exactly the original readers.
+        for pattern in 0u32..16 {
+            let diff: u64 = (0..4)
+                .filter(|byte| pattern & (1 << byte) != 0)
+                .map(|byte| 1u64 << (byte * 8))
+                .sum();
+            let expected: std::collections::BTreeSet<_> = groups
+                .iter()
+                .filter(|(_, m)| **m & diff != 0)
+                .flat_map(|(&rs, _)| rs.iter().copied())
+                .collect();
+            let actual: Vec<_> = masks
+                .iter()
+                .filter(|(m, _)| **m & diff != 0)
+                .flat_map(|(_, rs)| rs.iter().copied())
+                .collect();
+            assert_eq!(actual.len(), expected.len());
+            assert_eq!(
+                actual
+                    .into_iter()
+                    .collect::<std::collections::BTreeSet<_>>(),
+                expected
+            );
+        }
+        let split = BTreeMap::from([(&[1, 2][..], 0xff), (&[2, 3][..], 0xff00)]);
+        assert!(
+            shared_reader_masks(&split, 0xffff).is_none(),
+            "keep the two original tests"
+        );
+    }
 
     /// A unit outside the partitioned settle marks the partitions that read
     /// what a call of it writes, after the call, and only those.
