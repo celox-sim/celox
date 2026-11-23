@@ -17,6 +17,7 @@ use celox_state_layout::{SettleLayout, SettleObject};
 use std::collections::BTreeMap;
 
 mod cone;
+pub(crate) mod predicates;
 mod prune;
 
 #[cfg(feature = "host-runtime")]
@@ -208,10 +209,16 @@ pub(crate) fn instrument_processes_from(program: &mut LaidOutProgram, first: usi
 /// compiles, and that every analysis takes for an access of any state, so a
 /// builder instruments the FF units after its dead-store elimination.
 pub(crate) fn instrument_ff_units(program: &mut LaidOutProgram, wide_commits: bool) {
+    let predicates = if wide_commits && program.layout().settle.is_some() {
+        predicates::homes(program)
+    } else {
+        Default::default()
+    };
     let (sir, layout, runtime) = program.split_mut();
     let Some(mut marker) = Marker::new(layout, runtime) else {
         return;
     };
+    marker.predicates = predicates;
     // Four-state objects have a second plane elsewhere.
     marker.wide = wide_commits && !layout.four_state;
     if marker.wide {
@@ -516,6 +523,8 @@ struct Marker<'a> {
     /// one marks the scheduler's settle dirty with 2, "only cone sources
     /// changed", which runs the clock cone instead of the whole settle.
     clock_homes: crate::HashSet<usize>,
+    /// Equality predicate shared by all settle readers of a stable home.
+    predicates: crate::HashMap<usize, predicates::Predicate>,
     /// Commit contiguous registers word by word ([`Self::wide_run`]).
     wide: bool,
     /// The bytes of every object in the stable and the working region,
@@ -808,6 +817,7 @@ impl<'a> Marker<'a> {
             scheduler_dirty: runtime.runtime_schema.scheduler.as_ref().map(|scheduler| {
                 RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, scheduler.slots.dirty)
             }),
+            predicates: Default::default(),
             clock_homes: runtime
                 .runtime_schema
                 .scheduler
@@ -1139,6 +1149,16 @@ impl<'a> Marker<'a> {
         }
         // Set the readers' flags only when the store changes the state, both
         // planes compared.
+        let predicate = if self.predicates.is_empty() {
+            None
+        } else {
+            CommitRange::of(self.layout, &instruction).and_then(|range| {
+                self.predicates
+                    .get(&range.stable)
+                    .copied()
+                    .filter(|p| p.width == range.width)
+            })
+        };
         let old = alloc.register(unit, RegisterType::Logic { width });
         segment
             .instructions
@@ -1149,6 +1169,19 @@ impl<'a> Marker<'a> {
             .instructions
             .push(SIRInstruction::Load(new, address, offset, width));
         let changed = alloc.register(unit, bit_type());
+        let (old, new) = if let Some(predicate) = predicate {
+            predicates::compare(&mut segment.instructions, predicate, old, new, |width| {
+                alloc.register(
+                    unit,
+                    RegisterType::Bit {
+                        width,
+                        signed: false,
+                    },
+                )
+            })
+        } else {
+            (old, new)
+        };
         segment
             .instructions
             .push(SIRInstruction::Binary(changed, old, BinaryOp::NeCase, new));
@@ -1184,6 +1217,15 @@ impl<'a> Marker<'a> {
             let Some(range) = CommitRange::of(self.layout, instruction) else {
                 break;
             };
+            // The word comparison tests every changed bit. Let the typed
+            // commit test its readers’ predicate for this register instead.
+            if self
+                .predicates
+                .get(&range.stable)
+                .is_some_and(|p| p.width == range.width)
+            {
+                break;
+            }
             let (stable, working) = (range.stable, range.working);
             if let Some(first) = run.first()
                 && working.wrapping_sub(stable) != first.working.wrapping_sub(first.stable)
@@ -1503,6 +1545,7 @@ mod tests {
             layout,
             flags,
             scheduler_dirty: None,
+            predicates: Default::default(),
             clock_homes: crate::HashSet::default(),
             wide: false,
             homes: Vec::new(),
@@ -1619,6 +1662,7 @@ mod tests {
             layout,
             flags: RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, flags),
             scheduler_dirty: None,
+            predicates: Default::default(),
             clock_homes: crate::HashSet::default(),
             wide: true,
             homes: Vec::new(),
