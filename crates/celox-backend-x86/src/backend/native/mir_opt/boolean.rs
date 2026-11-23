@@ -2,6 +2,89 @@
 
 use super::*;
 
+/// An OR tree observed only by zero tests needs a nonzero witness for each
+/// inequality. Carry each differing bit to the branch instead of normalizing
+/// every leaf separately with SETNE and MOVZX.
+pub(super) fn fold_branch_differences(func: &mut MFunction) {
+    let count = func.vregs.count() as usize;
+    let mut exact = vec![false; count];
+    let mut or_inputs = vec![None; count];
+    let mut feeds_or = vec![false; count];
+    let mut pending = Vec::new();
+    for block in &func.blocks {
+        for phi in &block.phis {
+            pending.extend(phi.sources.iter().map(|&(_, src)| src));
+        }
+        for inst in &block.insts {
+            match *inst {
+                MInst::Or { dst, lhs, rhs } | MInst::Or32 { dst, lhs, rhs } => {
+                    or_inputs[dst.0 as usize] = Some([lhs, rhs]);
+                    feeds_or[lhs.0 as usize] = true;
+                    feeds_or[rhs.0 as usize] = true;
+                }
+                MInst::Branch { .. } => {}
+                _ => pending.extend(inst.uses()),
+            }
+        }
+    }
+    while let Some(value) = pending.pop() {
+        if !std::mem::replace(&mut exact[value.0 as usize], true)
+            && let Some(inputs) = or_inputs[value.0 as usize]
+        {
+            pending.extend(inputs);
+        }
+    }
+    let eligible = |r: VReg| feeds_or[r.0 as usize] && !exact[r.0 as usize];
+    let eligible_comparison = |inst: &MInst| match *inst {
+        MInst::Cmp {
+            dst,
+            kind: CmpKind::Ne,
+            ..
+        }
+        | MInst::CmpImm {
+            dst,
+            kind: CmpKind::Ne,
+            imm: 0,
+            ..
+        } => eligible(dst),
+        _ => false,
+    };
+    if !func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .any(eligible_comparison)
+    {
+        return;
+    }
+    let zeros = known_bits::known_zeros(func);
+    let fits_word = |r: VReg| !zeros[r.0 as usize] <= u64::from(u32::MAX);
+    for block in &mut func.blocks {
+        for inst in &mut block.insts {
+            // A differing bit must survive even an OR32 in the use tree.
+            match *inst {
+                MInst::Cmp {
+                    dst,
+                    lhs,
+                    rhs,
+                    kind: CmpKind::Ne,
+                } if eligible(dst) && fits_word(lhs) && fits_word(rhs) => {
+                    *inst = MInst::Xor32 { dst, lhs, rhs };
+                }
+                MInst::CmpImm {
+                    dst,
+                    lhs,
+                    imm: 0,
+                    kind: CmpKind::Ne,
+                } if eligible(dst) && fits_word(lhs) => {
+                    *inst = MInst::Mov { dst, src: lhs };
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 /// Shorten private chains without duplicating any shared subexpression. Fold
 /// complemented leaves with De Morgan's law so an ANDN chain becomes an OR
 /// tree followed by one ANDN, instead of losing the target's NOT/AND fusion.

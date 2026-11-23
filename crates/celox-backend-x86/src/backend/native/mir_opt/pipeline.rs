@@ -279,6 +279,7 @@ fn run_final_pipeline(runner: &mut PassRunner<'_>) {
     // CFG simplification concatenates linear blocks. Re-place constants only
     // after that concatenation, otherwise a block-local constant can acquire a
     // very long artificial live range in the merged block.
+    runner.run("fold_branch_differences", boolean::fold_branch_differences);
     runner.run("final_sink_loads", sink_loads);
     runner.run("refresh_constant_spill_descs", refresh_constant_spill_descs);
 }
