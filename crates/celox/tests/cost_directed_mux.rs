@@ -132,3 +132,56 @@ fn scalar_case_with_a_data_bit_lowers_to_one_word() {
         }
     }
 }
+
+#[test]
+fn shared_scalar_bank_uses_consecutive_homes_in_selector_order() {
+    use celox::{OptLevel, Simulator};
+    use std::fmt::Write;
+    use std::path::Path;
+
+    let mut source = String::from("module Top(input bit [5:0] a, b, output logic [7:0] x, y");
+    for i in (1..=33).rev() {
+        write!(source, ", input logic [7:0] data{i}").unwrap();
+    }
+    source.push_str(");\n");
+    for (key, result) in [("a", "x"), ("b", "y")] {
+        writeln!(source, "always_comb case ({key})").unwrap();
+        for i in 1..=33 {
+            writeln!(source, "6'd{i}: {result} = data{i};").unwrap();
+        }
+        writeln!(source, "default: {result} = 0; endcase").unwrap();
+    }
+    source.push_str("endmodule");
+    let mut sim = Simulator::from_sv_sources(vec![(&source, Path::new("bank.sv"))], "Top")
+        .four_state(false)
+        .opt_level(OptLevel::O2)
+        .build_native()
+        .unwrap();
+    let bank: Vec<_> = (1..=33).map(|i| sim.signal(&format!("data{i}"))).collect();
+    assert!(
+        bank.windows(2).all(|p| p[0].offset + 1 == p[1].offset),
+        "{bank:?}"
+    );
+    let (a, b, x, y) = (
+        sim.signal("a"),
+        sim.signal("b"),
+        sim.signal("x"),
+        sim.signal("y"),
+    );
+    sim.modify(|io| {
+        for (i, &input) in bank.iter().enumerate() {
+            io.set(input, i as u8 + 1);
+        }
+    })
+    .unwrap();
+    for key in 0..64u8 {
+        sim.modify(|io| {
+            io.set(a, key);
+            io.set(b, 63 - key);
+        })
+        .unwrap();
+        let expected = |k| if (1..=33).contains(&k) { k } else { 0u8 };
+        assert_eq!(sim.get(x), expected(key).into());
+        assert_eq!(sim.get(y), expected(63 - key).into());
+    }
+}
