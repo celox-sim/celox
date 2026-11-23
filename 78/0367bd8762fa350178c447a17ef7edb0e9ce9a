@@ -1,0 +1,1 @@
+Address Codex P2 review findings: track unstaged aliased FF repeated writes and exclude written aliases from combinational sensitivity per instance
