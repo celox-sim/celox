@@ -233,19 +233,21 @@ fn settle_profile_counts_runs_native() {
 
 /// A count of dirty partitions says nothing about their share of the work:
 /// unrelated partitions can contain much wider expressions or larger processes.
-/// Updating one input must not promote its three readers to a full settle.
+/// The three distinct read sets for each input keep its readers independently
+/// schedulable. Updating the input must not promote them to a full settle.
 #[test]
 fn sparse_partition_updates_do_not_promote_unrelated_work() {
     const SOURCE: &str = r#"
 module Top (
     a: input logic<8>, b: input logic<8>, c: input logic<8>,
+    x: input logic<8>, y: input logic<8>, z: input logic<8>,
     a0: output logic<8>, a1: output logic<8>, a2: output logic<8>,
     b0: output logic<8>, b1: output logic<8>, b2: output logic<8>,
     c0: output logic<8>, c1: output logic<8>, c2: output logic<8>,
 ) {
-    assign a0 = a + 8'd1; assign a1 = a + 8'd2; assign a2 = a + 8'd3;
-    assign b0 = b + 8'd1; assign b1 = b + 8'd2; assign b2 = b + 8'd3;
-    assign c0 = c + 8'd1; assign c1 = c + 8'd2; assign c2 = c + 8'd3;
+    assign a0 = a + x + 8'd1; assign a1 = a + y + 8'd2; assign a2 = a + z + 8'd3;
+    assign b0 = b + x + 8'd1; assign b1 = b + y + 8'd2; assign b2 = b + z + 8'd3;
+    assign c0 = c + x + 8'd1; assign c1 = c + y + 8'd2; assign c2 = c + z + 8'd3;
 }
 "#;
     let mut sim = Simulator::builder(SOURCE, "Top")
