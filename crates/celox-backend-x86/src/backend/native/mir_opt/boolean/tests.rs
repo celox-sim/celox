@@ -74,6 +74,101 @@ fn compile(mut function: MFunction) -> (JitCode, usize) {
 }
 
 #[test]
+fn branch_differences_keep_observable_bits_and_wide_operands() {
+    for size in [OpSize::S32, OpSize::S64] {
+        for observe_tree in [false, true] {
+            let mut regs = VRegAllocator::new();
+            let [a, b, c, diff, nonzero, tree] = std::array::from_fn(|_| regs.alloc());
+            let mut function = MFunction::new(regs, vec![SpillDesc::transient(); 6]);
+            let mut block = MBlock::new(BlockId(0));
+            for (dst, offset) in [(a, 0), (b, 8), (c, 16)] {
+                block.push(MInst::Load {
+                    dst,
+                    base: BaseReg::SimState,
+                    offset,
+                    size,
+                });
+            }
+            block.push(MInst::Cmp {
+                dst: diff,
+                lhs: a,
+                rhs: b,
+                kind: CmpKind::Ne,
+            });
+            block.push(MInst::CmpImm {
+                dst: nonzero,
+                lhs: c,
+                imm: 0,
+                kind: CmpKind::Ne,
+            });
+            block.push(MInst::Or32 {
+                dst: tree,
+                lhs: diff,
+                rhs: nonzero,
+            });
+            if observe_tree {
+                block.push(MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 32,
+                    src: tree,
+                    size: OpSize::S64,
+                });
+            }
+            block.push(MInst::Branch {
+                cond: tree,
+                true_bb: BlockId(1),
+                false_bb: BlockId(2),
+            });
+            function.push_block(block);
+            for (id, status) in [(1, 1), (2, 0)] {
+                let mut arm = MBlock::new(BlockId(id));
+                arm.push(MInst::ReturnError { code: status });
+                function.push_block(arm);
+            }
+            fold_branch_differences(&mut function);
+            let replaced = size == OpSize::S32 && !observe_tree;
+            assert_eq!(
+                function.blocks[0]
+                    .insts
+                    .iter()
+                    .any(|i| matches!(i, MInst::Xor32 { .. })),
+                replaced
+            );
+            assert_eq!(
+                function.blocks[0]
+                    .insts
+                    .iter()
+                    .any(|i| matches!(i, MInst::Mov { .. })),
+                replaced
+            );
+            let (code, bytes) = compile(function);
+            for (lhs, rhs, third) in [
+                (3u64, 3u64, 0u64),
+                (16, 1, 0),
+                (0, 0, 8),
+                (1 << 39, 0, 0),
+                (0, 0, 1 << 41),
+            ] {
+                let mut state = vec![0; bytes];
+                for (offset, value) in [(0, lhs), (8, rhs), (16, third)] {
+                    state[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+                }
+                let mask = if size == OpSize::S32 {
+                    u64::from(u32::MAX)
+                } else {
+                    u64::MAX
+                };
+                let expected = u8::from((lhs ^ rhs | third) & mask != 0);
+                assert_eq!(unsafe { code.call(&mut state) }, i64::from(expected));
+                if observe_tree {
+                    assert_eq!(&state[32..40], &u64::from(expected).to_le_bytes());
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn balanced_reductions_consume_interleaved_inputs_without_retaining_all_leaves() {
     fn peak_live(block: &MBlock) -> usize {
         let mut live = HashSet::default();
