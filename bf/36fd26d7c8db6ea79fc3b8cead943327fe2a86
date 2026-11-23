@@ -1,0 +1,1 @@
+Rebase onto master (203040a); resolve conflicts by applying scoped_type before bind_declared in ports_from_scope and keeping both hierarchy tests
