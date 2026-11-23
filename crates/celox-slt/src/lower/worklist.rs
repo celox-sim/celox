@@ -7,6 +7,7 @@ use celox_sir::BlockId;
 
 enum Frame {
     Visit(NodeId),
+    InputBank(input_bank::InputBank),
     Cache(NodeId),
     VisitSlice(NodeId, BitAccess),
     CacheSlice(NodeId, BitAccess),
@@ -140,6 +141,20 @@ impl SLTToSIRLowerer {
                                 )
                             {
                                 value = Some(result);
+                                continue;
+                            }
+                            if !self.four_state
+                                && env.is_none()
+                                && let Some(bank) = input_bank::InputBank::recognize(
+                                    arena,
+                                    node,
+                                    cache,
+                                    &self.region_slice_cache,
+                                )
+                            {
+                                let selector = bank.selector;
+                                work.push(Frame::InputBank(bank));
+                                work.push(Frame::Visit(selector));
                                 continue;
                             }
                             self.with_mux_stats(|stats| stats.normal_seen += 1);
@@ -420,6 +435,10 @@ impl SLTToSIRLowerer {
                     };
                     builder.emit(SIRInstruction::Unary(result, op, inner));
                     value = Some(result);
+                }
+                Frame::InputBank(bank) => {
+                    let selector = value.take().unwrap();
+                    value = Some(bank.emit(self, builder, selector, arena, cache, allow_cache));
                 }
                 Frame::Cast(width) => {
                     value = Some(self.cast_reg_width(builder, value.take().unwrap(), width));
