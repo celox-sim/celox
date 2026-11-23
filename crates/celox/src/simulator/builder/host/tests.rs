@@ -3763,3 +3763,45 @@ endmodule"#;
         );
     }
 }
+
+#[test]
+fn register_predicates_require_one_exclusive_full_width_comparison() {
+    let source = r#"
+module Top(input logic clk, output logic [4:0] zeros, output logic [7:0] copy,
+           output logic partial, output logic other, output int n);
+    logic [7:0] a, b, c, d, e, f;
+    always_ff @(posedge clk) begin
+        a <= a + 8'd1;
+        b <= b + 8'd3;
+        c <= c + 8'd5;
+        d <= d + 8'd7;
+        e <= e + 8'd9;
+        f <= f + 8'd11;
+    end
+    assign zeros = {a == 8'd37, b == 8'd0, c == 8'd0, d == 8'd0, e == 8'd0};
+    assign copy = b ^ 8'h55;
+    assign other = f == 8'd17 || f == 8'd43;
+    assign partial = (c[3:0] == 4'd0);
+    initial forever begin @(d); n++; end
+    always @(posedge e[0]) n++;
+endmodule"#;
+    let (program, ..) = crate::Simulation::from_sv_sources(
+        vec![(source, std::path::Path::new("zero-readers.sv"))],
+        "Top",
+    )
+    .emit_triggers()
+    .settle_partition(crate::SettlePartition::Always)
+    .four_state(false)
+    .opt_level(crate::OptLevel::O2)
+    .into_laid_out_program(crate::MemoryLayoutMode::Packed, false, false)
+    .unwrap();
+    let homes = crate::settle::predicates::homes(&program);
+    let home = |name| program.layout().offsets[&program.get_addr(&[], &[name]).unwrap()];
+    assert_eq!(
+        homes.get(&home("a")).map(|p| (p.width, p.value)),
+        Some((8, 37))
+    );
+    for name in ["b", "c", "d", "e", "f"] {
+        assert!(!homes.contains_key(&home(name)), "{name}");
+    }
+}
