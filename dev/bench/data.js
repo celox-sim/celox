@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795407555548,
+  "lastUpdate": 1795407904488,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -464514,6 +464514,32 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-veryl-cc-x86_64/heliodor_suite_71_linux_boot_execution",
             "unit": "ms",
             "value": 241964.788372
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "a8011da7c944e4c115583d13ae8b123eb9acf0b0",
+          "message": "perf(scheduler): preserve partition dirty marks after NBA publication (#4517)",
+          "timestamp": "2026-11-22T07:33:39Z",
+          "url": "https://github.com/celox-sim/celox/commit/a8011da7c944e4c115583d13ae8b123eb9acf0b0"
+        },
+        "date": 1795407904488,
+        "cpu": "AMD EPYC 7763",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-veryl-tiered-x86_64/heliodor_suite_71_linux_boot_end_to_end",
+            "unit": "ms",
+            "value": 303310.133597
           }
         ]
       }
