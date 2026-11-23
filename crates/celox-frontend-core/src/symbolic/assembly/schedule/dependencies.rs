@@ -23,6 +23,12 @@ struct Producer {
 }
 
 #[derive(Default)]
+pub(super) struct SamplePlacement {
+    pub(super) shared: HashSet<AbsoluteAddr>,
+    pub(super) conditional_packs: HashSet<AbsoluteAddr>,
+}
+
+#[derive(Default)]
 pub(super) struct StateDependencies {
     producers: Vec<Producer>,
     feedback: HashSet<AbsoluteAddr>,
