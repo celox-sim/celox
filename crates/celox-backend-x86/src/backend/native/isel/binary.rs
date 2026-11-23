@@ -248,6 +248,21 @@ fn lower_scalar_binary_value(
             rhs: rhs_vreg,
             kind: CmpKind::Eq,
         }),
+        // Shared comparisons must materialize their result. XOR already
+        // produces exactly 0 or 1 when both GPRs contain canonical bits.
+        // Keep single-use comparisons available for branch/select fusion.
+        BinaryOp::Ne | BinaryOp::NeCase
+            if !ctx.four_state
+                && !ctx.single_use_registers.contains(dst)
+                && ctx.known_bits.get(&lhs_vreg) == Some(&1)
+                && ctx.known_bits.get(&rhs_vreg) == Some(&1) =>
+        {
+            block.push(MInst::Xor {
+                dst: dst_vreg,
+                lhs: lhs_vreg,
+                rhs: rhs_vreg,
+            });
+        }
         BinaryOp::Ne => {
             // A two-state one-bit value is its own non-zero test.
             let one_bit_against_zero = |value: &RegisterId, zero: &RegisterId| {
