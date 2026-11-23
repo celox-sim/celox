@@ -288,10 +288,18 @@ impl SLTToSIRLowerer {
         Some(MuxCfgPlan { shared_nodes })
     }
 
-    pub(super) fn constant_condition<A: Hash + Eq + Clone>(
+    pub(super) fn constant_condition<A: Hash + Eq + Clone + std::fmt::Debug>(
+        &mut self,
         cond: NodeId,
         arena: &SLTNodeArena<A>,
     ) -> Option<bool> {
+        if !self.four_state
+            && super::index_bounds::always_in_bounds(arena, cond)
+            && self.is_speculatable_pure(cond, arena)
+            && !self.contains_div_rem(cond, arena)
+        {
+            return Some(true);
+        }
         let (value, mask) = try_const_eval(cond, arena)?;
         (mask == BigUint::from(0u8)).then(|| value != BigUint::from(0u8))
     }
