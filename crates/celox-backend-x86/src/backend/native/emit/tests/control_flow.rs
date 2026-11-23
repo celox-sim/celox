@@ -360,3 +360,79 @@ fn settle_guard_layout_clusters_clean_paths_and_preserves_dirty_paths() {
         }
     }
 }
+
+#[test]
+fn unchanged_outputs_fall_through_past_the_reader_publication_chain() {
+    let mut regs = VRegAllocator::new();
+    let [a, b, changed] = std::array::from_fn(|_| regs.alloc());
+    let mut func = MFunction::new(regs, vec![SpillDesc::transient(); 3]);
+    func.settle_flags = Some(8..10);
+    let mut entry = MBlock::new(BlockId(0));
+    for (dst, offset) in [(a, 0), (b, 1)] {
+        entry.push(MInst::Load {
+            dst,
+            base: BaseReg::SimState,
+            offset,
+            size: OpSize::S8,
+        });
+    }
+    entry.push(MInst::Or32 {
+        dst: changed,
+        lhs: a,
+        rhs: b,
+    });
+    let exit = BlockId(5);
+    entry.push(MInst::Branch {
+        cond: changed,
+        true_bb: BlockId(1),
+        false_bb: exit,
+    });
+    func.blocks.push(entry);
+    for (first, cond, offset, next) in [(1, a, 8, BlockId(3)), (3, b, 9, exit)] {
+        let mut guard = MBlock::new(BlockId(first));
+        let mut mark = MBlock::new(BlockId(first + 1));
+        guard.push(MInst::Branch {
+            cond,
+            true_bb: mark.id,
+            false_bb: next,
+        });
+        mark.push(MInst::StoreImm {
+            base: BaseReg::SimState,
+            offset,
+            size: OpSize::S8,
+            imm: 1,
+        });
+        mark.push(MInst::Jump { target: next });
+        func.blocks.extend([guard, mark]);
+    }
+    let mut done = MBlock::new(exit);
+    done.push(MInst::Return);
+    func.blocks.push(done);
+
+    let order = emission_block_order(&func);
+    assert_eq!(func.blocks[order[0]].id, BlockId(0));
+    assert_eq!(func.blocks[order[1]].id, exit);
+    // Skipping just the first notification does not identify a whole
+    // publication chain. Leave the ordinary block order as the tie-breaker.
+    let mut single = func.clone();
+    let Some(MInst::Branch { false_bb, .. }) = single.blocks[0].insts.last_mut() else {
+        unreachable!();
+    };
+    *false_bb = BlockId(3);
+    let natural = (0..single.blocks.len()).collect();
+    let single_order = crate::native::emit::settle_layout::cluster_clean_guards(&single, natural);
+    assert_eq!(single.blocks[single_order[1]].id, BlockId(1));
+
+    let allocation = regalloc::run_regalloc(&mut func).unwrap();
+    let code = emit(&func, &allocation.assignment, allocation.spill_frame_size).unwrap();
+    let jit = JitCode::new(&code.code).unwrap();
+    for bits in 0..16 {
+        let mut state = vec![0u8; (code.required_state_size as usize).max(10)];
+        let (a, b) = (bits & 1, (bits >> 1) & 1);
+        let (pending_a, pending_b) = ((bits >> 2) & 1, (bits >> 3) & 1);
+        state[..2].copy_from_slice(&[a, b]);
+        state[8..10].copy_from_slice(&[pending_a, pending_b]);
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        assert_eq!(state[8..10], [a | pending_a, b | pending_b]);
+    }
+}
