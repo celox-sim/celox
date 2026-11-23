@@ -34,13 +34,6 @@ impl ScopeElaboration<'_> {
                 name: port.name().to_string(),
             });
         }
-        if self
-            .ports
-            .iter()
-            .any(|port| port.direction() == PortDirection::Ref)
-        {
-            return Err(AnalyzerError::Unsupported("ref port direction".to_string()));
-        }
         // The static properties of each class specialization are variables
         // of the module (IEEE 1800-2023 8.9, 8.25). A class declaration
         // that names no visible type is an error also when nothing uses it.

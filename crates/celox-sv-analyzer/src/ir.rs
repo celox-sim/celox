@@ -654,6 +654,7 @@ pub struct Port {
     name: String,
     direction: PortDirection,
     r#type: Type,
+    is_const: bool,
     is_net: bool,
     unresolved_net: bool,
     net_resolution: crate::ast::NetResolution,
@@ -665,6 +666,7 @@ pub struct Port {
 pub struct Signal {
     name: String,
     r#type: Type,
+    is_const: bool,
     is_net: bool,
     unresolved_net: bool,
     net_resolution: crate::ast::NetResolution,
@@ -719,6 +721,7 @@ impl Signal {
         Self {
             name,
             r#type,
+            is_const: false,
             is_net,
             unresolved_net: false,
             net_resolution: crate::ast::NetResolution::Wire,
@@ -783,6 +786,16 @@ impl Signal {
         &self.r#type
     }
 
+    pub(crate) fn with_const(mut self, is_const: bool) -> Self {
+        self.is_const = is_const;
+        self
+    }
+
+    /// Whether the signal was declared `const`.
+    pub fn is_const(&self) -> bool {
+        self.is_const
+    }
+
     pub fn is_net(&self) -> bool {
         self.is_net
     }
@@ -819,6 +832,7 @@ impl Port {
             name,
             direction,
             r#type,
+            is_const: false,
             is_net,
             unresolved_net: false,
             net_resolution: crate::ast::NetResolution::Wire,
@@ -865,6 +879,16 @@ impl Port {
 
     pub fn direction(&self) -> PortDirection {
         self.direction
+    }
+
+    pub(crate) fn with_const(mut self, is_const: bool) -> Self {
+        self.is_const = is_const;
+        self
+    }
+
+    /// Whether this is a `const ref` port.
+    pub fn is_const(&self) -> bool {
+        self.is_const
     }
 
     pub fn r#type(&self) -> &Type {
@@ -1091,7 +1115,7 @@ impl From<ast::PortDirection> for PortDirection {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Type {
     structure: Option<std::sync::Arc<StructureType>>,
     tagged_identity: Option<String>,
@@ -1118,7 +1142,30 @@ pub struct Type {
     /// whose named values a name of the variable from another scope has
     /// (IEEE 1800-2023 6.19, 23.6).
     enumeration: Option<std::sync::Arc<ast::Type>>,
+    /// The interned semantic type in [`crate::Design`]'s `TyTable`, if bound.
+    semantic: Option<crate::ast::semantic_types::TyId>,
 }
+
+impl PartialEq for Type {
+    fn eq(&self, other: &Self) -> bool {
+        self.structure == other.structure
+            && self.tagged_identity == other.tagged_identity
+            && self.kind == other.kind
+            && self.is_signed == other.is_signed
+            && self.packed_ranges == other.packed_ranges
+            && self.unpacked_ranges == other.unpacked_ranges
+            && self.resolved_width == other.resolved_width
+            && self.packed_bounds == other.packed_bounds
+            && self.signed_element_depth == other.signed_element_depth
+            && self.class == other.class
+            && self.chandle == other.chandle
+            && self.container == other.container
+            && self.packed_structure == other.packed_structure
+            && self.enumeration == other.enumeration
+    }
+}
+
+impl Eq for Type {}
 
 /// Shared metadata, allocated only for unpacked structure types. Ordinary
 /// scalar types and cloning their declarations do not copy a member layout.
@@ -1159,6 +1206,10 @@ impl Type {
     /// this signal must keep (see [`crate::ast::Type::with_chandle`]).
     pub fn is_chandle(&self) -> bool {
         self.chandle
+    }
+
+    pub(crate) fn semantic_type(&self) -> Option<crate::ast::semantic_types::TyId> {
+        self.semantic
     }
 
     /// The type of the container a variable of this type holds the handle
@@ -1328,13 +1379,17 @@ impl Type {
             container: None,
             packed_structure: None,
             enumeration: None,
+            semantic: None,
         }
     }
 
     pub(crate) fn from_ast(
         r#type: ast::Type,
         constants: &dyn typecheck::ConstantEnvironment,
-        class: &dyn Fn(&ast::Type) -> Option<String>,
+        resolve: &mut dyn FnMut(
+            &ast::Type,
+        )
+            -> (Option<String>, Option<crate::ast::semantic_types::TyId>),
     ) -> Self {
         let structure = r#type.structure_identity().map(|identity| {
             std::sync::Arc::new(StructureType {
@@ -1342,14 +1397,14 @@ impl Type {
                 leaves: r#type
                     .structure_leaves()
                     .into_iter()
-                    .map(|(name, ty)| (name, Self::from_ast(ty, constants, class)))
+                    .map(|(name, ty)| (name, Self::from_ast(ty, constants, resolve)))
                     .collect(),
             })
         });
         let tagged_identity = r#type.tagged_identity().map(str::to_owned);
         let kind = r#type.kind().into();
         let is_signed = r#type.is_signed();
-        let class = class(&r#type);
+        let (class, semantic) = resolve(&r#type);
         let signed_element_depth = r#type.signed_element_depth();
         let chandle = r#type.is_chandle();
         // The declaration's bounds, resolved where its constant functions
@@ -1384,6 +1439,7 @@ impl Type {
             container,
             packed_structure,
             enumeration,
+            semantic,
         }
     }
 }

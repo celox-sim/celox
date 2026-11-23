@@ -92,7 +92,7 @@ mod procedural;
 mod scope;
 mod scoped_map;
 mod selects;
-mod semantic_types;
+pub(crate) mod semantic_types;
 mod shared_map;
 mod statements;
 pub(crate) mod subroutine_owners;
@@ -392,6 +392,7 @@ pub struct Parameter {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Port {
     randomizable: bool,
+    is_const: bool,
     name: String,
     direction: PortDirection,
     r#type: Type,

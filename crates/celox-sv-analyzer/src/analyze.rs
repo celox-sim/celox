@@ -166,6 +166,7 @@ fn publish(
                     ast::ir_type(session, &tree.functions, port.r#type().clone(), &type_env),
                     port.is_net(),
                 )
+                .with_const(port.is_const())
                 .with_unresolved_net(port.is_unresolved_net())
                 .with_net_resolution(port.net_resolution())
                 .with_default(port.default().cloned().map(Into::into))
@@ -187,6 +188,7 @@ fn publish(
                         ty.clone(),
                         port.is_net(),
                     )
+                    .with_const(port.is_const())
                     .with_unresolved_net(port.is_unresolved_net())
                     .with_net_resolution(port.net_resolution())
                 })
@@ -208,6 +210,7 @@ fn publish(
                         ast::ir_type(session, &tree.functions, ty, &type_env),
                         port.is_net(),
                     )
+                    .with_const(port.is_const())
                     .with_unresolved_net(port.is_unresolved_net())
                     .with_net_resolution(port.net_resolution()),
                 );
@@ -230,6 +233,7 @@ fn publish(
                     ),
                     signal.is_net(),
                 )
+                .with_const(signal.is_const())
                 .with_unresolved_net(signal.is_unresolved_net())
                 .with_net_resolution(signal.net_resolution())
                 .with_package_variable(signal.package_variable())

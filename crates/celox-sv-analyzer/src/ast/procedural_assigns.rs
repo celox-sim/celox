@@ -436,6 +436,11 @@ fn check_target(
         if port.is_net {
             return Err(AnalyzerError::ProceduralNetAssignment { name });
         }
+        if port.direction == PortDirection::Ref {
+            return Err(unsupported(format!(
+                "procedural continuous assignment to ref port `{name}`"
+            )));
+        }
         true
     } else {
         false

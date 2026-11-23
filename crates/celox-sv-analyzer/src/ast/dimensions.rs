@@ -182,10 +182,9 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                 dimensions.insert(name, procedural::dimensions_from_type(&ty));
             }
             for leaf in aggregate.leaves() {
-                dimensions.insert(
-                    leaf.name(port.name()),
-                    procedural::dimensions_from_type(&leaf.r#type),
-                );
+                let mut dims = procedural::dimensions_from_type(&leaf.r#type);
+                dims.randomizable &= port.randomizable;
+                dimensions.insert(leaf.name(port.name()), dims);
             }
         }
     }
