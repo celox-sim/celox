@@ -541,6 +541,14 @@ impl SLTToSIRLowerer {
         arena: &SLTNodeArena<A>,
     ) -> RegisterId {
         let width = self.get_width(node, arena);
+        // A RAM write samples validity as a boolean operand of its enable.
+        // Both operands have already been lowered, including any effects.
+        if !self.four_state
+            && *op == BinaryOp::LogicAnd
+            && let Some(known) = index_bounds::in_bounds_knownness(arena, node)
+        {
+            return if known == *lhs { l } else { r };
+        }
         if matches!(
             op,
             BinaryOp::Eq

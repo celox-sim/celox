@@ -357,3 +357,50 @@ fn two_state_array_read_guards_require_the_entire_index_range_to_fit() {
         assert_eq!(four.constant_condition(guard, &arena), None);
     }
 }
+
+#[test]
+fn ram_write_validity_keeps_knownness_and_checks_partial_depths() {
+    let mut arena = SLTNodeArena::new();
+    let offset = input(&mut arena, 0, 8);
+    // A 64-bit byte offset is converted to an element address.
+    let zero = constant(&mut arena, 0, 56);
+    let offset = arena
+        .alloc(SLTNode::Concat(vec![(zero, 56), (offset, 8)]))
+        .unwrap();
+    for (stride, depth, four_state, proven) in [
+        (4, 64, false, true),
+        (4, 63, false, false),
+        (4, 64, true, false),
+        (0, 64, false, false),
+    ] {
+        let divisor = constant(&mut arena, stride, 64);
+        let index = arena
+            .alloc(SLTNode::Binary(offset, BinaryOp::DivU, divisor))
+            .unwrap();
+        let two_state = arena
+            .alloc(SLTNode::Unary(UnaryOp::ToTwoState, index))
+            .unwrap();
+        let known = arena
+            .alloc(SLTNode::Binary(index, BinaryOp::EqCase, two_state))
+            .unwrap();
+        let limit = constant(&mut arena, depth, 64);
+        let inside = arena
+            .alloc(SLTNode::Binary(index, BinaryOp::LtU, limit))
+            .unwrap();
+        for (a, b) in [(known, inside), (inside, known)] {
+            let valid = arena
+                .alloc(SLTNode::Binary(a, BinaryOp::LogicAnd, b))
+                .unwrap();
+            let mut builder = SIRBuilder::new();
+            let mut cache = crate::HashMap::default();
+            let result =
+                SLTToSIRLowerer::new(four_state).lower(&mut builder, valid, &arena, &mut cache);
+            assert_eq!(
+                result == cache[&known],
+                proven,
+                "stride={stride}, depth={depth}, four_state={four_state}"
+            );
+            finish_lowering(builder);
+        }
+    }
+}
