@@ -9,11 +9,7 @@ pub(super) fn signal_kind_from_port_direction(
         sv::ir::PortDirection::Input => VariableKind::Input,
         sv::ir::PortDirection::Output => VariableKind::Output,
         sv::ir::PortDirection::Inout => VariableKind::Inout,
-        sv::ir::PortDirection::Ref => {
-            return Err(sv::AnalyzerError::Unsupported(
-                "ref port direction".to_string(),
-            ));
-        }
+        sv::ir::PortDirection::Ref => VariableKind::Ref,
         sv::ir::PortDirection::Unspecified => VariableKind::Variable,
     })
 }

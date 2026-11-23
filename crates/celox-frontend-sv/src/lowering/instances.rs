@@ -321,14 +321,14 @@ pub(super) fn array_element_connections(
             let Some(actual_expr) = connection.actual_expr.as_ref() else {
                 return Ok(connection.clone());
             };
-            let Some(port_width) = child
+            let Some(port_var) = child
                 .signal_names
                 .get(&connection.formal)
                 .and_then(|id| child.variables.get(id))
-                .map(|variable| variable.width)
             else {
                 return Ok(connection.clone());
             };
+            let port_width = port_var.width;
             let Some(actual_width) = sv_expr_natural_width(
                 actual_expr,
                 parent_variables,
@@ -338,6 +338,33 @@ pub(super) fn array_element_connections(
             ) else {
                 return Ok(connection.clone());
             };
+            if port_var.kind == VariableKind::Ref {
+                if actual_width == port_width {
+                    return Ok(connection.clone());
+                }
+                if let sv::ir::Expr::Ident(name) = actual_expr
+                    && parent_signal_names
+                        .get(name)
+                        .and_then(|id| parent_variables.get(id))
+                        .is_some_and(|variable| {
+                            variable.array_dims == [count] && actual_width == port_width * count
+                        })
+                {
+                    return Err(unsupported(format!(
+                        "instance array element-by-element ref port connection on `{}`",
+                        connection.formal
+                    )));
+                }
+                return Err(ParserError::illegal_context(
+                    "systemverilog ref port",
+                    format!(
+                        "ref port `{}` of instance array requires an equivalent variable \
+                         (IEEE 1800-2023 23.3.3.2, 23.3.3.5)",
+                        connection.formal
+                    ),
+                    None,
+                ));
+            }
             if actual_width == port_width {
                 return Ok(connection.clone());
             }
@@ -540,9 +567,11 @@ pub(super) fn expand_structure_connections<'a>(
         }
         if let Some(pattern) = &connection.bound_pattern {
             if port.direction() != sv::ir::PortDirection::Input {
-                return Err(invalid(
-                    "an output structure port requires a variable".into(),
-                ));
+                return Err(invalid(if port.direction() == sv::ir::PortDirection::Ref {
+                    "a ref port requires a variable".into()
+                } else {
+                    "an output structure port requires a variable".into()
+                }));
             }
             let Some(design) = design.as_deref_mut() else {
                 continue;

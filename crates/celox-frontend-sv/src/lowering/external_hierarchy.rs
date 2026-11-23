@@ -481,6 +481,40 @@ fn prepare_external_hierarchy_collecting(
         ))
         .into());
     }
+    for ir in analyses.values() {
+        for module in ir.modules() {
+            if let Some(port) = module
+                .ports()
+                .iter()
+                .find(|port| port.direction() == sv::ir::PortDirection::Ref)
+            {
+                return Err(sv::AnalyzerError::Unsupported(format!(
+                    "ref port `{}` of `{}` in a mixed-language hierarchy",
+                    port.name(),
+                    module.name()
+                ))
+                .into());
+            }
+        }
+    }
+    for module in foreign_modules
+        .values()
+        .chain(foreign_specializations.values())
+    {
+        if let Some(var) = module
+            .sim_module
+            .variables
+            .values()
+            .find(|var| var.kind == VariableKind::Ref)
+        {
+            return Err(sv::AnalyzerError::Unsupported(format!(
+                "ref port `{}` of `{}` in a mixed-language hierarchy",
+                var.path.join("."),
+                module.sim_module.name
+            ))
+            .into());
+        }
+    }
     let no_instances = HashMap::default();
     let expansion = sv::ir::InstanceExpansion::new(&no_instances, &overrides);
     for ir in analyses.values_mut() {
@@ -555,6 +589,9 @@ fn prepare_external_hierarchy_collecting(
             true,
             false,
             &HashSet::default(),
+            &HashSet::default(),
+            &[],
+            &[],
             warnings,
             None,
             &mut design,

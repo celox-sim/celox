@@ -77,20 +77,26 @@ impl Ff<'_, '_> {
         // A `$readmemh` assigns the words it may load, although the file
         // read when it executes gives only some of them.
         let assigned = without_loaded_words(&targets, &self.writes.memory_loads);
-        if kind == sv::ir::CombProcessKind::AlwaysComb
-            && super::super::comb_retention::retains_state(
-                &body_unit,
-                &assigned,
-                &assigned
-                    .iter()
-                    .map(|target| (target.id, self.m.var(target.id).width))
-                    .collect(),
-            )
-        {
-            if !allow_inferred_latches {
-                return Err(unsupported("latch inference inside always_comb"));
+        if kind == sv::ir::CombProcessKind::AlwaysComb {
+            let widths: HashMap<_, _> = assigned
+                .iter()
+                .map(|target| (target.id, self.m.var(target.id).width))
+                .collect();
+            let retains = if self.alias_partitions.is_empty() {
+                super::super::comb_retention::retains_state(&body_unit, &assigned, &widths)
+            } else {
+                self.alias_partitions.iter().any(|canonical| {
+                    super::super::comb_retention::retains_state_with_aliases(
+                        &body_unit, &assigned, &widths, canonical,
+                    )
+                })
+            };
+            if retains {
+                if !allow_inferred_latches {
+                    return Err(unsupported("latch inference inside always_comb"));
+                }
+                self.m.warn(crate::FrontendWarningKind::InferredLatch, site);
             }
-            self.m.warn(crate::FrontendWarningKind::InferredLatch, site);
         }
         let dependencies =
             super::super::comb::subtract_written_sensitivity(reads.clone(), &targets);
@@ -405,6 +411,15 @@ impl Ff<'_, '_> {
                 target: LogicPathTarget::Process {
                     process: initialized,
                     sensitivity_counters: sensitivity_counters.clone(),
+                    written_excluded_inputs: if always_comb {
+                        sources
+                            .iter()
+                            .copied()
+                            .zip(snapshots.iter().map(|&(saved, _, _)| saved))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    },
                     startup: (!runs_at_time_zero).then(|| celox_slt::CombStartup {
                         initialized,
                         counters: counter_snapshots.clone(),

@@ -32,6 +32,12 @@ pub enum LogicPathTarget<A: Hash + Eq + Clone> {
         after_initials: bool,
         /// Source ranges and occurrence counters used by the activation guard.
         sensitivity_counters: Vec<(VarAtomBase<A>, A)>,
+        /// Source ranges and snapshot slots of the activation guard whose bits
+        /// must exclude storage written by the process itself (`always_comb` /
+        /// `always_latch`). Empty for processes that remain sensitive to external
+        /// writes of written variables (`always @*`).
+        #[serde(default)]
+        written_excluded_inputs: Vec<(VarAtomBase<A>, A)>,
         startup: Option<CombStartup<A>>,
         target: VarAtomBase<A>,
         unit: Box<celox_sir::ExecutionUnit<A>>,
@@ -122,6 +128,7 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> LogicPath<A> {
                 process,
                 after_initials,
                 sensitivity_counters,
+                written_excluded_inputs,
                 startup,
                 target,
                 unit,
@@ -134,6 +141,15 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> LogicPath<A> {
                         (
                             VarAtomBase::new(f(&source.id), source.access.lsb, source.access.msb),
                             f(counter),
+                        )
+                    })
+                    .collect(),
+                written_excluded_inputs: written_excluded_inputs
+                    .iter()
+                    .map(|(source, saved)| {
+                        (
+                            VarAtomBase::new(f(&source.id), source.access.lsb, source.access.msb),
+                            f(saved),
                         )
                     })
                     .collect(),

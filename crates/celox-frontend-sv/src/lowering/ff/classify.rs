@@ -25,6 +25,11 @@ pub(super) struct Writes {
     /// Variables several edge processes write by blocking assignments (see
     /// `with_shared_variables`).
     pub(super) shared: HashSet<SourceVarId>,
+    /// Groups of variables that `ref` ports alias within one instance (see
+    /// `with_alias_groups`).
+    pub(super) alias_groups: Vec<Vec<SourceVarId>>,
+    /// Per-process private `WORKING` shadows for variables in an aliased group.
+    pub(super) alias_work: HashMap<SourceVarId, SourceVarId>,
     /// Variables read from the working region.
     pub(super) working: HashSet<SourceVarId>,
     /// Variables a nonblocking assignment writes.
@@ -141,23 +146,44 @@ impl Ff<'_, '_> {
         self.writes.targets.push((id, access));
     }
 
-    /// The variables the subroutines `body` calls assign, directly or
-    /// through further calls.
-    pub(super) fn subroutine_assignments(&self, body: &[sv::ir::Stmt]) -> HashSet<SourceVarId> {
-        let mut calls = Vec::new();
+    /// The variables the subroutines `body` calls assign, as `(all_assigned,
+    /// nonblocking_assigned)`, directly or through further calls and `ref` formals.
+    pub(super) fn subroutine_assignments(
+        &self,
+        body: &[sv::ir::Stmt],
+    ) -> (HashSet<SourceVarId>, HashSet<SourceVarId>) {
+        let mut root_calls = Vec::new();
         for stmt in body {
-            stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
+            stmt.walk(&mut |stmt| stmt_calls(stmt, &mut root_calls));
         }
+        let mut calls: Vec<(
+            sv::ir::Callee,
+            Vec<Option<sv::ir::Expr>>,
+            HashMap<String, SourceVarId>,
+        )> = root_calls
+            .into_iter()
+            .map(|(callee, args)| (callee, args, HashMap::default()))
+            .collect();
         let mut assigned = HashSet::default();
-        let mut visited = HashSet::default();
+        let mut nonblocking = HashSet::default();
+        let mut visited: HashSet<(String, Vec<(String, SourceVarId)>)> = HashSet::default();
         let mut seen_defaults = super::super::procedural::SeenDefaults::default();
-        while let Some((callee, args)) = calls.pop() {
+        let resolve_id = |name: &str, refs: &HashMap<String, SourceVarId>| {
+            refs.get(name).copied().or_else(|| self.m.id(name))
+        };
+        let bind_arg_id = |expr: &sv::ir::Expr, refs: &HashMap<String, SourceVarId>| {
+            lvalue_from_expr(expr).and_then(|lvalues| match lvalues.as_slice() {
+                [lvalue] => resolve_id(lvalue.name(), refs),
+                _ => None,
+            })
+        };
+        while let Some((callee, args, caller_refs)) = calls.pop() {
             if let sv::ir::Callee::Object(op) = &callee {
-                assigned.extend(
-                    written_object_arguments(op, &args)
-                        .iter()
-                        .filter_map(|lhs| self.m.id(lhs.name())),
-                );
+                for lhs in written_object_arguments(op, &args) {
+                    if let Some(id) = resolve_id(lhs.name(), &caller_refs) {
+                        assigned.insert(id);
+                    }
+                }
             }
             let sv::ir::Callee::Subroutine(name) = callee else {
                 continue;
@@ -165,30 +191,98 @@ impl Ff<'_, '_> {
             let Some(subroutine) = self.m.subroutine(&name) else {
                 continue;
             };
-            default_calls(subroutine, &args, &mut calls, &mut seen_defaults);
-            if !visited.insert(name) {
+            let mut sub_calls = Vec::new();
+            default_calls(subroutine, &args, &mut sub_calls, &mut seen_defaults);
+            for (c, a) in sub_calls {
+                calls.push((c, a, caller_refs.clone()));
+            }
+            let mut child_refs = HashMap::default();
+            for (param, arg) in subroutine.params.iter().zip(args.iter()) {
+                if !param.direction.is_reference() {
+                    continue;
+                }
+                let Some(arg) = arg else {
+                    continue;
+                };
+                if param.leaves.is_empty() {
+                    if let Some(id) = bind_arg_id(arg, &caller_refs) {
+                        child_refs.insert(param.name.clone(), id);
+                    }
+                } else if let sv::ir::Expr::Concat(parts) = arg
+                    && parts.len() == param.leaves.len()
+                {
+                    for (leaf, part) in param.leaves.iter().zip(parts) {
+                        if let Some(id) = bind_arg_id(part, &caller_refs) {
+                            child_refs.insert(leaf.clone(), id);
+                        }
+                    }
+                }
+            }
+            let mut binding_key: Vec<(String, SourceVarId)> =
+                child_refs.iter().map(|(k, &v)| (k.clone(), v)).collect();
+            binding_key.sort();
+            if !visited.insert((name, binding_key)) {
                 continue;
             }
             for stmt in &subroutine.body {
                 stmt.walk(&mut |stmt| {
                     match stmt {
-                        sv::ir::Stmt::Assign { lhs, .. } => {
-                            assigned.extend(self.m.id(lhs.name()));
+                        sv::ir::Stmt::Assign {
+                            lhs,
+                            nonblocking: is_nba,
+                            ..
+                        } => {
+                            if let Some(id) = resolve_id(lhs.name(), &child_refs) {
+                                assigned.insert(id);
+                                if *is_nba {
+                                    nonblocking.insert(id);
+                                }
+                            }
                         }
-                        sv::ir::Stmt::AssignConcat { parts, .. } => {
-                            assigned.extend(parts.iter().filter_map(|part| self.m.id(part.name())));
+                        sv::ir::Stmt::AssignConcat {
+                            parts,
+                            nonblocking: is_nba,
+                            ..
+                        } => {
+                            for part in parts {
+                                if let Some(id) = resolve_id(part.name(), &child_refs) {
+                                    assigned.insert(id);
+                                    if *is_nba {
+                                        nonblocking.insert(id);
+                                    }
+                                }
+                            }
                         }
                         _ => {}
                     }
-                    stmt_calls(stmt, &mut calls);
+                    let mut nested = Vec::new();
+                    stmt_calls(stmt, &mut nested);
+                    for (c, a) in nested {
+                        calls.push((c, a, child_refs.clone()));
+                    }
                 });
             }
         }
-        assigned
+        (assigned, nonblocking)
     }
 
     /// Collect the variables a body writes, following calls into subroutines.
-    pub(super) fn scan(&mut self, stmts: &[sv::ir::Stmt], visited: &mut HashSet<String>) {
+    pub(super) fn scan(&mut self, stmts: &[sv::ir::Stmt], _visited: &mut HashSet<String>) {
+        self.scan_with_refs(
+            stmts,
+            &HashMap::default(),
+            &mut HashSet::default(),
+            &mut Vec::new(),
+        );
+    }
+
+    fn scan_with_refs(
+        &mut self,
+        stmts: &[sv::ir::Stmt],
+        refs: &HashMap<String, sv::ir::LValue>,
+        visited: &mut HashSet<(String, Vec<(String, String)>)>,
+        active: &mut Vec<String>,
+    ) {
         // Each target, whether a blocking assignment writes it, and the
         // bits it writes in the iterations of the loops around it.
         let mut writes: Vec<(sv::ir::LValue, bool, Option<Vec<BitAccess>>)> = Vec::new();
@@ -206,27 +300,27 @@ impl Ff<'_, '_> {
             &mut |stmt, loops| match stmt {
                 sv::ir::Stmt::Assign {
                     lhs, nonblocking, ..
-                } => writes.push((
-                    lhs.clone(),
-                    !nonblocking,
-                    m.unrolled_select_writes(lhs, loops),
-                )),
+                } => {
+                    let resolved = resolve_lvalue(lhs, refs);
+                    let unrolled = m.unrolled_select_writes(&resolved, loops);
+                    writes.push((resolved, !nonblocking, unrolled));
+                }
                 sv::ir::Stmt::AssignConcat {
                     parts, nonblocking, ..
                 } => {
                     writes.extend(parts.iter().map(|part| {
-                        (
-                            part.clone(),
-                            !nonblocking,
-                            m.unrolled_select_writes(part, loops),
-                        )
+                        let resolved = resolve_lvalue(part, refs);
+                        let unrolled = m.unrolled_select_writes(&resolved, loops);
+                        (resolved, !nonblocking, unrolled)
                     }));
                 }
                 // `$readmemh` writes its destination immediately, and
                 // `$timeformat` the design's format of `%t`.
                 sv::ir::Stmt::SystemTask { task, args, .. } => {
                     if let Some(destination) = readmem_destination(*task, args) {
-                        writes.push((sv::ir::LValue::Ident(destination.to_string()), true, None));
+                        let resolved =
+                            resolve_lvalue(&sv::ir::LValue::Ident(destination.to_string()), refs);
+                        writes.push((resolved, true, None));
                     }
                     if *task == sv::ir::SystemTask::Timeformat {
                         writes.push((sv::ir::LValue::Ident(TIME_FORMAT.to_string()), true, None));
@@ -248,7 +342,8 @@ impl Ff<'_, '_> {
         while let Some((callee, args)) = calls.pop() {
             if let sv::ir::Callee::Object(op) = &callee {
                 for lhs in written_object_arguments(op, &args) {
-                    self.record_target(&lhs, true);
+                    let resolved = resolve_lvalue(&lhs, refs);
+                    self.record_target(&resolved, true);
                 }
             }
             let name = match callee {
@@ -270,7 +365,8 @@ impl Ff<'_, '_> {
                         _ => {}
                     }
                     for lvalue in written_system_arguments(function, &args) {
-                        self.record_target(&lvalue, true);
+                        let resolved = resolve_lvalue(&lvalue, refs);
+                        self.record_target(&resolved, true);
                     }
                     continue;
                 }
@@ -300,7 +396,8 @@ impl Ff<'_, '_> {
             };
             if let Some(import) = self.m.dpi_imports.get(&name) {
                 for lvalue in written_dpi_arguments(import, &args) {
-                    self.record_target(&lvalue, true);
+                    let resolved = resolve_lvalue(&lvalue, refs);
+                    self.record_target(&resolved, true);
                 }
                 continue;
             }
@@ -308,18 +405,81 @@ impl Ff<'_, '_> {
                 continue;
             };
             default_calls(&subroutine, &args, &mut calls, &mut seen_defaults);
+            let mut child_refs = HashMap::default();
             for (param, arg) in subroutine.params.iter().zip(args.iter()) {
+                if param.direction.is_reference() {
+                    let Some(arg) = arg else {
+                        continue;
+                    };
+                    if param.leaves.is_empty() {
+                        if let Some(lvalues) = lvalue_from_expr(arg)
+                            && let [lvalue] = lvalues.as_slice()
+                        {
+                            child_refs.insert(param.name.clone(), resolve_lvalue(lvalue, refs));
+                        }
+                    } else if let sv::ir::Expr::Concat(parts) = arg
+                        && parts.len() == param.leaves.len()
+                    {
+                        for (leaf, part) in param.leaves.iter().zip(parts) {
+                            if let Some(lvalues) = lvalue_from_expr(part)
+                                && let [lvalue] = lvalues.as_slice()
+                            {
+                                child_refs.insert(leaf.clone(), resolve_lvalue(lvalue, refs));
+                            }
+                        }
+                    }
+                    continue;
+                }
                 if param.direction.is_written()
                     && let Some(lvalues) = arg.as_ref().and_then(lvalue_from_expr)
                 {
                     for lvalue in lvalues {
-                        self.record_target(&lvalue, true);
+                        let resolved = resolve_lvalue(&lvalue, refs);
+                        self.record_target(&resolved, true);
                     }
                 }
             }
-            if visited.insert(name) {
-                self.scan(&subroutine.body, visited);
+            if active.contains(&name) {
+                continue;
+            }
+            let mut binding_key: Vec<(String, String)> = child_refs
+                .iter()
+                .map(|(k, v)| (k.clone(), format!("{v:?}")))
+                .collect();
+            binding_key.sort();
+            if visited.insert((name.clone(), binding_key)) {
+                active.push(name);
+                self.scan_with_refs(&subroutine.body, &child_refs, visited, active);
+                active.pop();
             }
         }
+    }
+}
+
+fn resolve_lvalue(
+    lvalue: &sv::ir::LValue,
+    refs: &HashMap<String, sv::ir::LValue>,
+) -> sv::ir::LValue {
+    match refs.get(lvalue.name()) {
+        Some(sv::ir::LValue::Ident(target)) => match lvalue {
+            sv::ir::LValue::Ident(_) => sv::ir::LValue::Ident(target.clone()),
+            sv::ir::LValue::Select {
+                msb,
+                lsb,
+                array_slice_width,
+                array_slice_reversed,
+                window,
+                ..
+            } => sv::ir::LValue::Select {
+                name: target.clone(),
+                msb: msb.clone(),
+                lsb: lsb.clone(),
+                array_slice_width: array_slice_width.clone(),
+                array_slice_reversed: *array_slice_reversed,
+                window: window.clone(),
+            },
+        },
+        Some(actual @ sv::ir::LValue::Select { .. }) => actual.clone(),
+        None => lvalue.clone(),
     }
 }

@@ -829,9 +829,492 @@ fn relocate_comb_logic(
             }
         }
     }
+    merge_same_process_targets(&mut relocated_module.comb_blocks, global_arena)?;
+    exclude_written_process_sensitivity(&mut relocated_module.comb_blocks);
     comb_blocks.extend(relocated_module.comb_blocks);
     comb_observers.extend(relocated_module.comb_observers);
     Ok(())
+}
+
+/// Merge overlapping or adjacent `LogicPathTarget::Process` entries emitted by
+/// the same combinational process that relocate to the same `AbsoluteAddr`, as
+/// happens when multiple `ref` ports of one instance alias the same parent
+/// variable.
+fn merge_same_process_targets(
+    comb_blocks: &mut Vec<celox_slt::LogicPath<AbsoluteAddr>>,
+    global_arena: &mut SLTNodeArena<AbsoluteAddr>,
+) -> Result<(), ParserError> {
+    let mut groups: HashMap<(AbsoluteAddr, AbsoluteAddr), Vec<usize>> = HashMap::default();
+    for (idx, path) in comb_blocks.iter().enumerate() {
+        if let celox_slt::LogicPathTarget::Process {
+            process, target, ..
+        } = &path.target
+        {
+            groups.entry((*process, target.id)).or_default().push(idx);
+        }
+    }
+    if !groups.values().any(|indices| indices.len() > 1) {
+        return Ok(());
+    }
+    let mut removed = vec![false; comb_blocks.len()];
+    for ((_, target_id), mut indices) in groups {
+        if indices.len() <= 1 {
+            continue;
+        }
+        indices.sort_by_key(|&idx| {
+            let var = comb_blocks[idx]
+                .target
+                .var()
+                .expect("process target has a var");
+            (var.access.lsb, var.access.msb)
+        });
+        let mut keep_idx: Option<usize> = None;
+        for next_idx in indices {
+            let next_access = comb_blocks[next_idx]
+                .target
+                .var()
+                .expect("process target has a var")
+                .access;
+            let Some(k_idx) = keep_idx else {
+                keep_idx = Some(next_idx);
+                continue;
+            };
+            let keep_access = comb_blocks[k_idx]
+                .target
+                .var()
+                .expect("process target has a var")
+                .access;
+            if next_access.lsb.saturating_sub(1) > keep_access.msb {
+                keep_idx = Some(next_idx);
+                continue;
+            }
+            let next = comb_blocks[next_idx].clone();
+            removed[next_idx] = true;
+            let keep = &mut comb_blocks[k_idx];
+            keep.sources.extend(next.sources);
+            keep.previous_sources.extend(next.previous_sources);
+            keep.address_sources.extend(next.address_sources);
+            keep.order_before.extend(next.order_before);
+            keep.comb_capture_enable_always |= next.comb_capture_enable_always;
+            for item in next.local_inputs {
+                if !keep.local_inputs.contains(&item) {
+                    keep.local_inputs.push(item);
+                }
+            }
+            for site in next.comb_capture_enable_sites {
+                if !keep.comb_capture_enable_sites.contains(&site) {
+                    keep.comb_capture_enable_sites.push(site);
+                }
+            }
+            for node in next.pre_lower_nodes {
+                if !keep.pre_lower_nodes.contains(&node) {
+                    keep.pre_lower_nodes.push(node);
+                }
+            }
+            let new_msb = keep_access.msb.max(next_access.msb);
+            if new_msb != keep_access.msb
+                && let celox_slt::LogicPathTarget::Process { target, .. } = &mut keep.target
+            {
+                target.access.msb = new_msb;
+                let updated_access = target.access;
+                keep.expr = global_arena
+                    .alloc(celox_slt::SLTNode::Input {
+                        variable: target_id,
+                        signed: false,
+                        index: Vec::new(),
+                        access: updated_access,
+                    })
+                    .map_err(|error| {
+                        ParserError::illegal_context(
+                            "comb process target merge",
+                            error.to_string(),
+                            None,
+                        )
+                    })?;
+            }
+        }
+    }
+    let mut idx = 0usize;
+    comb_blocks.retain(|_| {
+        let keep = !removed[idx];
+        idx += 1;
+        keep
+    });
+    Ok(())
+}
+
+fn subtract_written_ranges(
+    atom: VarAtomBase<AbsoluteAddr>,
+    written: &[VarAtomBase<AbsoluteAddr>],
+) -> Vec<(usize, usize)> {
+    let mut ranges = vec![(atom.access.lsb, atom.access.msb)];
+    for target in written.iter().filter(|target| target.id == atom.id) {
+        ranges = ranges
+            .into_iter()
+            .flat_map(|(lsb, msb)| {
+                if target.access.msb < lsb || target.access.lsb > msb {
+                    return vec![(lsb, msb)];
+                }
+                let mut kept = Vec::new();
+                if lsb < target.access.lsb {
+                    kept.push((lsb, target.access.lsb - 1));
+                }
+                if target.access.msb < msb {
+                    kept.push((target.access.msb + 1, msb));
+                }
+                kept
+            })
+            .collect();
+    }
+    ranges
+}
+
+/// Exclude storage written by a combinational process from its own relocated
+/// sources, sensitivity counters, and activation guard snapshots.
+///
+/// Frontends subtract written formals before elaboration, which misses sibling
+/// `ref` ports (or package/hierarchical aliases) that relocate to the same
+/// physical variable in a given instance.
+pub(super) fn exclude_written_process_sensitivity(
+    comb_blocks: &mut [celox_slt::LogicPath<AbsoluteAddr>],
+) {
+    let mut groups: HashMap<AbsoluteAddr, Vec<usize>> = HashMap::default();
+    for (idx, path) in comb_blocks.iter().enumerate() {
+        if let celox_slt::LogicPathTarget::Process { process, .. } = &path.target {
+            groups.entry(*process).or_default().push(idx);
+        }
+    }
+    for (process_id, indices) in groups {
+        let mut written_targets = Vec::new();
+        for &idx in &indices {
+            if let celox_slt::LogicPathTarget::Process { target, .. } = &comb_blocks[idx].target
+                && target.id != process_id
+            {
+                written_targets.push(*target);
+            }
+        }
+        if written_targets.is_empty() {
+            continue;
+        }
+        for &idx in &indices {
+            let path = &mut comb_blocks[idx];
+            if path.sources.iter().any(|source| {
+                written_targets
+                    .iter()
+                    .any(|target| target.id == source.id && target.access.overlaps(&source.access))
+            }) {
+                let old_sources = std::mem::take(&mut path.sources);
+                for source in old_sources {
+                    for (lsb, msb) in subtract_written_ranges(source, &written_targets) {
+                        path.sources.insert(VarAtomBase::new(source.id, lsb, msb));
+                    }
+                }
+            }
+        }
+        let guard_updates: HashMap<AbsoluteAddr, (VarAtomBase<AbsoluteAddr>, Vec<(usize, usize)>)> = {
+            let celox_slt::LogicPathTarget::Process {
+                written_excluded_inputs,
+                ..
+            } = &comb_blocks[indices[0]].target
+            else {
+                unreachable!()
+            };
+            written_excluded_inputs
+                .iter()
+                .filter(|&&(source, _)| {
+                    written_targets.iter().any(|target| {
+                        target.id == source.id && target.access.overlaps(&source.access)
+                    })
+                })
+                .map(|&(source, saved)| {
+                    (
+                        saved,
+                        (source, subtract_written_ranges(source, &written_targets)),
+                    )
+                })
+                .collect()
+        };
+        if guard_updates.is_empty() {
+            continue;
+        }
+        let rewritten_unit = {
+            let celox_slt::LogicPathTarget::Process { unit, .. } =
+                &mut comb_blocks[indices[0]].target
+            else {
+                unreachable!()
+            };
+            narrow_comb_process_guard(unit, &guard_updates);
+            unit.clone()
+        };
+        for &idx in &indices {
+            let celox_slt::LogicPathTarget::Process {
+                sensitivity_counters,
+                written_excluded_inputs,
+                unit,
+                ..
+            } = &mut comb_blocks[idx].target
+            else {
+                unreachable!()
+            };
+            if idx != indices[0] {
+                *unit = rewritten_unit.clone();
+            }
+            let old_counters = std::mem::take(sensitivity_counters);
+            for (source, counter) in old_counters {
+                for (lsb, msb) in subtract_written_ranges(source, &written_targets) {
+                    sensitivity_counters.push((VarAtomBase::new(source.id, lsb, msb), counter));
+                }
+            }
+            let old_inputs = std::mem::take(written_excluded_inputs);
+            for (source, saved) in old_inputs {
+                for (lsb, msb) in subtract_written_ranges(source, &written_targets) {
+                    written_excluded_inputs.push((VarAtomBase::new(source.id, lsb, msb), saved));
+                }
+            }
+        }
+    }
+}
+
+fn narrow_comb_process_guard(
+    unit: &mut ExecutionUnit<AbsoluteAddr>,
+    guard_updates: &HashMap<AbsoluteAddr, (VarAtomBase<AbsoluteAddr>, Vec<(usize, usize)>)>,
+) {
+    use celox_sir::{BinaryOp, RegisterId, RegisterType, SIRValue};
+
+    let mut saved_loads: HashMap<RegisterId, (VarAtomBase<AbsoluteAddr>, Vec<(usize, usize)>)> =
+        HashMap::default();
+    for block in unit.blocks.values() {
+        for inst in &block.instructions {
+            if let SIRInstruction::Load(dst, addr, ..) = inst
+                && let Some(update) = guard_updates.get(addr)
+            {
+                saved_loads.insert(*dst, update.clone());
+            }
+        }
+    }
+
+    let mut next_reg = unit
+        .register_map
+        .keys()
+        .map(|reg| reg.0 + 1)
+        .max()
+        .unwrap_or(0);
+    let mut alloc_reg = |register_map: &mut HashMap<RegisterId, RegisterType>, ty: RegisterType| {
+        let reg = RegisterId(next_reg);
+        next_reg += 1;
+        register_map.insert(reg, ty);
+        reg
+    };
+    let mut dropped_source_regs = HashSet::default();
+    let mut block_ids: Vec<_> = unit.blocks.keys().copied().collect();
+    block_ids.sort_unstable();
+    for block_id in block_ids {
+        let block = unit
+            .blocks
+            .get_mut(&block_id)
+            .expect("block id collected from unit");
+        let old_insts = std::mem::take(&mut block.instructions);
+        let mut new_insts = Vec::with_capacity(old_insts.len());
+        for inst in old_insts {
+            match inst {
+                SIRInstruction::Load(_, addr, ..)
+                    if guard_updates
+                        .get(&addr)
+                        .is_some_and(|(_, kept)| kept.is_empty()) => {}
+                SIRInstruction::Store(addr, _, _, src_reg, ..)
+                    if guard_updates
+                        .get(&addr)
+                        .is_some_and(|(_, kept)| kept.is_empty()) =>
+                {
+                    dropped_source_regs.insert(src_reg);
+                }
+                SIRInstruction::Binary(differs, lhs, BinaryOp::NeCase, rhs)
+                    if saved_loads.contains_key(&rhs) || saved_loads.contains_key(&lhs) =>
+                {
+                    let (current, previous, (orig_source, kept)) =
+                        if let Some(entry) = saved_loads.get(&rhs) {
+                            (lhs, rhs, entry)
+                        } else {
+                            (rhs, lhs, &saved_loads[&lhs])
+                        };
+                    if kept.is_empty() {
+                        dropped_source_regs.insert(current);
+                        new_insts.push(SIRInstruction::Imm(differs, SIRValue::new(0u8)));
+                    } else {
+                        let cur_is_logic = matches!(
+                            unit.register_map.get(&current),
+                            Some(RegisterType::Logic { .. })
+                        );
+                        let prev_is_logic = matches!(
+                            unit.register_map.get(&previous),
+                            Some(RegisterType::Logic { .. })
+                        );
+                        let part_ty = |is_logic: bool, sub_w: usize| {
+                            if is_logic {
+                                RegisterType::Logic { width: sub_w }
+                            } else {
+                                RegisterType::Bit {
+                                    width: sub_w,
+                                    signed: false,
+                                }
+                            }
+                        };
+                        let mut acc: Option<RegisterId> = None;
+                        for (idx, &(k_lsb, k_msb)) in kept.iter().enumerate() {
+                            let sub_w = k_msb - k_lsb + 1;
+                            let cur_part =
+                                alloc_reg(&mut unit.register_map, part_ty(cur_is_logic, sub_w));
+                            let prev_part =
+                                alloc_reg(&mut unit.register_map, part_ty(prev_is_logic, sub_w));
+                            let rel_lsb = k_lsb - orig_source.access.lsb;
+                            new_insts
+                                .push(SIRInstruction::Slice(cur_part, current, rel_lsb, sub_w));
+                            new_insts
+                                .push(SIRInstruction::Slice(prev_part, previous, rel_lsb, sub_w));
+                            let is_last = idx + 1 == kept.len();
+                            match acc {
+                                None if is_last => {
+                                    new_insts.push(SIRInstruction::Binary(
+                                        differs,
+                                        cur_part,
+                                        BinaryOp::NeCase,
+                                        prev_part,
+                                    ));
+                                }
+                                None => {
+                                    let part_diff = alloc_reg(
+                                        &mut unit.register_map,
+                                        RegisterType::Bit {
+                                            width: 1,
+                                            signed: false,
+                                        },
+                                    );
+                                    new_insts.push(SIRInstruction::Binary(
+                                        part_diff,
+                                        cur_part,
+                                        BinaryOp::NeCase,
+                                        prev_part,
+                                    ));
+                                    acc = Some(part_diff);
+                                }
+                                Some(prev_acc) => {
+                                    let part_diff = alloc_reg(
+                                        &mut unit.register_map,
+                                        RegisterType::Bit {
+                                            width: 1,
+                                            signed: false,
+                                        },
+                                    );
+                                    new_insts.push(SIRInstruction::Binary(
+                                        part_diff,
+                                        cur_part,
+                                        BinaryOp::NeCase,
+                                        prev_part,
+                                    ));
+                                    let dst = if is_last {
+                                        differs
+                                    } else {
+                                        alloc_reg(
+                                            &mut unit.register_map,
+                                            RegisterType::Bit {
+                                                width: 1,
+                                                signed: false,
+                                            },
+                                        )
+                                    };
+                                    new_insts.push(SIRInstruction::Binary(
+                                        dst,
+                                        prev_acc,
+                                        BinaryOp::Or,
+                                        part_diff,
+                                    ));
+                                    acc = Some(dst);
+                                }
+                            }
+                        }
+                    }
+                }
+                other => new_insts.push(other),
+            }
+        }
+        block.instructions = new_insts;
+    }
+
+    if !dropped_source_regs.is_empty() {
+        let mut used_regs = HashSet::default();
+        let mark_offset = |used: &mut HashSet<RegisterId>, offset: &SIROffset| {
+            for reg in offset.dynamic_registers().into_iter().flatten() {
+                used.insert(reg);
+            }
+        };
+        for block in unit.blocks.values() {
+            for inst in &block.instructions {
+                match inst {
+                    SIRInstruction::Imm(..) => {}
+                    SIRInstruction::Binary(_, lhs, _, rhs) => {
+                        used_regs.insert(*lhs);
+                        used_regs.insert(*rhs);
+                    }
+                    SIRInstruction::Unary(_, _, src) | SIRInstruction::Slice(_, src, ..) => {
+                        used_regs.insert(*src);
+                    }
+                    SIRInstruction::Load(_, _, offset, _)
+                    | SIRInstruction::Commit(_, _, offset, _, _) => {
+                        mark_offset(&mut used_regs, offset);
+                    }
+                    SIRInstruction::Store(_, offset, _, src, _, _) => {
+                        mark_offset(&mut used_regs, offset);
+                        used_regs.insert(*src);
+                    }
+                    SIRInstruction::Concat(_, srcs)
+                    | SIRInstruction::RuntimeEvent { args: srcs, .. }
+                    | SIRInstruction::CombCaptureEvent { args: srcs, .. }
+                    | SIRInstruction::ExternCall { args: srcs, .. } => {
+                        used_regs.extend(srcs.iter().copied());
+                    }
+                    SIRInstruction::Mux(_, cond, then_val, else_val) => {
+                        used_regs.insert(*cond);
+                        used_regs.insert(*then_val);
+                        used_regs.insert(*else_val);
+                    }
+                    SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
+                        used_regs.insert(*old);
+                        used_regs.insert(*new);
+                    }
+                    SIRInstruction::Call { frame, args, .. } => {
+                        used_regs.insert(*frame);
+                        used_regs.extend(args.iter().map(|(_, reg)| *reg));
+                    }
+                }
+            }
+            match &block.terminator {
+                SIRTerminator::Jump(_, args) => {
+                    used_regs.extend(args.iter().copied());
+                }
+                SIRTerminator::Branch {
+                    cond,
+                    true_block,
+                    false_block,
+                } => {
+                    used_regs.insert(*cond);
+                    used_regs.extend(true_block.1.iter().copied());
+                    used_regs.extend(false_block.1.iter().copied());
+                }
+                SIRTerminator::Switch { selector, .. } => {
+                    used_regs.insert(*selector);
+                }
+                SIRTerminator::Return | SIRTerminator::Error(_) => {}
+            }
+        }
+        for block in unit.blocks.values_mut() {
+            block.instructions.retain(|inst| match inst {
+                SIRInstruction::Load(dst, ..) => {
+                    !(dropped_source_regs.contains(dst) && !used_regs.contains(dst))
+                }
+                _ => true,
+            });
+        }
+    }
 }
 
 /// Relocate the flip-flop units of the instance that evaluate, with or

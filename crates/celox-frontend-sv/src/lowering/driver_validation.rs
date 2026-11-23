@@ -726,6 +726,9 @@ pub(super) fn validate_foreign_drivers(
     let mut written_once = None;
     let mut always_ff = None;
     for (name, writes) in foreign_writes {
+        if !writes.overlapping {
+            continue;
+        }
         // Drivers of nets through hierarchical names are rejected with the
         // instance's net drivers.
         if module
@@ -737,7 +740,7 @@ pub(super) fn validate_foreign_drivers(
         }
         let drivers = drivers.local(name);
         let continuous = drivers.iter().any(|(id, _)| *id < first_ff);
-        let repeating = writes.repeating + usize::from(!drivers.is_empty());
+        let repeating = writes.overlapping_repeating + usize::from(!drivers.is_empty());
         let local_always_ff = always_ff
             .get_or_insert_with(|| {
                 let mut written = HashSet::default();
@@ -760,7 +763,11 @@ pub(super) fn validate_foreign_drivers(
         let local_once = written_once
             .get_or_insert_with(|| {
                 let mut written = HashSet::default();
-                for process in module.initial_processes().iter().filter(|p| !p.repeats()) {
+                for process in module
+                    .initial_processes()
+                    .iter()
+                    .filter(|p| !p.repeats() && !p.is_initializer() && !p.is_final())
+                {
                     procedural::written_names_with_calls(module, process.body(), &mut written);
                 }
                 written
@@ -769,10 +776,12 @@ pub(super) fn validate_foreign_drivers(
         let reason = if continuous {
             Some("its module drives it continuously or from always_comb")
         } else if writes.combinational
-            && (!drivers.is_empty() || local_once || writes.repeating > 1)
+            && (!drivers.is_empty() || local_once || writes.overlapping_repeating > 1)
         {
             Some("another module drives it continuously or from always_comb")
-        } else if writes.always_ff && (!drivers.is_empty() || local_once || writes.repeating > 1) {
+        } else if writes.always_ff
+            && (!drivers.is_empty() || local_once || writes.overlapping_repeating > 1)
+        {
             Some("an always_ff process writes it")
         } else if local_always_ff {
             Some("an always_ff process of its module writes it")

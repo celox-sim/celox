@@ -29,7 +29,6 @@ Celox は IEEE Std 1800™-2023 が規定する SystemVerilog を実装します
 以下の構文や節は未実装であり、コンパイル時に拒否します。
 
 - **検証・設計構造ブロック:** `bind`、`checker`、`config`、clocking ブロックと clocking drive、ユーザー定義プリミティブ（UDP）、`specify` ブロック。covergroup は一部に対応します。[カバーグループ](#covergroups)を参照してください。
-- **ポート形式:** `ref` ポート（[#427](https://github.com/celox-sim/celox/issues/427)）。
 - **union と配列・コンテナの混在型:** `tagged` union、unpacked union、packed union の代入パターン、`chandle` の固定長 unpacked 配列（`chandle a[4]`、typedef 経由を含む）、動的コンテナの固定長 unpacked 配列（`int a[2][$]`、typedef 経由を含む）、固定長 unpacked 配列を要素とする動的コンテナ（`int a[][2]`）。
 - **制御フロー:** `disable fork` 以外の `disable` 文。宣言初期化子、`final`、`always_comb`、`always_ff` 内の `fork`（これらの文脈にはスケジューラ用のプロセス基盤がありません）。
 - **時刻・システムタスク:** `wait_order`、および未実装の IEEE 1800-2023 / Annex D システムタスク・関数。Celox は標準が定義する全タスク・関数名を認識しており、未対応のものは未使用パラメータや関数本体に書かれた場合も含め名前付きで報告します（例: `$q_initialize`）。
@@ -43,6 +42,7 @@ Celox は IEEE Std 1800™-2023 が規定する SystemVerilog を実装します
 | 機能 | 対応 | 未対応 |
 | --- | --- | --- |
 | **ワイルドカード `.*` 接続**（[#442](https://github.com/celox-sim/celox/issues/442)） | SystemVerilog ソース内で定義されたモジュール（interface ポート付きを含む）への `.*` 接続 | SystemVerilog ソース外（Veryl など）で定義されたモジュールへの `.*` 接続 |
+| **`ref` および `const ref` ポート（23.3.3.2）** | モジュール・program における ANSI / non-ANSI の `ref`・`const ref` ポート：packed・unpacked・構造体・enum・`string`・`real`・クラス・動的コンテナ・`event` 型の変数および unpacked 構造体メンバの参照渡し、多段チェーン、package 変数の実引数、`const ref` の読み取り専用検査、IEEE 1800-2023 6.22.2 の型等価性検査 | トップモジュールの `ref` ポート。unpacked 配列・動的コンテナの単一要素への接続。インスタンス配列の要素ごとの分割接続。上下限の異なる queue 間の接続。`ref` ポート（または参照先の変数）に対する手続き的 `force`/`release`・`assign`/`deassign`。Veryl と SystemVerilog の言語境界を跨ぐ `ref` ポート |
 | **複数ドライバのネット（6.6.1–6.6.3）** | 単一モジュール内の `wire`、`tri`、`wand`、`triand`、`wor`、`trior` ネットへの複数継続代入（6.6.1–6.6.3 に従って解決。2値シミュレーションでは X/Z リテラル無し）。`wire`・`tri` ネットへの継続代入とネット宣言時の代入は駆動強度で解決（28.12） | モジュール境界を跨ぐ複数ドライバ（モジュール間のトライステートバスなど）。複数ドライバの `wand`、`triand`、`wor`、`trior` ネットの駆動強度（28.12.4）。複数ドライバの `tri0`、`tri1`、supply ネット。値依存ループを含む関数を呼ぶドライバ。2値シミュレーションでの X・Z リテラル付きドライバ |
 | **未駆動ネットと `inout` ポート** | 下位モジュールの `inout` ポートで両側に継続ドライバが1つずつある場合（例: `assign io = oe ? d : 'z;`）。独立遅延付きネットの未駆動ビット（`z` を読む） | トップモジュールの `inout` ポート。独立遅延の無い未駆動の内部ネット（[#460](https://github.com/celox-sim/celox/issues/460)） |
 | **ゲート・スイッチプリミティブ（Clause 28）** | 遅延・駆動強度の無い単一または1次元インスタンス配列の `and`、`nand`、`or`、`nor`、`xor`、`xnor`、`buf`、`not` | その他のゲート・スイッチプリミティブ（トライステートバッファ、スイッチ、プル電源など）。ゲートの遅延・駆動強度・多次元インスタンス配列（[#457](https://github.com/celox-sim/celox/issues/457)） |

@@ -14,6 +14,7 @@ impl Ff<'_, '_> {
         let mut cache = HashMap::default();
         let aliases = &self.aliases.map;
         let working_set = &self.writes.working;
+        let alias_work = &self.writes.alias_work;
         let variables = &*self.m.variables;
         let direct = self.kernel.is_some() || self.direct;
         let shared = &self.writes.shared;
@@ -22,11 +23,11 @@ impl Ff<'_, '_> {
             if direct || shared.contains(var) {
                 stable(*var)
             } else if let Some(var) = aliases.get(id) {
-                working(*var)
+                working(alias_work.get(var).copied().unwrap_or(*var))
             } else if working_set.contains(id)
                 || variables.get(id).is_some_and(SvVariable::is_scratch)
             {
-                working(*id)
+                working(alias_work.get(id).copied().unwrap_or(*id))
             } else {
                 stable(*id)
             }

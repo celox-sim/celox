@@ -507,6 +507,14 @@ impl Ff<'_, '_> {
                 // A fork of a body inlined into a unit shares variables as
                 // the unit's own body does.
                 let (body, shared) = self.share_forked(&subroutine, body)?;
+                let body = if self.kernel.is_none()
+                    && self.frame.is_none()
+                    && !self.staged_nbas.is_empty()
+                {
+                    nba_stage::stage_inlined_nonblocking(&body, &self.staged_nbas, self.m)
+                } else {
+                    body
+                };
                 let built = self.b.built();
                 self.call_stack.active_calls.push(name.to_string());
                 let falls = self.exec_block(&body);

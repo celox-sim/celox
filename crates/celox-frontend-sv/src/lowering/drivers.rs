@@ -1040,7 +1040,7 @@ pub(super) fn net_lvalue_range(
 /// writes within those only (see `keep_element_window`). Overlapping bits
 /// are merged. `None` if the select is constant, or its positions read
 /// other run-time values.
-fn unrolled_select_bits(
+pub(super) fn unrolled_select_bits(
     lvalue: &sv::ir::LValue,
     range: Option<(i128, i128)>,
     window: Option<(i128, i128)>,
