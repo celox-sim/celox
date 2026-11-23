@@ -87,7 +87,7 @@ workflows:
         - 'swatinem/rust-cache@v2'
     '.github/workflows/pr-title.yml':
         - 'actions/checkout@v7'
-        - 'mergifyio/setup-cli@f4029a9e48b04e184138fdb17df2b27eb035d8bf'
+        - 'mergifyio/setup-cli@4c0a3dd5939b5f8fb423b48d4e99cfab29f75e87'
     '.github/workflows/publish-aplite.yml':
         - 'actions/checkout@v7'
         - 'actions/setup-node@v7'
@@ -291,14 +291,14 @@ dependencies:
         uses:
             - 'mergifyio/setup-cli@dc99f07e699b94b39e5495c24596372813eadcbc'
             - 're-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35'
+    'mergifyio/setup-cli@4c0a3dd5939b5f8fb423b48d4e99cfab29f75e87':
+        ref: 'v1.6.0'
+        commit: 'sha1-4c0a3dd5939b5f8fb423b48d4e99cfab29f75e87'
+        owner_id: 37838584
+        repo_id: 1267289500
     'mergifyio/setup-cli@dc99f07e699b94b39e5495c24596372813eadcbc':
         ref: 'v1.3.0'
         commit: 'sha1-dc99f07e699b94b39e5495c24596372813eadcbc'
-        owner_id: 37838584
-        repo_id: 1267289500
-    'mergifyio/setup-cli@f4029a9e48b04e184138fdb17df2b27eb035d8bf':
-        ref: 'v1.5.0'
-        commit: 'sha1-f4029a9e48b04e184138fdb17df2b27eb035d8bf'
         owner_id: 37838584
         repo_id: 1267289500
     'peaceiris/actions-gh-pages@v4':
