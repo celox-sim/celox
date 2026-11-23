@@ -134,6 +134,7 @@ fn four_state_transition_keeps_the_selector_bits_of_each_comparison() {
     let value = arm(&mut arena, selector, 1, active, tail);
     let form = NextStateForm {
         roots: vec![ValueRoot {
+            enable: None,
             target: 3,
             access: BitAccess::new(0, 7),
             value,

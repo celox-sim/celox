@@ -692,3 +692,63 @@ endmodule"#
         }
     }
 }
+
+#[test]
+fn sampled_bank_publishes_only_assigned_registers() {
+    use crate::{SimBackend, Simulator};
+    use celox_runtime::backend::EventHandle;
+
+    fn check<B: SimBackend>(mut sim: Simulator<B>) {
+        let clock = sim.event("clk").addr();
+        let sample = sim.backend.resolve_eval_only_event(&clock).unwrap();
+        let publish = sim.backend.resolve_apply_event(&clock).unwrap();
+        let [en, data, a, b, feedback] =
+            ["en", "data", "a", "b", "feedback"].map(|s| sim.signal(s));
+        sim.backend.set(a, 5u8);
+        sim.backend.set(feedback, 7u8);
+        sim.backend.eval_comb().unwrap();
+        sim.backend.eval_only_ff_at(sample).unwrap();
+        sim.backend.set(a, 9u8);
+        sim.backend.set(feedback, 11u8);
+        sim.backend.set(en, 1u8);
+        sim.backend.apply_ff_at(publish).unwrap();
+        assert_eq!(sim.get(a), 9u8.into());
+        assert_eq!(sim.get(feedback), 7u8.into());
+
+        sim.backend.set(data, 13u8);
+        sim.backend.eval_comb().unwrap();
+        sim.backend.eval_only_ff_at(sample).unwrap();
+        sim.backend.set(en, 0u8);
+        sim.backend.set(data, 19u8);
+        sim.backend.eval_comb().unwrap();
+        // A second edge with no assignment keeps the previously queued NBA.
+        sim.backend.eval_only_ff_at(sample).unwrap();
+        sim.backend.apply_ff_at(publish).unwrap();
+        assert_eq!(sim.get(a), 13u8.into());
+        assert_eq!(sim.get(b), 9u8.into());
+
+        sim.backend.set(a, 21u8);
+        sim.backend.eval_only_ff_at(sample).unwrap();
+        sim.backend.apply_ff_at(publish).unwrap();
+        assert_eq!(sim.get(a), 21u8.into());
+    }
+
+    let source = "module Top(input bit clk, other, en, input bit [7:0] data, output bit [7:0] a,b,feedback,seen);
+        always_ff @(posedge clk) begin
+            if (en) begin a <= data; b <= a; end
+            if (en) feedback <= data; else feedback <= feedback;
+        end
+        always_ff @(posedge other) seen <= b;
+    endmodule";
+    let build = || {
+        Simulator::from_sv_sources(vec![(source, std::path::Path::new("bank.sv"))], "Top")
+            .four_state(false)
+            .opt_level(crate::OptLevel::O2)
+    };
+    check(build().build_interpreter().unwrap());
+    check(build().build_native().unwrap());
+    #[cfg(feature = "cranelift")]
+    check(build().build_cranelift().unwrap());
+    #[cfg(feature = "wasm-runtime")]
+    check(build().build_wasm().unwrap());
+}

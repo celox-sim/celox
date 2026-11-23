@@ -568,6 +568,7 @@ fn clocked_and_combinational_writes_share_nested_selectors() {
         path.sources = (100..=102).map(|id| VarAtomBase::new(id, 0, 0)).collect();
         paths.push(path);
         form.roots.push(ValueRoot {
+            enable: None,
             target,
             access: BitAccess::new(0, 7),
             value: expr,

@@ -885,7 +885,15 @@ fn take_conflicting_samples(
         }
     };
     for r in &form.roots {
-        check(r.target, WORKING_REGION, &[r.value]);
+        if let Some(enable) = &r.enable {
+            check(
+                r.target,
+                WORKING_REGION,
+                &[r.value, enable.condition, enable.data],
+            );
+        } else {
+            check(r.target, WORKING_REGION, &[r.value]);
+        }
     }
     for p in &form.ports {
         check(
@@ -894,6 +902,22 @@ fn take_conflicting_samples(
             &[p.guard, p.index, p.value],
         );
     }
+    let early_banks: HashSet<_> = form
+        .roots
+        .iter()
+        .filter(|r| early.contains(&r.target))
+        .filter_map(|r| r.enable.as_ref().map(|e| e.slot))
+        .collect();
+    early.extend(
+        form.roots
+            .iter()
+            .filter(|r| {
+                r.enable
+                    .as_ref()
+                    .is_some_and(|e| early_banks.contains(&e.slot))
+            })
+            .map(|r| r.target),
+    );
     let (roots, late) = std::mem::take(&mut form.roots)
         .into_iter()
         .partition(|r| early.contains(&r.target));

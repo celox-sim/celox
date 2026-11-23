@@ -2,6 +2,7 @@
 //! writes update the symbolic store at their source position, and nonblocking
 //! writes retain the value sampled there until the NBA region.
 mod destinations;
+mod enables;
 
 use super::*;
 use celox_frontend_core::symbolic::artifact::{EdgeEvaluation, NextStateForms};
@@ -55,10 +56,17 @@ impl FfGraph {
         let checkpoint = pm.checkpoint();
         let first_temp = pm.next_id;
         let mut raw = SLTNodeArena::new();
-        let form = comb::Comb::new(pm, &mut raw).lower_next_state(body, &blocking);
+        let mut enables = Vec::new();
+        let form =
+            comb::Comb::new(pm, &mut raw).lower_next_state(body, &blocking, Some(&mut enables));
         pm.rollback(checkpoint);
         let form = form.ok()?;
-        let unavailable_input = celox_slt::canon::reachable(&raw, form.nodes()).into_iter().any(|node| {
+        let nodes = form.nodes().chain(
+            enables
+                .iter()
+                .flat_map(|(_, condition, data)| [*condition, *data]),
+        );
+        let unavailable_input = celox_slt::canon::reachable(&raw, nodes).into_iter().any(|node| {
             matches!(raw.get(node), SLTNode::Input { variable, .. } if variable.0 >= first_temp.0 || active.contains(variable))
         });
         // Constant-index writes can appear as wide packed roots. Use the sparse
@@ -72,7 +80,7 @@ impl FfGraph {
         {
             return None;
         }
-        let form = canonical_copy(&raw, &mut self.arena, &form).ok()?;
+        let form = enables::bind(&raw, &mut self.arena, &form, enables, pm)?;
         self.active_targets
             .entry(trigger.clone())
             .or_default()
@@ -105,15 +113,20 @@ impl FfGraph {
                     access: root.access,
                 })
                 .collect();
-            let mut commit = SIRBuilder::new();
             let memories = form.ports.iter().map(|port| port.array).collect();
             targets.extend(
                 form.ports
                     .iter()
                     .map(|port| VarAtomBase::new(port.array, 0, pm.var(port.array).width - 1)),
             );
-            ff::emit_sparse_memory_commits(&mut commit, &targets, &memories, pm);
-            let commit = seal_builder(commit);
+            let enables: HashMap<_, _> = form
+                .roots
+                .iter()
+                .filter_map(|r| r.enable.as_ref().map(|e| (r.target, e.slot)))
+                .collect();
+            let publish =
+                |targets: &[VarAtomBase<_>]| enables::publication(targets, &enables, &memories, pm);
+            let commit = publish(&targets);
             segments.push(EdgeBatch::Graph(form));
             ff_processes::append_event_body(bodies, trigger, None, commit.clone());
             let blocking = self.active_targets.remove(trigger).unwrap_or_default();
@@ -126,12 +139,10 @@ impl FfGraph {
                 let (early, late): (Vec<_>, Vec<_>) =
                     targets.into_iter().partition(|t| blocking.contains(&t.id));
                 for (phase, targets) in [(active, early), (nba, late)] {
-                    let mut builder = SIRBuilder::new();
-                    ff::emit_sparse_memory_commits(&mut builder, &targets, &memories, pm);
                     ff_processes::insert_or_merge_ff_unit(
                         phase,
                         trigger.clone(),
-                        seal_builder(builder),
+                        publish(&targets),
                     );
                 }
             }
@@ -631,6 +642,64 @@ mod tests {
                 .flat_map(|b| &b.instructions)
                 .any(|inst| matches!(inst, SIRInstruction::Commit(..) | SIRInstruction::Mux(..)))
         );
+    }
+
+    #[test]
+    fn split_publication_uses_the_sampled_bank_enable() {
+        let source = "module Top(input bit clk, clk2, rst, en, input bit [31:0] data,
+                                 output bit [31:0] a,b, output bit seen);
+            always_ff @(posedge clk or posedge rst)
+                if (rst) begin a <= 0; b <= 0; end
+                else if (en) begin a <= data; b <= a; end
+            always_ff @(posedge clk2) seen <= ^b;
+            endmodule";
+        let sir = schedule(source, true, DeadStorePolicy::Off);
+        let mut banks = 0;
+        for (event, units) in sir.updates.groups(celox_sir::UpdateEntry::Publish) {
+            for unit in units {
+                for block in unit.blocks.values() {
+                    let SIRTerminator::Branch {
+                        cond,
+                        true_block: (write, _),
+                        ..
+                    } = &block.terminator
+                    else {
+                        continue;
+                    };
+                    let Some(slot) = block.instructions.iter().find_map(|i| match i {
+                        SIRInstruction::Load(r, addr, SIROffset::Static(0), 1)
+                            if r == cond && addr.region == WORKING_REGION =>
+                        {
+                            Some(addr)
+                        }
+                        _ => None,
+                    }) else {
+                        continue;
+                    };
+                    let writes = &unit.blocks[write].instructions;
+                    assert_eq!(
+                        writes
+                            .iter()
+                            .filter(|i| matches!(i, SIRInstruction::Commit(_, _, _, 32, _)))
+                            .count(),
+                        2
+                    );
+                    let samples = sir
+                        .updates
+                        .at(event, celox_sir::UpdateEntry::Sample)
+                        .unwrap();
+                    assert!(samples.iter().flat_map(|s| s.blocks.values()).any(|b| {
+                        b.instructions.iter().any(
+                            |i| matches!(i, SIRInstruction::Store(addr, _, 1, ..) if addr == slot),
+                        )
+                    }));
+                    assert!(!samples.iter().flat_map(|s| s.blocks.values()).flat_map(|b| &b.instructions).any(|i|
+                        matches!(i, SIRInstruction::Commit(src, dst, _, 32, _) if src.region == STABLE_REGION && dst.region == WORKING_REGION)));
+                    banks += 1;
+                }
+            }
+        }
+        assert!(banks >= 1, "the bank must use guarded publication");
     }
 
     #[test]

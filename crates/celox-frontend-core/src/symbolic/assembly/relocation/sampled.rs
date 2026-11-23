@@ -268,6 +268,7 @@ mod tests {
                 })
                 .unwrap();
             form.roots.push(ValueRoot {
+                enable: None,
                 target,
                 access,
                 value,
@@ -344,6 +345,7 @@ mod tests {
         let x = input(0);
         let y = input(1);
         let root = |n, value| ValueRoot {
+            enable: None,
             target: addr(n),
             access,
             value,
@@ -390,6 +392,7 @@ mod tests {
         let working = RegionedAbsoluteAddr::from_absolute_addr(WORKING_REGION, q);
         let form = NextStateForm {
             roots: vec![ValueRoot {
+                enable: None,
                 target: q,
                 access: BitAccess::new(0, 7),
                 value: NodeId(0),
