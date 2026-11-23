@@ -21,6 +21,8 @@ mod prune;
 
 #[cfg(feature = "host-runtime")]
 pub(crate) use cone::clock_cone;
+#[cfg(feature = "host-runtime")]
+pub(crate) use prune::full_settle;
 pub(crate) use prune::prune_stale_marks;
 
 /// The flag layout of `program`'s partitioned settle, if it has one.
