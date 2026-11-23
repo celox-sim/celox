@@ -202,6 +202,7 @@ impl StateGraph {
             driven.entry(target.id).or_default().push(target.access);
             if event_nets.contains(&target.id) {
                 event_roots.push(ValueRoot {
+                    enable: None,
                     target: target.id,
                     access: target.access,
                     value: path.expr,
@@ -742,6 +743,7 @@ mod tests {
         let drivers = Drivers::new(&arena, &paths);
         let form = NextStateForm {
             roots: vec![ValueRoot {
+                enable: None,
                 target: addr(3),
                 access: BitAccess::new(0, 7),
                 value: read,

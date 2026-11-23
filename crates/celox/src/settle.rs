@@ -231,6 +231,7 @@ pub(crate) fn instrument_ff_units(program: &mut LaidOutProgram, wide_commits: bo
             .map(|(_, units)| units)
         {
             merge_straight_units(units);
+            merge_guarded_publications(units);
         }
     }
     let mut stats = WideStats::default();
@@ -374,6 +375,46 @@ fn merge_straight_units(units: &mut Vec<ExecutionUnit<RegionedAbsoluteAddr>>) {
         }
     }
     merged.extend(open);
+    *units = merged;
+}
+
+/// Keep a clock's publication in the same native call when some of its
+/// register banks have sampled enables. Inlining each small guarded unit
+/// separately duplicates their bodies at every scheduler dispatch site.
+fn merge_guarded_publications(units: &mut Vec<ExecutionUnit<RegionedAbsoluteAddr>>) {
+    let publication = |unit: &ExecutionUnit<RegionedAbsoluteAddr>| {
+        unit.blocks.values().all(|b| {
+            matches!(
+                b.terminator,
+                SIRTerminator::Branch { .. } | SIRTerminator::Jump(..) | SIRTerminator::Return
+            ) && b.instructions.iter().all(|i| match i {
+                SIRInstruction::Commit(..)
+                | SIRInstruction::Imm(..)
+                | SIRInstruction::Unary(..) => true,
+                SIRInstruction::Load(_, addr, SIROffset::Static(0), 1) => {
+                    addr.region == WORKING_REGION
+                }
+                SIRInstruction::Store(addr, SIROffset::Static(0), 1, _, triggers, observers) => {
+                    addr.region == WORKING_REGION && triggers.is_empty() && observers.is_empty()
+                }
+                _ => false,
+            })
+        })
+    };
+    if !units
+        .iter()
+        .any(|unit| unit.blocks.len() > 1 && publication(unit))
+    {
+        return;
+    }
+    let mut merged = Vec::new();
+    for group in units.chunk_by(|a, b| publication(a) && publication(b)) {
+        if group.len() > 1 {
+            merged.push(celox_sir::merge_sir_eu_refs(&group.iter().collect::<Vec<_>>()).0);
+        } else {
+            merged.push(group[0].clone());
+        }
+    }
     *units = merged;
 }
 

@@ -941,6 +941,7 @@ fn lower_registers(
             .entry(trigger)
             .or_insert_with(|| (NextStateForm::default(), SIRBuilder::new()));
         form.roots.push(ValueRoot {
+            enable: None,
             target: target_id,
             access,
             value: next,
