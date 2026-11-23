@@ -42,6 +42,7 @@ pub fn direction_str(var_kind: VariableKind) -> &'static str {
         VariableKind::Input => "input",
         VariableKind::Output => "output",
         VariableKind::Inout => "inout",
+        VariableKind::Ref => "ref",
         _ => "internal",
     }
 }

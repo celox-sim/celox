@@ -1115,11 +1115,11 @@ impl<'a> ModuleParser<'a> {
                         pre_lower_nodes: Vec::new(),
                     });
                 }
-                crate::VariableKind::Inout => {
+                crate::VariableKind::Inout | crate::VariableKind::Ref => {
                     return Err(ParserError::unsupported(
                         64,
                         LoweringPhase::SimulatorParser,
-                        "external inout port",
+                        "external inout or ref port",
                         child_var.path.join("."),
                         Some(&parent_dst.token),
                     ));
