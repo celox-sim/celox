@@ -294,7 +294,7 @@ impl SLTToSIRLowerer {
         arena: &SLTNodeArena<A>,
     ) -> Option<bool> {
         if !self.four_state
-            && super::index_bounds::always_in_bounds(arena, cond)
+            && super::index_bounds::in_bounds_knownness(arena, cond).is_some()
             && self.is_speculatable_pure(cond, arena)
             && !self.contains_div_rem(cond, arena)
         {
