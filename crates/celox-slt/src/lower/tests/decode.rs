@@ -510,12 +510,21 @@ fn dense_input_bank_selects_each_register_and_preserves_holes_and_priority() {
             else_expr: zero,
         })
         .unwrap();
-    let default = constant(&mut arena, 251, 8);
-    let mut root = default;
+    // The default clears an unknown bit. Removing its cast along with the
+    // redundant casts on the scalar inputs would produce the wrong value.
+    let literal = arena
+        .alloc(SLTNode::Constant(255u8.into(), 4u8.into(), 8, false))
+        .unwrap();
+    let mut root = arena
+        .alloc(SLTNode::Unary(UnaryOp::ToTwoState, literal))
+        .unwrap();
     let shadowed = input(&mut arena, 31, 8);
     root = arm(&mut arena, selector, 3, shadowed, root);
     for label in (0..12).rev().filter(|&label| label != 6) {
         let value = input(&mut arena, 2 + label as u32, 8);
+        let value = arena
+            .alloc(SLTNode::Unary(UnaryOp::ToTwoState, value))
+            .unwrap();
         root = arm(&mut arena, selector, label, value, root);
     }
     reduce_two_state_decodes(&mut arena, [&mut root]).unwrap();
