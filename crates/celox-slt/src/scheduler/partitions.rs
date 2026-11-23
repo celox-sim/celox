@@ -204,6 +204,103 @@ pub(super) fn process_interacts_with_host<Addr: Clone + Eq + Hash>(path: &LogicP
     }
 }
 
+/// Follow pure packed assignments back to a published register or the stored
+/// result of a computation with several inputs. Missing bits end the proof.
+fn published_input_by_work<A: Clone + Copy + Ord + Hash>(
+    prepared: &PreparedSchedule<A>,
+    partitioning: &SettlePartitioning<A>,
+    unpacked: &HashMap<A, usize>,
+) -> Vec<Option<A>> {
+    let mut driven = HashSet::default();
+    let mut defs = Vec::new();
+    for (id, path) in prepared.input.iter().enumerate() {
+        if let Some(target) = path.target.var() {
+            driven.insert(target.id);
+            defs.push(ExactInterval {
+                object: target.id,
+                start: target.access.lsb,
+                length: target.access.msb - target.access.lsb + 1,
+                value: id,
+            });
+        }
+    }
+    let defs = DisjointIntervalMap::try_new(defs).expect("validated disjoint path definitions");
+    #[derive(Clone, Copy)]
+    enum Origin<A> {
+        Unknown,
+        Constant,
+        Stored(A),
+    }
+    let mut origins = vec![Origin::Unknown; prepared.input.len()];
+    prepared
+        .scheduled_work
+        .iter()
+        .map(|work| {
+            let ScheduledWork::CombPath(id) = *work else {
+                return None;
+            };
+            let path = &prepared.input[id];
+            let LogicPathTarget::Var(target) = &path.target else {
+                return None;
+            };
+            if !path.previous_sources.is_empty()
+                || !path.address_sources.is_empty()
+                || !path.local_inputs.is_empty()
+                || !path.pre_lower_nodes.is_empty()
+                || path_has_effects(path)
+                || prepared.adj[id].contains(&id)
+                || unpacked.contains_key(&target.id)
+                || partitioning.write_domains.contains_key(&target.id)
+                || partitioning.external_readers.contains_key(&target.id)
+                || partitioning.clock_nets.contains(&target.id)
+            {
+                return None;
+            }
+            let mut origin = None;
+            let mut joins_inputs = false;
+            let mut add_input = |source| {
+                joins_inputs |= origin.replace(source).is_some_and(|old| old != source);
+            };
+            for src in &path.sources {
+                if unpacked.contains_key(&src.id) || partitioning.clock_nets.contains(&src.id) {
+                    return None;
+                }
+                if !driven.contains(&src.id) {
+                    if !partitioning.write_domains.contains_key(&src.id) {
+                        return None;
+                    }
+                    add_input(src.id);
+                    continue;
+                }
+                let bits = src.access;
+                let len = bits.msb - bits.lsb + 1;
+                let mut covered = 0;
+                for writer in defs.overlapping(&src.id, bits.lsb, len).ok()? {
+                    let access = prepared.input[writer].target.var()?.access;
+                    covered += access.msb.min(bits.msb) - access.lsb.max(bits.lsb) + 1;
+                    match origins[writer] {
+                        Origin::Unknown => return None,
+                        Origin::Constant => {}
+                        Origin::Stored(root) => add_input(root),
+                    }
+                }
+                if covered != len {
+                    return None;
+                }
+            }
+            if joins_inputs {
+                // Start a new cone at the stored result of a join. Keep the
+                // join on its own side of the change test.
+                origins[id] = Origin::Stored(target.id);
+                None
+            } else {
+                origins[id] = origin.map_or(Origin::Constant, Origin::Stored);
+                origin
+            }
+        })
+        .collect()
+}
+
 /// Keep consecutive assignments with identical activation inputs together.
 /// A run large enough to fill a partition also gets boundaries at both ends:
 /// an unrelated write would otherwise wake every destination in the run.
@@ -211,6 +308,7 @@ fn partition_fanout_boundaries<A: Clone + Eq + Hash>(
     prepared: &PreparedSchedule<A>,
     path_costs: &[usize],
     target_cost: usize,
+    origins: &[Option<A>],
 ) -> (Vec<bool>, Vec<bool>) {
     let paths: Vec<_> = prepared
         .scheduled_work
@@ -250,6 +348,26 @@ fn partition_fanout_boundaries<A: Clone + Eq + Hash>(
                 cuts[start] = true;
                 cuts[end] = true;
             }
+        }
+        start = end;
+    }
+    // Readers of one stored value can also share a guard when intervening
+    // pure assignments give them different immediate input sets.
+    let mut start = 0;
+    for run in origins.chunk_by(|a, b| a.is_some() && a == b) {
+        let end = start + run.len();
+        if run.len() > 1
+            && paths[start..end]
+                .iter()
+                .flatten()
+                .map(|&id| path_costs[id])
+                .sum::<usize>()
+                >= target_cost
+        {
+            cuts[start] = true;
+            cuts[end] = true;
+            inside[start + 1..end].fill(true);
+            cuts[start + 1..end].fill(false);
         }
         start = end;
     }
@@ -309,6 +427,7 @@ pub(super) fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Cop
                     .any(|atom| partitioning.clock_nets.contains(&atom.id))
         })
     };
+    let origins = published_input_by_work(prepared, &partitioning, unpacked_element_widths);
     // Propagate clock domains through single-driver acyclic paths. Unknown
     // inputs and procedural or feedback outputs keep their ordinary cuts.
     let mut domains = partitioning.write_domains;
@@ -355,7 +474,7 @@ pub(super) fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Cop
     let mut previous_clocked = false;
     let path_costs: Vec<_> = input.iter().map(|path| path_cost(arena, path)).collect();
     let (fanout_cuts, inside_fanout) =
-        partition_fanout_boundaries(prepared, &path_costs, partitioning.target_cost);
+        partition_fanout_boundaries(prepared, &path_costs, partitioning.target_cost, &origins);
     for (index, work) in prepared.scheduled_work.iter().enumerate() {
         if skipped_work.contains(&index) {
             continue;
