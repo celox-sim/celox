@@ -1872,6 +1872,7 @@ pub fn lower_frontend_artifact(
 
     let module_id = ModuleId(0);
     let sim_module = SimModule {
+        testbench_variables: Default::default(),
         time_precision: None,
         time_scale: celox_design::TimeScale::default(),
         name: artifact.module_name().to_string(),

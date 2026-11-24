@@ -27,11 +27,14 @@ pub fn schedule_symbolic_rtl(
     trace: Option<&mut FrontendTrace>,
 ) -> Result<VerylScheduledRtlOutput, ParserError> {
     let VerylSymbolicRtl {
-        symbolic,
+        mut symbolic,
         module_ir,
         source_id_maps,
         inferred_latch_diagnostics,
     } = source;
+    if parallel.unobserved_nets != celox_design::DeadStorePolicy::Off {
+        crate::testbench::pin_source_storage(&mut symbolic, &module_ir);
+    }
     let reset_wires = reset_wires(&symbolic);
     let root_id = symbolic.root_id;
     let root = module_ir.get(&root_id).copied();
