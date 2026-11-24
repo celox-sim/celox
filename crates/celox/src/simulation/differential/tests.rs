@@ -970,6 +970,36 @@ fn compiled_kernels_after_many_processes() {
     agrees_with_the_reference(&source, 200);
 }
 
+/// Delays on both sides of a word boundary can expire together. Once a
+/// process switches to an edge wait, its old wake time must be ignored.
+#[test]
+fn sparse_delays_across_ready_words() {
+    let mut source =
+        String::from("`timescale 1ns/1ns\nmodule Top(output logic [129:0] q); logic pulse = 0;\n");
+    for index in 0..130 {
+        let delay = match index {
+            0 | 63 | 64 | 129 => 3,
+            _ => 90,
+        };
+        source.push_str(&format!(
+            "initial begin #{delay} q[{index}] = 1; @(posedge pulse); #2 q[{index}] = 0; end\n"
+        ));
+    }
+    source.push_str("initial #10 pulse = 1; endmodule");
+    let mut reference = build_in(&source, SchedulerMode::Reference);
+    let mut compiled = build_in(&source, SchedulerMode::Compiled);
+    for time in [2, 3, 10, 12, 90, 100] {
+        reference.run_until(time).unwrap();
+        compiled.run_until(time).unwrap();
+        assert_eq!(
+            compiled.save_state().unwrap(),
+            reference.save_state().unwrap(),
+            "time {time}"
+        );
+    }
+    assert!(compiled.scheduler_stats().compiled_slots > 0);
+}
+
 /// A kernel that loops through queued NBAs stays native and remains bounded.
 #[test]
 fn waiting_kernels_that_yield_remain_compiled() {

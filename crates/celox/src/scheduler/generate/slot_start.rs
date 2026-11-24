@@ -2,6 +2,15 @@
 //! judged against, and the host clocks that apply.
 use super::*;
 
+impl Slot<'_> {
+    /// Timed kernels grouped by their word in the ready and timed masks.
+    fn timed_words(&self) -> impl Iterator<Item = (usize, &[(usize, Option<AbsoluteAddr>)])> {
+        self.delays
+            .chunk_by(|a, b| self.ordinals[a.0] / 64 == self.ordinals[b.0] / 64)
+            .map(|kernels| (self.ordinals[kernels[0].0] / 64 * 64, kernels))
+    }
+}
+
 impl Plan {
     /// The head of the slot loop: the time of the next slot, the earliest wake
     /// time of a kernel, queued nonblocking update or host clock, and whether
@@ -68,33 +77,21 @@ impl Plan {
             time = next;
             any = g.binary(1, any, BinaryOp::Or, entry);
         }
-        if !delays.is_empty() && g.ready_bits > 64 {
-            for &(index, status) in delays {
-                let wake = g.load(slots.wake[index], SCHEDULER_TIME_WIDTH);
-                let waiting = g.waiting_for_time(index, status);
-                let earlier = g.binary(1, wake, BinaryOp::LtU, time);
-                let earlier = g.binary(1, earlier, BinaryOp::And, waiting);
-                let next = g.b.alloc_bit(SCHEDULER_TIME_WIDTH, false);
-                g.b.emit(SIRInstruction::Mux(next, earlier, wake, time));
-                time = next;
-                any = g.binary(1, any, BinaryOp::Or, waiting);
-            }
-        } else if !delays.is_empty() {
-            let timed = g.load(slots.timed, g.ready_bits);
-            let zero = g.constant(0, g.ready_bits);
+        for (offset, kernels) in cx.timed_words() {
+            let timed = g.load_at(slots.timed, offset, 64);
+            let zero = g.constant(0, 64);
             let some = g.binary(1, timed, BinaryOp::Ne, zero);
             any = g.binary(1, any, BinaryOp::Or, some);
-            time = g.scan_timed(
+            time = g.scan_timed_word(
                 timed,
-                delays,
+                kernels,
                 ordinals,
                 time,
-                SCHEDULER_TIME_WIDTH,
                 |g, kernels, bits, mut time| {
                     for &(index, _) in kernels {
                         let wake = g.load(slots.wake[index], SCHEDULER_TIME_WIDTH);
                         let on = g.b.alloc_bit(1, false);
-                        g.b.emit(SIRInstruction::Slice(on, bits, ordinals[index], 1));
+                        g.b.emit(SIRInstruction::Slice(on, bits, ordinals[index] % 64, 1));
                         let earlier = g.binary(1, wake, BinaryOp::LtU, time);
                         let earlier = g.binary(1, earlier, BinaryOp::And, on);
                         let next = g.b.alloc_bit(SCHEDULER_TIME_WIDTH, false);
@@ -232,38 +229,18 @@ impl Plan {
                 );
             }
         }
-        let mut ready = g.load(slots.ready, g.ready_bits);
-        if !delays.is_empty() && g.ready_bits > 64 {
-            for &(index, status) in delays {
-                let wake = g.load(slots.wake[index], SCHEDULER_TIME_WIDTH);
-                let waiting = g.waiting_for_time(index, status);
-                let due = g.binary(1, wake, BinaryOp::Eq, time);
-                let mut due = g.binary(1, due, BinaryOp::And, waiting);
-                if host_inputs && self.inactive.iter().any(|&(process, _)| process == index) {
-                    let process = &schema.processes[index];
-                    let status = g.load(process.status, celox_design::PROCESS_STATUS_WIDTH);
-                    let inactive = g.equals(status, u64::from(ProcessStatus::InactiveDelay.code()));
-                    let amount = g.load(process.delay, celox_design::PROCESS_DELAY_WIDTH);
-                    let zero = g.equals(amount, 0);
-                    let inactive = g.binary(1, inactive, BinaryOp::And, zero);
-                    let active = g.equals(inactive, 0);
-                    due = g.binary(1, due, BinaryOp::And, active);
-                }
-                let bit = g.bit(due, ordinals[index]);
-                ready = g.binary(g.ready_bits, ready, BinaryOp::Or, bit);
-            }
-        } else if !delays.is_empty() {
-            let timed = g.load(slots.timed, g.ready_bits);
-            ready = g.scan_timed(
+        for (offset, kernels) in cx.timed_words() {
+            let timed = g.load_at(slots.timed, offset, 64);
+            let ready = g.load_at(slots.ready, offset, 64);
+            let ready = g.scan_timed_word(
                 timed,
-                delays,
+                kernels,
                 ordinals,
                 ready,
-                g.ready_bits,
                 |g, kernels, bits, ready| {
                     // The kernels at their wake time, as a word masked by
                     // the group's timed bits once.
-                    let mut due_bits = g.constant(0, g.ready_bits);
+                    let mut due_bits = g.constant(0, 64);
                     for &(index, _) in kernels {
                         let wake = g.load(slots.wake[index], SCHEDULER_TIME_WIDTH);
                         let mut due = g.binary(1, wake, BinaryOp::Eq, time);
@@ -282,15 +259,15 @@ impl Plan {
                             let active = g.equals(inactive, 0);
                             due = g.binary(1, due, BinaryOp::And, active);
                         }
-                        let bit = g.bit(due, ordinals[index]);
-                        due_bits = g.binary(g.ready_bits, due_bits, BinaryOp::Or, bit);
+                        let bit = g.bit_of(due, ordinals[index] % 64, 64);
+                        due_bits = g.binary(64, due_bits, BinaryOp::Or, bit);
                     }
-                    let due_bits = g.binary(g.ready_bits, due_bits, BinaryOp::And, bits);
-                    g.binary(g.ready_bits, ready, BinaryOp::Or, due_bits)
+                    let due_bits = g.binary(64, due_bits, BinaryOp::And, bits);
+                    g.binary(64, ready, BinaryOp::Or, due_bits)
                 },
             );
+            g.store_at(slots.ready, offset, 64, ready);
         }
-        g.store(slots.ready, g.ready_bits, ready);
         if host_inputs {
             let zero = g.constant(0, 64);
             g.arena_header_store(
@@ -316,6 +293,7 @@ impl Plan {
                 let mut observed = g.constant(u64::from(waits), 1);
                 if observers != BigUint::default() {
                     let mask = g.wide_constant(observers, g.ready_bits);
+                    let ready = g.load(slots.ready, g.ready_bits);
                     let due = g.binary(g.ready_bits, ready, BinaryOp::And, mask);
                     let zero = g.constant(0, g.ready_bits);
                     let due = g.binary(1, due, BinaryOp::Ne, zero);
