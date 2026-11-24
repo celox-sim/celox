@@ -15,6 +15,12 @@ pub(super) fn declare_scheduler_slots(
     expected_events: usize,
     nba_sites: usize,
 ) -> Option<celox_design::SchedulerSlots<SourceVarId>> {
+    let can_delay_inactive = modules.values().any(|module| {
+        module
+            .processes
+            .iter()
+            .any(|process| !process.slots.const_delays)
+    });
     let variables = &mut modules.get_mut(&root)?.variables;
     let mut next = variables.keys().map(|id| id.0 + 1).max().unwrap_or(0);
     let mut declare = |name: String, width: usize| {
@@ -47,6 +53,7 @@ pub(super) fn declare_scheduler_slots(
     };
     let events = expected_events.next_multiple_of(TIME).max(TIME);
     let clocks = events.max(CLOCKS);
+    let process_bits = process_count.next_multiple_of(TIME).max(TIME);
     Some(celox_design::SchedulerSlots {
         limit: declare("limit".into(), TIME),
         now: declare("now".into(), TIME),
@@ -70,13 +77,14 @@ pub(super) fn declare_scheduler_slots(
         current: declare("current".into(), TIME),
         levels: declare("levels".into(), events),
         unknown_levels: declare("unknown_levels".into(), events),
-        ready: declare(
-            "ready".into(),
-            process_count.next_multiple_of(TIME).max(TIME),
-        ),
+        ready: declare("ready".into(), process_bits),
         timed: declare(
             "timed".into(),
-            process_count.next_multiple_of(TIME).max(TIME),
+            if can_delay_inactive {
+                2 * process_bits
+            } else {
+                process_bits
+            },
         ),
         wake: (0..process_count)
             .map(|index| declare(format!("wake[{index}]"), TIME))

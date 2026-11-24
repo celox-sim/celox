@@ -450,21 +450,27 @@ impl Plan {
         let pre = g.equals(phase, 0);
         g.if_bit(pre, 0, |g| self.ordered_save_levels(g, tracked));
         if !self.inactive.is_empty() {
-            let ordinals = ordinals(&self.kernels);
-            let time = g.load(g.slots.now, SCHEDULER_TIME_WIDTH);
-            let mut ready = g.constant(0, g.ready_bits);
-            for &(index, status) in &self.inactive {
-                let waiting = g.waiting_for_time(index, Some(status));
-                // SDK Delay(0) resumes after NBA, whereas InactiveDelay(0)
-                // resumes before it. Computed delays can return either status.
-                let inactive = g.equals_at(status, ProcessStatus::InactiveDelay);
-                let waiting = g.binary(1, waiting, BinaryOp::And, inactive);
-                let wake = g.load(g.slots.wake[index], SCHEDULER_TIME_WIDTH);
-                let now = g.binary(1, wake, BinaryOp::Eq, time);
-                let due = g.binary(1, waiting, BinaryOp::And, now);
-                let bit = g.bit(due, ordinals[index]);
-                ready = g.binary(g.ready_bits, ready, BinaryOp::Or, bit);
-            }
+            let ready = if g.has_inactive_mask() {
+                g.load_at(g.slots.timed, g.ready_bits, g.ready_bits)
+            } else {
+                // A saved design with a single timed plane reconstructs the batch.
+                let ordinals = ordinals(&self.kernels);
+                let time = g.load(g.slots.now, SCHEDULER_TIME_WIDTH);
+                let mut ready = g.constant(0, g.ready_bits);
+                for &(index, status) in &self.inactive {
+                    let waiting = g.waiting_for_time(index, Some(status));
+                    // SDK Delay(0) resumes after NBA, whereas InactiveDelay(0)
+                    // resumes before it. Computed delays can return either status.
+                    let inactive = g.equals_at(status, ProcessStatus::InactiveDelay);
+                    let waiting = g.binary(1, waiting, BinaryOp::And, inactive);
+                    let wake = g.load(g.slots.wake[index], SCHEDULER_TIME_WIDTH);
+                    let now = g.binary(1, wake, BinaryOp::Eq, time);
+                    let due = g.binary(1, waiting, BinaryOp::And, now);
+                    let bit = g.bit(due, ordinals[index]);
+                    ready = g.binary(g.ready_bits, ready, BinaryOp::Or, bit);
+                }
+                ready
+            };
             let zero = g.constant(0, g.ready_bits);
             let any = g.binary(1, ready, BinaryOp::Ne, zero);
             let promote = g.binary(1, pre, BinaryOp::And, any);
@@ -920,6 +926,44 @@ endmodule
         assert_eq!(after.reference_steps, before.reference_steps);
         assert_eq!(after.native_service_calls, before.native_service_calls);
     }
+    #[test]
+    fn inactive_batches_span_ready_words_before_nba() {
+        let mut source = String::from(
+            "`timescale 1ns/1ns
+             module Top; bit committed; bit [69:0] seen, done; int later = 3;
+             initial #2 committed <= 1;",
+        );
+        let mut early = num_bigint::BigUint::default();
+        for index in 0..70 {
+            let delay = if matches!(index, 0 | 63 | 64 | 69) {
+                early.set_bit(index, true);
+                "0"
+            } else {
+                "later"
+            };
+            source.push_str(&format!(
+                "initial begin #2; #({delay}); #0; seen[{index}] = committed; done[{index}] = 1; end\n"
+            ));
+        }
+        source.push_str("endmodule");
+        let mut sim = Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("wide-inactive.sv"))],
+            "Top",
+        )
+        .four_state(false)
+        .scheduler_mode(SchedulerMode::DifferentialRuns)
+        .build_native()
+        .unwrap();
+        sim.run_until(2).unwrap();
+        assert_eq!(sim.get(sim.signal("done")), early);
+        assert_eq!(sim.get(sim.signal("seen")), 0u8.into());
+        sim.run_until(5).unwrap();
+        let all = (num_bigint::BigUint::from(1u8) << 70usize) - 1u8;
+        assert_eq!(sim.get(sim.signal("done")), all);
+        assert_eq!(sim.get(sim.signal("seen")), all ^ early);
+        assert!(sim.scheduler_stats().checked_steps > 0);
+    }
+
     #[test]
     fn inactive_and_computed_delays_keep_pending_domains_compiled() {
         for body in [
