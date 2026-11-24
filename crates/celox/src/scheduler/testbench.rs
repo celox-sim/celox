@@ -19,7 +19,8 @@ pub(super) fn attach(program: &mut LaidOutProgram, deferred: bool) {
     let Some(schema) = program.runtime.runtime_schema.scheduler.clone() else {
         return;
     };
-    let unit = generate(program, &tb, &meta, &schema.slots, deferred);
+    let mut unit = generate(program, &tb, &meta, &schema.slots, deferred);
+    bind_recording_callees(&mut unit, &mut program.scheduler_callees, &meta);
     meta.entry = Some(program.sir.processes.len());
     program.sir.processes.push(unit);
     program
@@ -74,7 +75,8 @@ pub(super) fn regenerate(program: &mut LaidOutProgram, deferred: bool) {
     else {
         return;
     };
-    let unit = generate(program, &tb, meta, &schema.slots, deferred);
+    let mut unit = generate(program, &tb, meta, &schema.slots, deferred);
+    bind_recording_callees(&mut unit, &mut program.scheduler_callees, meta);
     program.sir.processes[entry] = unit;
 }
 
@@ -1080,6 +1082,41 @@ fn generate_advance(g: &mut Generator<'_>, cx: &Bench<'_>) {
     let exhausted = g.equals(budget, 0);
     let exhausted = g.binary(1, exhausted, BinaryOp::Or, due);
     branch(g, exhausted, safe, start);
+}
+
+/// Outlined kernels are shared with the ordinary timed scheduler. A kernel
+/// that emits records needs its own counted entry when called from the TB,
+/// so the next marker and drain see exactly the records it produced.
+fn bind_recording_callees(unit: &mut Unit, callees: &mut Vec<Unit>, m: &Meta) {
+    if callees.is_empty() {
+        return;
+    }
+    let mut bindings = HashMap::default();
+    for instruction in unit
+        .blocks
+        .values_mut()
+        .flat_map(|block| &mut block.instructions)
+    {
+        let SIRInstruction::ExternCall { func, .. } = instruction else {
+            continue;
+        };
+        let Some(index) = celox_sir::extern_abi::native_kernel_index(*func)
+            .and_then(|slot| slot.checked_sub(CALLEE_PLACEHOLDER))
+        else {
+            continue;
+        };
+        *func = *bindings.entry(index).or_insert_with(|| {
+            let body = &callees[index as usize];
+            if !instructions(body).any(|inst| matches!(inst, SIRInstruction::RuntimeEvent { site_id, .. } if Some(*site_id) != m.marker_site)) {
+                return *func;
+            }
+            let mut counted = body.clone();
+            count_events(&mut counted, m);
+            let slot = callees.len() as u32;
+            callees.push(counted);
+            celox_sir::extern_abi::NATIVE_KERNEL_CALL_TAG | (CALLEE_PLACEHOLDER + slot)
+        });
+    }
 }
 
 fn count_events(unit: &mut Unit, m: &Meta) {
