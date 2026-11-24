@@ -172,6 +172,11 @@ impl Comb<'_, '_> {
                 .flat_map(|item| &item.labels)
                 .any(|label| matches!(label, sv::ir::CaseLabel::Value(value) if real(value)))
         {
+            // The wildcard bits of `casez` and `casex` (12.5.1) have no
+            // meaning for a real value.
+            if kind != sv::ir::CaseKind::Exact {
+                return Err(unsupported("casez or casex on a real value"));
+            }
             for item in items {
                 let mut condition: Option<sv::ir::Expr> = None;
                 for label in &item.labels {

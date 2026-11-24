@@ -520,6 +520,17 @@ impl Ff<'_, '_> {
         } else {
             selector.clone()
         };
+        // The wildcard bits of `casez` and `casex` (12.5.1) have no meaning
+        // for a real value.
+        if matches!(kind, sv::ir::CaseKind::Z | sv::ir::CaseKind::X)
+            && (self.m.expr_float_precision(&selector).is_some()
+                || items.iter().flat_map(|item| &item.labels).any(|label| {
+                    matches!(label, sv::ir::CaseLabel::Value(value)
+                        if self.m.expr_float_precision(value).is_some())
+                }))
+        {
+            return Err(unsupported("casez or casex on a real value"));
+        }
         let join = self.b.new_block();
         let mut any_falls = false;
         for item in items {
