@@ -76,6 +76,7 @@ impl<'a> PlanBuilder<'a> {
             finish_sites,
             service_function,
             ordered: None,
+            published_events: Vec::new(),
             service_processes,
             nba_processes,
             cyclic,
@@ -632,6 +633,22 @@ impl<'a> PlanBuilder<'a> {
             })
         {
             return Err("an event domain has no separate units".into());
+        }
+        if plan.ordered.is_some() {
+            // Restoring a snapshot only changes working storage. Between raw
+            // samples the apply units are the only writers to stable signals.
+            // Wide commits carry typed shadows that name the affected homes.
+            let apply = || {
+                tracked
+                    .iter()
+                    .flat_map(|&i| plan.events[i].apply.iter().flatten())
+            };
+            plan.published_events = if apply().any(|unit| opaque(unit, &schema.extern_functions)) {
+                tracked
+            } else {
+                let writes: HashSet<_> = apply().flat_map(written).collect();
+                tracked.into_iter().filter(|i| writes.contains(i)).collect()
+            };
         }
         Ok(())
     }

@@ -498,7 +498,7 @@ impl Plan {
         );
         let one = g.constant(1, 64);
         g.arena_header_store(std::mem::offset_of!(ArenaHeader, phase), one);
-        self.ordered_raw_levels(g, ordered, tracked, false);
+        self.ordered_raw_levels(g, ordered, false);
         let images = g.arena_header_load(std::mem::offset_of!(ArenaHeader, image_len));
         let zero = g.constant(0, 64);
         let has_images = g.binary(1, images, BinaryOp::Ne, zero);
@@ -508,7 +508,7 @@ impl Plan {
             ordered.copy_image(g, live, true);
         });
         self.ordered_publish(g, ordered, tracked, finish_exit, checks, false);
-        self.ordered_raw_levels(g, ordered, tracked, true);
+        self.ordered_raw_levels(g, ordered, true);
         g.check_waits_at(checks, false);
         let staged: Vec<_> = self
             .kernels
@@ -536,16 +536,13 @@ impl Plan {
         g.store_levels(levels);
     }
 
-    fn ordered_raw_levels(
-        &self,
-        g: &mut Generator<'_>,
-        ordered: Ordered,
-        tracked: &[usize],
-        record: bool,
-    ) {
+    fn ordered_raw_levels(&self, g: &mut Generator<'_>, ordered: Ordered, record: bool) {
+        if self.published_events.is_empty() {
+            return;
+        }
         let pointer = g.arena_header_load(std::mem::offset_of!(ArenaHeader, records));
         let mut pulses = g.load_at(g.slots.exit_arg, self.event_bits, self.event_bits);
-        for &event in tracked {
+        for &event in &self.published_events {
             let index = g.constant((ordered.events + event) as u64, 64);
             let level = g.level(&self.events[event]);
             if record {
@@ -597,7 +594,7 @@ impl Plan {
                 self.ordered_dispatch(g, event, tracked, done, finish_exit);
                 g.b.switch_to_block(done);
                 if snapshots {
-                    self.ordered_raw_levels(g, ordered, tracked, true);
+                    self.ordered_raw_levels(g, ordered, true);
                     g.check_waits_at(checks, false);
                 }
             });
@@ -659,6 +656,9 @@ mod tests {
             logic enable = 1'bx;
             bit [7:0] edges = 0, rises = 0, falls = 0;
             wire gated = clk & enable;
+            wire published_q = q;
+            bit [7:0] clocked = 0;
+            always_ff @(posedge published_q) clocked <= clocked + 1;
             always #1 clk = !clk;
             always @(posedge clk) enable = 1;
             always @(posedge gated) begin edges = edges + 1; q <= edges[0]; end
@@ -678,6 +678,7 @@ mod tests {
         assert_eq!(sim.get(sim.signal("edges")), 2u8.into());
         assert_eq!(sim.get(sim.signal("rises")), 1u8.into());
         assert_eq!(sim.get(sim.signal("falls")), 1u8.into());
+        assert_eq!(sim.get(sim.signal("clocked")), 1u8.into());
         let before = sim.scheduler_stats();
         assert!(before.compiled_slots > 0, "{before:?}");
         assert!(
@@ -689,6 +690,7 @@ mod tests {
         assert_eq!(sim.get(sim.signal("edges")), 2u8.into());
         assert_eq!(sim.get(sim.signal("rises")), 1u8.into());
         assert_eq!(sim.get(sim.signal("falls")), 1u8.into());
+        assert_eq!(sim.get(sim.signal("clocked")), 1u8.into());
         let after = sim.scheduler_stats();
         assert_eq!(before.reference_steps, after.reference_steps, "{after:?}");
         assert_eq!(
