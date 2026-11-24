@@ -146,6 +146,11 @@ fn marked_by(analysis: &Analysis<'_>, block: BlockId) -> Option<Vec<usize>> {
         let SIROffset::Static(offset) = offset else {
             return None;
         };
+        // The same object also holds wait flags and optional profiling
+        // counters. Their stores cannot activate a settle partition.
+        if offset / 8 > celox_design::settle_untracked_flag(analysis.partitions) {
+            continue;
+        }
         if !offset.is_multiple_of(8) || !width.is_multiple_of(8) {
             return None;
         }
@@ -232,6 +237,55 @@ fn remove_unreachable_blocks(unit: &mut Unit) {
 mod tests {
     use super::*;
     use celox_sir::{SIRBuilder, SIRValue};
+
+    #[test]
+    fn counter_updates_do_not_hide_partition_publications() {
+        let flags = RegionedAbsoluteAddr::from_absolute_addr(
+            celox_design::STABLE_REGION,
+            AbsoluteAddr {
+                instance_id: celox_design::InstanceId(0),
+                var_id: celox_design::StateObjectId(1),
+            },
+        );
+        let marks = |byte| {
+            let mut b = SIRBuilder::new();
+            let counter = b.alloc_bit(64, false);
+            let one = b.alloc_bit(8, false);
+            let offset = SIROffset::Static(byte * 8);
+            b.emit(SIRInstruction::Load(counter, flags, offset.clone(), 64));
+            b.emit(SIRInstruction::Store(
+                flags,
+                offset,
+                64,
+                counter,
+                vec![],
+                vec![],
+            ));
+            b.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
+            b.emit(SIRInstruction::Store(
+                flags,
+                SIROffset::Static(8),
+                8,
+                one,
+                vec![],
+                vec![],
+            ));
+            let unit = b.flush_eu().unwrap();
+            let offsets = Default::default();
+            marked_by(
+                &Analysis::new(&unit, &flags, 2, &offsets),
+                unit.entry_block_id,
+            )
+        };
+        assert_eq!(
+            marks(celox_design::settle_profile_offset(2, 0)),
+            Some(vec![1])
+        );
+        // A counter-sized store overlapping a flag or the untracked byte
+        // still needs a known publication mask.
+        assert_eq!(marks(1), None);
+        assert_eq!(marks(2), None);
+    }
 
     #[test]
     fn tracked_entry_skips_the_full_flag_fill_only_in_the_specialized_copy() {
