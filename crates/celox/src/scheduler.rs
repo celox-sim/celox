@@ -334,17 +334,8 @@ pub(crate) const CALLEE_PLACEHOLDER: u32 = 0x2000_0000;
 /// [`OUTLINE_MIN_INSTRUCTIONS`] is compiled once, beside the others, instead
 /// of into one function with the whole schedule, whose compilation grows
 /// faster than its size.
-/// A testbench scheduler inlines the compiled scheduler and reads the
-/// records and finishes of the units it runs from it, so a program with one
-/// keeps them inline.
-pub(crate) fn outlines_callees(program: &LaidOutProgram, native_image: bool) -> bool {
-    native_image
-        && cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen")))
-        && program
-            .runtime
-            .testbench
-            .as_ref()
-            .is_none_or(|testbench| testbench.scheduler().is_none())
+pub(crate) fn outlines_callees(native_image: bool) -> bool {
+    native_image && cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen")))
 }
 
 /// Generate the compiled scheduler of `program`, if it qualifies, and record
