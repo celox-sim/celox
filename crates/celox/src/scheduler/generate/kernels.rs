@@ -218,13 +218,18 @@ impl Plan {
         g.b.switch_to_block(run);
         let clear = g.constant(0, 1);
         g.store_at(slots.ready, ordinals[index], 1, clear);
+        let can_delay_inactive = self.inactive.iter().any(|&(process, _)| process == index);
+        if can_delay_inactive && g.has_inactive_mask() {
+            // An imported kernel can already be ready in Active.
+            g.store_at(slots.timed, g.ready_bits + ordinals[index], 1, clear);
+        }
         let current = g.constant(index as u64, SCHEDULER_TIME_WIDTH);
         g.store(slots.current, SCHEDULER_TIME_WIDTH, current);
         // The work budget bounds zero-time loops. A kernel that only
         // suspends for positive constant delays runs once in the slot it
         // is due in and cannot take part in one, so it is not charged.
         let budgeted = kernel.wait.is_some()
-            || self.inactive.iter().any(|&(process, _)| process == index)
+            || can_delay_inactive
             || shortest_delay(&program.sir.processes[index], process.delay) == 0;
         if self.cyclic && budgeted {
             if let Some(guards) = guards {
@@ -537,6 +542,12 @@ impl Plan {
             let flag = g.constant(1, SCHEDULER_FLAG_WIDTH);
             g.store(slots.waiting[index], SCHEDULER_FLAG_WIDTH, flag);
             g.set_timed(ordinals[index], true);
+            if g.has_inactive_mask() && self.inactive.iter().any(|&(process, _)| process == index) {
+                // A computed positive delay resumes in Active at a future time.
+                let zero = g.equals(amount, 0);
+                let pending = g.binary(1, inactive, BinaryOp::And, zero);
+                g.store_at(slots.timed, g.ready_bits + ordinals[index], 1, pending);
+            }
             g.b.seal_block(SIRTerminator::Jump(resumed, Vec::new()));
             g.b.switch_to_block(other);
         }

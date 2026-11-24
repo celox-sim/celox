@@ -1943,6 +1943,8 @@ pub struct SchedulerSlots<A> {
     /// order: those whose [`Self::waiting`] is set with a delay status. The
     /// scheduler recomputes it when it enters and keeps it up to date as
     /// kernels suspend, so a slot scans only the kernels that can be due.
+    /// The next mask of the same width holds this slot's pending Inactive
+    /// continuations, transferred to ready together before NBA publication.
     pub timed: A,
     /// The time each process kernel resumes at, in kernel order, valid
     /// where [`Self::waiting`] is set and the kernel's status is a delay.
