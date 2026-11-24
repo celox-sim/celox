@@ -709,6 +709,8 @@ struct Plan {
     finish_sites: HashSet<u32>,
     service_function: Option<u32>,
     ordered: Option<ordered::Ordered>,
+    /// Tracked event signals that ordered publication can change before settling.
+    published_events: Vec<usize>,
     service_processes: HashSet<usize>,
     nba_processes: HashSet<usize>,
     /// Native fixed-point work lists need runtime bounds, not a DAG restriction.
