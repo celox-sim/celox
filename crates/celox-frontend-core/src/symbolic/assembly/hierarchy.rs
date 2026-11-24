@@ -14,10 +14,12 @@ pub(super) fn module_variables(
         let mut variables = HashMap::default();
         let mut paths: HashMap<Vec<String>, Option<SourceVarId>> = HashMap::default();
         for (&source_id, variable) in &module.variables {
-            // A package variable belongs to the package's instance, and a
-            // hierarchically named one to its own instance.
+            // A package variable belongs to the package's instance, a
+            // hierarchically named one to its own instance, and a ref port to
+            // its bound owner variable.
             if module.package_bindings.contains_key(&source_id)
                 || module.hierarchical_bindings.contains_key(&source_id)
+                || variable.kind == crate::VariableKind::Ref
             {
                 continue;
             }

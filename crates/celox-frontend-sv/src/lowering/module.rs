@@ -774,6 +774,7 @@ fn lower_module_with_overrides(
             function_frames: Vec::new(),
             package_bindings: HashMap::default(),
             hierarchical_bindings: HashMap::default(),
+            ref_port_bindings: Vec::new(),
             counter_slots: Vec::new(),
             pending_slots: Vec::new(),
             comb_alternatives: Vec::new(),

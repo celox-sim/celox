@@ -31,13 +31,14 @@ pub enum VariableKind {
     Input,
     Output,
     Inout,
+    Ref,
     Variable,
     Let,
 }
 
 impl VariableKind {
     pub const fn is_port(self) -> bool {
-        matches!(self, Self::Input | Self::Output | Self::Inout)
+        matches!(self, Self::Input | Self::Output | Self::Inout | Self::Ref)
     }
 
     pub const fn description(self) -> &'static str {
@@ -47,6 +48,7 @@ impl VariableKind {
             Self::Input => "input",
             Self::Output => "output",
             Self::Inout => "inout",
+            Self::Ref => "ref",
             Self::Variable => "variable",
             Self::Let => "let-bounded variable",
         }

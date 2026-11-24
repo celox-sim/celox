@@ -206,6 +206,9 @@ pub struct SimModule {
     /// named by a hierarchical name (IEEE 1800-2023 23.6). Each instance of
     /// the module refers to the object its binding locates from it.
     pub hierarchical_bindings: HashMap<SourceVarId, HierarchicalBinding>,
+    /// Child instance `ref` ports that alias variables of this module (IEEE
+    /// 1800-2023 23.3.3.2).
+    pub ref_port_bindings: Vec<RefPortBinding>,
     /// Counter objects of the signals that a unit of the module may store
     /// twice between two runtime checks (see
     /// `crate::watch::multi_store_candidates`). Assembly counts a signal's
@@ -334,6 +337,15 @@ pub struct PackageBinding {
     pub simulator_state: bool,
 }
 
+/// A child instance's `ref` port aliasing a variable of its parent module.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RefPortBinding {
+    pub instance: String,
+    pub index: usize,
+    pub child_port: SourceVarId,
+    pub parent_var: SourceVarId,
+}
+
 impl SimModule {
     /// The hierarchy index of element `position` of instance `name`.
     pub fn instance_index(&self, name: &str, position: usize) -> usize {
@@ -428,6 +440,7 @@ impl fmt::Debug for SimModule {
             .field("functions", &self.functions)
             .field("package_bindings", &self.package_bindings)
             .field("hierarchical_bindings", &self.hierarchical_bindings)
+            .field("ref_port_bindings", &self.ref_port_bindings)
             .finish()
     }
 }

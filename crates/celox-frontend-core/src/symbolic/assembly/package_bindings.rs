@@ -144,9 +144,104 @@ impl PackageBindings {
                 );
             }
         }
-        // A hierarchical name may denote a variable that itself denotes a
-        // package variable or another instance's variable.
-        if paths.is_some() {
+        // A child instance's `ref` port denotes the variable of its parent
+        // module (IEEE 1800-2023 23.3.3.2), which may itself be bound.
+        for (path, &parent_instance_id) in expanded {
+            let parent_module = &modules[&instance_modules[&parent_instance_id]];
+            let mut children = HashMap::default();
+            for binding in &parent_module.ref_port_bindings {
+                let child = match children.entry((&binding.instance, binding.index)) {
+                    std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        let mut child_path = path.0.clone();
+                        child_path.push((binding.instance.clone(), binding.index));
+                        let child = expanded.get(&InstancePath(child_path)).ok_or_else(|| {
+                            ParserError::illegal_context(
+                                "ref port",
+                                format!(
+                                    "unknown child {}[{}] of {}",
+                                    binding.instance, binding.index, parent_module.name
+                                ),
+                                None,
+                            )
+                        })?;
+                        *entry.insert(*child)
+                    }
+                };
+                let child_module = &modules[&instance_modules[&child]];
+                let (Some(port), Some(target)) = (
+                    child_module.variables.get(&binding.child_port),
+                    parent_module.variables.get(&binding.parent_var),
+                ) else {
+                    return Err(ParserError::illegal_context(
+                        "ref port",
+                        format!(
+                            "unknown variable in ref port binding between `{}` and `{}`",
+                            parent_module.name, child_module.name
+                        ),
+                        None,
+                    ));
+                };
+                if port.kind != crate::VariableKind::Ref {
+                    return Err(ParserError::illegal_context(
+                        "ref port",
+                        format!(
+                            "`{}` of `{}` is not a ref port",
+                            port.path.join("."),
+                            child_module.name
+                        ),
+                        None,
+                    ));
+                }
+                if (
+                    port.metadata.width,
+                    port.metadata.is_4state,
+                    &port.metadata.array_dims,
+                    port.metadata.value_kind,
+                ) != (
+                    target.metadata.width,
+                    target.metadata.is_4state,
+                    &target.metadata.array_dims,
+                    target.metadata.value_kind,
+                ) {
+                    return Err(ParserError::illegal_context(
+                        "ref port",
+                        format!(
+                            "ref port `{}` of `{}` binds a variable of another type",
+                            port.path.join("."),
+                            child_module.name
+                        ),
+                        None,
+                    ));
+                }
+                if targets
+                    .insert(
+                        AbsoluteAddr {
+                            instance_id: child,
+                            var_id: binding.child_port,
+                        },
+                        AbsoluteAddr {
+                            instance_id: parent_instance_id,
+                            var_id: binding.parent_var,
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(ParserError::illegal_context(
+                        "ref port",
+                        format!(
+                            "ref port `{}` of `{}` is connected more than once",
+                            port.path.join("."),
+                            child_module.name
+                        ),
+                        None,
+                    ));
+                }
+            }
+        }
+        // A hierarchical name or `ref` port may denote a variable that itself
+        // denotes a package variable or another instance's variable.
+        if !targets.is_empty() {
             let sources: Vec<_> = targets.keys().copied().collect();
             for source in sources {
                 let mut target = targets[&source];
@@ -155,14 +250,39 @@ impl PackageBindings {
                     steps += 1;
                     if next == source || steps > targets.len() {
                         return Err(ParserError::illegal_context(
-                            "hierarchical reference",
-                            "a hierarchical name denotes itself".to_string(),
+                            if paths.is_some() {
+                                "hierarchical reference"
+                            } else {
+                                "ref port"
+                            },
+                            "a hierarchical name or ref port denotes itself".to_string(),
                             None,
                         ));
                     }
                     target = next;
                 }
                 targets.insert(source, target);
+            }
+        }
+        for (&instance_id, module_id) in instance_modules {
+            let module = &modules[module_id];
+            for (&var_id, variable) in &module.variables {
+                if variable.kind == crate::VariableKind::Ref
+                    && !targets.contains_key(&AbsoluteAddr {
+                        instance_id,
+                        var_id,
+                    })
+                {
+                    return Err(ParserError::illegal_context(
+                        "ref port",
+                        format!(
+                            "unconnected ref port `{}` of `{}`",
+                            variable.path.join("."),
+                            module.name
+                        ),
+                        None,
+                    ));
+                }
             }
         }
         let object_aliases = targets.iter().map(|(&a, &b)| (a, b)).collect();
@@ -469,4 +589,213 @@ pub(super) fn check_package_variable_drivers(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::VariableKind;
+    use crate::symbolic::artifact::{PackageBinding, RefPortBinding, SymbolicVariable};
+
+    fn dummy_module(name: &str) -> SimModule {
+        SimModule {
+            time_precision: None,
+            time_scale: celox_design::TimeScale::default(),
+            name: name.to_owned(),
+            variables: HashMap::default(),
+            ff_access_summaries: HashMap::default(),
+            event_bodies: HashMap::default(),
+            split_commit_ff_blocks: HashMap::default(),
+            parallel_ff_parts: HashMap::default(),
+            instances: HashMap::default(),
+            instance_ports: Default::default(),
+            indexed_instance_names: HashSet::default(),
+            instance_index_bases: HashMap::default(),
+            comb_blocks: Vec::new(),
+            comb_observers: Vec::new(),
+            runtime_errors: HashMap::default(),
+            runtime_event_sites: Vec::new(),
+            memory_file_bases: Vec::new(),
+            extern_functions: Vec::new(),
+            initial_memory_values: Vec::new(),
+            declaration_initial_memory_values: Vec::new(),
+            folded_initial_memory_values: Vec::new(),
+            comb_boundaries: HashMap::default(),
+            arena: SLTNodeArena::new(),
+            reset_clock_map: HashMap::default(),
+            processes: Vec::new(),
+            functions: Vec::new(),
+            function_frames: Vec::new(),
+            package_bindings: HashMap::default(),
+            hierarchical_bindings: HashMap::default(),
+            ref_port_bindings: Vec::new(),
+            counter_slots: Vec::new(),
+            pending_slots: Vec::new(),
+            comb_alternatives: Vec::new(),
+            wait_sites: Vec::new(),
+            nba_sites: Vec::new(),
+            nba_switches: Vec::new(),
+            host_request_sites: Vec::new(),
+            time_slot: None,
+            sample_shadows: Vec::new(),
+            initial_copies: Vec::new(),
+            next_state: Default::default(),
+        }
+    }
+
+    fn var(name: &str, kind: VariableKind, width: usize, is_4state: bool) -> SymbolicVariable {
+        SymbolicVariable {
+            path: vec![name.to_owned()],
+            kind,
+            signed: false,
+            metadata: VariableMetadata {
+                width,
+                is_4state,
+                kind: DomainKind::Other,
+                type_kind: celox_design::PortTypeKind::Logic,
+                array_dims: Vec::new(),
+                value_kind: celox_design::ValueKind::Bits,
+            },
+            packed_dims: vec![width],
+            unpacked_ranges: Vec::new(),
+            source: None,
+            module_affiliated: true,
+        }
+    }
+
+    #[test]
+    fn ref_port_bindings_resolve_chained_and_package_aliases() {
+        let pkg_id = ModuleId(0);
+        let top_id = ModuleId(1);
+        let mid_id = ModuleId(2);
+        let leaf_id = ModuleId(3);
+
+        let mut pkg = dummy_module("$pkg");
+        pkg.variables
+            .insert(SourceVarId(0), var("pv", VariableKind::Variable, 32, false));
+
+        let mut top = dummy_module("Top");
+        top.variables.insert(
+            SourceVarId(0),
+            var("pv_alias", VariableKind::Variable, 32, false),
+        );
+        top.package_bindings.insert(
+            SourceVarId(0),
+            PackageBinding {
+                package: pkg_id,
+                var_id: SourceVarId(0),
+                simulator_state: false,
+            },
+        );
+        top.ref_port_bindings.push(RefPortBinding {
+            instance: "u_mid".into(),
+            index: 0,
+            child_port: SourceVarId(0),
+            parent_var: SourceVarId(0),
+        });
+
+        let mut mid = dummy_module("Mid");
+        mid.variables
+            .insert(SourceVarId(0), var("m", VariableKind::Ref, 32, false));
+        mid.ref_port_bindings.push(RefPortBinding {
+            instance: "u_leaf".into(),
+            index: 0,
+            child_port: SourceVarId(0),
+            parent_var: SourceVarId(0),
+        });
+
+        let mut leaf = dummy_module("Leaf");
+        leaf.variables
+            .insert(SourceVarId(0), var("l", VariableKind::Ref, 32, false));
+
+        let mut modules = HashMap::default();
+        modules.insert(pkg_id, pkg);
+        modules.insert(top_id, top);
+        modules.insert(mid_id, mid);
+        modules.insert(leaf_id, leaf);
+
+        let pkg_inst = InstanceId(0);
+        let top_inst = InstanceId(1);
+        let mid_inst = InstanceId(2);
+        let leaf_inst = InstanceId(3);
+
+        let mut expanded = HashMap::default();
+        expanded.insert(InstancePath(vec![]), top_inst);
+        expanded.insert(InstancePath(vec![("u_mid".into(), 0)]), mid_inst);
+        expanded.insert(
+            InstancePath(vec![("u_mid".into(), 0), ("u_leaf".into(), 0)]),
+            leaf_inst,
+        );
+
+        let mut instance_modules = HashMap::default();
+        instance_modules.insert(pkg_inst, pkg_id);
+        instance_modules.insert(top_inst, top_id);
+        instance_modules.insert(mid_inst, mid_id);
+        instance_modules.insert(leaf_inst, leaf_id);
+
+        let mut package_instances = HashMap::default();
+        package_instances.insert(pkg_id, pkg_inst);
+
+        let bindings =
+            PackageBindings::new(&expanded, &instance_modules, &modules, &package_instances)
+                .unwrap();
+        let expected = AbsoluteAddr {
+            instance_id: pkg_inst,
+            var_id: SourceVarId(0),
+        };
+        assert_eq!(bindings.locate(top_inst, SourceVarId(0)), expected);
+        assert_eq!(bindings.locate(mid_inst, SourceVarId(0)), expected);
+        assert_eq!(bindings.locate(leaf_inst, SourceVarId(0)), expected);
+
+        let vars = hierarchy::module_variables(&modules);
+        assert!(!vars.0[&mid_id].contains_key(&SourceVarId(0)));
+        assert!(!vars.0[&leaf_id].contains_key(&SourceVarId(0)));
+    }
+
+    #[test]
+    fn ref_port_bindings_reject_unconnected_or_mismatched() {
+        let top_id = ModuleId(0);
+        let child_id = ModuleId(1);
+
+        let mut top = dummy_module("Top");
+        top.variables
+            .insert(SourceVarId(0), var("v", VariableKind::Variable, 16, false));
+
+        let mut child = dummy_module("Child");
+        child
+            .variables
+            .insert(SourceVarId(0), var("r", VariableKind::Ref, 32, false));
+
+        let mut modules = HashMap::default();
+        modules.insert(top_id, top);
+        modules.insert(child_id, child);
+
+        let mut expanded = HashMap::default();
+        expanded.insert(InstancePath(vec![]), InstanceId(0));
+        expanded.insert(InstancePath(vec![("u".into(), 0)]), InstanceId(1));
+
+        let mut instance_modules = HashMap::default();
+        instance_modules.insert(InstanceId(0), top_id);
+        instance_modules.insert(InstanceId(1), child_id);
+
+        let err = PackageBindings::new(&expanded, &instance_modules, &modules, &HashMap::default())
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("unconnected ref port"), "{err}");
+
+        modules
+            .get_mut(&top_id)
+            .unwrap()
+            .ref_port_bindings
+            .push(RefPortBinding {
+                instance: "u".into(),
+                index: 0,
+                child_port: SourceVarId(0),
+                parent_var: SourceVarId(0),
+            });
+        let err = PackageBindings::new(&expanded, &instance_modules, &modules, &HashMap::default())
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("another type"), "{err}");
+    }
 }
