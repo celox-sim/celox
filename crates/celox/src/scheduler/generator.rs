@@ -218,21 +218,39 @@ impl Generator<'_> {
         self.store_at(self.slots.timed, ordinal, 1, value);
     }
 
-    /// Fold `group` over the kernels of `kernels` whose bit of the timed
-    /// mask `timed` may be set, eight kernels (one byte of the mask) at a
-    /// time: a byte with no bit set skips its kernels. `group` gets a
-    /// group's kernels with their status slots, the mask restricted to the
-    /// group and the accumulator of `width` bits, and returns the new
-    /// accumulator. The accumulator is a block parameter of the join after
-    /// each group, so callers keep it to one word (the native backend's
-    /// branch arguments are single words).
-    pub(super) fn scan_timed(
+    /// Run a scan only when its mask has pending work. Only a scalar value
+    /// crosses the join, including when the complete scheduler mask is wide.
+    fn scan_if_set(
+        &mut self,
+        bits: RegisterId,
+        acc: RegisterId,
+        scan: impl FnOnce(&mut Self) -> RegisterId,
+    ) -> RegisterId {
+        let zero = self.constant(0, 64);
+        let some = self.binary(1, bits, BinaryOp::Ne, zero);
+        let body = self.b.new_block();
+        let joined = self.b.alloc_bit(64, false);
+        let join = self.b.new_block_with(vec![joined]);
+        self.b.seal_block(SIRTerminator::Branch {
+            cond: some,
+            true_block: (body, Vec::new()),
+            false_block: (join, vec![acc]),
+        });
+        self.b.switch_to_block(body);
+        let result = scan(self);
+        self.b.seal_block(SIRTerminator::Jump(join, vec![result]));
+        self.b.switch_to_block(join);
+        joined
+    }
+
+    /// Skip an empty timed word before inspecting its bytes. The kernels of
+    /// each word are in ordinal order, so each byte forms one contiguous group.
+    pub(super) fn scan_timed_word(
         &mut self,
         timed: RegisterId,
         kernels: &[(usize, Option<AbsoluteAddr>)],
         ordinals: &[usize],
-        mut acc: RegisterId,
-        width: usize,
+        acc: RegisterId,
         mut group: impl FnMut(
             &mut Self,
             &[(usize, Option<AbsoluteAddr>)],
@@ -240,37 +258,23 @@ impl Generator<'_> {
             RegisterId,
         ) -> RegisterId,
     ) -> RegisterId {
-        let mut groups: BTreeMap<usize, Vec<(usize, Option<AbsoluteAddr>)>> = BTreeMap::new();
-        for &(index, status) in kernels {
-            groups
-                .entry(ordinals[index] / 8)
-                .or_default()
-                .push((index, status));
-        }
-        for kernels in groups.values() {
-            let mut mask = BigUint::default();
-            for &(index, _) in kernels {
-                mask |= BigUint::from(1u8) << ordinals[index];
+        let mut scan_bytes = |g: &mut Self| {
+            let mut result = acc;
+            for byte in kernels.chunk_by(|a, b| ordinals[a.0] / 8 == ordinals[b.0] / 8) {
+                let mask = byte
+                    .iter()
+                    .fold(0u64, |mask, &(i, _)| mask | (1 << (ordinals[i] % 64)));
+                let mask = g.constant(mask, 64);
+                let bits = g.binary(64, timed, BinaryOp::And, mask);
+                result = g.scan_if_set(bits, result, |g| group(g, byte, bits, result));
             }
-            let mask = self.wide_constant(mask, self.ready_bits);
-            let bits = self.binary(self.ready_bits, timed, BinaryOp::And, mask);
-            let zero = self.constant(0, self.ready_bits);
-            let some = self.binary(1, bits, BinaryOp::Ne, zero);
-            let scan = self.b.new_block();
-            let joined = self.b.alloc_bit(width, false);
-            let join = self.b.new_block_with(vec![joined]);
-            self.b.seal_block(SIRTerminator::Branch {
-                cond: some,
-                true_block: (scan, Vec::new()),
-                false_block: (join, vec![acc]),
-            });
-            self.b.switch_to_block(scan);
-            acc = group(self, kernels, bits, acc);
-            self.b.seal_block(SIRTerminator::Jump(join, vec![acc]));
-            self.b.switch_to_block(join);
-            acc = joined;
+            result
+        };
+        if self.ready_bits > 64 && kernels.len() > 8 {
+            self.scan_if_set(timed, acc, scan_bytes)
+        } else {
+            scan_bytes(self)
         }
-        acc
     }
 
     pub(super) fn load(&mut self, address: AbsoluteAddr, width: usize) -> RegisterId {
