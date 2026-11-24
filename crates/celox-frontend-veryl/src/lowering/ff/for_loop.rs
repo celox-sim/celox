@@ -47,18 +47,17 @@ struct ForLoopFrame {
 }
 
 impl<'a> FfParser<'a> {
-    pub(super) fn loop_bound_status(
-        bound: &ForBound,
-        width: usize,
-        signed: bool,
-    ) -> Option<LoopBoundStatus> {
-        let value = match bound {
+    fn loop_bound_integer(bound: &ForBound) -> Option<BigInt> {
+        Some(match bound {
             ForBound::Const(v, _) => BigInt::from(*v),
             ForBound::Expression(expr) => {
                 if !expr.comptime().is_const {
                     return None;
                 }
                 let value = expr.comptime().get_value().ok()?;
+                if value.is_xz() {
+                    return None;
+                }
                 match value {
                     Value::U64(v) => {
                         if v.signed {
@@ -76,7 +75,15 @@ impl<'a> FfParser<'a> {
                     }
                 }
             }
-        };
+        })
+    }
+
+    pub(super) fn loop_bound_status(
+        bound: &ForBound,
+        width: usize,
+        signed: bool,
+    ) -> Option<LoopBoundStatus> {
+        let value = Self::loop_bound_integer(bound)?;
 
         if signed {
             let max = (BigInt::from(1u8) << (width.saturating_sub(1))) - BigInt::from(1u8);
@@ -1092,6 +1099,20 @@ impl<'a> FfParser<'a> {
                 Some(&stmt.token),
             ));
         }
+        // In a half-open, nonnegative range with unit stride, each visible
+        // counter is at most end - 1 and its successor is at most end. When
+        // both bounds fit, neither a conversion failure nor a stalled step
+        // is reachable. Keep these error exits out of the scheduled clock.
+        let bounded_increment = !reverse
+            && !inclusive
+            && step == 1
+            && matches!(stepped_op, None | Some(Op::Add))
+            && [start_status, end_status]
+                .iter()
+                .all(|s| *s == Some(LoopBoundStatus::FitsLoopType))
+            && [start_bound, end_bound]
+                .into_iter()
+                .all(|b| Self::loop_bound_integer(b).is_some_and(|v| v.sign() != Sign::Minus));
         let counter_width = loop_width.max(1);
         let bound_width = counter_width.max(start_bound_width).max(end_bound_width);
         let widen_inclusive = inclusive && !loop_signed;
@@ -1155,7 +1176,7 @@ impl<'a> FfParser<'a> {
         let header_counter = ir_builder.alloc_bit(compare_width, loop_signed);
         let fitcheck_counter = ir_builder.alloc_bit(compare_width, loop_signed);
         let body_counter = ir_builder.alloc_bit(compare_width, loop_signed);
-        let needs_range_check = compare_width != loop_width;
+        let needs_range_check = !bounded_increment && compare_width != loop_width;
         let precheck_bb = (!reverse && needs_range_check).then(|| ir_builder.new_block());
         let reverse_precheck_bb = (reverse && needs_range_check).then(|| ir_builder.new_block());
         let empty_exit_counter = ir_builder.alloc_bit(compare_width, loop_signed);
@@ -1247,7 +1268,16 @@ impl<'a> FfParser<'a> {
             return Ok(());
         }
 
-        if !reverse {
+        if bounded_increment {
+            let next = ir_builder.alloc_bit(compare_width, loop_signed);
+            ir_builder.emit(SIRInstruction::Binary(
+                next,
+                body_counter,
+                BinaryOp::Add,
+                one_reg,
+            ));
+            ir_builder.seal_block(SIRTerminator::Jump(header_bb, vec![next]));
+        } else if !reverse {
             self.emit_for_forward_step(stmt, &shape, &frame, non_progress_message, ir_builder)?;
         } else {
             self.emit_for_reverse_step(stmt, &shape, &frame, non_progress_message, ir_builder);
