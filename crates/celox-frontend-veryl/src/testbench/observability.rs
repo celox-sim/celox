@@ -412,3 +412,77 @@ pub(super) fn collect_function_call_reads(
         active_functions.remove(&call.id);
     }
 }
+
+/// Initial blocks and component methods bind their storage after scheduling.
+/// Keep the host module's variables, including whole-variable write targets.
+/// A hierarchical reference also names a variable in a different module:
+/// preserve matching local paths in every specialization until instance ids
+/// are available for the exact lookup.
+pub(crate) fn pin_source_storage(
+    design: &mut crate::symbolic::artifact::SymbolicRtl,
+    modules: &crate::HashMap<celox_design::ModuleId, &veryl_analyzer::ir::Module>,
+) {
+    use veryl_analyzer::ir::Declaration;
+    let mut hierarchical_paths = FxHashSet::default();
+    for (id, module) in modules {
+        let mut accesses = Vec::new();
+        let mut caller = false;
+        let mut active = FxHashSet::default();
+        for decl in &module.declarations {
+            match decl {
+                Declaration::Initial(body) => collect_statement_reads(
+                    &body.statements,
+                    &module.functions,
+                    &mut active,
+                    &mut accesses,
+                ),
+                Declaration::Final(body) => collect_statement_reads(
+                    &body.statements,
+                    &module.functions,
+                    &mut active,
+                    &mut accesses,
+                ),
+                Declaration::External(ext) => {
+                    for connection in &ext.connects {
+                        collect_expression_reads(
+                            &connection.expr,
+                            &module.functions,
+                            &mut active,
+                            &mut accesses,
+                        );
+                        if let Some(dst) = &connection.output {
+                            collect_target_reads(
+                                dst,
+                                &module.functions,
+                                &mut active,
+                                &mut accesses,
+                            );
+                        }
+                    }
+                }
+                _ => continue,
+            }
+            caller = true;
+        }
+        if caller {
+            let symbolic = design.modules.get_mut(id).expect("projected Veryl module");
+            symbolic
+                .testbench_variables
+                .extend(symbolic.variables.keys().copied());
+        }
+        hierarchical_paths.extend(accesses.into_iter().filter_map(|a| match a {
+            TestbenchRead::Hierarchical(r) => Some(source_path(&r.var_path)),
+            TestbenchRead::Root(_) => None,
+        }));
+    }
+    if !hierarchical_paths.is_empty() {
+        for module in design.modules.values_mut() {
+            module.testbench_variables.extend(
+                module
+                    .variables
+                    .iter()
+                    .filter_map(|(&id, var)| hierarchical_paths.contains(&var.path).then_some(id)),
+            );
+        }
+    }
+}

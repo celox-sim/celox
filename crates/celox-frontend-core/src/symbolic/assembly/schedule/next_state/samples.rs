@@ -33,6 +33,7 @@ impl StateGraph {
         for (&instance, module) in &design.instance_modules {
             let module = &design.modules[module];
             let locate = |id| design.bindings.locate(instance, id);
+            blocked.extend(module.testbench_variables.iter().copied().map(locate));
             blocked.extend(
                 module
                     .initial_memory_values

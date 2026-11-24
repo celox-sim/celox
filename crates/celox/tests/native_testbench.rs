@@ -736,6 +736,37 @@ fn test_testbench_direct_reads_are_dead_store_roots() {
 }
 
 #[test]
+fn o2_keeps_a_combinational_net_read_only_by_a_hierarchical_testbench() {
+    let code = r#"
+        module Child (d: input logic<8>, q: output logic<8>) {
+            let intermediate: logic<8> = d ^ 8'h5a;
+            assign q = intermediate + 8'd1;
+        }
+        #[test(t)]
+        module t {
+            var d: logic<8>;
+            var q: logic<8>;
+            inst child: Child (d, q);
+            initial {
+                d = 8'ha0;
+                $assert(q == 8'hfb);
+                $assert(child.intermediate == 8'hfa);
+                d = 8'h5a;
+                $assert(child.intermediate == 0);
+                $finish();
+            }
+        }
+    "#;
+    assert_eq!(
+        Simulator::builder(code, "t")
+            .opt_level(celox::OptLevel::O2)
+            .run_test()
+            .unwrap(),
+        TestResult::Pass
+    );
+}
+
+#[test]
 fn test_hierarchical_testbench_read_resolves_nested_instance_index_and_select() {
     let code = r#"
         module Core () {
