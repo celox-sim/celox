@@ -207,7 +207,6 @@ impl Plan {
             schema,
             tracked,
             waits,
-            delays,
             ordinals,
             checks,
             assertions,
@@ -281,10 +280,12 @@ impl Plan {
         // delay may overflow.
         if let Some(lazy) = &self.lazy {
             let waits = waits.iter().any(|&(index, _)| lazy.kernels[index]);
-            let observers = delays
+            // Ready work includes newly started kernels that never suspend.
+            let observers = lazy
+                .kernels
                 .iter()
-                .map(|&(index, _)| index)
-                .filter(|&index| lazy.kernels[index])
+                .enumerate()
+                .filter_map(|(index, &observes)| observes.then_some(index))
                 .fold(BigUint::default(), |mask, index| {
                     mask | (BigUint::from(1u8) << ordinals[index])
                 });

@@ -898,6 +898,41 @@ fn always_comb_startup_gate_reads_process_statuses_once() {
     );
 }
 
+#[test]
+fn only_delaying_processes_get_wake_time_loads() {
+    let source = "`timescale 1ns/1ns
+        module Top(output int a, b, c);
+            initial a = 1;
+            initial b = a + 2;
+            initial begin #5; c = b; end
+        endmodule";
+    let (program, ..) = crate::Simulation::from_sv_sources(
+        vec![(source, std::path::Path::new("wake-loads.sv"))],
+        "Top",
+    )
+    .emit_triggers()
+    .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, false, false)
+    .unwrap();
+    let scheduler = program.runtime.runtime_schema.scheduler.as_ref().unwrap();
+    assert!(scheduler.fallback.iter().all(Option::is_none));
+    let wakes = &scheduler.slots.wake;
+    assert!(wakes.len() > 1);
+    let loaded: crate::HashSet<_> = program.sir.processes[scheduler.unit.unwrap()]
+        .blocks
+        .values()
+        .flat_map(|block| &block.instructions)
+        .filter_map(|instruction| match instruction {
+            crate::ir::SIRInstruction::Load(_, address, ..)
+                if wakes.contains(&address.absolute_addr()) =>
+            {
+                Some(address.absolute_addr())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(loaded.len(), 1);
+}
+
 #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
 #[test]
 fn native_scheduler_host_wait_scans_grow_linearly() {

@@ -148,7 +148,7 @@ impl PlanBuilder<'_> {
                     kernels.push(Some(Kernel {
                         writes,
                         wait: None,
-                        delays: true,
+                        delays: !statuses_only(unit, slots.status, &WAIT_STATUSES),
                     }));
                     fallback.push(None);
                 }

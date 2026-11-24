@@ -606,7 +606,7 @@ struct Kernel {
     /// [`Plan::events`].
     writes: Vec<usize>,
     /// For a kernel that waits for edges, the edges and its staged
-    /// nonblocking assignments; `None` for a kernel that only delays.
+    /// nonblocking assignments; `None` when it has no edge waits.
     wait: Option<Wait>,
     /// The kernel suspends for delays. A kernel that also waits tells the
     /// two apart by the status it suspended with.
