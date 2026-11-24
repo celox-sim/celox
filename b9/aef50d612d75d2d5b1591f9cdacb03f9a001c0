@@ -1,0 +1,1 @@
+CI found a duplicate testbench_variables initializer after rebasing over #4609. Keep the upstream fixture and verify the frontend library test target.
