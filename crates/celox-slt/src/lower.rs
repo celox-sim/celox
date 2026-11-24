@@ -204,9 +204,9 @@ struct LoweringCostCache {
     owned_slice_lower_costs: Vec<Option<u128>>,
     contains_shared_nontrivial: Vec<Option<bool>>,
     is_speculatable_pure: Vec<Option<bool>>,
-    /// Whether the cone of a node has no operation a guarded concat must not
-    /// skip (see `guarded_concat_root_is_supported`).
-    guarded_concat_supported: Vec<Option<bool>>,
+    /// Whether the cone of a node has no operation a zero guard must not
+    /// skip (see `zero_guard_root_is_supported`).
+    zero_guard_supported: Vec<Option<bool>>,
     /// The index in `zero_facts` of a node's zero-controller facts, or
     /// `u32::MAX`. The facts depend on `fanout`, so they live as long as it.
     zero_facts_slot: Vec<u32>,
@@ -230,7 +230,7 @@ impl LoweringCostCache {
         self.owned_slice_lower_costs.resize(node_count, None);
         self.contains_shared_nontrivial.resize(node_count, None);
         self.is_speculatable_pure.resize(node_count, None);
-        self.guarded_concat_supported.resize(node_count, None);
+        self.zero_guard_supported.resize(node_count, None);
         self.zero_facts_slot.resize(node_count, u32::MAX);
         self.traversal_seen.resize(node_count, false);
         self.dirty.resize(node_count, false);
@@ -257,7 +257,7 @@ impl LoweringCostCache {
             self.owned_slice_lower_costs[node.0] = None;
             self.contains_shared_nontrivial[node.0] = None;
             self.is_speculatable_pure[node.0] = None;
-            self.guarded_concat_supported[node.0] = None;
+            self.zero_guard_supported[node.0] = None;
             self.zero_facts_slot[node.0] = u32::MAX;
             self.traversal_seen[node.0] = false;
             self.dirty[node.0] = false;
@@ -319,7 +319,7 @@ struct ZeroControllerFacts {
 }
 
 #[derive(Clone, Copy)]
-struct GuardedConcatPlan {
+struct ZeroGuardPlan {
     guard: NodeId,
     net_benefit_scaled: u128,
 }
@@ -493,6 +493,16 @@ impl SLTToSIRLowerer {
         cache: &mut crate::HashMap<NodeId, RegisterId>,
     ) -> RegisterId {
         self.reset_cost_cache(node, arena, cache, true);
+        if !self.four_state
+            && Self::has_masked_or_term(node, arena)
+            && !cache.contains_key(&node)
+            && let Some(plan) = self.zero_guard_plan(node, arena, cache)
+        {
+            let result = self.lower_zero_guarded(builder, plan.guard, node, arena, cache);
+            cache.insert(node, result);
+            self.cache_insert_log.push(node);
+            return result;
+        }
         self.lower_inner(builder, node, arena, cache, None, true)
     }
 

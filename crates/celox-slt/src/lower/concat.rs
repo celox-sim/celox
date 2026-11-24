@@ -58,7 +58,7 @@ impl SLTToSIRLowerer {
     }
 
     /// Compute exact two-state zero controllers for the small algebra used by
-    /// guarded lane vectors. A controller `g` is present only when assuming
+    /// guarded concatenations and OR trees. A controller `g` is present only when assuming
     /// the one-bit value `g == 0` proves every bit of `node` is zero.
     ///
     /// The facts of a node depend on the fanout of the top-level root being
@@ -74,14 +74,15 @@ impl SLTToSIRLowerer {
             return facts.clone();
         }
 
+        let masked_or = matches!(arena.get(root), SLTNode::Binary(_, BinaryOp::Or, _));
         // Explicit postorder avoids consuming the native stack on procedural
-        // expression chains. Each node in this concat cone is analyzed once.
+        // expression chains. Analyze each reachable node once.
         let mut stack = vec![(root, false)];
         while let Some((node, expanded)) = stack.pop() {
             if self.memoized_zero_facts(node).is_some() {
                 continue;
             }
-            if !expanded {
+            if !expanded && !self.cost_cache.initially_materialized[node.0] {
                 stack.push((node, true));
                 for child in Self::node_children(node, arena).into_iter().rev() {
                     if self.memoized_zero_facts(child).is_none() {
@@ -97,6 +98,10 @@ impl SLTToSIRLowerer {
                     .expect("zero-controller postorder must analyze children first")
             };
             let mut facts = match arena.get(node) {
+                // A captured or previously lowered value is opaque here.
+                _ if self.cost_cache.initially_materialized[node.0] => {
+                    ZeroControllerFacts::default()
+                }
                 SLTNode::Constant(value, mask, _, _) => ZeroControllerFacts {
                     unconditional_zero: value.is_zero() && mask.is_zero(),
                     guards: crate::HashSet::default(),
@@ -180,11 +185,14 @@ impl SLTToSIRLowerer {
                 && self.get_width(node, arena) == 1
                 && !matches!(arena.get(node), SLTNode::Constant(..))
             {
-                // This shared compound value covers every zero case of its
-                // descendant controllers and possibly more. Keeping only the
-                // maximal value prevents a leaf from winning on a tiny local
-                // cost difference and keeps deep conjunction sets linear.
-                facts.guards.clear();
+                // A broadcast makes each word's local select look shared.
+                // For an OR, keep its common enable as an alternative: the
+                // local selects can differ across all the words. Bound the
+                // alternatives to keep shared conjunction chains linear.
+                const MAX_SHARED_GUARDS: usize = 4;
+                if !masked_or || facts.guards.len() >= MAX_SHARED_GUARDS {
+                    facts.guards.clear();
+                }
                 facts.guards.insert(node);
             }
             let cache = &mut self.cost_cache;
@@ -201,20 +209,20 @@ impl SLTToSIRLowerer {
     }
 
     /// Whether no node of the cone of `root` is a division, a remainder or a
-    /// loop, which a guarded concat must not skip. Memoized per node until
+    /// loop, which a zero guard must not skip. Memoized per node until
     /// the cost cache is reset, so nested concats share their common cone.
-    fn guarded_concat_root_is_supported<A: Hash + Eq + Clone>(
+    fn zero_guard_root_is_supported<A: Hash + Eq + Clone>(
         &mut self,
         root: NodeId,
         arena: &SLTNodeArena<A>,
     ) -> bool {
         self.prepare_cost_cache(arena);
-        if let Some(supported) = self.cost_cache.guarded_concat_supported[root.0] {
+        if let Some(supported) = self.cost_cache.zero_guard_supported[root.0] {
             return supported;
         }
         let mut stack = vec![(root, false)];
         while let Some((node, expanded)) = stack.pop() {
-            if self.cost_cache.guarded_concat_supported[node.0].is_some() {
+            if self.cost_cache.zero_guard_supported[node.0].is_some() {
                 continue;
             }
             let supported = match arena.get(node) {
@@ -233,25 +241,25 @@ impl SLTToSIRLowerer {
                             children
                                 .into_iter()
                                 .filter(|child| {
-                                    self.cost_cache.guarded_concat_supported[child.0].is_none()
+                                    self.cost_cache.zero_guard_supported[child.0].is_none()
                                 })
                                 .map(|child| (child, false)),
                         );
                         continue;
                     }
-                    children.iter().all(|child| {
-                        self.cost_cache.guarded_concat_supported[child.0] == Some(true)
-                    })
+                    children
+                        .iter()
+                        .all(|child| self.cost_cache.zero_guard_supported[child.0] == Some(true))
                 }
             };
             let cache = &mut self.cost_cache;
             cache.touch(node);
-            cache.guarded_concat_supported[node.0] = Some(supported);
+            cache.zero_guard_supported[node.0] = Some(supported);
         }
-        self.cost_cache.guarded_concat_supported[root.0] == Some(true)
+        self.cost_cache.zero_guard_supported[root.0] == Some(true)
     }
 
-    fn guarded_concat_region_cost<A: Hash + Eq + Clone + std::fmt::Debug>(
+    fn zero_guard_region_cost<A: Hash + Eq + Clone + std::fmt::Debug>(
         &self,
         root: NodeId,
         guard: NodeId,
@@ -297,7 +305,7 @@ impl SLTToSIRLowerer {
         (cost, live_through_cost)
     }
 
-    fn guarded_concat_net_benefit<A: Hash + Eq + Clone + std::fmt::Debug>(
+    fn zero_guard_net_benefit<A: Hash + Eq + Clone + std::fmt::Debug>(
         &self,
         root: NodeId,
         guard: NodeId,
@@ -312,7 +320,7 @@ impl SLTToSIRLowerer {
         let probability = Self::guarded_true_probability(guard, arena);
         let false_weight = probability.total_weight - probability.true_weight;
         let (skippable_cost, live_through_chunks) =
-            self.guarded_concat_region_cost(root, guard, arena, materialized);
+            self.zero_guard_region_cost(root, guard, arena, materialized);
         let result_chunks = Self::chunks(self.get_width(root, arena));
         let saved_scaled = false_weight.saturating_mul(skippable_cost);
         let introduced_scaled = probability
@@ -334,13 +342,13 @@ impl SLTToSIRLowerer {
         (saved_scaled > introduced_scaled).then(|| saved_scaled - introduced_scaled)
     }
 
-    pub(super) fn guarded_concat_plan<A: Hash + Eq + Clone + std::fmt::Debug>(
+    pub(super) fn zero_guard_plan<A: Hash + Eq + Clone + std::fmt::Debug>(
         &mut self,
         root: NodeId,
         arena: &SLTNodeArena<A>,
         materialized: &crate::HashMap<NodeId, RegisterId>,
-    ) -> Option<GuardedConcatPlan> {
-        if self.four_state || !self.guarded_concat_root_is_supported(root, arena) {
+    ) -> Option<ZeroGuardPlan> {
+        if self.four_state || !self.zero_guard_root_is_supported(root, arena) {
             return None;
         }
 
@@ -357,15 +365,15 @@ impl SLTToSIRLowerer {
                 continue;
             }
             let Some(net_benefit_scaled) =
-                self.guarded_concat_net_benefit(root, guard, arena, materialized)
+                self.zero_guard_net_benefit(root, guard, arena, materialized)
             else {
                 continue;
             };
-            let candidate = GuardedConcatPlan {
+            let candidate = ZeroGuardPlan {
                 guard,
                 net_benefit_scaled,
             };
-            let replace = best.as_ref().is_none_or(|current: &GuardedConcatPlan| {
+            let replace = best.as_ref().is_none_or(|current: &ZeroGuardPlan| {
                 candidate.net_benefit_scaled > current.net_benefit_scaled
                     || candidate.net_benefit_scaled == current.net_benefit_scaled
                         && candidate.guard < current.guard
@@ -377,30 +385,74 @@ impl SLTToSIRLowerer {
         best
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn lower_guarded_concat_cfg<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
+    /// Consider an OR tree when one of its terms masks a data word with a
+    /// replicated bit. This inexpensive filter only selects candidates; the
+    /// zero-controller proof still covers the whole expression.
+    pub(super) fn has_masked_or_term<A: Hash + Eq + Clone>(
+        root: NodeId,
+        arena: &SLTNodeArena<A>,
+    ) -> bool {
+        let SLTNode::Binary(lhs, BinaryOp::Or, rhs) = arena.get(root) else {
+            return false;
+        };
+        [*lhs, *rhs].into_iter().any(|mut term| {
+            while let SLTNode::Binary(_, BinaryOp::Or, next) = arena.get(term) {
+                term = *next;
+            }
+            let SLTNode::Binary(lhs, BinaryOp::And, rhs) = arena.get(term) else {
+                return false;
+            };
+            [*lhs, *rhs].into_iter().any(|id| {
+                let SLTNode::Concat(parts) = arena.get(id) else {
+                    return false;
+                };
+                let Some(&(bit, 1)) = parts.first() else {
+                    return false;
+                };
+                parts.len() > 1
+                    && arena.node_width(bit) == Some(1)
+                    && parts.iter().all(|&part| part == (bit, 1))
+            })
+        })
+    }
+
+    pub(super) fn lower_zero_guarded<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
         &mut self,
         builder: &mut SIRBuilder<A>,
-        plan: GuardedConcatPlan,
-        parts: &[(NodeId, usize)],
+        guard: NodeId,
+        root: NodeId,
         arena: &SLTNodeArena<A>,
         cache: &mut crate::HashMap<NodeId, RegisterId>,
     ) -> RegisterId {
-        let guard = self.lower_inner(builder, plan.guard, arena, cache, None, true);
-        let width = parts.iter().map(|(_, width)| *width).sum();
+        let guard_value = self.lower_inner(builder, guard, arena, cache, None, true);
+        let width = self.get_width(root, arena);
         let result = builder.alloc_logic(width);
         let true_block = builder.new_block();
         let false_block = builder.new_block();
         let merge_block = builder.new_block_with(vec![result]);
         builder.seal_block(SIRTerminator::Branch {
-            cond: guard,
+            cond: guard_value,
             true_block: (true_block, Vec::new()),
             false_block: (false_block, Vec::new()),
         });
 
         let true_transaction = self.cache_transaction();
         builder.switch_to_block(true_block);
-        let true_value = self.lower_concat_eager_inner(builder, parts, arena, cache, None, true);
+        let true_value = match arena.get(root) {
+            SLTNode::Concat(parts) => {
+                self.lower_concat_eager_inner(builder, parts, arena, cache, None, true)
+            }
+            _ => {
+                // Fold the enable out of each word's select on the active
+                // edge, then restore its dominating value for later paths.
+                let one = builder.alloc_reg(builder.register(&guard_value).clone());
+                builder.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
+                cache.insert(guard, one);
+                let result = self.lower_inner(builder, root, arena, cache, None, true);
+                cache.insert(guard, guard_value);
+                result
+            }
+        };
         builder.seal_block(SIRTerminator::Jump(merge_block, vec![true_value]));
         self.rollback_cache(cache, true_transaction);
 
@@ -432,9 +484,9 @@ impl SLTToSIRLowerer {
 
         if env.is_none()
             && allow_cache
-            && let Some(plan) = self.guarded_concat_plan(node, arena, cache)
+            && let Some(plan) = self.zero_guard_plan(node, arena, cache)
         {
-            return self.lower_guarded_concat_cfg(builder, plan, parts, arena, cache);
+            return self.lower_zero_guarded(builder, plan.guard, node, arena, cache);
         }
 
         self.lower_concat_eager_inner(builder, parts, arena, cache, env, allow_cache)
