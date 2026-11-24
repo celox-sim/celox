@@ -745,6 +745,7 @@ fn lower_module_with_overrides(
         source: module.clone(),
         implicit_nets_allowed,
         sim_module: SimModule {
+            testbench_variables: Default::default(),
             time_precision: None,
             time_scale: celox_design::TimeScale::default(),
             name,

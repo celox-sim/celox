@@ -103,9 +103,8 @@ fn operands<A: Clone + Eq + Hash>(node: &SLTNode<A>, out: &mut Vec<NodeId>) {
 }
 
 /// Whether the rewrite rebuilds every node of the expression of `root`:
-/// operators over plain reads. Folds bind names of their own, a capture is
-/// evaluated at one position, and an indexed read addresses its variable in
-/// state.
+/// operators over reads, including the index expressions of a memory read.
+/// Folds bind names of their own and a capture is evaluated at one position.
 fn plain_expr<A: Clone + Eq + Hash>(root: NodeId, arena: &SLTNodeArena<A>) -> bool {
     let mut pending = vec![root];
     let mut seen = HashSet::default();
@@ -117,7 +116,6 @@ fn plain_expr<A: Clone + Eq + Hash>(root: NodeId, arena: &SLTNodeArena<A>) -> bo
             SLTNode::ForFold { .. } | SLTNode::ForFoldGroup { .. } | SLTNode::Capture { .. } => {
                 return false;
             }
-            SLTNode::Input { index, .. } if !index.is_empty() => return false,
             node => operands(node, &mut pending),
         }
     }
@@ -180,6 +178,8 @@ fn expression_cost<A: Copy + Eq + Hash>(
         }
         let node = arena.get(node);
         count += match node {
+            // A shared indexed load belongs at its driver, even if the address is cheap.
+            SLTNode::Input { index, .. } if !index.is_empty() => DUPLICATED_NET_OPERATORS + 1,
             SLTNode::Input { .. } | SLTNode::Constant(..) | SLTNode::Slice { .. } => 0,
             SLTNode::Concat(parts) => {
                 extra_input_loads(parts.iter().map(|p| p.0), arena, drivers).max(1)
@@ -385,13 +385,13 @@ pub fn inline_nets_with_arrays<A: Copy + Eq + Hash + Ord + Debug + Display>(
                     variable,
                     signed,
                     access,
-                    ..
+                    index: indices,
                 } = node
                 {
                     reads[index].insert(*variable);
                     if first {
                         read_ranges.push((*variable, *access));
-                        if *signed {
+                        if *signed || !indices.is_empty() {
                             pinned.insert(*variable);
                         }
                     }
@@ -791,7 +791,12 @@ pub fn inline_nets_with_arrays<A: Copy + Eq + Hash + Ord + Debug + Display>(
                         continue;
                     }
                     match arena.get(id) {
-                        SLTNode::Input { variable, .. } => read(variable),
+                        SLTNode::Input {
+                            variable, index, ..
+                        } => {
+                            read(variable);
+                            expr.extend(index.iter().map(|entry| entry.node));
+                        }
                         node => operands(node, &mut expr),
                     }
                 }
@@ -863,8 +868,12 @@ fn prune_folded_inputs<A: Copy + Eq + Hash>(
         let node = arena.get(id);
         match node {
             SLTNode::Input {
-                variable, access, ..
+                variable,
+                access,
+                index,
+                ..
             } => {
+                pending.extend(index.iter().map(|entry| (entry.node, unused)));
                 if unused {
                     discarded.insert(VarAtomBase {
                         id: *variable,
@@ -957,10 +966,27 @@ fn substitute<A: Copy + Eq + Hash>(
             } if index.is_empty() && resolved.contains_key(&variable) => {
                 read_ranges(&resolved[&variable], access, arena)?
             }
-            SLTNode::Input { .. }
-            | SLTNode::Constant(..)
-            | SLTNode::ForFold { .. }
-            | SLTNode::ForFoldGroup { .. } => node,
+            SLTNode::Input {
+                variable,
+                signed,
+                mut index,
+                access,
+            } => {
+                if index.iter().all(|entry| cache[&entry.node] == entry.node) {
+                    node
+                } else {
+                    for entry in &mut index {
+                        entry.node = cache[&entry.node];
+                    }
+                    arena.alloc(SLTNode::Input {
+                        variable,
+                        signed,
+                        index,
+                        access,
+                    })?
+                }
+            }
+            SLTNode::Constant(..) | SLTNode::ForFold { .. } | SLTNode::ForFoldGroup { .. } => node,
             SLTNode::Slice { expr, access } => {
                 let new = cache[&expr];
                 if new == expr {
@@ -1105,6 +1131,39 @@ mod tests {
         let mut sources: Vec<u32> = path.sources.iter().map(|source| source.id).collect();
         sources.sort_unstable();
         sources
+    }
+
+    #[test]
+    fn inline_address_wires_without_duplicating_an_indexed_load() {
+        let mut arena = SLTNodeArena::new();
+        let addr = input(&mut arena, 10, 0, 7);
+        let index_wire = input(&mut arena, 11, 0, 7);
+        let memory = arena
+            .alloc(SLTNode::Input {
+                variable: 20,
+                signed: false,
+                access: BitAccess::new(0, 7),
+                index: vec![crate::SLTIndex {
+                    node: index_wire,
+                    stride: 8,
+                    kind: crate::SLTIndexKind::Unpacked { element_width: 8 },
+                }],
+            })
+            .unwrap();
+        let result = input(&mut arena, 12, 0, 7);
+        let mut paths = vec![
+            path(11, 0, 7, addr, &[10]),
+            path(12, 0, 7, memory, &[11, 20]),
+            path(13, 0, 7, result, &[12]),
+            path(14, 0, 7, result, &[12]),
+        ];
+        let report = inline_nets(&mut paths, &mut arena, &pinned(&[13, 14])).unwrap();
+        assert_eq!(report.removed, vec![11]);
+        assert_eq!(sources(&paths[0]), vec![10, 20]);
+        assert!(
+            matches!(arena.get(paths[0].expr), SLTNode::Input { variable: 20, index, .. }
+            if index.len() == 1 && index[0].node == addr && index[0].stride == 8)
+        );
     }
 
     /// A chain of nets with one reader each collapses into the observed

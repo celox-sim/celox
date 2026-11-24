@@ -110,7 +110,8 @@ pub(super) fn pinned_nets(
                     celox_design::DeadStorePolicy::PreserveListedSignals
                     | celox_design::DeadStorePolicy::Off => false,
                 };
-            if port
+            if modules[module].testbench_variables.contains(&var_id)
+                || port
                 || variable.metadata.value_kind != celox_design::ValueKind::Bits
                 || (!variable.metadata.array_dims.is_empty()
                     && !unpacked_element_widths.contains_key(&bindings.locate(instance, var_id)))

@@ -148,6 +148,8 @@ impl<A> EventBody<A> {
 
 #[derive(Clone, Default)]
 pub struct SimModule {
+    /// Storage a frontend's separately compiled testbench or component can access.
+    pub testbench_variables: HashSet<SourceVarId>,
     /// A frontend's global tick precision; absent for scale-free frontends.
     pub time_precision: Option<celox_design::TimePrecision>,
     /// Local unit and precision; scale-free frontends use the 1ps default.

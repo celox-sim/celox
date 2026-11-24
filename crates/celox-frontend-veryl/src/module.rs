@@ -276,10 +276,12 @@ impl<'a> ModuleParser<'a> {
             }
             self.comb_process_ranges.push(crate::artifact::CombProcess {
                 paths: self.comb_blocks.len()..self.comb_blocks.len() + paths.len(),
-                reads: crate::logic_tree::sensitivity::implicit_reads(
-                    self.module,
-                    &decl.statements,
-                )?,
+                // Only retained processes use authored sensitivity at runtime.
+                reads: if proven_combinational {
+                    HashSet::default()
+                } else {
+                    crate::logic_tree::sensitivity::implicit_reads(self.module, &decl.statements)?
+                },
                 token: decl
                     .statements
                     .iter()
