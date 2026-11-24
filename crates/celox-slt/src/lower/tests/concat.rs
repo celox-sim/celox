@@ -43,7 +43,7 @@ fn common_zero_controller_guards_rob_sized_lane_concat() {
     lowerer.reset_cost_cache(root, &arena, &cache, true);
     assert_eq!(
         lowerer
-            .guarded_concat_plan(root, &arena, &cache)
+            .zero_guard_plan(root, &arena, &cache)
             .expect("ROB-sized guarded scan must be profitable")
             .guard,
         guard,
@@ -335,7 +335,107 @@ fn zero_controller_analysis_uses_iterative_postorder_on_deep_dag() {
     lowerer.reset_cost_cache(root, &arena, &cache, true);
 
     let plan = lowerer
-        .guarded_concat_plan(root, &arena, &cache)
+        .zero_guard_plan(root, &arena, &cache)
         .expect("deep guarded concat must be analyzed without recursion");
     assert_eq!(plan.guard, guard);
+}
+
+#[test]
+fn shared_read_enable_guards_an_or_of_masked_words() {
+    let mut arena = SLTNodeArena::new();
+    let enable = input(&mut arena, 0, 1);
+    let debug = input(&mut arena, 1, 1);
+    let debug_enable = arena
+        .alloc(SLTNode::Binary(debug, BinaryOp::And, enable))
+        .unwrap();
+    let mut root = constant(&mut arena, 0, 8);
+    for lane in 0..8 {
+        let select = input(&mut arena, 2 + lane, 1);
+        let gate = if lane < 4 { enable } else { debug_enable };
+        let selected = arena
+            .alloc(SLTNode::Binary(select, BinaryOp::And, gate))
+            .unwrap();
+        let mask = arena
+            .alloc(SLTNode::Concat(vec![(selected, 1); 8]))
+            .unwrap();
+        let data = input(&mut arena, 10 + lane, 8);
+        let word = arena
+            .alloc(SLTNode::Binary(data, BinaryOp::And, mask))
+            .unwrap();
+        root = arena
+            .alloc(SLTNode::Binary(root, BinaryOp::Or, word))
+            .unwrap();
+    }
+    let mut builder = SIRBuilder::new();
+    let mut cache = crate::HashMap::default();
+    let mut lowerer = SLTToSIRLowerer::new(false);
+    let result = lowerer.lower(&mut builder, root, &arena, &mut cache);
+    assert_eq!(cache.get(&root), Some(&result));
+    let later_enable = lowerer.lower(&mut builder, enable, &arena, &mut cache);
+    let unit = finish_lowering(builder);
+    assert_eq!(branch_count(&unit), 1);
+    let entry = &unit.blocks[&unit.entry_block_id];
+    assert!(matches!(entry.terminator, SIRTerminator::Branch { .. }));
+    let loads: Vec<_> = entry
+        .instructions
+        .iter()
+        .filter_map(|i| match i {
+            SIRInstruction::Load(_, addr, ..) => Some(*addr),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        loads,
+        [0],
+        "only the shared enable belongs before the branch"
+    );
+    let val = |v: u8| TestSIRValue {
+        payload: v.into(),
+        mask: 0u8.into(),
+    };
+    for enabled in [0, 1] {
+        for dbg in [0, 1] {
+            let mut memory = crate::HashMap::from_iter([(0, val(enabled)), (1, val(dbg))]);
+            let mut expected = 0;
+            for lane in 0..8 {
+                let selected = u8::from(lane % 3 != 0);
+                let payload = 1u8 << lane;
+                memory.insert(2 + lane, val(selected));
+                memory.insert(10 + lane, val(payload));
+                if enabled != 0 && selected != 0 && (lane < 4 || dbg != 0) {
+                    expected |= payload;
+                }
+            }
+            let values = execute_fold_group_sir_with_memory(&unit, &memory);
+            assert_eq!(values[&result].payload, BigUint::from(expected));
+            assert_eq!(values[&later_enable].payload, BigUint::from(enabled));
+        }
+    }
+
+    // A word already sampled by the scheduler may have used an earlier
+    // enable. Its cached value must still contribute when the enable is low.
+    let SLTNode::Binary(_, _, last_word) = *arena.get(root) else {
+        unreachable!()
+    };
+    let mut builder = SIRBuilder::new();
+    let sampled = builder.alloc_logic(8);
+    builder.emit(SIRInstruction::Imm(sampled, SIRValue::new(0x80u8)));
+    let mut cache = crate::HashMap::from_iter([(last_word, sampled)]);
+    let result = lowerer.lower(&mut builder, root, &arena, &mut cache);
+    let unit = finish_lowering(builder);
+    let zero_inputs = (0..18).map(|id| (id, val(0))).collect();
+    assert_eq!(
+        execute_fold_group_sir_with_memory(&unit, &zero_inputs)[&result].payload,
+        BigUint::from(0x80u8)
+    );
+
+    let unmasked = input(&mut arena, 18, 8);
+    let mixed = arena
+        .alloc(SLTNode::Binary(root, BinaryOp::Or, unmasked))
+        .unwrap();
+    for (four_state, root) in [(false, mixed), (true, root)] {
+        let mut builder = SIRBuilder::new();
+        SLTToSIRLowerer::new(four_state).lower(&mut builder, root, &arena, &mut Default::default());
+        assert_eq!(branch_count(&finish_lowering(builder)), 0);
+    }
 }
