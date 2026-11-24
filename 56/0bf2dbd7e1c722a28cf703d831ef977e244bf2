@@ -1,0 +1,1 @@
+Address PR #4595 review: exclude synthetic nested struct aggregates, validate declared struct ref aggregates, and count distinct writing processes for same-instance ref aliases
