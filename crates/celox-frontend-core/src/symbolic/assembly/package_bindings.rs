@@ -599,6 +599,7 @@ mod tests {
 
     fn dummy_module(name: &str) -> SimModule {
         SimModule {
+            testbench_variables: Default::default(),
             time_precision: None,
             time_scale: celox_design::TimeScale::default(),
             name: name.to_owned(),
