@@ -3408,6 +3408,68 @@ fn non_ansi_port_expressions_become_explicit_ports() {
 }
 
 #[test]
+fn ansi_and_non_ansi_ref_and_const_ref_ports() {
+    let ansi = parse(
+        "module M(const ref logic [7:0] a, b, input logic c, ref var int d, ref [3:0] e); endmodule",
+    );
+    let ports = &ansi.units[0].ports;
+    assert_eq!(ports.len(), 5);
+    assert_eq!(
+        ports
+            .iter()
+            .map(|p| (p.direction, p.constant, p.variable))
+            .collect::<Vec<_>>(),
+        vec![
+            (Some(Direction::Ref), true, false),
+            (Some(Direction::Ref), true, false),
+            (Some(Direction::Input), false, false),
+            (Some(Direction::Ref), false, true),
+            (Some(Direction::Ref), false, false),
+        ]
+    );
+
+    let non_ansi = parse(
+        "module M(a, b, c, d);
+            const ref logic [7:0] a;
+            ref int b;
+            ref [3:0] c;
+            logic [3:0] c;
+            ref d;
+            int d;
+        endmodule",
+    );
+    let unit = &non_ansi.units[0];
+    assert_eq!(unit.port_style, PortStyle::Ansi);
+    assert_eq!(unit.ports.len(), 4);
+    assert_eq!(
+        unit.ports
+            .iter()
+            .map(|p| (p.direction, p.constant))
+            .collect::<Vec<_>>(),
+        vec![
+            (Some(Direction::Ref), true),
+            (Some(Direction::Ref), false),
+            (Some(Direction::Ref), false),
+            (Some(Direction::Ref), false),
+        ]
+    );
+
+    for bad in [
+        "module M(ref wire a); endmodule",
+        "module M(const ref wire a); endmodule",
+        "module M(a); ref wire a; endmodule",
+        "module M(a); const ref wire a; endmodule",
+        "module M(a); ref a; wire a; endmodule",
+        "module M(const int a); endmodule",
+    ] {
+        assert!(
+            Declarations::parse(bad, Path::new("bad.sv")).is_err(),
+            "expected parse failure for: {bad}"
+        );
+    }
+}
+
+#[test]
 fn array_method_with_expressions_parse_in_values_and_statements() {
     parse(
         "module M; int a[3], q[$]; initial begin
