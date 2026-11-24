@@ -1055,7 +1055,11 @@ impl Parser<'_> {
             }
             let checker_was_ready = frame.checker_ready();
             if !frame.typed_scope() && frame.typed_category.is_none() {
-                frame.typed_category = Some(self.peek().to_owned());
+                frame.typed_category = Some(if self.peek() == "const" && self.nth(1) == "ref" {
+                    "const ref".to_owned()
+                } else {
+                    self.peek().to_owned()
+                });
             }
             let was_typed = frame.typed_scope();
             let item_word = self.peek();
@@ -1390,6 +1394,11 @@ impl Parser<'_> {
             } else {
                 None
             };
+            if direction == Some(Direction::Ref) && net_type.is_some() {
+                return Err(
+                    self.error("a `ref` port cannot have a net type (IEEE 1800-2023 23.2.2.3)")
+                );
+            }
             let variable = self.eat("var");
             let typed = self.starts_type();
             let fresh = direction.is_some() || net_type.is_some() || variable || typed;
