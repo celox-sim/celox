@@ -211,6 +211,11 @@ impl Generator<'_> {
         self.binary(1, flag, BinaryOp::Ne, zero)
     }
 
+    /// Older laid-out designs have just the low timed plane.
+    pub(super) fn has_inactive_mask(&self) -> bool {
+        self.program.layout().widths[&self.slots.timed] >= 2 * self.ready_bits
+    }
+
     /// Record in the timed mask whether the kernel of ready-bit `ordinal`
     /// waits for its wake time.
     pub(super) fn set_timed(&mut self, ordinal: usize, timed: bool) {
