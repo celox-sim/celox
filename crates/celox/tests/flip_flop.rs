@@ -60,6 +60,41 @@ fn scalar_clock_assignments_read_from_the_wire_graph() {
     }
 }
 
+#[test]
+fn bounded_memory_initialization_has_no_clock_error_exit() {
+    let code = r#"
+        module Top (
+            clk: input clock, en: input logic, addr: input logic<10>, q: output logic<10>
+        ) {
+            var mem: logic<10>[1024];
+            always_ff (clk) {
+                if en {
+                    for i in 0..1024 { mem[i] = i as 10; }
+                }
+            }
+            assign q = mem[addr];
+        }
+    "#;
+    let result = SimulatorBuilder::new(code, "Top")
+        .trace_post_optimized_sir()
+        .build_with_trace();
+    let mut sim = result.res.unwrap();
+    assert!(!result.trace.format_program().unwrap().contains("Error("));
+    let (clk, en, addr, q) = (
+        sim.event("clk"),
+        sim.signal("en"),
+        sim.signal("addr"),
+        sim.signal("q"),
+    );
+    sim.modify(|io| {
+        io.set(en, 1u8);
+        io.set(addr, 1023u16);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 1023u16.into());
+}
+
 all_backends! {
 
 fn test_ff_runtime_display_and_assert_continue(sim) {
