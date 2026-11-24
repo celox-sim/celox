@@ -228,6 +228,11 @@ impl Plan {
                 );
             }
         }
+        let queue_inactive = !self.inactive.is_empty() && g.has_inactive_mask();
+        if queue_inactive {
+            let empty = g.constant(0, g.ready_bits);
+            g.store_at(slots.timed, g.ready_bits, g.ready_bits, empty);
+        }
         for (offset, kernels) in cx.timed_words() {
             let timed = g.load_at(slots.timed, offset, 64);
             let ready = g.load_at(slots.ready, offset, 64);
@@ -255,6 +260,13 @@ impl Plan {
                             let amount = g.load(process.delay, celox_design::PROCESS_DELAY_WIDTH);
                             let zero = g.equals(amount, 0);
                             let inactive = g.binary(1, inactive, BinaryOp::And, zero);
+                            if queue_inactive {
+                                let bit = ordinals[index] % 64;
+                                let armed = g.mask_bit(bits, bit);
+                                let due = g.binary(1, due, BinaryOp::And, armed);
+                                let pending = g.binary(1, due, BinaryOp::And, inactive);
+                                g.store_at(slots.timed, g.ready_bits + ordinals[index], 1, pending);
+                            }
                             let active = g.equals(inactive, 0);
                             due = g.binary(1, due, BinaryOp::And, active);
                         }
