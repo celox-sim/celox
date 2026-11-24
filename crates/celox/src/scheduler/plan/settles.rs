@@ -428,13 +428,12 @@ impl<'a> PlanBuilder<'a> {
             .map(|&event| storage(events[event].signal))
             .filter(|addr| reads.contains(addr))
             .collect();
-        // A periodic kernel can update data together with the clock.
+        // A timed or initially ready kernel can update data together with the clock.
         // Its writes belong to the same input activation.
         for (index, kernel) in kernels.iter().enumerate() {
-            if kernel
-                .as_ref()
-                .is_some_and(|kernel| kernel.delays && !kernel.writes.is_empty())
-            {
+            if kernel.as_ref().is_some_and(|kernel| {
+                (kernel.wait.is_none() || kernel.delays) && !kernel.writes.is_empty()
+            }) {
                 sources.extend(
                     instructions(&sir.processes[index])
                         .flat_map(written_storage)
