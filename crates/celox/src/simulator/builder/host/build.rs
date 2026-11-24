@@ -531,7 +531,7 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
                 .options
                 .optimize_options
                 .is_enabled(crate::optimizer::SirPass::SchedulerCallees)
-                && crate::scheduler::outlines_callees(&laid_out, defer_derived_edges);
+                && crate::scheduler::outlines_callees(defer_derived_edges);
             crate::scheduler::attach(
                 &mut laid_out,
                 !self.options.native_force_support
