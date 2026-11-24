@@ -2964,6 +2964,56 @@ fn test_ff_runtime_events_drain_with_per_tick_time() {
     );
 }
 
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn outlined_rtl_reports_only_the_event_taken_at_each_tick() {
+    // A large clock body runs as an outlined native kernel. Exactly one
+    // predicate holds per edge, and quiet cycles must not advance the marker.
+    let checks: String = (0..128)
+        .map(|i| {
+            format!(
+                "if n == 9'd{} {{ $assert_continue(1'b0, \"n=%0d t=%t\", n); }}\n",
+                2 * i
+            )
+        })
+        .collect();
+    let code = format!(
+        r#"
+        module Counter(clk: input clock) {{
+            var n: logic<9>;
+            always_ff (clk) {{
+                {checks}
+                n = n + 9'd1;
+            }}
+        }}
+        #[test(t)]
+        module t {{
+            inst clk: $tb::clock_gen;
+            inst dut: Counter(clk);
+            initial {{ clk.next(5); $finish(); }}
+        }}
+    "#
+    );
+    let detailed = Simulator::builder(&code, "t")
+        .opt_level(celox::OptLevel::O2)
+        .run_test_detailed()
+        .unwrap();
+    assert!(!detailed.passed);
+    let messages: Vec<_> = detailed
+        .assertions
+        .iter()
+        .map(|a| a.message.as_deref())
+        .collect();
+    assert_eq!(
+        messages,
+        [
+            Some(b"n=0 t=1".as_slice()),
+            Some(b"n=2 t=3".as_slice()),
+            Some(b"n=4 t=5".as_slice())
+        ]
+    );
+}
+
 #[test]
 fn test_assert_format_args_render_current_time_for_percent_t() {
     let code = r#"
