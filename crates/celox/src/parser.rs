@@ -12,6 +12,16 @@ pub use celox_frontend_veryl::ParserError;
 pub use celox_frontend_veryl::parse_ir;
 use celox_frontend_veryl::parse_ir_with_loop_provenance;
 
+/// Veryl projects the state accessed by its late-compiled testbench before
+/// handing the remaining combinational nets to the shared graph optimizer.
+fn veryl_schedule_options(
+    options: &crate::optimizer::OptimizeOptions,
+) -> celox_frontend_core::ParallelScheduleOptions {
+    let mut schedule = crate::optimizer::parallel_schedule_options(options);
+    schedule.unobserved_nets = options.unobserved_nets();
+    schedule
+}
+
 fn apply_event_write_hints(
     scheduled: &mut celox_frontend_core::ScheduledRtl,
     hints: celox_frontend_core::EventWriteHints,
@@ -645,7 +655,7 @@ pub fn parse(
             ignored_loops,
             true_loops,
             four_state,
-            &crate::optimizer::parallel_schedule_options(optimize_options),
+            &veryl_schedule_options(optimize_options),
             &frontend_trace_options,
             trace.is_some().then_some(&mut frontend_trace),
         )
@@ -1167,7 +1177,7 @@ pub fn parse_with_external_hierarchy(
         ignored_loops,
         true_loops,
         four_state,
-        &crate::optimizer::parallel_schedule_options(optimize_options),
+        &veryl_schedule_options(optimize_options),
         &frontend_trace_options,
         trace.is_some().then_some(&mut frontend_trace),
     )?;

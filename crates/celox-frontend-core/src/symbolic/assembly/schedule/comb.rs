@@ -311,7 +311,7 @@ pub(super) fn comb_process_state(
 /// and the design allow it. Returns the nets that left the program.
 pub(super) fn inline_unobserved_nets(
     parallel: &ParallelScheduleOptions,
-    has_source_actions: bool,
+    actions: &HashMap<AbsoluteAddr, Vec<EventAction>>,
     four_state: bool,
     design: &Design,
     logic: &mut StateGraph,
@@ -347,11 +347,10 @@ pub(super) fn inline_unobserved_nets(
     } = units;
 
     // Nets nothing observes leave the program before it is scheduled. A
-    // fused flip-flop factory lowers the paths from their source form, and
-    // a `$dumpvars` may select any object at run time.
+    // source clock recipe must still find the state named in its summary.
+    // A `$dumpvars` may select any object at run time.
     let mut inlined_nets: Vec<AbsoluteAddr> = Vec::new();
     if parallel.unobserved_nets != celox_design::DeadStorePolicy::Off
-        && !has_source_actions
         && !four_state
         && !parallel.enabled()
         && !timing
@@ -359,7 +358,7 @@ pub(super) fn inline_unobserved_nets(
             .iter()
             .any(|site| site.kind == celox_design::HostRequestKind::Vcd)
     {
-        let pinned = pinned_nets(
+        let mut pinned = pinned_nets(
             parallel.unobserved_nets,
             &design.top_instances(),
             instance_modules,
@@ -403,6 +402,25 @@ pub(super) fn inline_unobserved_nets(
             comb_blocks,
             unpacked_element_widths,
         );
+        // Clock bodies regenerated from source still access their declared
+        // state. Both schedules consume the same optimized wire drivers.
+        for action in actions.values().flatten() {
+            pinned.extend(
+                action
+                    .summary
+                    .reads
+                    .iter()
+                    .chain(&action.summary.writes)
+                    .map(|atom| atom.id.absolute_addr()),
+            );
+            pinned.extend(
+                action
+                    .summary
+                    .dynamic_writes
+                    .iter()
+                    .map(|id| id.absolute_addr()),
+            );
+        }
         let report = celox_slt::net_inline::inline_nets_with_arrays(
             comb_blocks,
             global_arena,

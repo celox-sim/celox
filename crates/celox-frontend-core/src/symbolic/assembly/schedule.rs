@@ -169,7 +169,6 @@ pub fn schedule_symbolic_rtl_reporting_loops(
     } else {
         HashMap::default()
     };
-    let has_source_actions = !actions.is_empty();
     let EventSchedule {
         graph_clocks,
         write_domains,
@@ -243,15 +242,6 @@ pub fn schedule_symbolic_rtl_reporting_loops(
 
     let var_widths = prepare_comb_logic(&design, &mut logic, &mut units, trace_opts, &mut trace)?;
 
-    let source_inputs = source_update_inputs(
-        actions,
-        &design,
-        &logic,
-        &var_widths,
-        &ignored_loops,
-        &true_loops,
-    )?;
-
     // The event signals and their aliases: a partitioned settle keeps their
     // paths apart from the rest.
     let clock_nets = event_nets(
@@ -265,7 +255,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         comb_process_state(&logic, &variables, four_state);
     let inlined_nets = inline_unobserved_nets(
         parallel,
-        has_source_actions,
+        &actions,
         four_state,
         &design,
         &mut logic,
@@ -292,6 +282,15 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                 .map(|p| &mut p.expr),
         )?;
     }
+    let source_inputs = source_update_inputs(
+        actions,
+        &design,
+        &logic,
+        &var_widths,
+        &ignored_loops,
+        &true_loops,
+    )?;
+
     // Release the diagnostic DAGs before scheduling the combinational paths.
     if measure_graphs {
         drop(next_state_dags(&logic.transitions, &logic));
