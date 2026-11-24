@@ -14,7 +14,6 @@ impl Plan {
     ) -> (celox_sir::BlockId, Vec<(usize, celox_sir::BlockId)>) {
         let &Slot {
             slots,
-            ordinals,
             assertions,
             reactive_entry,
             reactive_end,
@@ -24,21 +23,58 @@ impl Plan {
         // the waits see its writes before the next one while kernels remain
         // ready (`run_ready`); then combinational logic settles.
         g.b.switch_to_block(pick);
-        let ready = g.load(slots.ready, g.ready_bits);
-        let zero = g.constant(0, g.ready_bits);
-        let idle = g.binary(1, ready, BinaryOp::Eq, zero);
         let pass_end = g.b.new_block();
-        let chosen = g.b.new_block();
         let idle_region = if assertions {
             g.b.new_block()
         } else {
             pass_end
         };
-        g.b.seal_block(SIRTerminator::Branch {
-            cond: idle,
-            true_block: (idle_region, Vec::new()),
-            false_block: (chosen, Vec::new()),
-        });
+        // Ordinals are dense in kernel order. Select the first nonempty
+        // word, then use its lowest set bit as a word-local switch index.
+        let mut kernels = self
+            .kernels
+            .iter()
+            .enumerate()
+            .filter(|(_, kernel)| kernel.is_some());
+        let mut runs = Vec::new();
+        for offset in (0..g.ready_bits).step_by(64) {
+            let word = g.load_at(slots.ready, offset, 64);
+            let empty = g.equals(word, 0);
+            let chosen = g.b.new_block();
+            let last = offset + 64 == g.ready_bits;
+            let next = if last { idle_region } else { g.b.new_block() };
+            g.b.seal_block(SIRTerminator::Branch {
+                cond: empty,
+                true_block: (next, Vec::new()),
+                false_block: (chosen, Vec::new()),
+            });
+            g.b.switch_to_block(chosen);
+            let lowest = g.b.alloc_bit(64, false);
+            g.b.emit(SIRInstruction::Unary(
+                lowest,
+                UnaryOp::CountTrailingZeros,
+                word,
+            ));
+            let selector = g.b.alloc_bit(8, false);
+            g.b.emit(SIRInstruction::Slice(selector, lowest, 0, 8));
+            let mut cases = Vec::new();
+            for (bit, (index, _)) in kernels.by_ref().take(64).enumerate() {
+                let run = g.b.new_block();
+                cases.push(SIRSwitchCase {
+                    value: bit.into(),
+                    target: run,
+                });
+                runs.push((index, run));
+            }
+            g.b.seal_block(SIRTerminator::Switch {
+                selector,
+                cases,
+                default: internal_exit,
+            });
+            if !last {
+                g.b.switch_to_block(next);
+            }
+        }
         if assertions {
             g.b.switch_to_block(idle_region);
             let phase = g.load_at(
@@ -69,54 +105,6 @@ impl Plan {
                 active,
             );
             g.b.seal_block(SIRTerminator::Jump(pass_end, Vec::new()));
-        }
-        g.b.switch_to_block(chosen);
-        let mut runs = Vec::new();
-        if g.ready_bits <= 64 {
-            // The lowest ready bit names the kernel: one dispatch instead
-            // of a test per kernel. The mask is not zero here.
-            let lowest = g.b.alloc_bit(g.ready_bits, false);
-            g.b.emit(SIRInstruction::Unary(
-                lowest,
-                UnaryOp::CountTrailingZeros,
-                ready,
-            ));
-            let selector = g.b.alloc_bit(8, false);
-            g.b.emit(SIRInstruction::Slice(selector, lowest, 0, 8));
-            let mut cases = Vec::new();
-            for (index, kernel) in self.kernels.iter().enumerate() {
-                if kernel.is_none() {
-                    continue;
-                }
-                let run = g.b.new_block();
-                cases.push(SIRSwitchCase {
-                    value: ordinals[index].into(),
-                    target: run,
-                });
-                runs.push((index, run));
-            }
-            g.b.seal_block(SIRTerminator::Switch {
-                selector,
-                cases,
-                default: internal_exit,
-            });
-        } else {
-            for (index, kernel) in self.kernels.iter().enumerate() {
-                if kernel.is_none() {
-                    continue;
-                }
-                let this = g.mask_bit(ready, ordinals[index]);
-                let run = g.b.new_block();
-                let next = g.b.new_block();
-                g.b.seal_block(SIRTerminator::Branch {
-                    cond: this,
-                    true_block: (run, Vec::new()),
-                    false_block: (next, Vec::new()),
-                });
-                runs.push((index, run));
-                g.b.switch_to_block(next);
-            }
-            g.b.seal_block(SIRTerminator::Jump(internal_exit, Vec::new()));
         }
         (pass_end, runs)
     }
