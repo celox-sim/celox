@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795526713606,
+  "lastUpdate": 1795527082354,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -465711,6 +465711,42 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-veryl-cc-x86_64/heliodor_suite_smp_linux_boot_2hart_execution",
             "unit": "ms",
             "value": 262900.169954
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "16df66a02e4504f537cbe2585ecd3f56ff627dff",
+          "message": "chore(deps): update rust crate toml to v1.2.2 (#4604)",
+          "timestamp": "2026-11-24T06:13:49Z",
+          "url": "https://github.com/celox-sim/celox/commit/16df66a02e4504f537cbe2585ecd3f56ff627dff"
+        },
+        "date": 1795527082354,
+        "cpu": "Intel Xeon 6975P-C",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-native-x86_64/heliodor_suite_smp_linux_boot_2hart_compilation",
+            "unit": "ms",
+            "value": 80325.791194
+          },
+          {
+            "name": "heliodor-native-x86_64/heliodor_suite_smp_linux_boot_2hart_execution",
+            "unit": "ms",
+            "value": 269955.290535
+          },
+          {
+            "name": "heliodor-celox-jit/heliodor_suite_smp_linux_boot_2hart_execution",
+            "unit": "ms",
+            "value": 269912.361646
           }
         ]
       }
