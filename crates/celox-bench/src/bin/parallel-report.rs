@@ -8,10 +8,8 @@ use std::io::Write as _;
     clippy::disallowed_types,
     reason = "cross-thread: the global tracing layer and filter must be Send + Sync and are called from every thread that emits celox::parallel events, sharing the capture buffer and window state"
 )]
-use std::sync::{
-    Mutex,
-    atomic::{AtomicBool, AtomicU64},
-};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::{
     collections::BTreeMap,
     fs,

@@ -640,9 +640,7 @@ pub(super) fn global_gvn(func: &mut MFunction) {
         leader_changes: &mut Vec<(ValueNumber, VReg, Option<usize>)>,
         replacements: &mut Vec<(usize, usize, MInst)>,
     ) {
-        for inst_idx in 0..block.insts.len() {
-            let inst = &block.insts[inst_idx];
-
+        for (inst_idx, inst) in block.insts.iter().enumerate() {
             if let MInst::Mov { dst, src } = inst {
                 let number = gvn_value(value_numbers, *src);
                 value_numbers[dst.0 as usize] = number;

@@ -122,11 +122,10 @@ pub(super) fn recognize_linear_bitmap_scan(
     }
     let found_position = found_position?;
     let found = header_block.params[found_position];
-    for position in 0..header_block.params.len() {
+    for (position, &best) in header_block.params.iter().enumerate() {
         if position == trip_position || position == index_position || position == found_position {
             continue;
         }
-        let best = header_block.params[position];
         let first_matches = is_zero_extended_index(eu, definitions, first_jump[0], index)
             && immediate(eu, definitions, first_jump[1]) == Some(1)
             && carry_jump == [best, found];

@@ -24,10 +24,6 @@ use std::sync::Arc;
 )]
 use std::sync::Mutex;
 use std::sync::atomic::Ordering;
-#[expect(
-    clippy::disallowed_types,
-    reason = "cross-thread: epoch, progress, abort and sleep flags are shared by the dispatching thread and the celox-lane worker threads, and diagnostic ids come from a process-wide counter"
-)]
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};

@@ -1673,9 +1673,9 @@ impl LoopNesting {
             std::mem::swap(&mut left, &mut right);
         }
         let difference = self.depth[left] - self.depth[right];
-        for level in 0..self.ancestors.len() {
+        for (level, ancestors) in self.ancestors.iter().enumerate() {
             if difference & (1usize << level) != 0 {
-                left = self.ancestors[level][left];
+                left = ancestors[left];
             }
         }
         if left == right {

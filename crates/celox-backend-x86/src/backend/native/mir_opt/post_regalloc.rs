@@ -97,11 +97,11 @@ pub fn post_regalloc_peephole(func: &mut MFunction, assignment: &AssignmentMap) 
             }
 
             let end = (idx + IMM_FOLD_SCAN_LIMIT + 1).min(block.insts.len());
-            for use_idx in idx + 1..end {
-                if !block.insts[use_idx].uses().contains(&imm_vreg) {
+            for (use_idx, inst) in block.insts.iter().enumerate().take(end).skip(idx + 1) {
+                if !inst.uses().contains(&imm_vreg) {
                     continue;
                 }
-                if let Some(folded) = fold_imm_use(&block.insts[use_idx], imm_vreg, value) {
+                if let Some(folded) = fold_imm_use(inst, imm_vreg, value) {
                     *remove_imm = true;
                     replacements.insert(use_idx, folded);
                 }

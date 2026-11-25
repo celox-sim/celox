@@ -23,10 +23,6 @@ pub(super) fn compile_tasks_with<S, T: Send, E: Send>(
     compile: impl Fn(&mut S, usize) -> Result<T, E> + Sync,
 ) -> std::thread::Result<Result<Vec<T>, E>> {
     use std::sync::atomic::Ordering;
-    #[expect(
-        clippy::disallowed_types,
-        reason = "cross-thread: scoped compile worker threads share the next-task counter and the stop flag the first failing worker sets"
-    )]
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     let mut results = Vec::with_capacity(order.len());
     let mut failure = None;
