@@ -1039,6 +1039,54 @@ fn units_without_calls_compile_alike_with_functions_present() {
     );
 }
 
+/// A call of the coverage helper compiles to the code of a heap helper
+/// call, which passes the state pointer first and finds the helper before
+/// the extern table, unlike a call of a user function with those arguments.
+#[test]
+fn coverage_helper_calls_compile_as_heap_helper_calls() {
+    let unit = |func| ExecutionUnit {
+        entry_block_id: crate::BlockId(0),
+        blocks: [block(
+            0,
+            vec![
+                imm(0, 0x11),
+                imm(1, 0x22),
+                imm(2, 0x33),
+                imm(3, 0x44),
+                SIRInstruction::ExternCall {
+                    dst: Some(reg(4)),
+                    func,
+                    args: (0..4).map(reg).collect(),
+                },
+                store(state(OUT), 32, 4),
+            ],
+            SIRTerminator::Return,
+        )]
+        .into_iter()
+        .collect(),
+        register_map: (0..5).map(|id| (reg(id), bit(64))).collect(),
+    };
+    let layout = layout(false);
+    let code = |func| {
+        emit_prepared_eu_with_functions(
+            &unit(func),
+            &layout,
+            false,
+            "unit",
+            false,
+            None,
+            None,
+            None,
+            || false,
+        )
+        .unwrap()
+        .code
+    };
+    let heap = code(celox_sir::extern_abi::HEAP_HELPER_ID);
+    assert_eq!(code(celox_sir::extern_abi::COVERAGE_HELPER_ID), heap);
+    assert_ne!(code(0), heap);
+}
+
 /// `clear()`: overwrites its `width`-bit four-state slot 0, which the caller
 /// passes and reads back, with zero in a single whole-slot store.
 fn clearing(width: usize) -> FunctionUnit<RegionedAbsoluteAddr> {

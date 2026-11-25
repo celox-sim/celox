@@ -505,7 +505,7 @@ impl SIRTranslator {
         );
         // The heap helper sits two slots before the user table and takes the
         // state pointer before its arguments.
-        let heap = func == celox_sir::extern_abi::HEAP_HELPER_ID;
+        let heap = celox_sir::extern_abi::is_heap_helper(func);
         let function = state.builder.ins().load(
             types::I64,
             MemFlags::trusted(),

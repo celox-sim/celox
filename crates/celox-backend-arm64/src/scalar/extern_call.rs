@@ -58,7 +58,7 @@ pub(super) fn emit_call_extern(
     // The heap helper takes the state pointer before the arguments, so C
     // argument `position` is `args[position - leading]`. So does a function
     // unit, whose one argument is its frame's offset into the call stack.
-    let heap = func == celox_sir::extern_abi::HEAP_HELPER_ID;
+    let heap = celox_sir::extern_abi::is_heap_helper(func);
     let function = celox_sir::extern_abi::native_function_slot(func);
     // Another generated function of the image: it takes only the state
     // pointer, already in x0, and returns its status there.

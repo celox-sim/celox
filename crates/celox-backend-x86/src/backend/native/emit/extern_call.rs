@@ -191,7 +191,7 @@ pub(super) fn emit_call_extern(
             (&[rdi, rsi, rdx, rcx, r8, r9], 0)
         };
     // The heap helper takes the state pointer before the staged arguments.
-    let heap = func == celox_sir::extern_abi::HEAP_HELPER_ID;
+    let heap = celox_sir::extern_abi::is_heap_helper(func);
     let leading = usize::from(heap || kernel.is_some());
     let arg_count = usize::from(arg_count) + leading;
     let stack_args = arg_count.saturating_sub(registers.len()) as i32;

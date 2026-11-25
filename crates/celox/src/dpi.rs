@@ -304,7 +304,9 @@ fn internal_helpers() -> Vec<usize> {
 }
 
 /// The heap helper that compiled code calls for
-/// [`celox_sir::extern_abi::HEAP_HELPER_ID`], with the state pointer first.
+/// [`celox_sir::extern_abi::HEAP_HELPER_ID`] and
+/// [`celox_sir::extern_abi::COVERAGE_HELPER_ID`], with the state pointer
+/// first.
 pub(crate) extern "C" fn heap_helper(state: *mut u8, code: u64, a: u64, b: u64, c: u64) -> u64 {
     // SAFETY: compiled code passes the state pointer of an image whose
     // header holds the address of its backend's live heap, and the backend
