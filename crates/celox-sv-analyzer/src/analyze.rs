@@ -277,6 +277,7 @@ fn publish(
                         .collect(),
                     instance.array_range(),
                 )
+                .with_interface_actuals(instance.interface_actuals().to_vec())
             })
             .collect();
         // The source module is consumed: its bodies move into the IR instead

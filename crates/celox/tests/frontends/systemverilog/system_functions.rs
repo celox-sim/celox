@@ -716,10 +716,13 @@ sv_backends! {
             event => panic!("unexpected event: {event:?}"),
         }).collect::<Vec<_>>();
         messages.sort();
+        // `$printtimescale(info)` names the port as written; the call in
+        // `show`, which the port imports, names the interface instance the
+        // function belongs to (IEEE 1800-2023 20.4.1, 21.2.1.5).
         assert_eq!(messages, [
+            "Time scale of (Top.i) is 1ns / 1ps",
+            "Time scale of (Top.j) is 100ns / 10ps",
             "Time scale of (Top.r_i.info) is 1ns / 1ps",
-            "Time scale of (Top.r_i.info) is 1ns / 1ps",
-            "Time scale of (Top.r_j.info) is 100ns / 10ps",
             "Time scale of (Top.r_j.info) is 100ns / 10ps",
         ]);
     }

@@ -960,6 +960,7 @@ pub struct Instance {
     port_connections: Vec<PortConnection>,
     /// The declared `[left:right]` bounds of an instance array.
     array_range: Option<(i128, i128)>,
+    interface_actuals: Vec<(String, String)>,
 }
 
 impl Instance {
@@ -982,7 +983,22 @@ impl Instance {
             port_names,
             port_connections,
             array_range,
+            interface_actuals: Vec::new(),
         }
+    }
+
+    pub(crate) fn with_interface_actuals(mut self, actuals: Vec<(String, String)>) -> Self {
+        self.interface_actuals = actuals;
+        self
+    }
+
+    /// The interface instance or port of the instantiating module that each
+    /// interface port of the child is connected to, as handles spell them
+    /// (the child's port, the actual): what `%m` in a subroutine the port
+    /// imports names (see [`celox_design::SiteHomes::ports`]). Ports that
+    /// are arrays are not listed.
+    pub fn interface_actuals(&self) -> &[(String, String)] {
+        &self.interface_actuals
     }
 
     /// The number of elements of an instance array, if this is one.

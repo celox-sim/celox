@@ -247,12 +247,13 @@ impl Item {
         }
     }
 
-    fn interface_scope(&self) -> Option<Arc<scope::ScopeSymbols>> {
-        let imported = &self.imported;
-        if imported.interface_scopes.is_empty() {
-            return None;
-        }
-        let mut scopes = imported
+    /// The interface bindings of the generate scopes that enclose the item,
+    /// outermost first, by their names.
+    fn enclosing_interface_scopes(
+        &self,
+    ) -> Vec<(&String, &super::interface_binding::ScopeBinding)> {
+        let mut scopes = self
+            .imported
             .interface_scopes
             .iter()
             .filter(|(name, _)| {
@@ -263,10 +264,38 @@ impl Item {
                         .is_some_and(|rest| rest.starts_with('.'))
             })
             .collect::<Vec<_>>();
+        scopes.sort_by_key(|(name, _)| name.len());
+        scopes
+    }
+
+    /// The module's name for the interface instance or port that `local`
+    /// names where the item is, as [`Self::scoped`] resolves it: one of the
+    /// innermost generate scope around the item that declares it, or else
+    /// one of the module.
+    pub fn interface_handle(&self, local: &str) -> Option<String> {
+        if let Some((scope, _)) = self
+            .enclosing_interface_scopes()
+            .into_iter()
+            .rev()
+            .find(|(_, bindings)| bindings.types.contains_key(local))
+        {
+            return Some(format!("{scope}.{}", scope_component(local)));
+        }
+        self.imported
+            .interface_types
+            .contains_key(local)
+            .then(|| local.to_owned())
+    }
+
+    fn interface_scope(&self) -> Option<Arc<scope::ScopeSymbols>> {
+        let imported = &self.imported;
+        if imported.interface_scopes.is_empty() {
+            return None;
+        }
+        let scopes = self.enclosing_interface_scopes();
         if scopes.is_empty() {
             return None;
         }
-        scopes.sort_by_key(|(name, _)| name.len());
         let mut local = (**imported).clone();
         for (_, bindings) in scopes {
             local.interface_members.extend(bindings.members.clone());
