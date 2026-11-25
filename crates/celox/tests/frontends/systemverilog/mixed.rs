@@ -1918,6 +1918,31 @@ fn module_class_override_sources(extra: &str) -> String {
 }
 
 #[test]
+fn mixed_hierarchies_call_recursive_functions_of_systemverilog_modules() {
+    // A recursive function goes out of line into a function unit of the
+    // module that declares it, under a Veryl top as under a SystemVerilog
+    // one.
+    let veryl = "module Top(t: output logic<32>) { inst s: $sv::Fact(t); }";
+    let sv = "`timescale 1ns/1ns
+        module Fact(output int t);
+            function automatic int fact(int n);
+                return n <= 1 ? 1 : n * fact(n - 1);
+            endfunction
+            initial #1 t = fact(5);
+        endmodule";
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sources(vec![(veryl, Path::new("top.veryl"))], "Top")
+            .with_sv_sources(vec![(sv, Path::new("fact.sv"))])
+            .four_state(four_state)
+            .build()
+            .unwrap();
+        sim.run_until(2).unwrap();
+        let t = sim.signal("t");
+        assert_eq!(sim.get(t), BigUint::from(120u8), "four-state {four_state}");
+    }
+}
+
+#[test]
 fn mixed_hierarchies_call_overrides_of_module_classes() {
     let veryl = "module Top(t: output logic<32>) { inst s: $sv::Setter; inst r: $sv::Reader(t); }";
     let sv = module_class_override_sources("5");
