@@ -1408,6 +1408,42 @@ endmodule
 }
 
 #[test]
+fn units_called_beside_next_state_graphs_are_kept() {
+    // At O2 the flip-flops of a two-state module are lowered into the
+    // next-state graph of their edge, and a procedure of the same edge that
+    // the graph does not take runs between its batches. The functions such
+    // a procedure calls are functions of the module, as those any other
+    // unit calls are: `fact` is recursive, so its call is out of line at
+    // every level.
+    let source = r#"module Top(input bit clk, input logic [7:0] d, output logic [7:0] q, output int r);
+    function automatic int fact(int n);
+        if (n <= 1) return 1;
+        return n * fact(n - 1);
+    endfunction
+    always_ff @(posedge clk) q <= q + d;
+    always @(posedge clk) r = fact(int'(d));
+endmodule
+"#;
+    for level in [
+        celox::OptLevel::O0,
+        celox::OptLevel::O1,
+        celox::OptLevel::O2,
+    ] {
+        let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("calls.sv"))], "Top")
+            .four_state(false)
+            .opt_level(level)
+            .build()
+            .unwrap_or_else(|error| panic!("{level:?}: {error:?}"));
+        let (clk, d) = (sim.event("clk"), sim.signal("d"));
+        let (q, r) = (sim.signal("q"), sim.signal("r"));
+        sim.modify(|io| io.set(d, 5u8)).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(r), BigUint::from(120u8), "{level:?}");
+        assert_eq!(sim.get(q), BigUint::from(5u8), "{level:?}");
+    }
+}
+
+#[test]
 fn defaults_count_at_every_call_of_the_size_policy() {
     // The default of `pick` calls `wide`, which runs at each of the three
     // calls of `caller`: inlined, `caller` is three times `wide`, over the
