@@ -258,6 +258,7 @@ impl SystemFunction {
         match self {
             Self::Process(op) => match op {
                 celox_design::ProcessOp::SelfHandle => "process::self",
+                celox_design::ProcessOp::SelfHandleInternal => "compiler process handle",
                 celox_design::ProcessOp::Status => "process.status",
                 celox_design::ProcessOp::Kill => "process.kill",
                 celox_design::ProcessOp::Await => "process.await",
