@@ -150,12 +150,15 @@ endmodule"#;
     }
 
     let mut sim = build(false);
+    let two_state_kernels = sim.scheduler_stats().kernels.len();
     sim.run_until(9).unwrap();
     assert_eq!(fails(&mut sim), 0);
     let passes = sim.signal("passes");
     assert_eq!(sim.get(passes), 5u32.into());
 
     let mut sim = build(true);
+    // Only the four-state design needs a scheduler entry for the X check.
+    assert_eq!(sim.scheduler_stats().kernels.len(), two_state_kernels + 1);
     let _ = sim.run_until(9);
     assert!(fails(&mut sim) > 0, "four-state X check must still fire");
 }
