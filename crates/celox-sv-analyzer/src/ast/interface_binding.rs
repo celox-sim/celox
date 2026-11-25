@@ -19,6 +19,10 @@ pub(super) struct InstanceBinding {
     pub module: String,
     pub connections: HashMap<String, Vec<PortConnection>>,
     pub parameters: Vec<ParameterOverride>,
+    /// The interface instance or port of the instantiating scope that each
+    /// interface port of the child (one that is no array) is connected to
+    /// (see [`crate::ir::Instance::interface_actuals`]).
+    pub interface_actuals: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

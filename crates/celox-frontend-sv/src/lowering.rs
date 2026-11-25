@@ -301,6 +301,8 @@ pub(crate) struct LoweredSvInstance {
     pub array_element: Option<(usize, usize)>,
     /// The lower bound of the instance array, which numbers its elements.
     pub array_index_base: usize,
+    /// See [`sv::ir::Instance::interface_actuals`].
+    pub interface_actuals: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

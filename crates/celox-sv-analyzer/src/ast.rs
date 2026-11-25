@@ -477,6 +477,8 @@ pub struct Instance {
     port_connections: Vec<PortConnection>,
     /// The declared `[left:right]` bounds of an instance array.
     array_range: Option<(i128, i128)>,
+    /// See [`crate::ir::Instance::interface_actuals`].
+    interface_actuals: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
