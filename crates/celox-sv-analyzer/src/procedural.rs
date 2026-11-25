@@ -144,6 +144,10 @@ pub enum StmtBase<E, L> {
         /// For a severity task in an action block of an assertion, that
         /// assertion (IEEE 1800-2023 16.3, 20.10).
         assertion: Option<celox_design::AssertionSite>,
+        /// The instance whose scope `%m` names, when the statement is in a
+        /// copy of a subroutine of another instance (see
+        /// [`celox_design::SiteHome`]).
+        home: Option<celox_design::SiteHome>,
     },
     /// The declaration point of a local variable: it is (re)initialized here,
     /// to `init` or to the default value of its type.
@@ -455,10 +459,12 @@ impl<E, L> StmtBase<E, L> {
                 args,
                 site,
                 assertion,
+                home,
             } => StmtBase::SystemTask {
                 task,
                 site,
                 assertion,
+                home,
                 args: args
                     .into_iter()
                     .map(|arg| match arg {
@@ -913,6 +919,58 @@ pub struct LocalVariableBase<T> {
     /// count of one analysis named it. Escaped identifiers may hold any
     /// character, so the name itself cannot tell.
     pub owned: bool,
+}
+
+/// An expression whose `$sformatf` calls can be visited in place.
+pub trait VisitFormats {
+    /// Visit the options of every `$sformatf` call in this expression in
+    /// place, the calls in its operands included.
+    fn visit_formats_mut(
+        &mut self,
+        f: &mut impl FnMut(&mut crate::system_functions::FormatOptions),
+    );
+}
+
+/// The home that marks the body of a per-instance arm of a dispatcher, a
+/// copy of a subroutine of the instance the arm selects: expanding the arms
+/// for each instance (`ir::virtual_instances::expand_stmts`) gives each its
+/// [`celox_design::SiteHome::Instance`]. Instance ids start at 1, so no
+/// instance has this one.
+pub fn arm_home() -> celox_design::SiteHome {
+    celox_design::SiteHome::Instance(0)
+}
+
+/// Mark `stmts`, a copy of a subroutine of another instance, with `home`:
+/// every site they make names it in `%m` (see [`celox_design::SiteHome`]).
+/// A site already marked keeps its home, that of a copy inside the copy.
+pub fn set_site_home<E: VisitFormats, L>(
+    stmts: &mut [StmtBase<E, L>],
+    home: &celox_design::SiteHome,
+) {
+    visit_site_homes(stmts, &mut |site| {
+        if site.is_none() {
+            *site = Some(home.clone());
+        }
+    });
+}
+
+/// Visit the home of every site of `stmts` (see [`set_site_home`]) in place.
+pub fn visit_site_homes<E: VisitFormats, L>(
+    stmts: &mut [StmtBase<E, L>],
+    f: &mut impl FnMut(&mut Option<celox_design::SiteHome>),
+) {
+    for stmt in stmts {
+        stmt.walk_mut(&mut |stmt| {
+            if let StmtBase::SystemTask { home, .. } = stmt {
+                f(home);
+            }
+        });
+        stmt.visit_mut(
+            &mut |expr: &mut E| expr.visit_formats_mut(&mut |options| f(&mut options.home)),
+            &mut |_| {},
+            &mut |_| {},
+        );
+    }
 }
 
 /// A function or task; tasks may suspend their calling process.

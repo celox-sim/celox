@@ -494,13 +494,18 @@ impl Ff<'_, '_> {
                 args,
                 site,
                 assertion,
+                home,
             } => {
                 // System-task output writes (including readmem) have their own
                 // lowering. Until they expose safe per-update boundaries, a
                 // watched automatic destination is rejected like expression
                 // copy-out rather than losing intermediate changes.
                 self.observation.implicit_write_depth += 1;
+                // Every site the task makes names its home.
+                let inner = home.clone().or_else(|| self.m.site_home.clone());
+                let outer = std::mem::replace(&mut self.m.site_home, inner);
                 let result = self.system_task(*task, args, site.as_ref(), assertion.as_ref());
+                self.m.site_home = outer;
                 self.observation.implicit_write_depth -= 1;
                 result
             }

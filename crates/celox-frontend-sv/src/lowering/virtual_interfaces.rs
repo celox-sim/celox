@@ -24,6 +24,9 @@ use super::{LoweredSvInstance, LoweredSvModule, LoweredSvModuleKey};
 struct Instance {
     /// The instance of the module that holds it.
     path: Vec<(String, usize)>,
+    /// Its handle there, as the module spells it (empty for a module
+    /// instance whose classes' overrides are numbered).
+    handle: String,
     module: ModuleId,
     interface: String,
     /// The signal of the module that holds each member.
@@ -132,6 +135,7 @@ impl Instances {
                         .collect();
                     found.instances.push(Instance {
                         path: path.clone(),
+                        handle: handle.handle.clone(),
                         module: module_id,
                         interface: handle.interface.clone(),
                         members: handle.members.clone(),
@@ -162,8 +166,7 @@ impl Instances {
     }
 
     /// The id of the instance that the interface port `handle` of a child
-    /// `instance` of the module instance `path` denotes: the one that the
-    /// actuals of its members belong to.
+    /// `instance` of the module instance `path` denotes.
     fn actual(
         &self,
         path: &[(String, usize)],
@@ -171,27 +174,35 @@ impl Instances {
         instance: &LoweredSvInstance,
         handle: &sv::ir::InterfaceHandle,
     ) -> Option<u32> {
-        handle.members.iter().find_map(|(member, formal)| {
-            let connection = instance
-                .port_connections
-                .iter()
-                .find(|connection| &connection.formal == formal)?;
-            let actual = match &connection.actual_expr {
-                Some(sv::ir::Expr::Ident(name)) => name.as_str(),
-                Some(_) => return None,
-                None => connection.actual.as_str(),
-            };
-            let actual = parent.interface_handles.iter().find(|candidate| {
-                candidate.interface == handle.interface
-                    && candidate
-                        .members
-                        .iter()
-                        .any(|(name, signal)| name == member && signal == actual)
-            })?;
-            self.identities
-                .get(&(path.to_vec(), actual.handle.clone()))
-                .copied()
-        })
+        actual_handle(
+            path,
+            &parent.interface_handles,
+            instance,
+            handle,
+            &self.identities,
+        )
+        .copied()
+    }
+
+    /// What the homes of the design's sites denote
+    /// ([`celox_design::SiteHomes`]): each numbered instance, and the one
+    /// each interface handle of each module instance denotes.
+    /// What [`celox_design::SiteHome::Instance`] denotes: the module
+    /// instance that holds each instance and its handle there, in id order.
+    pub(super) fn site_homes(&self) -> Vec<(Vec<(String, usize)>, String)> {
+        self.instances
+            .iter()
+            .map(|instance| {
+                // A module instance numbered for its classes' overrides is
+                // the module instance itself.
+                let handle = if instance.handle == sv::ir::MODULE_HANDLE {
+                    String::new()
+                } else {
+                    instance.handle.clone()
+                };
+                (instance.path.clone(), handle)
+            })
+            .collect()
     }
 
     /// The ids of the instances of each interface, in id order, which the
@@ -296,4 +307,120 @@ impl Instances {
         }
         values
     }
+}
+
+/// What `table` records for the handle among `parent`, those of module
+/// instance `path`, that the interface port `handle` of its child `instance`
+/// denotes: the one that the actuals of the port's members belong to.
+fn actual_handle<'t, T>(
+    path: &[(String, usize)],
+    parent: &[sv::ir::InterfaceHandle],
+    instance: &LoweredSvInstance,
+    handle: &sv::ir::InterfaceHandle,
+    table: &'t HashMap<(Vec<(String, usize)>, String), T>,
+) -> Option<&'t T> {
+    handle.members.iter().find_map(|(member, formal)| {
+        let connection = instance
+            .port_connections
+            .iter()
+            .find(|connection| &connection.formal == formal)?;
+        let actual = match &connection.actual_expr {
+            Some(sv::ir::Expr::Ident(name)) => name.as_str(),
+            Some(_) => return None,
+            None => connection.actual.as_str(),
+        };
+        let actual = parent.iter().find(|candidate| {
+            candidate.interface == handle.interface
+                && candidate
+                    .members
+                    .iter()
+                    .any(|(name, signal)| name == member && signal == actual)
+        })?;
+        table.get(&(path.to_vec(), actual.handle.clone()))
+    })
+}
+
+/// The interface instance, as the module instance that holds it and its
+/// handle there, that each interface port of each module instance below
+/// `root` denotes (see [`celox_design::SiteHomes::ports`]).
+#[allow(clippy::type_complexity)]
+pub(super) fn port_homes(
+    root: ModuleId,
+    module_ids: &HashMap<LoweredSvModuleKey, ModuleId>,
+    elaborated: &HashMap<ModuleId, ElaboratedModule>,
+) -> Vec<(
+    (Vec<(String, usize)>, String),
+    (Vec<(String, usize)>, String),
+)> {
+    // Only an interface port denotes another instance.
+    if !elaborated
+        .values()
+        .any(|module| module.home_handles.iter().any(|handle| handle.port))
+    {
+        return Vec::new();
+    }
+    let mut homes: HashMap<(Vec<(String, usize)>, String), (Vec<(String, usize)>, String)> =
+        HashMap::default();
+    // Parents come before their children, which follow the ports of their
+    // interface handles to them. Each entry carries the modules above it: a
+    // module that instantiates itself, directly or not, is an error that its
+    // elaboration reports, so the walk does not follow it.
+    type Parent<'a> = Option<(Vec<(String, usize)>, ModuleId, &'a LoweredSvInstance)>;
+    type Pending<'a> = (ModuleId, Vec<(String, usize)>, Parent<'a>, Vec<ModuleId>);
+    let mut pending: std::collections::VecDeque<Pending<'_>> =
+        std::collections::VecDeque::from([(root, Vec::new(), None, Vec::new())]);
+    while let Some((module_id, path, parent, above)) = pending.pop_front() {
+        let Some(module) = elaborated.get(&module_id) else {
+            continue;
+        };
+        for handle in &module.home_handles {
+            let home = if handle.port {
+                let Some((parent_path, parent_module, instance)) = &parent else {
+                    continue;
+                };
+                match actual_handle(
+                    parent_path,
+                    &elaborated[parent_module].home_handles,
+                    instance,
+                    handle,
+                    &homes,
+                ) {
+                    Some(home) => home.clone(),
+                    None => continue,
+                }
+            } else {
+                (path.clone(), handle.handle.clone())
+            };
+            homes.insert((path.clone(), handle.handle.clone()), home);
+        }
+        let mut positions: HashMap<&str, usize> = HashMap::default();
+        for instance in module.instances() {
+            // Hierarchy indices follow listing order.
+            let position = positions.entry(&instance.instance_name).or_default();
+            let index = instance.array_index_base + *position;
+            *position += 1;
+            let Some(&child) = module_ids.get(&LoweredSvModuleKey::instance_key(instance)) else {
+                continue;
+            };
+            if child == module_id || above.contains(&child) {
+                continue;
+            }
+            let mut child_path = path.clone();
+            child_path.push((instance.instance_name.clone(), index));
+            let mut child_above = above.clone();
+            child_above.push(module_id);
+            pending.push_back((
+                child,
+                child_path,
+                Some((path.clone(), module_id, instance)),
+                child_above,
+            ));
+        }
+    }
+    let mut ports: Vec<_> = homes
+        .into_iter()
+        .filter(|((path, handle), home)| home != &(path.clone(), handle.clone()))
+        .collect();
+    ports.sort();
+    ports
 }

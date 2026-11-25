@@ -428,6 +428,7 @@ impl ScopeElaboration<'_> {
         interface_scope_names.sort_unstable();
         interface_scope_names.dedup();
         let interface_handles = virtual_interfaces::handles(session, self.imported, &self.ports);
+        let home_handles = virtual_interfaces::home_handles(self.imported, &self.ports);
         let module_classes = module_overrides::module_classes(
             syntax_tree,
             session,
@@ -448,6 +449,7 @@ impl ScopeElaboration<'_> {
             program: self.program,
             interface_scope_names,
             interface_handles,
+            home_handles,
             module_classes,
             parameters: self.parameters,
             ports: self.ports,

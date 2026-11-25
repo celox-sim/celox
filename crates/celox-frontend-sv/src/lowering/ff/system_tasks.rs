@@ -77,6 +77,7 @@ impl Ff<'_, '_> {
             results: Vec::new(),
             strings,
             scope: None,
+            home: None,
         });
         self.with_kernel(|kernel| kernel.host_request(HostRequestKind::Vcd, local_site))
             .map_err(|error| unsupported(error.to_string()))?;
@@ -277,6 +278,7 @@ impl Ff<'_, '_> {
             results,
             strings: Vec::new(),
             scope: None,
+            home: None,
         });
         self.request_host(HostRequestKind::Plusargs, site)?;
         if let Some((lvalues, result, guards)) = target {
@@ -525,6 +527,7 @@ impl Ff<'_, '_> {
             arg_is_string,
             arg_float_precision,
             arg_is_handle,
+            home: None,
         });
         self.b.emit(SIRInstruction::RuntimeEvent {
             site_id,

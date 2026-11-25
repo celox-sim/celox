@@ -131,12 +131,10 @@ impl ModuleBinding<'_> {
                 };
                 let mut interface = {
                     let tree = &AnalysisContext {
-                        interface_instance: Some(timescales::interface_instance(
-                            tree.interface_instance.as_deref(),
-                            handle,
-                        )),
                         // A port's body runs in the instance it denotes,
-                        // which this scope does not name (#4354).
+                        // which the homes of its sites name (see below),
+                        // not this scope.
+                        interface_instance: None,
                         instance_scope: None,
                         ..tree.clone()
                     };
@@ -189,6 +187,18 @@ impl ModuleBinding<'_> {
                 bound.subroutines.retain(|function| {
                     function.name.contains("::") || functions.contains(&function.name)
                 });
+                // The subroutines the port imports run in the instance it
+                // denotes, whose scope their `%m` names.
+                let home = celox_design::SiteHome::Path {
+                    up: Some(0),
+                    down: Vec::new(),
+                    within: Some(handle.to_string()),
+                };
+                for subroutine in &mut bound.subroutines {
+                    let subroutine = Arc::make_mut(subroutine);
+                    crate::procedural::set_site_home(&mut subroutine.body, &home);
+                    crate::procedural::set_site_home(&mut subroutine.sensitivity_body, &home);
+                }
                 bound
                     .constant_functions
                     .retain(|name| name.contains("::") || functions.contains(name));

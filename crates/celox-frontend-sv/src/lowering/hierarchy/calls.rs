@@ -781,13 +781,31 @@ pub(in crate::lowering) fn import(
     }
     let imported = aliases.imported;
     let renames = Renames { names: renames };
+    // The callee's subroutines run in the caller's code, but `%m` in them
+    // names the callee instance (IEEE 1800-2023 21.2.1.5), and the homes of
+    // the copies they hold name the same instances from the caller.
+    let up = match call.start {
+        HierarchicalStart::Root => None,
+        HierarchicalStart::Ancestor(levels) => u32::try_from(levels).ok(),
+    };
+    let mut rehome = |site: &mut Option<celox_design::SiteHome>| {
+        *site = Some(match site.take() {
+            Some(home) => home.from_copy(up, &call.path),
+            None => celox_design::SiteHome::Path {
+                up,
+                down: call.path.clone(),
+                within: None,
+            },
+        });
+    };
     for subroutine in subroutines {
         if subroutine.name.contains("::") {
             continue;
         }
-        imported
-            .subroutines
-            .push(renames.subroutine(subroutine.clone()));
+        let mut subroutine = renames.subroutine(subroutine.clone());
+        sv::procedural::visit_site_homes(&mut subroutine.body, &mut rehome);
+        sv::procedural::visit_site_homes(&mut subroutine.sensitivity_body, &mut rehome);
+        imported.subroutines.push(subroutine);
     }
     Ok(())
 }

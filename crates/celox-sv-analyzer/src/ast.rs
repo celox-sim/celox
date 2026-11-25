@@ -351,6 +351,9 @@ pub struct Module {
     interface_scope_names: Vec<String>,
     /// The interface instances and ports a virtual interface may denote.
     interface_handles: Vec<crate::ir::InterfaceHandle>,
+    /// Every interface instance and port of the module, whose connections
+    /// tell the instance a port denotes (see [`crate::ir::Module::home_handles`]).
+    home_handles: Vec<crate::ir::InterfaceHandle>,
     /// The classes of a module, whose overrides other scopes may call (see
     /// `module_overrides`).
     module_classes: Option<crate::ir::ModuleClasses>,
@@ -957,6 +960,60 @@ pub struct ConditionalAssignment {
     guard_boundary: Option<usize>,
     /// Nested branch paths, from innermost to outermost.
     path_epochs: Vec<usize>,
+}
+
+impl crate::procedural::VisitFormats for Expr {
+    fn visit_formats_mut(
+        &mut self,
+        f: &mut impl FnMut(&mut crate::system_functions::FormatOptions),
+    ) {
+        match self {
+            Expr::Ident(_) | Expr::Literal(_) => {}
+            Expr::Select { expr, .. } | Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => {
+                expr.visit_formats_mut(f)
+            }
+            Expr::Concat(parts) | Expr::RepeatConcat { parts, .. } => {
+                for part in parts {
+                    part.visit_formats_mut(f);
+                }
+            }
+            Expr::Binary { left, right, .. } => {
+                left.visit_formats_mut(f);
+                right.visit_formats_mut(f);
+            }
+            Expr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                condition.visit_formats_mut(f);
+                then_expr.visit_formats_mut(f);
+                else_expr.visit_formats_mut(f);
+            }
+            Expr::Call { callee, args, .. } => {
+                if let Callee::String(crate::system_functions::StringOp::Format { options }) =
+                    callee
+                {
+                    f(options);
+                }
+                for arg in args.iter_mut().flatten() {
+                    arg.visit_formats_mut(f);
+                }
+            }
+            Expr::Inside { expr, items } => {
+                expr.visit_formats_mut(f);
+                for item in items {
+                    match item {
+                        InsideItem::Value(value) => value.visit_formats_mut(f),
+                        InsideItem::Range { low, high } => {
+                            low.visit_formats_mut(f);
+                            high.visit_formats_mut(f);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

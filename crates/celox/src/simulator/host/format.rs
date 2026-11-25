@@ -113,6 +113,7 @@ pub(crate) fn format_message(
         arg_is_string: Vec::new(),
         arg_float_precision: Vec::new(),
         arg_is_handle: Vec::new(),
+        home: None,
     };
     render_bytes(
         &template,

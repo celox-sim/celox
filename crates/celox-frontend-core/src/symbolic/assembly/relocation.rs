@@ -42,6 +42,88 @@ pub(super) fn elaborated_scope_name(
     }
 }
 
+/// Names the homes of sites ([`celox_design::SiteHome`]) as `%m` prints
+/// them: the instance a copied subroutine belongs to, not the one whose
+/// code runs it.
+pub(super) struct HomeNames<'a> {
+    root_name: &'a str,
+    expanded: &'a HashMap<InstancePath, InstanceId>,
+    indexed_instances: &'a HashSet<InstanceId>,
+    homes: &'a celox_design::SiteHomes,
+    ports: HashMap<(&'a [(String, usize)], &'a str), &'a (Vec<(String, usize)>, String)>,
+}
+
+impl<'a> HomeNames<'a> {
+    pub(super) fn new(
+        root_name: &'a str,
+        expanded: &'a HashMap<InstancePath, InstanceId>,
+        indexed_instances: &'a HashSet<InstanceId>,
+        homes: &'a celox_design::SiteHomes,
+    ) -> Self {
+        let ports = homes
+            .ports
+            .iter()
+            .map(|((path, port), actual)| ((path.as_slice(), port.as_str()), actual))
+            .collect();
+        Self {
+            root_name,
+            expanded,
+            indexed_instances,
+            homes,
+            ports,
+        }
+    }
+
+    /// The name of module instance `path` and, within it, of interface
+    /// instance `within` (empty for none).
+    fn name(&self, path: Vec<(String, usize)>, within: &str) -> String {
+        let name = elaborated_scope_name(
+            self.root_name,
+            &InstancePath(path),
+            self.expanded,
+            self.indexed_instances,
+        );
+        match (name.is_empty(), within.is_empty()) {
+            (_, true) => name,
+            (true, false) => within.to_owned(),
+            (false, false) => format!("{name}.{within}"),
+        }
+    }
+
+    fn instance(&self, id: u32) -> Option<String> {
+        let (path, within) = self
+            .homes
+            .instances
+            .get(usize::try_from(id.checked_sub(1)?).ok()?)?;
+        Some(self.name(path.clone(), within))
+    }
+
+    /// The name of `home` for a site that module instance `holder` holds.
+    pub(super) fn resolve(
+        &self,
+        holder: &InstancePath,
+        home: &celox_design::SiteHome,
+    ) -> Option<String> {
+        match home {
+            celox_design::SiteHome::Path { up, down, within } => {
+                let kept = match up {
+                    Some(up) => holder.0.len().checked_sub(usize::try_from(*up).ok()?)?,
+                    None => 0,
+                };
+                let mut path = holder.0[..kept].to_vec();
+                path.extend(down.iter().cloned());
+                let within = within.as_deref().unwrap_or("");
+                // An interface port names the instance connected to it.
+                match self.ports.get(&(path.as_slice(), within)) {
+                    Some((actual, handle)) => Some(self.name(actual.clone(), handle)),
+                    None => Some(self.name(path, within)),
+                }
+            }
+            celox_design::SiteHome::Instance(id) => self.instance(*id),
+        }
+    }
+}
+
 pub(super) fn flatten_with_trace(
     module: &SimModule,
     path: &InstancePath,
@@ -219,6 +301,7 @@ pub(super) fn relocate_units(
     trace_opts: &crate::FrontendTraceOptions,
     trace: &mut Option<&mut crate::FrontendTrace>,
     startup_ready: Option<AbsoluteAddr>,
+    homes: &HomeNames<'_>,
 ) -> Result<
     (
         SLTNodeArena<AbsoluteAddr>,
@@ -296,6 +379,7 @@ pub(super) fn relocate_units(
             &mut extern_functions,
             &mut runtime_event_sites,
             &functions,
+            homes,
         )?;
         let function_base = instance.function_base;
         relocate_functions(&instance, &mut functions);
@@ -411,6 +495,7 @@ fn number_instance<'a>(
     extern_functions: &mut Vec<ExternFunction>,
     runtime_event_sites: &mut Vec<RuntimeEventSite>,
     functions: &[celox_sir::FunctionUnit<RegionedAbsoluteAddr>],
+    homes: &HomeNames<'_>,
 ) -> Result<InstanceRelocation<'a>, ParserError> {
     let runtime_event_site_base = u32::try_from(runtime_event_sites.len()).map_err(|_| {
         ParserError::illegal_context(
@@ -477,7 +562,13 @@ fn number_instance<'a>(
         let global_site = runtime_event_sites.len() as u32;
         runtime_event_site_map.insert(local_site as u32, global_site);
         let mut site = site.clone();
-        site.scope = Some(scope.clone());
+        // A copied subroutine's site names the instance it belongs to.
+        site.scope = Some(
+            site.home
+                .take()
+                .and_then(|home| homes.resolve(path, &home))
+                .unwrap_or_else(|| scope.clone()),
+        );
         // A deferred action names the flush point of its process in the
         // same instance.
         if let Some(celox_design::DeferredSite::Action { queue, .. }) = &mut site.deferred {

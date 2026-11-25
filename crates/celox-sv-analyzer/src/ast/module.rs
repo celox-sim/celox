@@ -40,6 +40,10 @@ impl Module {
         &self.interface_handles
     }
 
+    pub(crate) fn home_handles(&self) -> &[crate::ir::InterfaceHandle] {
+        &self.home_handles
+    }
+
     pub(crate) fn module_classes(&self) -> Option<&crate::ir::ModuleClasses> {
         self.module_classes.as_ref()
     }
