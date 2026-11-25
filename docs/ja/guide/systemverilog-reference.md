@@ -228,7 +228,7 @@ program の region と `$exit` に関する差異は[標準準拠コードに影
   - generate ブロック内インスタンスのポート接続が宣言する暗黙ネット（6.10）: これを読む入力接続は拒否し、出力だけが駆動するものはブロックではなくモジュールのネットになります。
   - 多次元のインスタンス配列、負の下限を持つインスタンス配列、または4,095要素を超えるインスタンス配列。
   - package ネット（[#1146](https://github.com/celox-sim/celox/issues/1146)）。package 変数はクロックやリセットにできません。
-  - ワイルドカード import（26.3）: モジュール・interface・program・package スコープ、generate ブロック、手続きブロックは、参照位置ごとではなく本体全体で名前を1度だけ束縛します（`export p::x;` は package 内で束縛）。1つの束縛対象内で参照位置により異なる宣言を指す場合は拒否します。また、ブロック自身のワイルドカード import を通じて package 変数を読むブロックローカル初期化子も拒否します（[#4350](https://github.com/celox-sim/celox/issues/4350)）。
+  - ワイルドカード import（26.3）: モジュール・interface・program・package スコープ、generate ブロック、手続きブロックは、参照位置ごとではなく本体全体で名前を1度だけ束縛します（`export p::x;` は package 内で束縛）。1つの束縛対象内で参照位置により異なる宣言を指す場合は拒否します（[#4646](https://github.com/celox-sim/celox/issues/4646)）。先行する参照がワイルドカード import で取り込んだ名前は、同名を宣言する別パッケージの後続ワイルドカード import の後でも、規格どおりその宣言に束縛されたままです。また、ブロック自身のワイルドカード import を通じて package 変数を読むブロックローカル初期化子も拒否します（[#4350](https://github.com/celox-sim/celox/issues/4350)）。
   - `$unit` 変数を宣言できるソースファイルは1つだけです。
 - **型と式:**
   - enum の packed 配列の要素に対する enum メソッド（`first`、`next` など）（[#2417](https://github.com/celox-sim/celox/issues/2417)）。

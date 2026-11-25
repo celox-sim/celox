@@ -706,7 +706,7 @@ fn qualifier_offsets(tree: &SyntaxTree) -> HashSet<usize> {
 }
 
 /// The block that owns a lexical scope with imports of its own.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum ScopeOwner {
     /// A generate block, by its native body identity.
     Generate(celox_sv_syntax::BodyItemId),
@@ -950,13 +950,16 @@ enum ScopeLookup {
 
 /// Look `name`, referenced at `offset`, up in the generate blocks around the
 /// reference, innermost first: in each, its declarations, then its explicit
-/// imports, then its wildcard imports (IEEE 1800-2023 26.3).
+/// imports, then the candidate an earlier reference made locally visible
+/// there (`visible`), then its wildcard imports (IEEE 1800-2023 26.3). A
+/// candidate the reference finds becomes locally visible in its block.
 fn scope_lookup(
     name: &String,
     offset: usize,
     scopes: &[GenerateScope],
     provided: &dyn Fn(&String, &String) -> Result<String, AnalyzerError>,
     packages: &packages::Packages,
+    visible: &mut HashMap<(ScopeOwner, String), String>,
 ) -> Result<ScopeLookup, AnalyzerError> {
     let mut around: Vec<&GenerateScope> = scopes
         .iter()
@@ -982,6 +985,9 @@ fn scope_lookup(
         }
         if let Some(target) = explicit {
             return Ok(ScopeLookup::Imported(scope.id, target));
+        }
+        if let Some(target) = visible.get(&(scope.id, name.clone())) {
+            return Ok(ScopeLookup::Imported(scope.id, target.clone()));
         }
         let mut found: Option<(String, &String)> = None;
         // A wildcard import makes candidates for the references after it.
@@ -1010,6 +1016,7 @@ fn scope_lookup(
             }
         }
         if let Some((target, _)) = found {
+            visible.insert((scope.id, name.clone()), target.clone());
             return Ok(ScopeLookup::Imported(scope.id, target));
         }
     }
@@ -1553,10 +1560,12 @@ fn resolve_scope_imports(
                 }
             }
         }
+        // The candidates references made locally visible in each block.
+        let mut visible = HashMap::default();
         for (name, offsets) in &mut referenced {
             let mut outer = Vec::new();
             for &offset in offsets.iter() {
-                match scope_lookup(name, offset, &all_scopes, &provided, packages)? {
+                match scope_lookup(name, offset, &all_scopes, &provided, packages, &mut visible)? {
                     ScopeLookup::Declared => {}
                     ScopeLookup::Imported(ScopeOwner::Generate(block), target) => {
                         block_resolved.push((name.clone(), offset, target.clone()));
@@ -1580,6 +1589,42 @@ fn resolve_scope_imports(
             *offsets = outer;
         }
         referenced.retain(|_, offsets| !offsets.is_empty());
+    }
+    // The first reference of the module's scope to a name that a wildcard
+    // import before it provides imports that declaration, which is locally
+    // visible to the references after it (IEEE 1800-2023 26.3): they bind
+    // it even after another wildcard import that also declares the name.
+    // A declaration of the scope and an explicit import come first, and a
+    // reference after `export p::x;` binds the export: wildcard candidates
+    // do not take part there.
+    let exported_before = |name: &String, offset: usize| {
+        imports.exports.iter().any(|export| match export {
+            Export::Item(package_name, item) => {
+                item == name
+                    && imports
+                        .export_offsets
+                        .get(&(package_name.clone(), name.clone()))
+                        .is_some_and(|at| *at < offset)
+            }
+            _ => false,
+        })
+    };
+    let mut module_visible: HashMap<String, (usize, (String, Vec<String>))> = HashMap::default();
+    if !imports.wildcard.is_empty() {
+        for (name, offsets) in &referenced {
+            if local.contains(name) || bindings.iter().any(|binding| binding.name == *name) {
+                continue;
+            }
+            for &offset in offsets {
+                if exported_before(name, offset) {
+                    break;
+                }
+                if let Some(found) = candidates(name, offset)? {
+                    module_visible.insert(name.clone(), (offset, found));
+                    break;
+                }
+            }
+        }
     }
     // `export p::x;` refers to `x`: it imports a candidate the scope does
     // not otherwise reference, like an explicit import (IEEE 1800-2023 26.6),
@@ -1709,7 +1754,7 @@ fn resolve_scope_imports(
         Ok(found.map(|(target, _)| target))
     };
     if !imports.wildcard.is_empty() {
-        for (name, offsets) in &referenced {
+        for name in referenced.keys() {
             if local.contains(name) {
                 continue;
             }
@@ -1718,20 +1763,14 @@ fn resolve_scope_imports(
             if bindings.iter().any(|binding| binding.name == *name) {
                 continue;
             }
-            // A wildcard import binds the references after it; the scope
-            // binds the name once, to what the last of them denote, and the
-            // check below rejects references the binding would change.
-            let mut resolved: Option<Option<(String, Vec<String>)>> = None;
-            for &offset in offsets {
-                if let Some(found) = candidates(name, offset)? {
-                    resolved = Some(Some(found));
-                }
-            }
-            if let Some(Some((target, through))) = resolved {
+            // A wildcard import binds the references after the first that
+            // finds it; the check below rejects the references before it
+            // that denote another declaration.
+            if let Some((_, (target, through))) = module_visible.get(name) {
                 bindings.push(Binding {
                     name: name.clone(),
-                    target,
-                    through,
+                    target: target.clone(),
+                    through: through.clone(),
                 });
             }
         }
@@ -1901,8 +1940,12 @@ fn resolve_scope_imports(
                     return provided(package_name, name).map(Some);
                 }
             }
-            if let Some((target, _)) = candidates(name, offset)? {
-                return Ok(Some(target));
+            // No wildcard import before the first reference that finds one
+            // provides the name.
+            if let Some((at, (target, _))) = module_visible.get(name)
+                && *at <= offset
+            {
+                return Ok(Some(target.clone()));
             }
             if let Some(target) = outer.get(name) {
                 return Ok(target.clone());
