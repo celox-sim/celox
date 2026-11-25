@@ -435,6 +435,7 @@ fn bind_in_mode(
                             classes::enclosing_unit(native, data.tokens),
                             native,
                             data.tokens,
+                            tree.generate_scope.as_deref(),
                             session,
                         );
                         // The declaration, in the elaborated scope that
@@ -762,6 +763,7 @@ fn declare_enum(
         classes::enclosing_unit(native, data.tokens),
         native,
         data.tokens,
+        tree.generate_scope.as_deref(),
         session,
     );
     let position = declaration_position(tree, native, data);

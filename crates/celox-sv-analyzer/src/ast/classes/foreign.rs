@@ -389,6 +389,7 @@ fn specialize(
         interface_instance: None,
         instance_scope: None,
         declared_values: false,
+        generate_scope: None,
     };
 
     let mut imports = owner.imports.clone();
