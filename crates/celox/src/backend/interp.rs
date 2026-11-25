@@ -192,6 +192,10 @@ struct Machine<'a> {
     emit_triggers: bool,
     /// The frames of the function calls being run.
     frames: Frames<'a>,
+    /// The scheduler's outlined bodies, which a compiled image calls
+    /// through its extern table; the interpreter runs a body itself when
+    /// a unit calls it.
+    scheduler_callees: &'a [ExecutionUnit<RegionedAbsoluteAddr>],
 }
 
 /// The program's function units and the stack their frames live on.
@@ -1279,6 +1283,44 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
                 ))),
             };
         }
+        // A compiled image calls the scheduler's outlined bodies through
+        // its extern table; the interpreter runs the body itself, which
+        // is what inlining it into the caller would do.
+        if let Some(index) = celox_sir::extern_abi::native_kernel_index(func)
+            && let Some(index) = index.checked_sub(crate::scheduler::CALLEE_PLACEHOLDER)
+        {
+            let callee = self
+                .scheduler_callees
+                .get(index as usize)
+                .ok_or_else(|| InterpError::Machine(format!("unbound scheduler callee {index}")))?;
+            let mut registers = Registers::new(&callee.register_map, self.four_state);
+            let mut child = Machine {
+                memory: &mut *self.memory,
+                layout: self.layout,
+                extern_functions: self.extern_functions,
+                four_state: self.four_state,
+                comb_capture_enabled: &mut *self.comb_capture_enabled,
+                heap: &mut *self.heap,
+                trigger_snapshots: self.trigger_snapshots,
+                emit_triggers: self.emit_triggers,
+                frames: Frames {
+                    functions: self.frames.functions,
+                    slots: self.frames.slots,
+                    stack: &mut *self.frames.stack,
+                    bases: Vec::new(),
+                },
+                scheduler_callees: self.scheduler_callees,
+            };
+            execute_prepared_unit(
+                callee,
+                &mut child,
+                &[],
+                self.four_state,
+                &mut registers,
+                self.frames.functions,
+            )?;
+            return Ok(0);
+        }
         // SAFETY: the frontend gives each call the argument count of the
         // DPI-C import it links to.
         Ok(unsafe { self.extern_functions.call(func, args) })
@@ -1469,6 +1511,7 @@ fn run_units<'u>(
     trigger_snapshots: &mut Vec<((AbsoluteAddr, u32), u64)>,
     emit_triggers: bool,
     calls: &mut Calls,
+    scheduler_callees: &[ExecutionUnit<RegionedAbsoluteAddr>],
     #[cfg(hotspot_jit)] hotspots: (&mut Option<HotspotRuntime>, EntryKey),
 ) -> Result<(), SimulatorErrorCode> {
     #[cfg(hotspot_jit)]
@@ -1508,6 +1551,7 @@ fn run_units<'u>(
                     stack: &mut *stack,
                     bases: Vec::new(),
                 },
+                scheduler_callees,
             };
             if let Ok(base) = machine.object_offset(&addr) {
                 // Snapshot the raw first word; trigger detection extracts the
@@ -1545,6 +1589,7 @@ fn run_units<'u>(
                 stack: &mut *stack,
                 bases: Vec::new(),
             },
+            scheduler_callees,
         };
         // Entry blocks of top-level execution units take no parameters: the
         // compiled ABI passes only the memory pointer, so all inputs arrive
@@ -1619,6 +1664,9 @@ pub struct InterpBackend {
     updates: HashMap<AbsoluteAddr, celox_sir::EventEntries<UnitGroup>>,
     /// One unit per process kernel.
     process_units: Vec<PreparedUnit>,
+    /// The scheduler's outlined bodies, run by the interpreter itself
+    /// when a unit calls one.
+    scheduler_callees: Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
     layout: MemoryLayout,
     four_state: bool,
     memory: MemoryImage,
@@ -1783,6 +1831,7 @@ impl InterpBackend {
             eval_comb_units,
             updates,
             process_units,
+            scheduler_callees: laid_out.scheduler_callees.clone(),
             layout,
             four_state,
             memory,
@@ -2021,6 +2070,7 @@ impl SimBackend for InterpBackend {
             &mut self.trigger_snapshots,
             self.emit_triggers,
             &mut self.calls,
+            &self.scheduler_callees,
             #[cfg(hotspot_jit)]
             (&mut self.hotspots, EntryKey::Comb),
         )
@@ -2054,6 +2104,7 @@ impl SimBackend for InterpBackend {
             &mut self.trigger_snapshots,
             self.emit_triggers,
             &mut self.calls,
+            &self.scheduler_callees,
             #[cfg(hotspot_jit)]
             (&mut self.hotspots, EntryKey::EvalApply(event.id())),
         )
@@ -2108,6 +2159,7 @@ impl SimBackend for InterpBackend {
             &mut self.trigger_snapshots,
             self.emit_triggers,
             &mut self.calls,
+            &self.scheduler_callees,
             #[cfg(hotspot_jit)]
             (&mut self.hotspots, EntryKey::CombApply(event.id())),
         )
@@ -2141,6 +2193,7 @@ impl SimBackend for InterpBackend {
             &mut self.trigger_snapshots,
             self.emit_triggers,
             &mut self.calls,
+            &self.scheduler_callees,
             #[cfg(hotspot_jit)]
             (&mut self.hotspots, EntryKey::EvalOnly(event.id())),
         )
@@ -2174,6 +2227,7 @@ impl SimBackend for InterpBackend {
             &mut self.trigger_snapshots,
             self.emit_triggers,
             &mut self.calls,
+            &self.scheduler_callees,
             #[cfg(hotspot_jit)]
             (&mut self.hotspots, EntryKey::Apply(event.id())),
         )
@@ -2227,6 +2281,7 @@ impl SimBackend for InterpBackend {
             &mut self.trigger_snapshots,
             false,
             &mut self.calls,
+            &self.scheduler_callees,
             #[cfg(hotspot_jit)]
             (&mut self.hotspots, EntryKey::Process(index)),
         )
