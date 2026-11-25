@@ -1001,6 +1001,7 @@ fn analyze_package(
         interface_instance: None,
         instance_scope: None,
         declared_values: true,
+        generate_scope: None,
     };
     let tree = &context;
     let timed = AnalysisContext {

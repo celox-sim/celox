@@ -239,12 +239,15 @@ impl Item {
     }
 
     /// `tree` analyzing the item, which sees the interface bindings of the
-    /// generate scopes that enclose it.
+    /// generate scopes that enclose it, and declares types of the instance
+    /// of the generate block it is in (IEEE 1800-2023 27.4).
     pub fn scoped<'a>(&self, tree: &AnalysisContext<'a>) -> AnalysisContext<'a> {
-        match self.interface_scope() {
+        let tree = match self.interface_scope() {
             Some(symbols) => tree.importing(symbols),
             None => tree.clone(),
-        }
+        };
+        let tokens = tree.declarations().body_item(self.id).tokens;
+        tree.in_generate_scope(&self.scope, tokens)
     }
 
     /// The interface bindings of the generate scopes that enclose the item,

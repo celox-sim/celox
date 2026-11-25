@@ -411,7 +411,14 @@ impl<'a, 'b> Elaborator<'a, 'b> {
             outer,
             outer_functions,
         });
-        let scope = Rc::new(self.prepare_block_contents(&children, scope, index_ref)?);
+        // The block's typedefs, constants and the types of its declarations
+        // are bound as those of this instance (IEEE 1800-2023 27.4).
+        let tokens = self.tree.declarations().body_item(id).tokens;
+        let generate = types::GenerateScope::new(&scope.path, self.tree.declarations(), tokens);
+        let outer = self.tree.generate_scope.replace(Arc::new(generate));
+        let prepared = self.prepare_block_contents(&children, scope, index_ref);
+        self.tree.generate_scope = outer;
+        let scope = Rc::new(prepared?);
         jobs.push(Job::ExitScope);
         ordinals.push(0);
         let counter = ordinals.len() - 1;

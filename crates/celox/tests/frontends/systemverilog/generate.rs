@@ -1310,3 +1310,157 @@ endmodule"#;
         assert_eq!(lines, ["22226666 0001 0100"], "four_state={four_state}");
     }
 }
+
+/// Build `body` as module `Top`, whose `for` generate blocks `g` declare
+/// anonymous types, or the error that rejects it.
+fn build_generate_types(body: &str) -> Result<celox::Simulation, String> {
+    let source = format!(
+        "`timescale 1ns/1ns\nmodule Top(output int seen, output int other);\n{body}\nendmodule"
+    );
+    celox::Simulation::from_sv_sources(
+        vec![(source.as_str(), Path::new("generate_types.sv"))],
+        "Top",
+    )
+    .build()
+    .map_err(|error| error.to_string())
+}
+
+/// Each instance of a `for` generate block is a scope of its own (IEEE
+/// 1800-2023 27.4), so an anonymous enumeration it declares is a type of
+/// each instance: a variable of another instance's is assigned to one only
+/// by a cast (6.22.1 c, 6.19.3). In one instance, its members and the
+/// variables of its declaration statement match it.
+#[test]
+fn anonymous_enumerations_of_generate_instances_are_types_of_their_own() {
+    let body = |statement: &str| {
+        format!(
+            "for (genvar i = 0; i < 2; i++) begin : g
+                enum {{A, B}} x, y;
+                initial begin
+                    x = i ? B : A;
+                    y = x;
+                    x = y;
+                end
+            end
+            initial begin
+                #1 {statement}
+                seen = g[1].x;
+                other = g[0].y;
+            end"
+        )
+    };
+    let Err(error) = build_generate_types(&body("g[1].x = g[0].x;")) else {
+        panic!("a variable of another instance's enumeration needs a cast");
+    };
+    assert!(error.contains("is not assignment"), "{error}");
+    let mut sim = build_generate_types(&body("void'($cast(g[1].x, g[0].x));")).unwrap();
+    let (seen, other) = (sim.signal("seen"), sim.signal("other"));
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(seen), BigUint::from(0u8));
+    assert_eq!(sim.get(other), BigUint::from(0u8));
+}
+
+/// The instances of a generate block with an escaped name, which may hold
+/// `.` and `[` (IEEE 1800-2023 5.6.1), declare their anonymous types and
+/// typedefs in the scope its elaborated path names: in one instance, the
+/// members of an anonymous enumeration match its variables, and a typedef
+/// and an anonymous type of the instance work together (6.22.1, 27.4).
+#[test]
+fn anonymous_types_of_escaped_generate_blocks_match_in_their_instance() {
+    let mut sim = build_generate_types(
+        "for (genvar i = 0; i < 2; i++) begin : \\g.b[0]
+            typedef enum {C, D} t;
+            typedef struct {t m; int n;} s_t;
+            enum {A, B} x, y;
+            t u;
+            s_t w;
+            struct {t m; int n;} v;
+            initial begin
+                x = i ? B : A;
+                y = x;
+                u = t'(x);
+                w.m = u;
+                w.n = y;
+                v.m = w.m;
+                v.n = w.n + 2;
+            end
+            if (i == 1) begin : last
+                initial #1 seen = v.n + (v.m == D);
+            end
+        end",
+    )
+    .unwrap();
+    let seen = sim.signal("seen");
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(seen), BigUint::from(4u8));
+}
+
+/// Instances of nested `for` generate blocks declare anonymous types of
+/// their own, too (IEEE 1800-2023 27.4, 6.22.1 c).
+#[test]
+fn anonymous_enumerations_of_nested_generate_instances_are_types_of_their_own() {
+    let body = |statement: &str| {
+        format!(
+            "for (genvar i = 0; i < 2; i++) begin : g
+                for (genvar j = 0; j < 2; j++) begin : h
+                    enum {{A, B}} x;
+                    initial x = j ? B : A;
+                end
+            end
+            initial begin
+                #1 {statement}
+                seen = g[1].h[1].x;
+                other = g[1].h[0].x;
+            end"
+        )
+    };
+    for statement in ["g[1].h[0].x = g[0].h[0].x;", "g[1].h[0].x = g[1].h[1].x;"] {
+        let Err(error) = build_generate_types(&body(statement)) else {
+            panic!("{statement} needs a cast");
+        };
+        assert!(error.contains("is not assignment"), "{statement}: {error}");
+    }
+    let mut sim = build_generate_types(&body("")).unwrap();
+    let (seen, other) = (sim.signal("seen"), sim.signal("other"));
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(seen), BigUint::from(1u8));
+    assert_eq!(sim.get(other), BigUint::from(0u8));
+}
+
+/// An anonymous structure of a `for` generate block is a type of each
+/// instance (IEEE 1800-2023 27.4, 6.22.1 c). An unpacked one is not
+/// equivalent to another instance's, so they do not compare (6.22.2,
+/// 11.4.5), while the variables of one declaration statement do. A packed
+/// one stays equivalent to, and assignment compatible with, another
+/// instance's (6.22.2 c).
+#[test]
+fn anonymous_structures_of_generate_instances_are_types_of_their_own() {
+    let body = |comparison: &str| {
+        format!(
+            "for (genvar i = 0; i < 2; i++) begin : g
+                struct {{int a;}} u, v;
+                struct packed {{logic [7:0] a;}} p;
+                initial begin
+                    u.a = i + 3;
+                    v = u;
+                    p.a = i + 5;
+                end
+            end
+            initial begin
+                #1 g[1].p = g[0].p;
+                g[1].u.a = g[0].u.a;
+                seen = g[1].u.a + g[1].p;
+                other = {comparison};
+            end"
+        )
+    };
+    let Err(error) = build_generate_types(&body("g[1].u == g[0].u")) else {
+        panic!("an unpacked structure of another instance is not equivalent");
+    };
+    assert!(error.contains("of another type"), "{error}");
+    let mut sim = build_generate_types(&body("g[0].u == g[0].v")).unwrap();
+    let (seen, other) = (sim.signal("seen"), sim.signal("other"));
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(seen), BigUint::from(8u8));
+    assert_eq!(sim.get(other), BigUint::from(1u8));
+}
