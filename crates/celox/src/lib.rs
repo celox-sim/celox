@@ -30,6 +30,7 @@ mod diagnostics;
 #[cfg_attr(not(feature = "host-runtime"), allow(dead_code))]
 mod dpi;
 use celox_sir::interp as interpreter;
+mod activation_profile;
 mod ir;
 mod memory_file_reader;
 mod optimizer;
@@ -55,6 +56,7 @@ mod value_change;
 #[cfg(all(feature = "cli", any(target_arch = "x86_64", target_arch = "aarch64")))]
 #[doc(hidden)]
 pub mod vpi;
+pub use activation_profile::{ActivationCount, ActivationKind, ActivationProfile, ActivationSite};
 pub use backend::SimulatorErrorCode as RuntimeErrorCode;
 pub use backend::{
     EventHandle, LayoutRequirements, MemoryLayout, MemoryLayoutMode, SimBackend, get_byte_size,

@@ -17,9 +17,14 @@ pub(crate) struct NativeHost {
 
 impl NativeHost {
     pub(super) fn new<B: SimBackend>(backend: &B, program: &RuntimeProgram) -> Self {
+        let mut arena = native_arena::Arena::default();
+        if !program.activation_sites.is_empty() {
+            arena.profile = vec![0; program.activation_sites.len()];
+            arena.header.profile = arena.profile.as_mut_ptr();
+        }
         Self {
             file_io: native_io::Metadata::new(backend, program),
-            arena: Default::default(),
+            arena,
             service_calls: 0,
             return_budget: u64::MAX,
             // Standalone native testbenches also need a finite bound on
@@ -460,6 +465,15 @@ impl<B: SimBackend> Simulator<B> {
         self.eval_comb_checked()?;
         self.dirty = false;
         self.end_untimed_slot()
+    }
+
+    /// The activations the compiled scheduler counted since the
+    /// simulation started, when built with `activation_profile` and the
+    /// design has a compiled scheduler that can count them.
+    pub fn activation_profile(&self) -> Option<crate::ActivationProfile> {
+        let sites = &self.program.activation_sites;
+        (!sites.is_empty())
+            .then(|| crate::ActivationProfile::new(sites, &self.native.arena.profile))
     }
 
     /// The work a partitioned settle counted since the simulation

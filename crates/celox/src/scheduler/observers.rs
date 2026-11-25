@@ -177,6 +177,12 @@ impl Generator<'_> {
             .copied()
             .reduce(|any, group| self.binary(1, any, BinaryOp::Or, group))
             .unwrap_or(initial);
+        self.count(ActivationKind::Observer, "checked", |_| {
+            "comb observers".into()
+        });
+        self.count_if(ActivationKind::Observer, "changed", any, |_| {
+            "comb observers".into()
+        });
         let zero = self.constant(0, 1);
         for (&site, &group) in observers.sites.iter().zip(&observers.groups) {
             self.b.emit(SIRInstruction::CombCaptureEnableIfChanged {
@@ -405,7 +411,7 @@ endmodule"#
                 let mut program = program.into_laid_out(four_state);
                 if mode == SchedulerMode::Compiled {
                     super::super::enable_native_services(&mut program);
-                    super::super::attach(&mut program, true, false);
+                    super::super::attach(&mut program, true, false, false);
                     assert!(
                         program
                             .runtime

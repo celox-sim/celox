@@ -27,6 +27,44 @@ impl Generator<'_> {
         units: &[Unit],
         finish_exit: celox_sir::BlockId,
     ) {
+        let role = {
+            let role = if std::ptr::eq(units, event.eval_apply.as_slice()) {
+                "eval_apply"
+            } else if event
+                .eval_only
+                .as_ref()
+                .is_some_and(|eval| std::ptr::eq(units, eval.as_slice()))
+            {
+                "eval_only"
+            } else if event
+                .apply
+                .as_ref()
+                .is_some_and(|apply| std::ptr::eq(units, apply.as_slice()))
+            {
+                "apply"
+            } else {
+                "fused"
+            };
+            self.count(ActivationKind::Domain, role, |program| {
+                Generator::event_name(program, event)
+            });
+            role
+        };
+        let name = format!(
+            "domain {} {role}",
+            Generator::event_name(self.program, event)
+        );
+        let previous = std::mem::replace(&mut self.role, name);
+        self.inline_domain_writers(event, units, finish_exit);
+        self.role = previous;
+    }
+
+    fn inline_domain_writers(
+        &mut self,
+        event: &Event,
+        units: &[Unit],
+        finish_exit: celox_sir::BlockId,
+    ) {
         let Some((index, offset)) = self
             .incremental
             .and_then(|plan| plan.events.as_ref())
@@ -332,6 +370,7 @@ impl Generator<'_> {
                 Some(index) => index,
                 None => {
                     outlined.push(unit.clone());
+                    outlines.roles.push(self.role.clone());
                     outlined.len() - 1
                 }
             };
@@ -343,7 +382,10 @@ impl Generator<'_> {
             });
         } else {
             self.inlined_instructions += size;
+            let start = self.b.next_block_id();
             self.b.inline_execution_unit(unit);
+            let end = self.b.next_block_id();
+            self.block_roles.push((start, end, self.role.clone()));
         }
     }
 

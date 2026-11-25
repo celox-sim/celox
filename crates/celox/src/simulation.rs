@@ -1573,6 +1573,12 @@ impl<B: SimBackend> Simulation<B> {
         self.simulator.settle_profile()
     }
 
+    /// The activations the compiled scheduler counted since the simulation
+    /// started, when built with `activation_profile`.
+    pub fn activation_profile(&self) -> Option<crate::ActivationProfile> {
+        self.simulator.activation_profile()
+    }
+
     /// Returns all ports of the top-level module.
     pub fn named_signals(&self) -> Vec<NamedSignal> {
         self.simulator.named_signals()

@@ -68,6 +68,12 @@ pub(super) fn run_native(
         sim.layout(),
         sim.settle_profile(),
     )?;
+    write_activation_profile(
+        opts.activation_profile.as_deref(),
+        sim.activation_profile(),
+        sim.settle_profile(),
+        None,
+    )?;
     let jit_execute_elapsed = sim
         .finish_native_execution_timing()
         .map(|timing| timing.elapsed());

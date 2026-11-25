@@ -11,6 +11,9 @@ pub struct SIRBuilder<Addr> {
     current_block_id: Option<BlockId>,
     blocks: HashMap<BlockId, BasicBlock<Addr>>,
     next_block_id: usize,
+    /// The blocks sealed since the builder was made or last flushed, in the
+    /// order they were sealed.
+    sealed: Vec<BlockId>,
     /// The instructions and blocks this builder has built, kept across
     /// flushes: a measure of the code built between two points.
     built: BuiltCode,
@@ -50,6 +53,7 @@ impl<Addr> SIRBuilder<Addr> {
             current_block_id: Some(BlockId(0)),
             next_block_id: 1,
             blocks,
+            sealed: Vec::new(),
             built: BuiltCode::default(),
         }
     }
@@ -95,12 +99,25 @@ impl<Addr> SIRBuilder<Addr> {
 
         let blocks = std::mem::take(&mut self.blocks);
         let regs = std::mem::take(&mut self.registers);
+        self.sealed.clear();
 
         (blocks, regs, next_reg_id)
     }
 
     pub fn new_block(&mut self) -> BlockId {
         self.new_block_with(vec![])
+    }
+
+    /// The id the next block will have: blocks are numbered in the order
+    /// they are made, those of an inlined unit included.
+    pub fn next_block_id(&self) -> usize {
+        self.next_block_id
+    }
+
+    /// The blocks sealed so far, in the order they were sealed: the blocks a
+    /// stretch of code filled, those made before it included.
+    pub fn sealed_blocks(&self) -> &[BlockId] {
+        &self.sealed
     }
     pub fn new_block_with(&mut self, params: Vec<RegisterId>) -> BlockId {
         let id = BlockId(self.next_block_id);
@@ -132,6 +149,7 @@ impl<Addr> SIRBuilder<Addr> {
             .take()
             .expect("No active block to seal");
         self.blocks.get_mut(&id).unwrap().terminator = terminator;
+        self.sealed.push(id);
         id
     }
 
@@ -336,6 +354,7 @@ impl<Addr> SIRBuilder<Addr> {
 
         let blocks = std::mem::take(&mut self.blocks);
         let regs = std::mem::take(&mut self.registers);
+        self.sealed.clear();
 
         // Reset for a new EU — register and block IDs are EU-scoped.
         // INVARIANT: callers must clear any external caches keyed by

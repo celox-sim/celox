@@ -154,6 +154,13 @@ unnecessary:
   simulation). A run that changed nothing compared is work the settle could
   have skipped, such as unrelated logic sharing a partition with state that
   changes every cycle.
+  `SimulatorBuilder::activation_profile` (CLI: `--activation-profile FILE`,
+  which writes these counters too) makes the compiled scheduler of a native
+  build count its own work: slots, domain judgments and how many found no
+  edge, domain units, kernel runs and edges, settle requests by cause, settle
+  runs and skips, event-driven settle groups and observers
+  (`activation_profile()` on the simulation; see `docs/benchmarks/rtlmeter.md`
+  for the per-clock reports).
 - partition sizing in estimated mode is a heuristic, not a derived optimum
   (`SETTLE_PARTITION_COST`, `TARGET_ESTIMATED_SETTLE_PARTITIONS` in the
   frontend's assembly). It pays off only for large designs whose per-cycle

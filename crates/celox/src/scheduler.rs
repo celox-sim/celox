@@ -43,6 +43,8 @@ mod observers;
 mod ordered;
 mod packed_commits;
 mod plan;
+pub(crate) mod profile;
+use crate::activation_profile::ActivationKind;
 mod publications;
 mod regions;
 mod settle;
@@ -113,6 +115,7 @@ pub(crate) fn hotspot_scheduler(
         .map_err(|_| "too many extern functions")?;
     let mut outlines = Outlines {
         callees: Vec::new(),
+        roles: Vec::new(),
         inline_budget,
         budgeted: false,
         cancel: cancel.cloned(),
@@ -141,6 +144,9 @@ pub(crate) struct HotspotScheduler {
 /// The bodies a generated scheduler calls instead of inlining them.
 struct Outlines {
     callees: Vec<Unit>,
+    /// The role of each callee: what the generator was running when it
+    /// outlined it (`Generator::role`).
+    roles: Vec<String>,
     inline_budget: Option<usize>,
     budgeted: bool,
     /// Generation stops inlining bodies once this is cancelled, and its
@@ -343,8 +349,15 @@ pub(crate) fn outlines_callees(native_image: bool) -> bool {
 /// Generate the compiled scheduler of `program`, if it qualifies, and record
 /// for every process kernel whether the scheduler runs it. With `outline`
 /// ([`outlines_callees`]), its larger bodies become
-/// [`LaidOutProgram::scheduler_callees`].
-pub(crate) fn attach(program: &mut LaidOutProgram, wiring_clocks: bool, outline: bool) {
+/// [`LaidOutProgram::scheduler_callees`]. With `activation_profile`, the
+/// unit counts its activations ([`profile`]) and the program lists the
+/// counters (`RuntimeProgram::activation_sites`).
+pub(crate) fn attach(
+    program: &mut LaidOutProgram,
+    wiring_clocks: bool,
+    outline: bool,
+    activation_profile: bool,
+) {
     let Some(schema) = program.runtime.runtime_schema.scheduler.clone() else {
         return;
     };
@@ -354,6 +367,9 @@ pub(crate) fn attach(program: &mut LaidOutProgram, wiring_clocks: bool, outline:
     // The points exist only in a scheduler that can call the host.
     let mut update_points = false;
     let mut callees = Vec::new();
+    let mut roles = Vec::new();
+    let mut sites = Vec::new();
+    let mut block_roles = Vec::new();
     let (fallback, unit, events, clocks, kernel_events) =
         match Plan::new(program, &schema.slots, wiring_clocks) {
             Err(reason) => (
@@ -363,7 +379,8 @@ pub(crate) fn attach(program: &mut LaidOutProgram, wiring_clocks: bool, outline:
                 Vec::new(),
                 vec![Vec::new(); kernels],
             ),
-            Ok(plan) => {
+            Ok(mut plan) => {
+                plan.activation_profile = activation_profile;
                 lazy = plan.lazy.is_some();
                 update_points = schema.update_points && plan.service_function.is_some();
                 let fallback = plan.fallback.clone();
@@ -388,7 +405,17 @@ pub(crate) fn attach(program: &mut LaidOutProgram, wiring_clocks: bool, outline:
                         }
                         program.settle_instrumented = true;
                     }
-                    generate_unit(&plan, program, &schema.slots, outline, &mut callees)
+                    let generated = generate_unit(
+                        &plan,
+                        program,
+                        &schema.slots,
+                        outline,
+                        &mut callees,
+                        &mut roles,
+                    );
+                    sites = generated.sites;
+                    block_roles = generated.block_roles;
+                    generated.unit
                 });
                 let tracked = plan.tracked();
                 let kernel_events = plan
@@ -439,6 +466,9 @@ pub(crate) fn attach(program: &mut LaidOutProgram, wiring_clocks: bool, outline:
         program.sir.processes.push(unit);
     }
     program.scheduler_callees = callees;
+    program.scheduler_callee_roles = roles;
+    program.scheduler_block_roles = block_roles;
+    program.runtime.activation_sites = sites;
     testbench::attach(program, lazy);
 }
 
@@ -450,23 +480,26 @@ fn generate_unit(
     slots: &SchedulerSlots<AbsoluteAddr>,
     outline: bool,
     callees: &mut Vec<Unit>,
-) -> Unit {
+    roles: &mut Vec<String>,
+) -> GeneratedUnit {
     if !outline {
-        return plan.generate(program, slots);
+        return plan.generate_profiled(program, slots, None, 0);
     }
     // A budget of nothing outlines every body of at least
     // OUTLINE_MIN_INSTRUCTIONS; smaller ones stay inline, where a call
     // would cost more than the body.
     let mut outlines = Outlines {
         callees: Vec::new(),
+        roles: Vec::new(),
         inline_budget: Some(0),
         budgeted: false,
         cancel: None,
         cancelled: false,
     };
-    let unit = plan.generate_with_outlines(program, slots, Some(&mut outlines), CALLEE_PLACEHOLDER);
+    let generated = plan.generate_profiled(program, slots, Some(&mut outlines), CALLEE_PLACEHOLDER);
     *callees = outlines.callees;
-    unit
+    *roles = outlines.roles;
+    generated
 }
 
 /// [`celox_design::SchedulerSchema::domain_waits`] of `program`.
@@ -572,9 +605,18 @@ pub(crate) fn without_fused_domains(
     }
     let outline = !program.scheduler_callees.is_empty();
     let mut callees = Vec::new();
-    program.sir.processes[unit] =
-        generate_unit(&plan, &program, &schema.slots, outline, &mut callees);
+    let mut roles = Vec::new();
+    program.sir.processes[unit] = generate_unit(
+        &plan,
+        &program,
+        &schema.slots,
+        outline,
+        &mut callees,
+        &mut roles,
+    )
+    .unit;
     program.scheduler_callees = callees;
+    program.scheduler_callee_roles = roles;
     testbench::regenerate(&mut program, true);
     program
 }
@@ -741,6 +783,8 @@ struct Plan {
     /// The width of an event mask: one bit per event, at least
     /// [`MIN_EVENT_BITS`] and a whole number of words.
     event_bits: usize,
+    /// The generated unit counts its activations ([`profile`]).
+    activation_profile: bool,
 }
 
 /// Deferred settles. The reference loop settles after every pass of the
@@ -850,6 +894,25 @@ struct Generator<'a> {
     event_batch: Option<u64>,
     /// Instructions of the units inlined so far, for outlining.
     inlined_instructions: usize,
+    /// The activation counters the unit increments, when it counts them
+    /// ([`profile`]).
+    profile: Option<profile::Counters>,
+    /// What the generator is running: the role of a body it outlines.
+    role: String,
+    /// The roles of the blocks made so far, as ranges of block ids
+    /// ([`GeneratedUnit::block_roles`]).
+    block_roles: Vec<(usize, usize, String)>,
+}
+
+/// A generated scheduler unit and what names its parts.
+pub(crate) struct GeneratedUnit {
+    pub unit: Unit,
+    /// The activation counters it increments ([`profile`]).
+    pub sites: Vec<crate::ActivationSite>,
+    /// What runs in its blocks: ranges `start..end` of block ids, the phase
+    /// of the slot that made them or the role of a body inlined there; a
+    /// narrower range inside a wider one is more specific.
+    pub block_roles: Vec<(usize, usize, String)>,
 }
 
 /// A kernel's wait as `Generator::check_waits` tests it.
