@@ -262,12 +262,20 @@ impl Plan {
             .unwrap_or_default();
         g.b.seal_block(SIRTerminator::Jump(enter, enter_args));
         g.b.switch_to_block(enter);
+        g.count(ActivationKind::Kernel, "runs", |program| {
+            profile::kernel_name(program, index)
+        });
         let before: Vec<_> = kernel
             .writes
             .iter()
             .map(|&event| g.level(&self.events[event]))
             .collect();
+        let previous = std::mem::replace(
+            &mut g.role,
+            format!("kernel {}", profile::kernel_name(program, index)),
+        );
         g.inline_writer(&program.sir.processes[index], finish_exit);
+        g.role = previous;
         if !kernel.writes.is_empty() {
             // Capture every continuation, including returns to a host service.
             // A later continuation cannot erase an already observed pulse.
@@ -275,6 +283,12 @@ impl Plan {
             for (&event, &was) in kernel.writes.iter().zip(&before) {
                 let is = g.level(&self.events[event]);
                 let edge = g.edge(&self.events[event], was, is);
+                if g.profiling() {
+                    let name = Generator::event_name(program, &self.events[event]);
+                    g.count_if(ActivationKind::Kernel, "edges", edge, |program| {
+                        format!("{} -> {name}", profile::kernel_name(program, index))
+                    });
+                }
                 let bit = g.event_bit(edge, event);
                 edges = g.binary(self.event_bits, edges, BinaryOp::Or, bit);
             }

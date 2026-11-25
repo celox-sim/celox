@@ -192,7 +192,7 @@ impl Plan {
                 false_block: (settle, Vec::new()),
             });
             g.b.switch_to_block(settle);
-            g.settle_then(limit_exit);
+            g.settle_then("time limit: before returning", limit_exit);
         }
         (time, started, run, stopped)
     }
@@ -345,7 +345,7 @@ impl Plan {
                     false_block: (slot, Vec::new()),
                 });
                 g.b.switch_to_block(settle);
-                g.settle_then(slot);
+                g.settle_then("slot start: lazy settle", slot);
                 g.b.switch_to_block(slot);
             }
         }
@@ -383,6 +383,7 @@ impl Plan {
         let one = g.constant(1, SCHEDULER_TIME_WIDTH);
         let count = g.binary(SCHEDULER_TIME_WIDTH, count, BinaryOp::Add, one);
         g.store(slots.count, SCHEDULER_TIME_WIDTH, count);
+        g.count(ActivationKind::Slot, "runs", |_| String::new());
         for &slot in &schema.time_slots {
             g.store_state(slot, 0, TIME_SLOT_WIDTH, time);
         }
@@ -491,6 +492,7 @@ impl Plan {
         entry_done: celox_sir::BlockId,
     ) {
         let &Slot {
+            program,
             slots,
             schema,
             tracked,
@@ -583,6 +585,12 @@ impl Plan {
                 // scheduled clock changes a gate (IEEE 1800-2023 9.4.2.3).
                 g.count_host_clock(schema, event.signal, actual, is, due);
                 let changed = g.binary(1, was, BinaryOp::Ne, is);
+                if g.profiling() {
+                    let name = Generator::event_name(program, event);
+                    g.count_if(ActivationKind::HostClock, "due", due, |_| name.clone());
+                    let edge = g.edge(event, was, is);
+                    g.count_if(ActivationKind::HostClock, "edges", edge, |_| name);
+                }
                 if let Some(aliases) = &event.aliases {
                     for unit in aliases {
                         g.inline(unit, finish_exit);

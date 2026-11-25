@@ -484,6 +484,18 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
         self
     }
 
+    /// Count the activations of the compiled scheduler of a native build:
+    /// its slots, each host clock's due slots and edges, each kernel's runs,
+    /// each domain judgment and how often it found no edge, each domain's
+    /// units, each request of the settle by what requested it, and the
+    /// settle's runs and skips. Read the counts with `activation_profile`
+    /// on the simulation. The counters cost a few instructions each where
+    /// they count; compare totals with a build without them.
+    pub fn activation_profile(mut self, enable: bool) -> Self {
+        self.options.activation_profile = enable;
+        self
+    }
+
     /// Count the work of a partitioned settle: each partition's runs,
     /// the runs that changed something it compares, and the settles.
     /// The counters live at the end of the settle's flags; read them

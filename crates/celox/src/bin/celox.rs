@@ -25,6 +25,8 @@ use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 mod cdsp;
 #[path = "celox/checkpoint_fs.rs"]
 mod checkpoint_fs;
+#[path = "celox/counters.rs"]
+mod counters;
 #[path = "celox/project.rs"]
 mod project;
 #[path = "celox/runner.rs"]
@@ -318,7 +320,12 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
         Some(path) => builder.settle_plan_output(path),
         None => builder,
     };
-    let builder = builder.settle_profile(arguments.execution.settle_profile.is_some());
+    let builder = builder
+        .settle_profile(
+            arguments.execution.settle_profile.is_some()
+                || arguments.execution.activation_profile.is_some(),
+        )
+        .activation_profile(arguments.execution.activation_profile.is_some());
     let builder = if let Some(path) = &arguments.execution.vcd {
         builder.vcd(path)
     } else if let Some(path) = &arguments.execution.fst {
@@ -345,6 +352,7 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
                 .map_err(|error| format!("compilation failed:\n{error}"))?;
             let compile_elapsed = compile_start.elapsed();
             report_warnings(simulation.warnings())?;
+            let mut execute_counts = None;
             let (result, execute_elapsed) = if let Some(port) = arguments.cdsp {
                 let start = std::time::Instant::now();
                 let result = cdsp::serve(&mut simulation, max_steps, port, &mut std::io::stdout());
@@ -364,6 +372,11 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
                 if let Some(progress) = progress {
                     saves.restore_progress(&simulation, arguments.design.signal_root(), progress)?;
                 }
+                let counters = arguments
+                    .execution
+                    .report
+                    .then(counters::ExecuteCounters::start)
+                    .flatten();
                 let start = std::time::Instant::now();
                 let result = simulate_sv(
                     &mut simulation,
@@ -372,7 +385,9 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
                     &mut std::io::stdout(),
                     arguments.execution.report,
                 );
-                (result, start.elapsed())
+                let elapsed = start.elapsed();
+                execute_counts = counters.and_then(counters::ExecuteCounters::stop);
+                (result, elapsed)
             };
             if arguments.execution.report {
                 writeln!(
@@ -383,6 +398,18 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
                     execute_elapsed.as_nanos()
                 )
                 .ok();
+                // The execute phase's own work, for comparisons that must
+                // leave out compilation (`perf stat` counts the process).
+                if let Some(counted) = &execute_counts {
+                    writeln!(
+                        std::io::stdout(),
+                        "CELOX_TEST_COUNTERS test={} instructions={} cycles={}",
+                        arguments.design.top,
+                        counted.instructions,
+                        counted.cycles
+                    )
+                    .ok();
+                }
             }
             $(if arguments.execution.report { $report_hotspots(&simulation, &arguments.design.top); })?
             runner::write_settle_profile(
@@ -391,6 +418,13 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
                 simulation.settle_profile(),
             )
             .map_err(|error| format!("cannot write the settle profile: {error}"))?;
+            runner::write_activation_profile(
+                arguments.execution.activation_profile.as_deref(),
+                simulation.activation_profile(),
+                simulation.settle_profile(),
+                Some(&simulation.scheduler_stats()),
+            )
+            .map_err(|error| format!("cannot write the activation profile: {error}"))?;
             result
         }};
     }

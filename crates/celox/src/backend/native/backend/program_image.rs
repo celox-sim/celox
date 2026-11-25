@@ -85,6 +85,11 @@ pub(crate) struct NativeRuntimeSchema {
     pub(crate) initial_copies: Vec<(AbsoluteAddr, AbsoluteAddr)>,
     pub(crate) scheduler: Option<celox_design::SchedulerSchema<AbsoluteAddr>>,
     pub(crate) derived_edges: Vec<celox_design::DerivedEdgeUnits<AbsoluteAddr>>,
+    /// The activation counters the scheduler code increments
+    /// (`RuntimeProgram::activation_sites`): an image loaded later must
+    /// allocate them, or that code writes through a null pointer.
+    #[serde(default)]
+    pub(crate) activation_sites: Vec<crate::ActivationSite>,
 }
 
 /// Pointer-free native compiler artifact which can be attached to the
@@ -337,6 +342,7 @@ impl NativeProgramImage {
         crate::ir::RuntimeProgram {
             design: self.design.clone(),
             rtl_accesses: self.runtime_schema.rtl_accesses.iter().copied().collect(),
+            activation_sites: self.runtime_schema.activation_sites.clone(),
             runtime_schema: RuntimeSchema {
                 runtime_errors: self.runtime_schema.runtime_errors.clone(),
                 runtime_event_sites: self.runtime_schema.runtime_event_sites.clone(),

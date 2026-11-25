@@ -90,6 +90,7 @@ impl Plan {
             .collect()
     }
 
+    #[cfg(test)]
     pub(super) fn generate(
         &self,
         program: &LaidOutProgram,
@@ -105,6 +106,20 @@ impl Plan {
         outlined: Option<&mut Outlines>,
         outline_base: u32,
     ) -> Unit {
+        self.generate_profiled(program, slots, outlined, outline_base)
+            .unit
+    }
+
+    /// [`Self::generate_with_outlines`], with the activation counters the
+    /// unit increments when the plan counts them
+    /// ([`Plan::activation_profile`]).
+    pub(super) fn generate_profiled(
+        &self,
+        program: &LaidOutProgram,
+        slots: &SchedulerSlots<AbsoluteAddr>,
+        outlined: Option<&mut Outlines>,
+        outline_base: u32,
+    ) -> GeneratedUnit {
         let schema = &program.runtime.runtime_schema;
         let edged = self.edged();
         let tracked = self.tracked();
@@ -124,6 +139,11 @@ impl Plan {
             .map(|service| nba::Sites::new(program, &native_nbas, service, &self.events));
         let mut g = Generator {
             inlined_instructions: 0,
+            // The counters live in the arena the host context reaches.
+            profile: (self.activation_profile && self.service_function.is_some())
+                .then(profile::Counters::default),
+            role: "scheduler".into(),
+            block_roles: Vec::new(),
             constant_block: None,
             constants: HashMap::default(),
             program,
@@ -254,11 +274,38 @@ impl Plan {
             host_inputs,
             header,
         };
+        // Each phase names the blocks it makes and those made before it that
+        // it fills (`GeneratedUnit::block_roles`): `header` is made here and
+        // filled by the next-slot phase, the settle's entry by the settle.
+        let mut phase = g.b.next_block_id();
+        let mut sealed = g.b.sealed_blocks().len();
+        let mut tag = |g: &mut Generator<'_>, role: &str| {
+            let end = g.b.next_block_id();
+            let role = format!("scheduler: {role}");
+            let filled: Vec<usize> = g.b.sealed_blocks()[sealed..]
+                .iter()
+                .map(|block| block.0)
+                .filter(|&block| block < phase)
+                .collect();
+            // A single block is narrower than the phase that made it, so
+            // this role wins over that one.
+            g.block_roles.extend(
+                filled
+                    .into_iter()
+                    .map(|block| (block, block + 1, role.clone())),
+            );
+            g.block_roles.push((phase, end, role));
+            phase = end;
+            sealed = g.b.sealed_blocks().len();
+        };
+        tag(&mut g, "setup");
         let (time, started, run, stopped) = self.next_slot(&mut g, &cx, &nbas);
+        tag(&mut g, "next slot");
 
         let internal_exit = g.exit_block(SchedulerExit::Internal);
         let (host_entry, host_levels) =
             self.start_slot(&mut g, &cx, &nbas, &guards, time, run, internal_exit);
+        tag(&mut g, "slot start");
         let finish_exit = g.exit_block(SchedulerExit::Finish);
         // A host that watches every update sees each kernel run, the host
         // clocks a slot applies and each settle (IEEE 1800-2023 38.36.1).
@@ -283,8 +330,10 @@ impl Plan {
             finish_exit,
             entry_done,
         );
+        tag(&mut g, "host clocks");
 
         let (pass_end, runs) = self.pick_kernel(&mut g, &cx, pick, internal_exit);
+        tag(&mut g, "kernel pick");
         self.run_kernels(
             &mut g,
             &cx,
@@ -296,6 +345,7 @@ impl Plan {
             internal_exit,
             updates,
         );
+        tag(&mut g, "kernel runs");
 
         let (slot_end, domains, resume_domains) = self.settle_pass(
             &mut g,
@@ -308,6 +358,7 @@ impl Plan {
             internal_exit,
         );
 
+        tag(&mut g, "process phase settle");
         // The domains the edges trigger, then the NBA region.
         g.b.switch_to_block(domains);
         self.observe_slot(&mut g, &tracked, &checks, finish_exit, true);
@@ -341,6 +392,7 @@ impl Plan {
             );
         }
 
+        tag(&mut g, "domain waves");
         self.rearm_clocks(&mut g, &cx, slot_end, started, time);
         self.drain_woken(&mut g, &cx, &guards, time, pick, internal_exit);
         self.assertion_regions(&mut g, &cx, pick);
@@ -400,18 +452,31 @@ impl Plan {
         let unknown = g.constant(celox_design::SCHEDULER_NEXT_UNJUDGED, SCHEDULER_TIME_WIDTH);
         g.store(slots.next, SCHEDULER_TIME_WIDTH, unknown);
         g.b.seal_block(SIRTerminator::Jump(stopped, Vec::new()));
+        tag(&mut g, "slot end");
         g.emit_settle(
             &program.sir.updates.observe,
             finish_exit,
             internal_exit,
             updates.map(|service| (service, &checks[..], &self.events[..])),
         );
+        tag(&mut g, "settle");
         if let Some(lazy) = &self.lazy {
             g.emit_eager(&lazy.eager, finish_exit, internal_exit);
         }
         if let Some(guards) = guards {
             guards.emit(&mut g, internal_exit);
         }
-        g.finish()
+        tag(&mut g, "eager settle and guards");
+        let sites = g
+            .profile
+            .take()
+            .map(profile::Counters::into_sites)
+            .unwrap_or_default();
+        let block_roles = std::mem::take(&mut g.block_roles);
+        GeneratedUnit {
+            unit: g.finish(),
+            sites,
+            block_roles,
+        }
     }
 }

@@ -71,11 +71,17 @@ impl Generator<'_> {
     /// Run the stateful part of a deferred settle (`Lazy::eager`) where the
     /// reference settles, then continue at `target`, as
     /// [`Self::settle_then`]: one copy serves every caller.
-    pub(super) fn eager_then(&mut self, eager: &[Unit], target: celox_sir::BlockId) {
+    pub(super) fn eager_then(
+        &mut self,
+        reason: &'static str,
+        eager: &[Unit],
+        target: celox_sir::BlockId,
+    ) {
         if eager.is_empty() {
             self.b.seal_block(SIRTerminator::Jump(target, Vec::new()));
             return;
         }
+        self.count(ActivationKind::EagerSettle, "requests", |_| reason.into());
         let case = match self
             .eager_continuations
             .iter()
@@ -108,6 +114,9 @@ impl Generator<'_> {
         let dirty = self.load(self.slots.dirty, SCHEDULER_FLAG_WIDTH);
         let zero = self.constant(0, SCHEDULER_FLAG_WIDTH);
         let changed = self.binary(1, dirty, BinaryOp::Ne, zero);
+        self.count_if(ActivationKind::EagerSettle, "dirty", changed, |_| {
+            String::new()
+        });
         let run = self.b.new_block();
         let done = self.b.new_block();
         self.b.seal_block(SIRTerminator::Branch {
@@ -116,9 +125,11 @@ impl Generator<'_> {
             false_block: (done, Vec::new()),
         });
         self.b.switch_to_block(run);
+        let previous = std::mem::replace(&mut self.role, "eager settle".into());
         for unit in eager {
             self.inline_with_exit(unit, None);
         }
+        self.role = previous;
         if eager.iter().any(|unit| self.unit_finishes(unit)) {
             self.check_finish(finish_exit);
         }
@@ -131,7 +142,11 @@ impl Generator<'_> {
     /// Run the shared settle, then continue at `target`. The registers
     /// `target` and its successors use must be defined in it or in the slot
     /// loop's header, which alone dominates every entry of the settle.
-    pub(super) fn settle_then(&mut self, target: celox_sir::BlockId) {
+    ///
+    /// `reason` names the request in an activation profile: what woke the
+    /// settle.
+    pub(super) fn settle_then(&mut self, reason: &'static str, target: celox_sir::BlockId) {
+        self.count(ActivationKind::SettleCall, "requests", |_| reason.into());
         let case = match self.continuations.iter().position(|&block| block == target) {
             Some(index) => index,
             None => {
@@ -156,6 +171,8 @@ impl Generator<'_> {
         updates: Option<(u32, &[WaitCheck<'_>], &[Event])>,
     ) {
         self.b.switch_to_block(self.comb);
+        self.count(ActivationKind::Settle, "entered", |_| String::new());
+        let previous = std::mem::replace(&mut self.role, "settle".into());
         // The updates the settle follows, then its own.
         if let Some((service, checks, events)) = updates {
             self.report_update(service, checks, events, finish_exit, AfterWrites::Settle);
@@ -170,6 +187,19 @@ impl Generator<'_> {
                 Some(observed) => self.binary(1, changed, BinaryOp::Or, observed),
                 None => changed,
             };
+            if self.profiling() {
+                self.count_if(ActivationKind::Settle, "dirty", changed, |_| String::new());
+                // Why it runs: a change of anything it reads (1), of
+                // clocks or time alone (2), of published values (4).
+                for (bit, measure) in [
+                    (0, "dirty: inputs"),
+                    (1, "dirty: clock/time"),
+                    (2, "dirty: published"),
+                ] {
+                    let set = self.mask_bit(dirty, bit);
+                    self.count_if(ActivationKind::Settle, measure, set, |_| String::new());
+                }
+            }
             let settle = self.b.new_block();
             let settled = self.b.new_block();
             self.b.seal_block(SIRTerminator::Branch {
@@ -200,6 +230,7 @@ impl Generator<'_> {
                     false_block: (full, Vec::new()),
                 });
                 self.b.switch_to_block(partial);
+                self.count(ActivationKind::Settle, "partial cone", |_| String::new());
                 for unit in &cone.units {
                     self.inline_with_exit(unit, None);
                 }
@@ -253,6 +284,7 @@ impl Generator<'_> {
                 AfterWrites::Again(comb),
             );
         }
+        self.role = previous;
         let targets = self.continuations.clone();
         self.dispatch_continuations(&targets, internal_exit);
     }
@@ -294,11 +326,20 @@ impl Generator<'_> {
         }
         .into_iter();
         let mut updated = None;
-        for (a, members) in &schedule.groups {
+        for (group, (a, members)) in schedule.groups.iter().enumerate() {
             let run = |g: &mut Self| {
+                let name = profile::group_name(
+                    g.program,
+                    group,
+                    a,
+                    members.iter().map(|&index| &units[index]),
+                );
+                g.count(ActivationKind::SettleGroup, "runs", |_| name.clone());
+                let previous = std::mem::replace(&mut g.role, format!("settle {name}"));
                 for &index in members {
                     g.inline_with_exit(&units[index], None);
                 }
+                g.role = previous;
             };
             if a.every_settle {
                 run(self);

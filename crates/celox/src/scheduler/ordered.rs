@@ -392,7 +392,7 @@ impl Plan {
         let publish_levels = g.b.new_block_with(vec![publish_mask]);
         let judge = g.b.new_block();
         if self.lazy.is_some() {
-            g.settle_then(judge);
+            g.settle_then("ordered waves: before judging", judge);
         } else {
             g.b.seal_block(SIRTerminator::Jump(judge, Vec::new()));
         }
@@ -418,6 +418,7 @@ impl Plan {
         g.store(g.slots.exit_arg, self.event_bits, zero);
         g.store_at(g.slots.exit_arg, self.event_bits, self.event_bits, zero);
         let quiet = g.binary(1, triggers, BinaryOp::Eq, zero);
+        g.count_judgment("ordered waves: first", quiet);
         self.finish_read_only_wave(g, ordered, tracked, triggers, slot_end, finish_exit, checks);
         g.b.seal_block(SIRTerminator::Branch {
             cond: quiet,
@@ -486,6 +487,7 @@ impl Plan {
         g.b.seal_block(SIRTerminator::Jump(pick, Vec::new()));
         g.b.switch_to_block(judge_wave);
         let quiet = g.binary(1, selected, BinaryOp::Eq, zero);
+        g.count_judgment("ordered waves: later", quiet);
         let no_edges = g.b.new_block();
         g.b.seal_block(SIRTerminator::Branch {
             cond: quiet,
@@ -570,7 +572,7 @@ impl Plan {
             false_block: (flush, vec![]),
         });
         g.b.switch_to_block(settle);
-        g.settle_then(wave);
+        g.settle_then("ordered waves: after an Active wave", wave);
 
         g.b.switch_to_block(flush);
         // Active-domain evaluation has settled before entering NBA. The next
@@ -683,7 +685,7 @@ impl Plan {
         if !single_wave {
             ordered.reset(g);
         }
-        g.settle_then(wave);
+        g.settle_then("ordered waves: after NBA publication", wave);
     }
 
     fn ordered_save_levels(&self, g: &mut Generator<'_>, tracked: &[usize]) {

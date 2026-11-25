@@ -88,6 +88,7 @@ impl<'a> PlanBuilder<'a> {
             observed_active: Vec::new(),
             gating: Vec::new(),
             event_bits,
+            activation_profile: false,
         };
         Ok(plan)
     }
