@@ -800,3 +800,42 @@ endmodule
   (top Top)
   (run_until 9)
   (assert_eq count 2) (assert_eq resumed 102) (assert_eq hits 1))
+
+; A `disable` in an unselected generate branch elaborates to nothing, so
+; the block it names runs in its own process as if it were not there.
+(case disable_in_unselected_generate_branch_changes_nothing
+  (source "inactive_disable.sv" #"
+module Top(output int seen, output int x);
+  initial begin
+    x = 0;
+    fork begin seen = x; end join_none
+    begin : work x = 1; end
+    wait fork;
+  end
+  if (0) begin initial disable work; end
+endmodule
+"#)
+  (top Top)
+  (run_until 2)
+  (assert_eq seen 1) (assert_eq x 1))
+
+; Killing a block cancels the blocks inside it; naming one of those
+; afterwards ends nothing, whoever now runs in its place.
+(case disable_after_outer_block_killed_names_nothing
+  (source "nested_disable.sv" #"
+module Top(output int late, output int resumed);
+  initial begin
+    begin : outer
+      begin : inner #10 late = 1; end
+      late = 2;
+    end
+    resumed = 1;
+  end
+  initial begin #3 fork begin #5 late = 100; end join_none end
+  initial #2 disable outer;
+  initial #4 disable inner;
+endmodule
+"#)
+  (top Top)
+  (run_until 12)
+  (assert_eq late 100) (assert_eq resumed 1))

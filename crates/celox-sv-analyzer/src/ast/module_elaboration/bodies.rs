@@ -122,7 +122,7 @@ impl ScopeElaboration<'_> {
         );
         // A subroutine a branch calls may need the process that runs the
         // block, which only the lowered subroutines show (9.6.1, 9.6.3).
-        let (needs_their_process, spawns_detached) =
+        let (needs_their_process, spawns_detached, randomizes) =
             procedural::external_disables::subroutine_process_effects(
                 self.subroutines.iter().chain(
                     self.imported
@@ -155,6 +155,23 @@ impl ScopeElaboration<'_> {
                             .map(|process| process.body.as_slice()),
                     ),
                 &spawns_detached,
+            )
+            || procedural::external_disables::random_state_may_change(
+                &disables,
+                self.comb_processes
+                    .iter()
+                    .map(|process| process.body.as_slice())
+                    .chain(
+                        self.ff_processes
+                            .iter()
+                            .map(|process| process.body.as_slice()),
+                    )
+                    .chain(
+                        self.initial_processes
+                            .iter()
+                            .map(|process| process.body.as_slice()),
+                    ),
+                &randomizes,
             )
         {
             return Err(unsupported("disable statement"));

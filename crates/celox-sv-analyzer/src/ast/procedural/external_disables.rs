@@ -257,15 +257,36 @@ impl BodyBuilder<'_, '_, '_> {
             ),
             assign(&armed, Expr::Literal("1'b1".into())),
         ];
+        // The branches of blocks inside this one: killing this branch
+        // cancels theirs without their disarming statements, so the
+        // process that continues after the block disarms them itself
+        // before another process can name one of them.
+        let mut nested = Vec::new();
+        for stmt in &body {
+            stmt.walk(&mut |stmt| {
+                if let Some(inner) = branch_label(stmt, &self.state.disables)
+                    && inner != label
+                    && !nested.contains(&inner)
+                {
+                    nested.push(inner);
+                }
+            });
+        }
         branch.extend(body);
         branch.push(assign(&armed, Expr::Literal("1'b0".into())));
         // Release the handle, so the heap collects it and its activation
         // may be reused: it names the branch only while it runs.
         branch.push(assign(&process, Expr::Literal("32'b0".into())));
-        vec![Stmt::Fork {
+        let mut output = vec![Stmt::Fork {
             join: celox_design::ForkJoin::All,
             branches: vec![branch],
-        }]
+        }];
+        for inner in nested {
+            let (process, armed) = variables(&inner);
+            output.push(assign(&armed, Expr::Literal("1'b0".into())));
+            output.push(assign(&process, Expr::Literal("32'b0".into())));
+        }
+        output
     }
 
     /// `disable label` of a block outside the statement.
@@ -354,6 +375,125 @@ fn const_effects(expr: &ConstExpr, asks: &mut bool, calls: &mut Vec<String>) {
     });
 }
 
+/// Whether a call draws on or observes the calling process's random
+/// stream (18.13, 20.14, 9.7): a branch of a synthetic fork has a stream
+/// of its own, seeded from its parent, so such a call in the branch or
+/// in the process around it does not continue the original stream.
+fn uses_random(callee: &Callee) -> bool {
+    match callee {
+        Callee::System(SystemFunction::Process(op)) => matches!(
+            op,
+            celox_design::ProcessOp::Srandom
+                | celox_design::ProcessOp::GetRandstate
+                | celox_design::ProcessOp::SetRandstate
+        ),
+        Callee::System(function) => matches!(
+            function,
+            SystemFunction::Random
+                | SystemFunction::DistUniform
+                | SystemFunction::DistNormal
+                | SystemFunction::DistExponential
+                | SystemFunction::DistPoisson
+                | SystemFunction::DistChiSquare
+                | SystemFunction::DistT
+                | SystemFunction::DistErlang
+                | SystemFunction::Urandom
+                | SystemFunction::UrandomRange
+                | SystemFunction::ScopeRandomize
+                | SystemFunction::ScopeRandomizeEnum
+        ),
+        _ => false,
+    }
+}
+
+/// Whether an expression or an assignment target uses the process's
+/// random stream, through any of its calls.
+fn expr_randomizes(expr: &Expr) -> bool {
+    let mut found = false;
+    const_functions::visit_expr_calls(expr, &mut |callee, _| found |= uses_random(callee));
+    found
+}
+
+fn const_randomizes(expr: &ConstExpr) -> bool {
+    let mut found = false;
+    const_functions::visit_const_calls(expr, &mut |callee, _| found |= uses_random(callee));
+    found
+}
+
+fn lvalue_randomizes(lvalue: &LValue) -> bool {
+    match lvalue {
+        LValue::Ident(_) => false,
+        LValue::Select {
+            msb,
+            lsb,
+            array_slice_width,
+            ..
+        } => {
+            const_randomizes(msb)
+                || const_randomizes(lsb)
+                || array_slice_width.as_ref().is_some_and(const_randomizes)
+        }
+        LValue::Object {
+            place,
+            select,
+            guards,
+            ..
+        } => {
+            guards.iter().any(expr_randomizes)
+                || place_randomizes(place)
+                || lvalue_randomizes(select)
+        }
+    }
+}
+
+fn place_randomizes(place: &ObjectPlace) -> bool {
+    match place {
+        ObjectPlace::Property { handle, .. } => expr_randomizes(handle),
+        ObjectPlace::Element {
+            container, index, ..
+        } => expr_randomizes(container) || expr_randomizes(index),
+        ObjectPlace::Member { outer, .. } => place_randomizes(outer),
+    }
+}
+
+/// Whether some process that runs a block as a branch uses its random
+/// stream, in the branch or around it, directly or through a subroutine
+/// it calls: the branch would continue a different stream (9.6.2).
+pub(in crate::ast) fn random_state_may_change<'a>(
+    disables: &ExternalDisables,
+    bodies: impl Iterator<Item = &'a [Stmt]>,
+    randomizes: &HashSet<String>,
+) -> bool {
+    bodies.into_iter().any(|body| {
+        let mut present = false;
+        let mut random = false;
+        for stmt in body {
+            stmt.walk(&mut |stmt| {
+                present |= branch_label(stmt, disables)
+                    .is_some_and(|label| disables.targets.contains(&label));
+            });
+            let mut named = Vec::new();
+            let mut called = Vec::new();
+            let mut target_random = false;
+            stmt.visit(
+                &mut |expr| {
+                    random |= expr_randomizes(expr);
+                    const_functions::visit_expr_calls(expr, &mut |callee, _| {
+                        if let Callee::Subroutine(name) = callee {
+                            named.push(name.clone());
+                        }
+                    });
+                },
+                &mut |lvalue| target_random |= lvalue_randomizes(lvalue),
+                &mut |name| called.push(name.to_string()),
+            );
+            named.extend(called);
+            random |= target_random || named.iter().any(|name| randomizes.contains(name));
+        }
+        present && random
+    })
+}
+
 /// The calls in an assignment target: its selectors and, for a class or
 /// container place, the expressions that name the place. `Stmt::visit`
 /// passes a target to its lvalue callback, not its expression one.
@@ -410,21 +550,30 @@ fn place_effects(place: &ObjectPlace, asks: &mut bool, calls: &mut Vec<String>) 
 /// its process (see `BodyBuilder::external_disable_block`).
 pub(in crate::ast) fn subroutine_process_effects<'a>(
     subroutines: impl Iterator<Item = &'a Subroutine>,
-) -> (HashSet<String>, HashSet<String>) {
+) -> (HashSet<String>, HashSet<String>, HashSet<String>) {
     let mut scanned = Vec::new();
     for subroutine in subroutines {
         let mut needs = false;
         let mut spawns = false;
+        let mut randomizes = false;
         let mut callees = Vec::new();
         for stmt in subroutine.body.iter().chain(&subroutine.sensitivity_body) {
             let mut target_asks = false;
             let mut target_calls = Vec::new();
+            let mut target_randomizes = false;
             stmt.visit(
-                &mut |expr| expr_effects(expr, &mut needs, &mut callees),
-                &mut |lvalue| lvalue_effects(lvalue, &mut target_asks, &mut target_calls),
+                &mut |expr| {
+                    expr_effects(expr, &mut needs, &mut callees);
+                    randomizes |= expr_randomizes(expr);
+                },
+                &mut |lvalue| {
+                    lvalue_effects(lvalue, &mut target_asks, &mut target_calls);
+                    target_randomizes |= lvalue_randomizes(lvalue);
+                },
                 &mut |_| {},
             );
             needs |= target_asks;
+            randomizes |= target_randomizes;
             callees.extend(target_calls);
             stmt.walk(&mut |stmt| match stmt {
                 Stmt::WaitFork | Stmt::DisableFork => needs = true,
@@ -436,12 +585,13 @@ pub(in crate::ast) fn subroutine_process_effects<'a>(
                 _ => {}
             });
         }
-        scanned.push((subroutine.name.clone(), needs, spawns, callees));
+        scanned.push((subroutine.name.clone(), needs, spawns, randomizes, callees));
     }
-    let (mut needs, mut spawns) = (HashSet::default(), HashSet::default());
+    let (mut needs, mut spawns, mut randomizes) =
+        (HashSet::default(), HashSet::default(), HashSet::default());
     loop {
-        let previous = (needs.len(), spawns.len());
-        for (name, direct_needs, direct_spawns, callees) in &scanned {
+        let previous = (needs.len(), spawns.len(), randomizes.len());
+        for (name, direct_needs, direct_spawns, direct_randomizes, callees) in &scanned {
             if (*direct_needs || callees.iter().any(|callee| needs.contains(callee)))
                 && !needs.contains(name)
             {
@@ -452,9 +602,14 @@ pub(in crate::ast) fn subroutine_process_effects<'a>(
             {
                 spawns.insert(name.clone());
             }
+            if (*direct_randomizes || callees.iter().any(|callee| randomizes.contains(callee)))
+                && !randomizes.contains(name)
+            {
+                randomizes.insert(name.clone());
+            }
         }
-        if (needs.len(), spawns.len()) == previous {
-            return (needs, spawns);
+        if (needs.len(), spawns.len(), randomizes.len()) == previous {
+            return (needs, spawns, randomizes);
         }
     }
 }
@@ -641,8 +796,25 @@ fn unwrap_stmts(
     unwanted: &HashSet<String>,
     disables: &ExternalDisables,
 ) -> Vec<Stmt> {
+    // The variables of an unwrapped block, which no statement may keep
+    // assigning: the branch ends with one that disarms it.
+    let compiler: HashSet<String> = unwanted
+        .iter()
+        .flat_map(|label| {
+            let (process, armed) = variables(label);
+            [process, armed]
+        })
+        .collect();
     let mut output = Vec::new();
     for stmt in stmts {
+        if let Stmt::Assign {
+            lhs: LValue::Ident(name),
+            ..
+        } = &stmt
+            && compiler.contains(name)
+        {
+            continue;
+        }
         if let Some(label) = branch_label(&stmt, disables)
             && unwanted.contains(&label)
         {
@@ -983,6 +1155,34 @@ mod tests {
                 .any(|signal| signal.name().starts_with("disable%")),
             "no block runs as a branch"
         );
+        assert!(
+            !format!("{:?}", ir.modules()[0]).contains("disable%"),
+            "no statement keeps the branch's variables"
+        );
+    }
+
+    #[test]
+    fn random_state_use_keeps_blocks_in_their_process() {
+        for source in [
+            // The process around the block observes its random state.
+            "module Top; process p; string s; \
+             initial begin p = process::self(); s = p.get_randstate(); \
+             begin : work #5; end end \
+             initial #1 disable work; endmodule",
+            // The block itself draws on the process's stream.
+            "module Top; int q; initial begin : work q = $urandom; #5; end \
+             initial #1 disable work; endmodule",
+            // Through a subroutine the process calls around the block.
+            "module Top; int q; task draw; q = $urandom; endtask \
+             initial begin draw(); begin : work #5; end end \
+             initial #1 disable work; endmodule",
+        ] {
+            let error = analyze(source).unwrap_err();
+            assert!(
+                error.to_string().contains("disable statement"),
+                "{source}: {error}"
+            );
+        }
     }
 
     #[test]
