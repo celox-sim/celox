@@ -1,1 +1,6 @@
-Check effective per-instance port connections after slicing distributed actuals and keep source locations for the strict diagnostic (review comment r4699862769).
+Revision history for #4700:
+
+rev 2 (content) 2026-11-25 19:36 UTC — Check effective per-instance port connections after slicing distributed actuals and keep source locations for the strict diagnostic (review comment r4699862769).
+rev 1 (initial) 2026-11-25 19:36 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":4700,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"b6ffedc8e7d98b9122940d518a15c12aa0981ebc","timestamp_iso":"2026-11-25T19:36:15Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"b6ffedc8e7d98b9122940d518a15c12aa0981ebc","new_sha":"7f7d72e74b3a693120db98f31e4730c43e533e03","timestamp_iso":"2026-11-25T19:36:15Z","reason":"Check effective per-instance port connections after slicing distributed actuals and keep source locations for the strict diagnostic (review comment r4699862769).","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/b6ffedc8e7d98b9122940d518a15c12aa0981ebc...7f7d72e74b3a693120db98f31e4730c43e533e03"}]} -->
