@@ -914,7 +914,10 @@ pub(in crate::ast) fn record(
     };
     let handles = leaves.iter().any(|leaf| {
         leaf.r#type.container().is_some()
-            || matches!(leaf.r#type.kind, TypeKind::String | TypeKind::Object)
+            || matches!(
+                leaf.r#type.kind,
+                TypeKind::String | TypeKind::Object | TypeKind::Process
+            )
     });
     let uniform = leaves.iter().all(two_state) || !leaves.iter().any(two_state);
     if aggregate.width() <= 64 && !handles && uniform {

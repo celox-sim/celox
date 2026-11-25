@@ -51,7 +51,7 @@ impl Message {
         }
         let handle = match ty.kind() {
             TypeKind::String => Some(HandleProperty::String),
-            TypeKind::Object => Some(HandleProperty::Object),
+            TypeKind::Object | TypeKind::Process => Some(HandleProperty::Object),
             _ => None,
         };
         Ok(Self {

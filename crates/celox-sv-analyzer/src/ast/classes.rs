@@ -2338,8 +2338,10 @@ pub(super) fn field(
     let (width, signed, handle) = match ty.kind() {
         _ if ty.container().is_some() => (HANDLE_WIDTH, false, Some(HandleProperty::Object)),
         TypeKind::String => (HANDLE_WIDTH, false, Some(HandleProperty::String)),
-        TypeKind::Object => (HANDLE_WIDTH, false, Some(HandleProperty::Object)),
-        TypeKind::Process | TypeKind::Event => (HANDLE_WIDTH, false, None),
+        // A process handle is a heap object the scheduler made, which names
+        // its process while a handle is anywhere (IEEE 1800-2023 9.7).
+        TypeKind::Object | TypeKind::Process => (HANDLE_WIDTH, false, Some(HandleProperty::Object)),
+        TypeKind::Event => (HANDLE_WIDTH, false, None),
         TypeKind::Chandle
         | TypeKind::Bit
         | TypeKind::Logic

@@ -179,3 +179,72 @@ endmodule
         verify(build().build_wasm().unwrap());
     }
 }
+
+/// A process that ended is reused once the heap collected every handle
+/// that named it (IEEE 1800-2023 9.7): a fork loop that takes
+/// `process::self()` in each child keeps the processes it holds handles of,
+/// and no more. The handles it keeps, in a class property, a queue, the
+/// index of an associative array, a package variable and a variable that a
+/// fork shares, go on naming their processes.
+#[test]
+fn ended_processes_are_reused_once_no_handle_names_them() {
+    const ROUNDS: u64 = 3000;
+    fn verify<B: SimBackend>(mut sim: Simulation<B>) {
+        // The heap collects after a number of new entries, so up to about
+        // that many ended processes wait for it: the count reaches its peak
+        // by the second collection and stays about there.
+        sim.run_until(ROUNDS * 2 / 3).unwrap();
+        let before = sim.state.schedule_key().activations.len();
+        sim.run_until(ROUNDS + 10).unwrap();
+        assert_eq!(sim.get(sim.signal("rounds")), ROUNDS.into());
+        assert_eq!(sim.get(sim.signal("checks")), 255u8.into());
+        let after = sim.state.schedule_key().activations.len();
+        assert!(
+            after < before + 64 && after < ROUNDS as usize / 2,
+            "{before} then {after} activations held after {ROUNDS} forks"
+        );
+    }
+    let source = r#"`timescale 1ns/1ns
+    package keep_pkg; process held; endpackage
+    module Top(output int rounds, output int checks);
+      class Holder; process p; endclass
+      Holder holder = new;
+      process queued[$];
+      bit keyed[process];
+      process p, killed;
+      initial begin
+        automatic process boxed;
+        rounds = 0; checks = 0;
+        fork begin holder.p = process::self(); end join_none
+        fork begin queued.push_back(process::self()); end join_none
+        fork begin keyed[process::self()] = 1; end join_none
+        fork begin keep_pkg::held = process::self(); end join_none
+        fork begin boxed = process::self(); end join_none
+        fork begin killed = process::self(); #5; end join_none
+        #1 killed.kill();
+        for (int i = 0; i < 3000; i++) begin
+          fork begin p = process::self(); end join_none
+          #1 rounds++;
+        end
+        checks = (holder.p.status() == process::FINISHED)
+          + (queued[0].status() == process::FINISHED) * 2
+          + (keep_pkg::held.status() == process::FINISHED) * 4
+          + (boxed.status() == process::FINISHED) * 8
+          + (killed.status() == process::KILLED) * 16
+          + (keyed.num() == 1) * 32
+          + (p.status() == process::FINISHED) * 64;
+        foreach (keyed[k]) checks += (k.status() == process::FINISHED) * 128;
+        killed.await();
+      end
+    endmodule"#;
+    for four_state in [false, true] {
+        let build = || {
+            Simulation::from_sv_sources(vec![(source, Path::new("reuse.sv"))], "Top")
+                .four_state(four_state)
+        };
+        verify(build().build_native().unwrap());
+        verify(build().build_interpreter().unwrap());
+        #[cfg(feature = "cranelift")]
+        verify(build().build_cranelift().unwrap());
+    }
+}

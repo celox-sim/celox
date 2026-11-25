@@ -14,7 +14,13 @@ pub mod frame_image;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProcessControl {
+    /// Whether a process handle names the activation: then it is
+    /// [`Self::handle`], a key of
+    /// [`crate::timing::ProcessState::process_handles`].
     pub exposed: bool,
+    /// The heap object of the activation's process handle.
+    #[serde(default)]
+    pub handle: Option<u32>,
     pub random: Option<u64>,
     pub killed: bool,
     pub suspended: Option<SuspendedProcess>,
@@ -604,6 +610,15 @@ impl<B: SimBackend> SimulationState<B> {
             if id >= self.kernel_count && self.activation_reusable(id) {
                 self.reusable_activations.push(Reverse(id));
             }
+        }
+    }
+
+    /// Offer activation `id` for reuse if it may be, now that no process
+    /// handle names it: its registrations were cleared when it ended (see
+    /// [`Self::release_for_reuse`]).
+    pub(super) fn offer_ended_activation(&mut self, id: usize) {
+        if id >= self.kernel_count && self.activation_reusable(id) {
+            self.reusable_activations.push(Reverse(id));
         }
     }
 
