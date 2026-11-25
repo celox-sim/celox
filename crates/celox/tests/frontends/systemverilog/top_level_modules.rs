@@ -605,10 +605,67 @@ endmodule
     assert!(error.contains("my_seq"), "{error}");
 }
 
-/// A virtual method called on an object of a class that the scope calling
-/// it does not see, here `hdl_top`, which uses only the package of the base
-/// class, is a fatal error naming the method, rather than a call of no
-/// override (IEEE 1800-2023 8.20).
+/// A virtual method call dispatches on the class of the object, whatever
+/// scope calls it: here `hdl_top`, which uses only the package of the base
+/// classes, calls the methods of an object of a class of another package,
+/// and casts it to one of its bases (IEEE 1800-2023 8.20, 8.16).
+#[test]
+fn virtual_calls_dispatch_to_classes_the_calling_scope_does_not_see() {
+    let source = r#"
+package base_pkg;
+  virtual class obj;
+    string m_name;
+    function new(string name); m_name = name; endfunction
+    virtual function string get_name(); return m_name; endfunction
+    virtual function string get_type_name(); return "obj"; endfunction
+  endclass
+  class mid extends obj;
+    function new(string name); super.new(name); endfunction
+  endclass
+  obj made;
+endpackage
+package agent_pkg;
+  import base_pkg::*;
+  class my_seq extends mid;
+    function new(string name = "my_seq"); super.new(name); endfunction
+    virtual function string get_type_name(); return "my_seq"; endfunction
+  endclass
+  function automatic void make(); my_seq q = new("q1"); made = q; endfunction
+endpackage
+module hdl_top;
+  base_pkg::obj keep;
+  base_pkg::mid m;
+  bit cast;
+  initial begin
+    #5 keep = base_pkg::made;
+    cast = $cast(m, keep);
+    $display("name '%s' type '%s' cast %0d", keep.get_name(), keep.get_type_name(), cast);
+  end
+endmodule
+module hvl_top;
+  initial begin #1 agent_pkg::make(); #50 $finish; end
+endmodule
+"#;
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("tb.sv"))], "hdl_top")
+                .tops(["hdl_top", "hvl_top"])
+                .four_state(four_state)
+                .build()
+                .unwrap_or_else(|error| panic!("{error}"));
+        sim.run_until(100_000).unwrap();
+        assert_eq!(
+            displays(&mut sim),
+            ["name 'q1' type 'my_seq' cast 1"],
+            "four_state={four_state}"
+        );
+    }
+}
+
+/// The classes a module declares are its own: a virtual method another
+/// module calls on an object of one of them finds no override there, which
+/// is a fatal error naming the method rather than a call of none (IEEE
+/// 1800-2023 8.20).
 #[test]
 fn dispatch_without_an_override_for_the_class_is_fatal() {
     let source = r#"
@@ -620,19 +677,20 @@ package base_pkg;
   endclass
   obj made;
 endpackage
-package agent_pkg;
-  import base_pkg::*;
-  class my_seq extends obj;
-    function new(string name = "my_seq"); super.new(name); endfunction
-  endclass
-  function automatic void make(); my_seq q = new("q1"); made = q; endfunction
-endpackage
 module hdl_top;
   base_pkg::obj keep;
   initial begin #5 keep = base_pkg::made; $display("name '%s'", keep.get_name()); end
 endmodule
 module hvl_top;
-  initial begin #1 agent_pkg::make(); #50 $finish; end
+  class local_seq extends base_pkg::obj;
+    function new(string name = "local_seq"); super.new(name); endfunction
+  endclass
+  initial begin
+    local_seq q;
+    #1 q = new("q1");
+    base_pkg::made = q;
+    #50 $finish;
+  end
 endmodule
 "#;
     for four_state in [false, true] {
@@ -656,6 +714,47 @@ endmodule
                 .iter()
                 .any(|event| matches!(event, celox::RuntimeEvent::Display { .. })),
             "four_state={four_state}: {events:?}"
+        );
+    }
+}
+
+/// So does one an interface instance calls when the scope that binds it
+/// does not use the package of the base class at all (8.20, 25.3).
+#[test]
+fn interface_instances_dispatch_in_scopes_without_the_base_package() {
+    let tops = r#"
+module hdl_top;
+  logic clk = 0;
+  bfm b(clk);
+  initial forever #10 clk = ~clk;
+  initial config_pkg::h = b;
+endmodule
+module hvl_top;
+  initial begin
+    #1 env_pkg::make();
+    config_pkg::h.start = 1;
+    #50 $finish;
+  end
+endmodule
+"#;
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![
+                (CLASS_PACKAGES, Path::new("packages.sv")),
+                (CLASS_BFM, Path::new("bfm.sv")),
+                (tops, Path::new("tops.sv")),
+            ],
+            "hdl_top",
+        )
+        .tops(["hdl_top", "hvl_top"])
+        .four_state(four_state)
+        .build()
+        .unwrap_or_else(|error| panic!("{error}"));
+        sim.run_until(100_000).unwrap();
+        assert_eq!(
+            displays(&mut sim),
+            ["name 'q1' type 'my_seq'"],
+            "four_state={four_state}"
         );
     }
 }
