@@ -1,0 +1,6 @@
+Revision history for #3523:
+
+rev 2 (content) 2026-11-11 04:45 UTC — Review: a one-line comment built with `` now consumes the rest of its line, like the block comment does.
+rev 1 (initial) 2026-11-11 04:45 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":3523,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"2efe078a20e6354b26b00f63dd7556535d0041c6","timestamp_iso":"2026-11-11T04:45:44Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"2efe078a20e6354b26b00f63dd7556535d0041c6","new_sha":"2bb26b668a0b602d5dc58c250b1915619b937e41","timestamp_iso":"2026-11-11T04:45:44Z","reason":"Review: a one-line comment built with `` now consumes the rest of its line, like the block comment does.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/2efe078a20e6354b26b00f63dd7556535d0041c6...2bb26b668a0b602d5dc58c250b1915619b937e41"}]} -->

@@ -1,0 +1,6 @@
+Revision history for #4586:
+
+rev 2 (rebase) 2026-11-23 18:10 UTC — Update the ff_branch_mir snapshot for the removed redundant test instruction so CI passes
+rev 1 (initial) 2026-11-23 18:10 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":4586,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"4bb4a7815abb7ac522e9d70652cb31ab04a7fc86","timestamp_iso":"2026-11-23T18:10:18Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"4bb4a7815abb7ac522e9d70652cb31ab04a7fc86","new_sha":"333016656b6e2e5cdd0ae0dbc8235557e9d6b93a","timestamp_iso":"2026-11-23T18:10:18Z","reason":"Update the ff_branch_mir snapshot for the removed redundant test instruction so CI passes","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/4bb4a7815abb7ac522e9d70652cb31ab04a7fc86...333016656b6e2e5cdd0ae0dbc8235557e9d6b93a"}]} -->

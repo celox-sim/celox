@@ -1,0 +1,6 @@
+Revision history for #4493:
+
+rev 2 (content) 2026-11-21 11:57 UTC — Refresh five code-generation snapshots for the two-state mux, direct bit slices and scheduler memory layout. The regression suites pass with updates disabled on both affected downstream PRs.
+rev 1 (initial) 2026-11-21 11:57 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":4493,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"fb61acff8fe766bb1293d34292413f96ffd82ed0","timestamp_iso":"2026-11-21T11:57:56Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"fb61acff8fe766bb1293d34292413f96ffd82ed0","new_sha":"5020300d722dfac930e3e9ce457bed3afb8756e0","timestamp_iso":"2026-11-21T11:57:56Z","reason":"Refresh five code-generation snapshots for the two-state mux, direct bit slices and scheduler memory layout. The regression suites pass with updates disabled on both affected downstream PRs.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/fb61acff8fe766bb1293d34292413f96ffd82ed0...5020300d722dfac930e3e9ce457bed3afb8756e0"}]} -->

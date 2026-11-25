@@ -1,0 +1,1 @@
+Drop the latch entry from intentional deviations (now standard warn behavior) and fix mixed-timescale framing

@@ -1,0 +1,6 @@
+Revision history for #4494:
+
+rev 2 (content) 2026-11-21 11:57 UTC — Use the shared packed-select offset helper for SLT expressions so named parameter bits such as P[0] still compile in instance connections. Verified the original Cranelift regression on this commit and downstream.
+rev 1 (initial) 2026-11-21 11:57 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":4494,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"75dfba0f906cf2527007035a1ad21de11ba17adf","timestamp_iso":"2026-11-21T11:57:56Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"75dfba0f906cf2527007035a1ad21de11ba17adf","new_sha":"e34dea0c35e589c9ec7d597694c30019b0cab685","timestamp_iso":"2026-11-21T11:57:56Z","reason":"Use the shared packed-select offset helper for SLT expressions so named parameter bits such as P[0] still compile in instance connections. Verified the original Cranelift regression on this commit and downstream.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/75dfba0f906cf2527007035a1ad21de11ba17adf...e34dea0c35e589c9ec7d597694c30019b0cab685"}]} -->
