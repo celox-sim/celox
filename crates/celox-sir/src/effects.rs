@@ -465,8 +465,12 @@ impl<A> SIRInstruction<A> {
                 capture_flags: true,
                 ..none
             },
-            SIRInstruction::ExternCall { .. } => crate::HostEffects {
+            SIRInstruction::ExternCall { func, .. } => crate::HostEffects {
                 extern_calls: true,
+                // The coverage helper touches only the heap, and a native
+                // memory operation is no call of a host function.
+                state_calls: *func != crate::extern_abi::COVERAGE_HELPER_ID
+                    && crate::native_memory::NativeMemoryOp::decode(*func).is_none(),
                 ..none
             },
             SIRInstruction::Call { effects, .. } if effects.kernel => crate::HostEffects::ALL,
@@ -691,5 +695,83 @@ mod tests {
         assert_eq!(objects(writer.state_reads()), Some(vec![1]));
         assert_eq!(objects(writer.state_writes()), Some(vec![2]));
         assert_eq!(objects(kernel.state_writes()), None);
+    }
+
+    /// Every extern call is one the host sees in program order. Whether it
+    /// may read or change state its instruction does not name is a class of
+    /// its own, which a call of the coverage helper is not in.
+    #[test]
+    fn a_coverage_helper_call_is_an_extern_call_but_no_state_call() {
+        use crate::extern_abi::{
+            COVERAGE_HELPER_ID, HEAP_HELPER_ID, NATIVE_KERNEL_CALL_TAG, VALUE_CHANGE_ID,
+        };
+        use crate::native_memory::NativeMemoryOp;
+        let extern_call = |func| SIRInstruction::<u32>::ExternCall {
+            dst: None,
+            func,
+            args: Vec::new(),
+        };
+        let only_extern = crate::HostEffects {
+            extern_calls: true,
+            ..Default::default()
+        };
+        let state = crate::HostEffects {
+            state_calls: true,
+            ..only_extern
+        };
+        let coverage = extern_call(COVERAGE_HELPER_ID);
+        assert_eq!(coverage.host_effects(), only_extern);
+        // It is still kept, in program order, and names no state.
+        assert!(coverage.is_host_interaction() && coverage.has_side_effects());
+        assert!(!coverage.is_pure() && !coverage.accesses_unknown_state());
+        assert!(coverage.state_reads().is_none() && coverage.state_writes().is_none());
+        for func in [
+            HEAP_HELPER_ID,
+            0,
+            7,
+            VALUE_CHANGE_ID,
+            NATIVE_KERNEL_CALL_TAG,
+        ] {
+            assert_eq!(extern_call(func).host_effects(), state, "{func:#x}");
+        }
+        // A native memory operation is no call of a host function.
+        for op in [
+            NativeMemoryOp::ReadIndirect,
+            NativeMemoryOp::WriteIndirect,
+            NativeMemoryOp::ReadState,
+            NativeMemoryOp::WriteState,
+            NativeMemoryOp::WriteState8,
+            NativeMemoryOp::WriteState16,
+            NativeMemoryOp::WriteState32,
+        ] {
+            assert_eq!(
+                extern_call(op.function()).host_effects(),
+                only_extern,
+                "{op:?}"
+            );
+        }
+        // A call answers with its callee's summary, and with every resource
+        // when the callee reaches a native kernel.
+        let call = |host, kernel| SIRInstruction::<u32>::Call {
+            function: FunctionId(0),
+            frame: RegisterId(0),
+            args: Vec::new(),
+            outputs: Vec::new(),
+            dst: None,
+            effects: std::sync::Arc::new(crate::CallEffects {
+                host,
+                kernel,
+                ..Default::default()
+            }),
+        };
+        assert_eq!(call(only_extern, false).host_effects(), only_extern);
+        assert_eq!(call(state, false).host_effects(), state);
+        assert_eq!(
+            call(only_extern, true).host_effects(),
+            crate::HostEffects::ALL
+        );
+        assert!(call(only_extern, true).host_effects().state_calls);
+        assert_eq!(only_extern.union(state), state);
+        assert!(only_extern.interacts_with_host());
     }
 }

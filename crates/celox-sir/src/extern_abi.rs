@@ -17,6 +17,24 @@ use crate::RegisterType;
 /// user extern function table.
 pub const HEAP_HELPER_ID: u32 = u32::MAX - 1;
 
+/// The `func` of an extern call to the heap helper for a covergroup
+/// operation.
+///
+/// It takes the arguments of [`HEAP_HELPER_ID`] the same way and reaches the
+/// same host function. The separate `func` states what the opcode word, a
+/// register, cannot: the operation reads and writes covergroup data in the
+/// heap and nothing of the simulation state, so the call is an extern call
+/// that is no state call ([`crate::HostEffects::state_calls`]).
+pub const COVERAGE_HELPER_ID: u32 = u32::MAX - 10;
+
+/// Whether an extern call of `func` is a call of the heap helper:
+/// [`HEAP_HELPER_ID`] or [`COVERAGE_HELPER_ID`], which differ only in what
+/// analyses assume of the call. Everything that passes the arguments or
+/// finds the callee asks this.
+pub const fn is_heap_helper(func: u32) -> bool {
+    matches!(func, HEAP_HELPER_ID | COVERAGE_HELPER_ID)
+}
+
 /// The `func` of a value change point: the host is told, right after a
 /// write of a watched object, that the object may have changed (IEEE
 /// 1800-2023 38.36.1). Its one argument is the site index. The call stands
@@ -104,7 +122,8 @@ pub fn native_function_guard_for(frame_size: usize) -> u32 {
     NATIVE_FUNCTION_GUARD_TAG | frame_size.min(NATIVE_FUNCTION_PAYLOAD as usize) as u32
 }
 
-/// The number of arguments of an extern call to [`HEAP_HELPER_ID`].
+/// The number of arguments of an extern call to the heap helper
+/// ([`is_heap_helper`]).
 pub const HEAP_HELPER_ARGUMENTS: usize = 4;
 
 /// The bit of an `svLogic` that holds the mask: `value | mask << 1`.
@@ -237,6 +256,7 @@ mod tests {
         assert!(huge > crate::STACK_SIZE);
         for helper in [
             HEAP_HELPER_ID,
+            COVERAGE_HELPER_ID,
             crate::float::FLOAT_HELPER_ID,
             0,
             NATIVE_KERNEL_CALL_TAG,
@@ -244,6 +264,38 @@ mod tests {
             assert_eq!(native_function_slot(helper), None);
             assert_eq!(native_function_guard(helper), None);
         }
+    }
+
+    /// The coverage helper is the heap helper under a `func` of its own,
+    /// which no other reserved function shares.
+    #[test]
+    fn the_coverage_helper_is_a_heap_helper_of_its_own() {
+        use crate::native_memory::NativeMemoryOp;
+        assert!(is_heap_helper(HEAP_HELPER_ID));
+        assert!(is_heap_helper(COVERAGE_HELPER_ID));
+        let others = [
+            0,
+            1,
+            crate::float::FLOAT_HELPER_ID,
+            VALUE_CHANGE_ID,
+            NATIVE_KERNEL_CALL_TAG,
+            NATIVE_FUNCTION_CALL_TAG,
+            NATIVE_FUNCTION_GUARD_TAG,
+            NativeMemoryOp::ReadIndirect.function(),
+            NativeMemoryOp::WriteIndirect.function(),
+            NativeMemoryOp::ReadState.function(),
+            NativeMemoryOp::WriteState.function(),
+            NativeMemoryOp::WriteState8.function(),
+            NativeMemoryOp::WriteState16.function(),
+            NativeMemoryOp::WriteState32.function(),
+        ];
+        for other in others {
+            assert!(!is_heap_helper(other), "{other:#x}");
+            assert_ne!(other, COVERAGE_HELPER_ID);
+        }
+        assert_ne!(COVERAGE_HELPER_ID, HEAP_HELPER_ID);
+        assert_eq!(NativeMemoryOp::decode(COVERAGE_HELPER_ID), None);
+        assert_eq!(native_kernel_index(COVERAGE_HELPER_ID), None);
     }
 
     #[test]

@@ -423,3 +423,38 @@ fn affected_by_writes_matches_the_path_scan_fixpoint() {
     }
     assert!(reached_some, "the paths must carry writes onward");
 }
+
+/// Relocation renumbers the extern functions a module's units call into the
+/// design's table and leaves the heap helper alone, under either of its
+/// `func`s: it is in no module's table.
+#[test]
+fn relocation_keeps_heap_helper_calls() {
+    use celox_sir::extern_abi::{COVERAGE_HELPER_ID, HEAP_HELPER_ID};
+    let extern_call = |func| SIRInstruction::<u32>::ExternCall {
+        dst: None,
+        func,
+        args: Vec::new(),
+    };
+    let unit = unit_of(vec![
+        extern_call(0),
+        extern_call(HEAP_HELPER_ID),
+        extern_call(COVERAGE_HELPER_ID),
+    ]);
+    let relocated = relocate_executation_unit_with_errors(
+        &unit,
+        &|address: &u32| *address,
+        &HashMap::default(),
+        &HashMap::default(),
+        &[(0, 5)].into_iter().collect(),
+        0,
+    );
+    let functions: Vec<u32> = relocated.blocks[&celox_sir::BlockId(0)]
+        .instructions
+        .iter()
+        .map(|instruction| match instruction {
+            SIRInstruction::ExternCall { func, .. } => *func,
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(functions, [5, HEAP_HELPER_ID, COVERAGE_HELPER_ID]);
+}

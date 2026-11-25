@@ -165,7 +165,7 @@ pub(super) fn relocate_executation_unit_with_errors<A, B>(
                                         dst: *dst,
                                         // The heap helper is outside every
                                         // module's extern function table.
-                                        func: if *func == celox_sir::extern_abi::HEAP_HELPER_ID {
+                                        func: if celox_sir::extern_abi::is_heap_helper(*func) {
                                             *func
                                         } else {
                                             extern_functions[func]

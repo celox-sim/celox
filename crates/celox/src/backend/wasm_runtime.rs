@@ -397,7 +397,7 @@ impl WasmBackend {
                             // argument count of the DPI-C import it links to.
                             let result = if func == u32::MAX {
                                 celox_sir::float::evaluate(args[0], args[1], args[2])
-                            } else if func == celox_sir::extern_abi::HEAP_HELPER_ID {
+                            } else if celox_sir::extern_abi::is_heap_helper(func) {
                                 caller.data_mut().call(args[0], args[1], args[2], args[3])
                             } else {
                                 unsafe { extern_functions.call(func, args) }

@@ -421,6 +421,34 @@ fn extern_call(args: usize, argument_type: RegisterType) -> ExecutionUnit<usize>
     )
 }
 
+/// A heap helper call passes exactly its opcode word and three operands,
+/// under either `func`.
+#[test]
+fn checks_heap_helper_call_argument_count() {
+    for func in [
+        crate::extern_abi::HEAP_HELPER_ID,
+        crate::extern_abi::COVERAGE_HELPER_ID,
+    ] {
+        let call = |args| {
+            let mut eu = extern_call(args, bit(64));
+            for instruction in &mut eu.blocks.get_mut(&BlockId(0)).unwrap().instructions {
+                if let SIRInstruction::ExternCall { func: callee, .. } = instruction {
+                    *callee = func;
+                }
+            }
+            eu.verify_result()
+        };
+        assert_eq!(call(crate::extern_abi::HEAP_HELPER_ARGUMENTS), Ok(()));
+        for args in [0, 3, 5] {
+            assert_eq!(
+                call(args).unwrap_err().invariant,
+                "TYPE.HEAP_CALL_ARGUMENT_COUNT",
+                "{func:#x} with {args} arguments"
+            );
+        }
+    }
+}
+
 #[test]
 fn checks_extern_call_argument_count_and_types() {
     assert_eq!(

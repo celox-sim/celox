@@ -8,6 +8,8 @@ use celox_sir::{
     SIRValue,
 };
 
+mod coverage_helper_calls;
+
 /// The width of the object a callee reads, `a`.
 const INPUT: usize = 13;
 /// The width of the object it writes, `b`.

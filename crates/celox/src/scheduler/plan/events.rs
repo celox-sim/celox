@@ -142,7 +142,7 @@ impl<'a> PlanBuilder<'a> {
             .updates
             .observe
             .iter()
-            .any(|unit| opaque(unit, &schema.extern_functions));
+            .any(|unit| opaque_in_settle(unit, &schema.extern_functions));
         let kernel_stores: Vec<HashSet<AbsoluteAddr>> = sir
             .processes
             .iter()

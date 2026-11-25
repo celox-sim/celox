@@ -1239,7 +1239,7 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
     }
 
     fn call_extern(&mut self, func: u32, args: &[u64]) -> Result<u64, InterpError> {
-        if func == celox_sir::extern_abi::HEAP_HELPER_ID {
+        if celox_sir::extern_abi::is_heap_helper(func) {
             let &[code, a, b, c] = args else {
                 unreachable!("the SIR verifier checks heap call arguments")
             };

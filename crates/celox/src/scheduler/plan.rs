@@ -4,6 +4,8 @@ mod events;
 mod kernels;
 mod ordering;
 mod settles;
+#[cfg(test)]
+mod tests;
 
 use super::*;
 
@@ -203,6 +205,14 @@ fn unit_stores<'a>(
 /// Whether a unit makes host calls, whose effects on the state are unknown.
 fn opaque(unit: &Unit, functions: &[celox_design::ExternFunction]) -> bool {
     instructions(unit).any(|inst| makes_opaque_calls(inst, functions))
+}
+
+/// Whether a unit of combinational logic makes host calls. A coverage
+/// helper call counts here, unlike in [`opaque`]: the plan of a design that
+/// makes one in its settle is the plan of the design with a heap call there
+/// (see [`makes_opaque_calls_in_settle`]).
+fn opaque_in_settle(unit: &Unit, functions: &[celox_design::ExternFunction]) -> bool {
+    instructions(unit).any(|inst| makes_opaque_calls_in_settle(inst, functions))
 }
 
 /// Whether no design code writes a storage: neither RTL logic, a kernel
