@@ -185,6 +185,6 @@ impl Type {
         self.members
             .first()
             .filter(|member| member.is_tagged())
-            .map(|member| member.owner.as_ref())
+            .map(|member| member.owner().as_ref())
     }
 }
