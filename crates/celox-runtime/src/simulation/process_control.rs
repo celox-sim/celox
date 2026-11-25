@@ -755,6 +755,12 @@ impl<B: SimBackend> SimulationState<B> {
             let control = &mut self.process_state.activations[id].control;
             control.exposed = false;
             control.handle = None;
+            // No handle names it any more, and the compiler variable
+            // that held a compiler-owned one was cleared with it, so a
+            // killed internal activation is reusable from here: the
+            // exclusion in `activation_reusable` guards only the window
+            // before this invalidation.
+            control.internal = false;
             self.offer_ended_activation(id);
         }
     }

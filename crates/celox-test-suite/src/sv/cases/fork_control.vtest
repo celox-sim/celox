@@ -801,6 +801,19 @@ endmodule
   (run_until 9)
   (assert_eq count 2) (assert_eq resumed 102) (assert_eq hits 1))
 
+; A block disabled again and again starts again each time, on an
+; activation the runtime reclaims once its handle is invalidated.
+(case repeatedly_disabled_block_starts_again
+  (source "repeated_disable.sv" #"
+module Top(output int count, output int cycles);
+  always begin : work #2; count++; end
+  initial forever begin #3; disable work; cycles++; end
+endmodule
+"#)
+  (top Top)
+  (run_until 19)
+  (assert_eq count 6) (assert_eq cycles 6))
+
 ; A `disable` in an unselected generate branch elaborates to nothing, so
 ; the block it names runs in its own process as if it were not there.
 (case disable_in_unselected_generate_branch_changes_nothing
