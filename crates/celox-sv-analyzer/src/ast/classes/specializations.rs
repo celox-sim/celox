@@ -738,14 +738,17 @@ impl BoundArguments {
     /// Whether `other` names the same specialization. Ordinary type equality
     /// ignores nominal declaration identity; specialization matching must
     /// distinguish separately declared enum and aggregate types (8.25).
-    pub(in crate::ast) fn same(&self, other: &Self, table: &semantic_types::TyTable) -> bool {
+    pub(in crate::ast) fn same(&self, other: &Self, table: &mut semantic_types::TyTable) -> bool {
+        // The types are fixed in the scope that assigns them.
+        let functions = const_functions::ConstantFunctions::default();
+        let env = ConstEnv::default();
         self.values == other.values
             && self.types.len() == other.types.len()
             && self.types.iter().all(|(name, ty)| {
-                other
-                    .types
-                    .get(name)
-                    .is_some_and(|other| spelling(ty, table) == spelling(other, table))
+                other.types.get(name).is_some_and(|other| {
+                    spelling(ty, table, &functions, &env)
+                        == spelling(other, table, &functions, &env)
+                })
             })
     }
 }
@@ -891,7 +894,7 @@ fn prepare_bound(
         .and_then(|known| {
             known.iter().find(|known| {
                 known.of(&base_env, &base_aliases)
-                    && known.arguments.same(&arguments, &session.types)
+                    && known.arguments.same(&arguments, &mut session.types)
             })
         })
         .map(|known| known.name.clone())
@@ -1410,8 +1413,8 @@ impl Parameters {
                     let ty = type_parameters::resolve(&tree.functions, ty, env)
                         .ok_or_else(|| unsupported(format!("type of type parameter `{name}`")))?;
                     if port {
-                        self.spelled
-                            .push(format!("{name}={}", spelling(&ty, &session.types)));
+                        let spelled = spelling(&ty, &mut session.types, &tree.functions, env);
+                        self.spelled.push(format!("{name}={spelled}"));
                         self.record_type(&ty);
                     }
                     aliases.insert(name.clone(), ty.clone());
@@ -1808,10 +1811,18 @@ fn literal_parameter(
         })
 }
 
-/// A spelling of type `ty` that tells it apart from other types, for the
-/// name of a specialization.
-pub(in crate::ast) fn spelling(ty: &Type, table: &semantic_types::TyTable) -> String {
-    spelled(ty, ty.binding.get(table), table)
+/// A spelling of type `ty`, whose bounds name constants of `env`, that
+/// tells it apart from other types, for the name of a specialization: the
+/// same for types that match (IEEE 1800-2023 6.22.1), and the same in every
+/// run.
+pub(in crate::ast) fn spelling(
+    ty: &Type,
+    table: &mut semantic_types::TyTable,
+    functions: &const_functions::ConstantFunctions,
+    env: &ConstEnv,
+) -> String {
+    let id = semantic_types::of_type(table, functions, ty, env);
+    spelled(ty, id, table)
 }
 
 /// [`spelling`] of `ty`, whose semantic type is `id` if it has one.
@@ -1881,10 +1892,7 @@ fn spelled(ty: &Type, id: Option<semantic_types::TyId>, table: &semantic_types::
     if integral && ty.is_signed() {
         spelled.push_str(" signed");
     }
-    let bound = |expr: &ConstExpr| match expr {
-        ConstExpr::Literal(literal) => literal.clone(),
-        expr => format!("{expr:?}"),
-    };
+    let bound = canonical_text::const_expr;
     if integral {
         for range in ty.packed_ranges() {
             spelled.push_str(&format!("[{}:{}]", bound(&range.left), bound(&range.right)));
@@ -1904,17 +1912,15 @@ fn spelled(ty: &Type, id: Option<semantic_types::TyId>, table: &semantic_types::
             bound(&range.right)
         ));
     }
-    // The spelling hashes the whole shape of the type, which stays its
-    // spelling until specializations are named by their semantic types.
-    if ty.enumeration().is_some() || !ty.members.is_empty() {
-        // An aggregate is told apart by its whole structure.
-        use std::hash::{Hash, Hasher};
-        let mut hasher = fxhash::FxHasher::default();
-        ty.hash(&mut hasher);
-        spelled.push_str(&format!("#{:016x}", hasher.finish()));
-    }
-    if let Some(name) = ty.declaration_name() {
-        spelled.push_str(&format!("@{name}"));
+    // An enumeration, structure or union is a type of its declaration
+    // (6.19, 6.22.1), which its semantic type names.
+    let declaration = id.and_then(|id| table.declaration_key(id));
+    debug_assert!(
+        declaration.is_some() || ty.enumeration().is_none() && ty.members.is_empty(),
+        "a type argument of an enumeration, structure or union type has a semantic type"
+    );
+    if let Some(declaration) = declaration {
+        spelled.push_str(&format!("@{declaration}"));
     }
     spelled
 }
@@ -2475,7 +2481,12 @@ mod tests {
                 &mut table,
                 VirtualInterface::new("bus_if".into(), modport.map(Into::into), arguments.into()),
             );
-            spelling(&ty, &table)
+            spelling(
+                &ty,
+                &mut table,
+                &crate::ast::const_functions::ConstantFunctions::default(),
+                &ConstEnv::default(),
+            )
         };
         assert_eq!(spelled(None, &[]), "virtual bus_if");
         assert_eq!(spelled(Some("m"), &[]), "virtual bus_if.m");

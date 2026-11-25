@@ -49,6 +49,28 @@ pub(super) enum Value {
     Pattern(BoundPattern),
 }
 
+impl Value {
+    fn canonical(&self, table: &mut semantic_types::TyTable) -> String {
+        match self {
+            Self::Expression {
+                expr,
+                signed,
+                value_type,
+            } => format!(
+                "{}{}{}",
+                canonical_text::expr(expr),
+                match signed {
+                    Some(true) => "s",
+                    Some(false) => "u",
+                    None => "",
+                },
+                value_type.canonical(table)
+            ),
+            Self::Pattern(pattern) => pattern.canonical(table),
+        }
+    }
+}
+
 pub(super) fn from_param(
     root: celox_sv_syntax::ExprId,
     tree: &AnalysisContext<'_>,
@@ -228,6 +250,64 @@ impl Value {
 }
 
 impl BoundPattern {
+    /// The pattern as the name of the analysis of a design element writes a
+    /// parameter value: its values and keys, and the types it binds by their
+    /// semantic types (see [`semantic_types::TyTable::canonical_text`]), the same
+    /// in every run. A type key is written by its native expression, by its
+    /// position in the parsed source, which is the same in every run.
+    pub(super) fn canonical(&self, table: &mut semantic_types::TyTable) -> String {
+        let items = match &self.items {
+            Items::Value(value) => return canonical_text::expr(value),
+            Items::ArrayValue {
+                value,
+                ty,
+                semantic,
+            } => {
+                let element = match semantic.get(table) {
+                    Some(id) => table.canonical_text(id),
+                    None => format!(
+                        "{}{}{}{:?}{}",
+                        ty.element_width,
+                        if ty.signed { "s" } else { "" },
+                        if ty.four_state { "l" } else { "b" },
+                        ty.dims,
+                        ty.element.as_deref().unwrap_or_default()
+                    ),
+                };
+                return format!("{}:{element}", canonical_text::expr(value));
+            }
+            Items::List(values) => values
+                .iter()
+                .map(|value| value.canonical(table))
+                .collect::<Vec<_>>(),
+            Items::Repeat(count, values) => {
+                let values = values
+                    .iter()
+                    .map(|value| value.canonical(table))
+                    .collect::<Vec<_>>();
+                return format!("'{{{count}{{{}}}}}", values.join(","));
+            }
+            Items::Keyed(items) => items
+                .iter()
+                .map(|(key, value)| {
+                    let key = match key {
+                        Key::Index(index) => index.to_string(),
+                        Key::Member(name) => name.clone(),
+                        Key::Name { name, index: None } => name.clone(),
+                        Key::Name {
+                            name,
+                            index: Some(index),
+                        } => format!("{name}[{index}]"),
+                        Key::Type(id) => format!("type#{id:?}"),
+                        Key::Default => "default".to_owned(),
+                    };
+                    format!("{key}:{}", value.canonical(table))
+                })
+                .collect(),
+        };
+        format!("'{{{}}}", items.join(","))
+    }
+
     pub(super) fn lower(
         &self,
         tree: &AnalysisContext<'_>,

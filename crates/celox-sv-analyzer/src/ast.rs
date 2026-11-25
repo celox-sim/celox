@@ -28,6 +28,7 @@ mod array_parameters;
 mod assignment_analysis;
 mod assignments;
 mod bound_patterns;
+mod canonical_text;
 mod case;
 mod casts;
 mod classes;
