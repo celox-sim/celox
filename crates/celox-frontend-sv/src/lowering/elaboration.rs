@@ -295,6 +295,7 @@ pub(crate) fn elaborate_instances(
         .filter_map(|name| signal_names.get(name).copied())
         .collect();
     let port_start = module.comb_blocks.len();
+    let mut clock_inputs = std::collections::BTreeMap::new();
     for (instance, child_id, child, connections) in resolved_instances {
         let name = &instance.instance_name;
         let position = module.instances.get(name).map_or(0, Vec::len);
@@ -322,9 +323,62 @@ pub(crate) fn elaborate_instances(
             &connections,
             four_state,
             &interconnect_ids,
+            &mut clock_inputs,
         )?;
     }
     let port_paths = port_start..module.comb_blocks.len();
+    if clock_inputs.values().any(|paths| paths.len() > 1) {
+        let mut pm = procedural::ProcModule::new(
+            &lowered.source,
+            &tables,
+            &mut parent_variables,
+            &mut signal_names,
+            &lowered.constants,
+            &lowered.parameter_types,
+            four_state,
+            warnings,
+        );
+        // Give equal clock expressions a single source. The child ports
+        // retain their own names and typed values, and ordinary clock wiring
+        // now assigns their edge-sensitive consumers to the same domain.
+        for ((expr, logic), paths) in clock_inputs {
+            if paths.len() < 2 {
+                continue;
+            }
+            if celox_slt::canon::reachable(&module.arena, [expr])
+                .into_iter()
+                .any(|n| {
+                    matches!(
+                        module.arena.get(n),
+                        SLTNode::ForFold { .. }
+                            | SLTNode::ForFoldGroup { .. }
+                            | SLTNode::Capture { .. }
+                    )
+                })
+            {
+                continue;
+            }
+            let (id, _) = pm.module_temp("clock_expr", 1, false, logic);
+            module
+                .variables
+                .insert(id, pm.var(id).to_symbolic_variable());
+            let atom = VarAtomBase::new(id, 0, 0);
+            let mut driver = module.comb_blocks[paths[0]].clone();
+            driver.target = LogicPathTarget::Var(atom);
+            module.comb_blocks.push(driver);
+            let input = module.arena.alloc(SLTNode::Input {
+                variable: id,
+                signed: false,
+                index: Vec::new(),
+                access: atom.access,
+            })?;
+            for i in paths {
+                let port = &mut module.comb_blocks[i];
+                port.expr = input;
+                port.sources = std::iter::once(atom).collect();
+            }
+        }
+    }
     if !module.next_state.forms.is_empty() && !four_state {
         let pm = procedural::ProcModule::new(
             &lowered.source,
@@ -991,6 +1045,7 @@ fn lower_port_connections(
     connections: &[LoweredSvPortConnection],
     four_state: bool,
     interconnect_ids: &HashSet<SourceVarId>,
+    clock_inputs: &mut std::collections::BTreeMap<(NodeId, bool), Vec<usize>>,
 ) -> Result<(), ParserError> {
     let mut connected_formals = HashSet::default();
     for connection in connections {
@@ -1167,6 +1222,16 @@ fn lower_port_connections(
                         expr,
                         child_var.is_4state && !collapse_unknown_literal,
                     )?;
+                }
+                if width == 1
+                    && celox_design::edges::polarity(child_var.domain_kind).is_some()
+                    && !sources.is_empty()
+                    && !matches!(arena.get(expr), SLTNode::Input { .. })
+                {
+                    clock_inputs
+                        .entry((expr, four_state && child_var.is_4state))
+                        .or_default()
+                        .push(paths.len());
                 }
                 paths.push(LogicPath {
                     transparent_copy: true,
