@@ -165,6 +165,21 @@ impl ScopeElaboration<'_> {
                 &self.packed_dimensions,
             )?;
         self.subroutines.extend(inline_subroutines);
+        // The subroutines of the covergroup types the scope declares
+        // (IEEE 1800-2023 19.3): all of them where another scope may use
+        // the type, else those the bodies above use.
+        if !self.imported.declarations_only {
+            self.subroutines
+                .extend(procedural::covergroup_subroutines::scope_subroutines(
+                    syntax_tree,
+                    session,
+                    &self.const_env,
+                    &self.packed_dimensions,
+                    &self.parameter_values,
+                    &mut body_state,
+                    self.is_package || self.export_symbols,
+                )?);
+        }
         // The functions of UVM's C library that Celox provides report
         // through the UVM package (see `procedural::dpi_reports`).
         procedural::dpi_reports::report_through_uvm(

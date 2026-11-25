@@ -114,6 +114,10 @@ pub(super) struct ScopeSymbols {
     /// Class-declared types, frozen in each specialization's declaration
     /// environment before another source imports them (8.23, 8.25).
     pub class_member_types: HashMap<String, HashMap<String, Type>>,
+    /// The scope-level covergroup types the scope declares (IEEE 1800-2023
+    /// 19.3), which a scope that uses them finds by their names. Their
+    /// subroutines are among `subroutines`.
+    pub covergroups: Vec<Arc<covergroups::Covergroup>>,
     pub inline_randomizations: Vec<classes::constraints::InlineRequest>,
     /// The compilation unit of a scope that names none of its items, which
     /// it takes when a specialization of a package class it takes names an
@@ -276,6 +280,9 @@ impl ScopeSymbols {
         extend_unnamed(&mut self.classes, &other.classes, |class| &*class.name);
         extend_unnamed(&mut self.object_classes, &other.object_classes, |class| {
             &*class.name
+        });
+        extend_unnamed(&mut self.covergroups, &other.covergroups, |model| {
+            &*model.name
         });
         extend_missing(&mut self.class_member_types, &other.class_member_types);
         for (name, value) in &other.const_env {
@@ -526,6 +533,8 @@ impl ScopeSymbols {
             classes: self.classes.clone(),
             object_classes: self.object_classes.clone(),
             class_member_types: self.class_member_types.clone(),
+            // Covergroup types have their design-wide names already.
+            covergroups: self.covergroups.clone(),
             inline_randomizations: self.inline_randomizations.clone(),
             hierarchical_subroutines: self.hierarchical_subroutines.clone(),
             declarations_only: self.declarations_only,

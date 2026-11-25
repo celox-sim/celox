@@ -1501,7 +1501,7 @@ pub(super) fn check_written_storage(
             expression_binding::object_property(tree, session, id, native, dims)?
             && property.storage.is_some()
         {
-            return expression_binding::check_writable(&property, dims);
+            return expression_binding::check_writable(&property, dims, &session.types);
         }
         id = match &native.expression(id).kind {
             ExprKind::Select { expression, .. } => *expression,

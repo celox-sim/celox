@@ -231,6 +231,29 @@ impl ScopeElaboration<'_> {
         calls
     }
 
+    /// The subroutines of covergroup types among the scope's own that its
+    /// other code can call: those its processes, declarations and other
+    /// subroutines call, and those they call in turn.
+    pub(super) fn reached_covergroup_subroutines(&self) -> HashSet<String> {
+        let own: HashMap<&str, &Subroutine> = self
+            .subroutines
+            .iter()
+            .filter(|subroutine| covergroups::is_class(&subroutine.name))
+            .map(|subroutine| (subroutine.name.as_str(), subroutine))
+            .collect();
+        let mut reached = HashSet::default();
+        let mut pending =
+            self.own_calls_except(|subroutine| covergroups::is_class(&subroutine.name));
+        while let Some(name) = pending.pop() {
+            if let Some(subroutine) = own.get(name)
+                && reached.insert(name.to_owned())
+            {
+                subroutine_calls(subroutine, &mut pending);
+            }
+        }
+        reached
+    }
+
     /// The names of the subroutines of `imported` that the scope can call:
     /// those its own code calls, and those they call in turn. The functions
     /// the types of its header may call are apart

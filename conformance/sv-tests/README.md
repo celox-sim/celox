@@ -909,7 +909,7 @@ coverage: they fold to their no-coverage results (`SV_COV_NOCOV,
 `SV_COV_OK for operations with nothing to do, `SV_COV_ERROR for invalid
 selector constants or a merge database that was never saved, and 100.0
 overall functional coverage on a design without covergroup instances per
-19.11). `$set_coverage_db_name` and `$load_coverage_db` are accepted and
+19.11; with covergroups, `$get_coverage` is their coverage). `$set_coverage_db_name` and `$load_coverage_db` are accepted and
 dropped. Two reviewed expectations update: `20.14--coverage` passes in both
 state modes in a focused official invocation, with no other verdict changed
 among 47 cases of chapter 20. Boundaries: selector arguments must be
@@ -917,8 +917,8 @@ constant expressions; the scope and database name arguments of the functions
 are not resolved, validated or evaluated, so they must be a literal or a
 name, while the database tasks evaluate their name; no database is kept, so
 `$coverage_save` saves nothing (`SV_COV_NOCOV) and `$coverage_merge` finds
-none; and covergroups are not elaborated, so `$get_coverage` is rejected in
-a source that declares one. A coverage function is no constant system
+none; and the database tasks report a compilation warning, as nothing is
+saved or loaded. A coverage function is no constant system
 function (11.2.1): its call in a constant expression or in a constant
 function is rejected, and a constant function ignores the database tasks
 (13.4.3).

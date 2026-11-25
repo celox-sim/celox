@@ -101,6 +101,7 @@ fn shared_always_temporaries_exclude_queued_writes() {
             SharedAlways {
                 temporaries: true,
                 foreign_references: &HashSet::default(),
+                no_covergroups: false,
             },
             &mut warnings,
         )

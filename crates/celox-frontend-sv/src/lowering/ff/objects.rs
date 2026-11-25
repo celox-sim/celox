@@ -199,6 +199,7 @@ impl Ff<'_, '_> {
             // (IEEE 1800-2023 15.5).
             ObjectOp::NewEvent => self.heap_call(ops::EVENT_NEW, &[]),
             ObjectOp::Stream(_) => unreachable!("handled by stream_call"),
+            ObjectOp::Coverage(_) => unreachable!("handled by coverage_call"),
             ObjectOp::New {
                 class,
                 size,
@@ -454,6 +455,7 @@ impl Ff<'_, '_> {
             ObjectOp::Pattern(_) => unreachable!("handled by aggregate_pattern"),
             ObjectOp::Concat(_) => unreachable!("handled by container_concat"),
             ObjectOp::Stream(_) => unreachable!("handled by stream_call"),
+            ObjectOp::Coverage(_) => unreachable!("handled by coverage_call"),
             ObjectOp::New { .. } | ObjectOp::Copy | ObjectOp::Box(_) | ObjectOp::Visit => {
                 Some(celox_design::ValueKind::ObjRef)
             }

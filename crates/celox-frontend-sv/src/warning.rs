@@ -114,6 +114,11 @@ pub enum FrontendWarningKind {
     /// the `static` keyword (IEEE 1800-2023 6.21).
     #[error("static variable `{name}` has an initializer but is not declared `static`")]
     ImplicitStaticInitializer { name: String },
+    /// A call of `$set_coverage_db_name` or `$load_coverage_db` (`task`):
+    /// there is no coverage database, so nothing is saved or loaded (IEEE
+    /// 1800-2023 19.9).
+    #[error("`{task}` has no effect: Celox keeps no coverage database")]
+    NoCoverageDatabase { task: &'static str },
 }
 
 /// Where a warning is in the source.
@@ -188,6 +193,10 @@ pub(crate) fn analyzer_warnings(
             FrontendWarningKind::ImplicitStaticInitializer { name: name.clone() },
             site.clone(),
         ),
+        celox_sv_analyzer::ir::AnalyzerWarning::NoCoverageDatabase { task, site } => (
+            FrontendWarningKind::NoCoverageDatabase { task },
+            site.clone(),
+        ),
     })
 }
 
@@ -246,6 +255,7 @@ impl miette::Diagnostic for FrontendWarning {
             FrontendWarningKind::ImplicitStaticInitializer { .. } => "implicit_static_initializer",
             FrontendWarningKind::ForcedSpecialization { .. } => "forced_specialization",
             FrontendWarningKind::ForcedArray { .. } => "forced_array",
+            FrontendWarningKind::NoCoverageDatabase { .. } => "no_coverage_database",
         }))
     }
 
@@ -290,6 +300,9 @@ impl miette::Diagnostic for FrontendWarning {
             }
             FrontendWarningKind::ImplicitStaticInitializer { .. } => {
                 "IEEE 1800-2023 6.21 requires an explicit `static` when a declaration specifies an initialization value; declare the variable `static`, or silence with implicit_static_initializer=allow"
+            }
+            FrontendWarningKind::NoCoverageDatabase { .. } => {
+                "the argument is evaluated and nothing is saved or loaded (IEEE 1800-2023 19.9; tracking issue #4294); read the coverage of the covergroups from the simulation instead"
             }
         }))
     }

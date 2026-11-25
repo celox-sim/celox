@@ -468,6 +468,9 @@ fn prepare_external_hierarchy_collecting(
         );
     }
     let overrides = schedule::exported_overrides(analyses.values())?;
+    let no_covergroups = !analyzed.values().next().is_some_and(|base| {
+        schedule::constructs_covergroups(analyses.values(), &base.packages, &design)
+    });
     // This hierarchy numbers no module instances: an override that selects
     // the instance whose items it reads, or among the definitions of its
     // class, would select none.
@@ -509,6 +512,10 @@ fn prepare_external_hierarchy_collecting(
                         forced: &[],
                         properties: &properties,
                         time_format,
+                        shared: SharedAlways {
+                            no_covergroups,
+                            ..SharedAlways::default()
+                        },
                         ..HierarchicalNames::lowering(&expansion)
                     },
                     analyses.remove(&module_id),

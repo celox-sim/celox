@@ -289,6 +289,7 @@ impl Module {
             let assignments = scope.assignments();
             let symbols = scope.symbols(syntax_tree, session, inline_randomizations);
             scope.complete_dispatchers();
+            scope.drop_unreached_covergroup_subroutines();
             let imported_parameters = scope.lower_imported();
             scope.prune_symbolic_functions(syntax_tree);
             Ok(scope.finish(

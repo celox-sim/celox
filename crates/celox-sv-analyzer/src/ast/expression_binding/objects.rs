@@ -170,12 +170,6 @@ pub(in crate::ast) fn check_member_declared(
             Some(false) => {}
             Some(true) | None => return Ok(()),
         }
-        // A covergroup the class declares (IEEE 1800-2023 19.4), which the
-        // analyzer does not lay out as a member.
-        match declares_covergroup(tree, session, &current, &member) {
-            Some(false) => {}
-            Some(true) | None => return Ok(()),
-        }
         pending.extend(class.base.iter().cloned());
         pending.extend(class.interfaces.iter().cloned());
     }
@@ -183,90 +177,6 @@ pub(in crate::ast) fn check_member_declared(
         class: classes::specializations::generic(session, &class_name),
         name: member,
     })
-}
-
-/// Rejects native expression `id` if it names a covergroup that a class
-/// declares (IEEE 1800-2023 19.4), `cg` in a method of the class or
-/// `h.cg`: the analysis does not make covergroup instances, so constructing
-/// one or calling its methods is unsupported rather than read as something
-/// else. A covergroup that nothing constructs has no instance, which is why
-/// its declaration alone is accepted.
-pub(in crate::ast) fn reject_covergroup(
-    tree: &AnalysisContext<'_>,
-    session: &mut Session,
-    id: ExprId,
-    native: &Declarations,
-    dimensions: &PackedDimensions,
-) -> Converted<()> {
-    let (class_name, member) = match &native.expression(ungroup(id, native)).kind {
-        // A name a scope of the method declares hides the class's.
-        ExprKind::Name(name) => {
-            let member = instances::normalize_identifier(&name.spelling);
-            if dimensions.get(&member).is_some() {
-                return Ok(());
-            }
-            let Some(class) = scope_class(dimensions) else {
-                return Ok(());
-            };
-            (class, member)
-        }
-        ExprKind::Member {
-            expression,
-            separator,
-            name,
-        } if separator == "." => {
-            let Some(class) = native_class(tree, session, *expression, native, dimensions) else {
-                return Ok(());
-            };
-            (class, instances::normalize_identifier(&name.spelling))
-        }
-        _ => return Ok(()),
-    };
-    let mut pending = vec![class_name];
-    let mut seen = HashSet::default();
-    while let Some(current) = pending.pop() {
-        if !seen.insert(current.clone()) || classes::builtin(&current) {
-            continue;
-        }
-        let Ok(class) = class(tree, session, dimensions, &current) else {
-            return Ok(());
-        };
-        // A property or method of the name hides a covergroup of a base.
-        if declares(session, &class, &member) != Some(false) {
-            return Ok(());
-        }
-        if declares_covergroup(tree, session, &current, &member) == Some(true) {
-            // The class as the source names it, not its specialization.
-            let spelled = classes::declaration(tree, session, &current).map_or_else(
-                || classes::specializations::generic(session, &current),
-                |declaration| instances::normalize_identifier(&declaration.name.spelling),
-            );
-            return Err(unsupported(format!(
-                "covergroup `{member}` of class `{spelled}` (IEEE 1800-2023 19.4)"
-            )));
-        }
-        pending.extend(class.base.iter().cloned());
-    }
-    Ok(())
-}
-
-/// Whether class `name` declares a covergroup `member`, or `None` when its
-/// declaration is not at hand.
-fn declares_covergroup(
-    tree: &AnalysisContext<'_>,
-    session: &mut Session,
-    name: &str,
-    member: &str,
-) -> Option<bool> {
-    let generic = classes::specializations::generic(session, name);
-    match classes::declaration(tree, session, name) {
-        Some(declaration) => Some(classes::declares_covergroup(
-            tree.declarations(),
-            declaration,
-            member,
-        )),
-        None => session.foreign.declares_covergroup(&generic, member),
-    }
 }
 
 /// Whether `class` itself declares a member `name` (IEEE 1800-2023 8.5),
@@ -674,11 +584,25 @@ pub(in crate::ast) fn member_type(
 /// the handle, or `None` for the enclosing method's `this`.
 /// Reject a write of `property` unless it is writable here: a constant
 /// property is written only by the initializer of its declaration or,
-/// without one, in the constructor of its class (IEEE 1800-2023 8.19).
+/// without one, in the constructor of its class (IEEE 1800-2023 8.19), and
+/// an embedded covergroup only in that constructor (19.4).
 pub(in crate::ast) fn check_writable(
     property: &classes::Property,
     dimensions: &PackedDimensions,
+    table: &semantic_types::TyTable,
 ) -> Converted<()> {
+    // An embedded covergroup is assigned in the constructor of its class
+    // alone (IEEE 1800-2023 19.4). A property of a covergroup type that a
+    // scope declares is a handle like any other.
+    if crate::ast::covergroups::embedded_property(property, table)
+        && !(dimensions.constructor
+            && dimensions.class_scope.as_deref() == Some(property.owner.as_str()))
+    {
+        return Err(AnalyzerError::CovergroupAssignment {
+            owner: property.owner.clone(),
+            name: property.name.clone(),
+        });
+    }
     if property.constant
         && !(property.initializer.is_none()
             && dimensions.constructor
@@ -1352,6 +1276,11 @@ pub(in crate::ast) fn constructor(
     // of its class; handles are copied, not the objects they refer to (IEEE
     // 1800-2023 8.12).
     if let ExprKind::Copy(source) = &native.expression(ungroup(id, native)).kind {
+        if crate::ast::covergroups::is_class(class_name) {
+            return Err(unsupported(
+                "covergroup shallow copy with new (IEEE 1800-2023 8.12, 19.3)",
+            ));
+        }
         if classes::builtin(class_name) {
             return Err(unsupported("copying a process or event with new"));
         }
@@ -1406,6 +1335,17 @@ pub(in crate::ast) fn constructor(
         }
         _ => return Ok(None),
     };
+    if crate::ast::covergroups::is_class(&class_name) {
+        return crate::ast::covergroups::construct(
+            tree,
+            session,
+            arguments,
+            native,
+            dimensions,
+            &class_name,
+        )
+        .map(Some);
+    }
     if class_name == super::super::semaphores::CLASS {
         return super::super::semaphores::new(tree, session, arguments, native, dimensions)
             .map(Some);

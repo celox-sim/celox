@@ -8,6 +8,7 @@
     "xezim/concurrent_assertions.json",
     "xezim/container_formals.json",
     "xezim/containers.json",
+    "xezim/covergroup.json",
     "xezim/distributions.json",
     "xezim/edges.json",
     "xezim/events.json",
