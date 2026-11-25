@@ -8,6 +8,8 @@ use num_bigint::BigUint;
 use super::*;
 use crate::{HandleKind, Root};
 
+mod bin_kinds;
+
 const CLASS: u32 = 77;
 
 fn call(heap: &mut Heap, sub: u64, x: u64, y: u64, arguments: [u64; 3]) -> u64 {

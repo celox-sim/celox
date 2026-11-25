@@ -12,8 +12,10 @@ const MAGIC: &[u8; 8] = b"CELOXCP1";
 // left, and the entries its constraints last allowed. Version 9 keys the
 // heap's container lookup by the digest of each container's contents.
 // Version 10 keeps the covergroup types, bins, options and hits of a heap
-// after its other fields.
-const VERSION: u32 = 10;
+// after its other fields. Version 11 keeps the bin arrays, `default`, ignore,
+// illegal and wildcard bins of a covergroup with the sets and filters of its
+// constructions.
+const VERSION: u32 = 11;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CheckpointFileError {

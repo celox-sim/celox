@@ -876,7 +876,9 @@ fn coverpoints_compile_to_the_descriptor_of_the_type() {
         Operand::Constant(constant) => (constant.ty, constant.value.to_string()),
         Operand::Input(index) => panic!("input {index}"),
     };
-    let BinValues::Ranges { ranges } = &descriptor.points[0].bins[0].values;
+    let BinValues::Ranges { ranges, .. } = &descriptor.points[0].bins[0].values else {
+        panic!("a bin of ranges");
+    };
     let [
         RangeDescriptor::Value(zero),
         RangeDescriptor::Range { low, high },
@@ -890,7 +892,9 @@ fn coverpoints_compile_to_the_descriptor_of_the_type() {
     };
     assert_eq!(constant(low).1, "1");
     assert_eq!(constant(high).1, "3");
-    let BinValues::Ranges { ranges } = &descriptor.points[0].bins[1].values;
+    let BinValues::Ranges { ranges, .. } = &descriptor.points[0].bins[1].values else {
+        panic!("a bin of ranges");
+    };
     assert_eq!(
         ranges.as_slice(),
         [RangeDescriptor::Range {
@@ -1153,7 +1157,9 @@ fn bin_values_outside_the_coverpoint_type_warn() {
         // type of its first operand, and what it resolves to.
         let elements = |point: usize, bin: usize| {
             let point = &descriptor.points[point];
-            let BinValues::Ranges { ranges } = &point.bins[bin].values;
+            let BinValues::Ranges { ranges, .. } = &point.bins[bin].values else {
+                panic!("a bin of ranges");
+            };
             ranges
                 .iter()
                 .map(|range| {

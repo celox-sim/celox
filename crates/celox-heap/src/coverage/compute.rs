@@ -18,7 +18,7 @@
 use fxhash::FxHashMap;
 
 use super::descriptor::BinKind;
-use super::shape::{BinId, BinShape};
+use super::shape::{BinClass, BinId, BinShape};
 use super::{Instance, Registry, TypeEntry};
 
 /// The covered bins and the bins.
@@ -106,9 +106,10 @@ impl Average {
     }
 }
 
-/// Whether a bin counts towards coverage: it is a `bins` bin with a value.
+/// Whether a bin counts towards coverage: it is a `bins` bin with a value
+/// (19.11.1) that is no `default` bin (19.5).
 fn coverable(bin: &BinShape) -> bool {
-    bin.kind == BinKind::Bins && !bin.empty
+    bin.kind == BinKind::Bins && bin.class == BinClass::Value && !bin.empty
 }
 
 /// The bins of coverpoint `point` of `instance`, none before it is built.
@@ -171,13 +172,13 @@ pub(super) fn instance(registry: &Registry, instance: usize, item: u32) -> Score
 }
 
 /// The union of the bins of a coverpoint over the instances of a type.
-pub(super) struct Merged<'a> {
+struct Merged<'a> {
     /// The most hits any instance needs for a covered bin: a bin of the
     /// type is covered with as many (19.11.1).
-    pub at_least: i32,
+    at_least: i32,
     /// The bins that count towards coverage, in the order instances first
     /// have them, with the sum of their hits.
-    pub bins: Vec<(&'a BinId, u64)>,
+    bins: Vec<(&'a BinId, u64)>,
 }
 
 impl Merged<'_> {
@@ -193,19 +194,31 @@ impl Merged<'_> {
     }
 }
 
+/// The most hits that an instance of `entry` needs for a covered bin of
+/// coverpoint `point`.
+pub(super) fn merged_at_least(registry: &Registry, entry: &TypeEntry, point: usize) -> i32 {
+    entry
+        .instances
+        .iter()
+        .map(|&instance| {
+            registry.instances[instance as usize]
+                .options
+                .at_least(point)
+        })
+        .max()
+        .unwrap_or(1)
+}
+
 /// The union of the bins of coverpoint `point` over the instances of
 /// `entry`, where bins of one name are one bin (19.11.3).
-pub(super) fn merged<'a>(registry: &'a Registry, entry: &'a TypeEntry, point: usize) -> Merged<'a> {
+fn merged<'a>(registry: &'a Registry, entry: &'a TypeEntry, point: usize) -> Merged<'a> {
     let instances = || {
         entry
             .instances
             .iter()
             .map(|&instance| &registry.instances[instance as usize])
     };
-    let at_least = instances()
-        .map(|instance| instance.options.at_least(point))
-        .max()
-        .unwrap_or(1);
+    let at_least = merged_at_least(registry, entry, point);
     let mut shapes = instances().filter_map(|instance| instance.shape);
     let first = shapes.next();
     let bins = if shapes.all(|shape| Some(shape) == first) {
