@@ -177,5 +177,16 @@ fn expression_connection(
         })
         .or_else(|| expr_ident_name(&expr))
         .unwrap_or_else(|| formal.clone());
-    Ok(PortConnection::new(formal, actual, Some(expr)))
+    let mut connection = PortConnection::new(formal, actual, Some(expr));
+    let source = native.expression(root);
+    if let Ok(ty) = expression_types::type_of(tree, session, root, native, dims)
+        && let Some(value) = array_compatibility::packed_value(&source.kind, session.types.data(ty))
+            .or_else(|| array_compatibility::fixed_unpacked_value(&session.types, ty))
+    {
+        connection.array_operand = Some(crate::ir::ArrayAssignmentOperand {
+            value,
+            site: procedural::source_span(source.tokens, tree),
+        });
+    }
+    Ok(connection)
 }

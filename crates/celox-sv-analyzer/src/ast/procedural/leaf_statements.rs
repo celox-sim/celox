@@ -238,12 +238,11 @@ impl BodyBuilder<'_, '_, '_> {
                 "force of an expression that reads a variable of a procedural block or of an automatic task",
             ));
         }
-        Ok(vec![Stmt::Force { lhs, rhs }])
+        let site = super::source_span(self.tree.declarations().expression(left).tokens, &self.tree);
+        Ok(vec![Stmt::Force { lhs, rhs, site }])
     }
 
-    /// The variable or net `force` or `release` names: a whole variable or
-    /// net of the module (IEEE 1800-2023 10.6.2). Constant selects of a
-    /// vector net, members, and names in other modules are not supported.
+    /// Bind the variable, net, or constant selection named by `force` or `release`.
     pub(super) fn force_target(&mut self, target: celox_sv_syntax::ExprId) -> Converted<LValue> {
         // An `always` procedure with one runs as a process (see
         // `validation::always_kind`), whose body is a process body.
@@ -464,8 +463,12 @@ impl BodyBuilder<'_, '_, '_> {
             }
             StatementKind::ProceduralForce(id) => self.procedural_force(*id),
             StatementKind::ProceduralRelease(target) => {
-                let target = self.force_target(*target)?;
-                Ok(vec![Stmt::Release { lhs: target }])
+                let lhs = self.force_target(*target)?;
+                let site = super::source_span(
+                    self.tree.declarations().expression(*target).tokens,
+                    &self.tree,
+                );
+                Ok(vec![Stmt::Release { lhs, site }])
             }
             StatementKind::Disable(tokens) => {
                 let mut words = self

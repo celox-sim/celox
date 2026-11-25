@@ -184,7 +184,15 @@ pub(super) fn ports_from_scope(
                     let name = native_port_name(native)?;
                     let mut dimensions =
                         PackedDimensions::new(HashMap::default(), const_env, type_aliases);
-                    dimensions.insert(name.clone(), procedural::dimensions_from_type(&ty));
+                    let shape = procedural::dimensions_from_type(&ty);
+                    array_compatibility::note_packed_initializer(
+                        syntax_tree,
+                        session,
+                        value,
+                        &shape,
+                        &dimensions,
+                    );
+                    dimensions.insert(name.clone(), shape);
                     let expression = expression_binding::expression(
                         value,
                         syntax_tree.declarations(),

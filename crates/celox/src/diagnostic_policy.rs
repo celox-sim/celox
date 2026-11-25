@@ -26,7 +26,7 @@ pub enum DiagnosticLevel {
 /// diagnostic severity at all. The `[compatibility]` opt-in of the same
 /// name selects per-block temporaries, which changes simulation
 /// results, so it is controlled by that boolean, never by a level.
-pub(crate) const STRICT_CODES: [&str; 8] = [
+pub(crate) const STRICT_CODES: [&str; 11] = [
     "mixed_timescale",
     "duplicate_module",
     "interface_array_query",
@@ -35,6 +35,9 @@ pub(crate) const STRICT_CODES: [&str; 8] = [
     "multiple_always_ff_drivers",
     "inferred_latch",
     "implicit_static_initializer",
+    "packed_to_unpacked_assignment",
+    "nonstandard_force_target",
+    "psprintf_alias",
 ];
 
 /// Overrides keyed by the code shown in a compilation diagnostic.
