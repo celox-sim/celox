@@ -402,6 +402,19 @@ fn uses_random(callee: &Callee) -> bool {
                 | SystemFunction::ScopeRandomize
                 | SystemFunction::ScopeRandomizeEnum
         ),
+        // Construction seeds the object from the process's stream
+        // (18.14.3), as a constrained scope randomization does the
+        // object it solves in, and `shuffle` draws on it: the same
+        // operations the out-of-line classifier counts as random.
+        Callee::Object(op) => matches!(
+            &**op,
+            ObjectOp::New { .. }
+                | ObjectOp::ScopeRandomize(_)
+                | ObjectOp::Container {
+                    op: ContainerOp::Shuffle,
+                    ..
+                }
+        ),
         _ => false,
     }
 }
@@ -1259,6 +1272,15 @@ mod tests {
             "module Top; bit [3:0] bits; \
              function int idx; return $urandom; endfunction \
              initial begin begin : work #5; end bits[idx()] = 1'b1; end \
+             initial #1 disable work; endmodule",
+            // Constructing an object in the block seeds it from the
+            // process's stream.
+            "module Top; class C; rand int v; endclass C c; \
+             initial begin : work c = new; #5; end \
+             initial #1 disable work; endmodule",
+            // A container shuffle in the block draws on the stream.
+            "module Top; int q[$]; \
+             initial begin : work q.push_back(1); q.shuffle(); #5; end \
              initial #1 disable work; endmodule",
         ] {
             let error = analyze(source).unwrap_err();
