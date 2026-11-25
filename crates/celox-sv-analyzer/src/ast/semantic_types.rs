@@ -277,6 +277,11 @@ pub(super) struct TyTable {
     /// The specializations of parameterized interfaces by name and the
     /// values of their parameters (25.9).
     interface_specializations: HashMap<(Arc<str>, Arc<[i128]>), DeclId>,
+    /// Each elaborated scope of an analysis of a design element, as
+    /// declarations record it, with the name and parameter values of the
+    /// element that the scope's name only hashes (see
+    /// [`TyTable::declaration_key`]).
+    analysis_scopes: HashMap<Arc<str>, Arc<str>>,
     /// How many times a reader resolved a type that was not bound where it
     /// was declared, which tests check producers against.
     #[cfg(test)]
@@ -746,6 +751,94 @@ impl TyTable {
     /// Declaration `id`.
     pub fn decl(&self, id: DeclId) -> &DeclData {
         &self.decls[id.0 as usize]
+    }
+
+    /// Record that `scope`, the elaborated scope of an analysis of a design
+    /// element, is that element with the parameter values `text` writes.
+    pub fn record_analysis_scope(&mut self, scope: Arc<str>, text: String) {
+        self.analysis_scopes.insert(scope, text.into());
+    }
+
+    /// Whether [`Self::record_analysis_scope`] recorded `scope`.
+    pub fn records_analysis_scope(&self, scope: &str) -> bool {
+        self.analysis_scopes.contains_key(scope)
+    }
+
+    /// The declaration of enumeration, structure or union type `id`, or of
+    /// the elements of a packed array of one, as the name of a class
+    /// specialization writes it (IEEE 1800-2023 8.25): its name, then the
+    /// elaborated scope that declares it, with the design element of that
+    /// scope written by its name and parameter values. The text is the same
+    /// in every run, as it holds no hash, address or id; an anonymous
+    /// enumeration without a recorded declaration is written by its
+    /// members. `None` for another type.
+    pub fn declaration_key(&self, mut id: TyId) -> Option<String> {
+        // A fixed-size unpacked array is one of its elements, whose
+        // dimensions the name writes itself.
+        while let TyData::Array {
+            kind: ArrayKind::Fixed(_),
+            element,
+        } = self.data(id)
+        {
+            id = *element;
+        }
+        let decl = match self.data(id) {
+            TyData::Packed(Packed {
+                element: PackedElement::Enum { decl, .. } | PackedElement::Aggregate(decl),
+                ..
+            })
+            | TyData::UnpackedStruct(decl) => decl,
+            _ => return None,
+        };
+        let decl = match decl {
+            Decl::Named(decl)
+            | Decl::Aggregate { decl, .. }
+            | Decl::AnonymousEnum {
+                decl: Some(decl), ..
+            } => self.decl(*decl),
+            Decl::AnonymousEnum { decl: None, .. } => return Some(self.spell(id)),
+            Decl::Class(_) | Decl::Interface(_) => return None,
+        };
+        Some(match &decl.scope {
+            Some(scope) => format!("{}@{}", decl.name, self.scope_key(scope)),
+            None => decl.name.to_string(),
+        })
+    }
+
+    /// Type `id` as the name of a class specialization or of the analysis
+    /// of a design element writes it: as a diagnostic spells it, with the
+    /// declaration of an enumeration, structure or union (see
+    /// [`Self::declaration_key`]), and the same in every run.
+    pub fn canonical_text(&self, id: TyId) -> String {
+        match self.data(id) {
+            TyData::Array { kind, element } => {
+                let dimension = match kind {
+                    ArrayKind::Fixed(range) => format!("[{}:{}]", range.left, range.right),
+                    ArrayKind::Dynamic => "[]".to_owned(),
+                    ArrayKind::Queue { bound: None } => "[$]".to_owned(),
+                    ArrayKind::Queue { bound: Some(bound) } => format!("[$:{bound}]"),
+                    ArrayKind::Associative { key } => format!("[{}]", self.canonical_text(*key)),
+                };
+                format!("{}{dimension}", self.canonical_text(*element))
+            }
+            _ => match self.declaration_key(id) {
+                Some(declaration) => format!("{}@{declaration}", self.spell(id)),
+                None => self.spell(id),
+            },
+        }
+    }
+
+    /// `scope` with the analysis it begins with written by its design
+    /// element and parameter values, which its name only hashes.
+    fn scope_key(&self, scope: &str) -> String {
+        self.analysis_scopes
+            .iter()
+            .find_map(|(analysis, text)| {
+                let rest = scope.strip_prefix(&**analysis)?;
+                (rest.is_empty() || rest.starts_with('.') || rest.starts_with("::"))
+                    .then(|| format!("{text}{rest}"))
+            })
+            .unwrap_or_else(|| scope.to_owned())
     }
 
     /// The id of type `data`.

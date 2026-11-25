@@ -4480,6 +4480,195 @@ fn static_outputs(source: &str, names: &[&str]) -> Vec<Vec<BigUint>> {
     runs
 }
 
+/// A class specialization is one per type argument up to type matching
+/// (IEEE 1800-2023 8.25, 6.22.1): a typedef of a typedef, a type parameter
+/// passed on, `type(v)`, a type localparam and a package function name the
+/// same specialization of an enumeration, `int` the one of `bit signed
+/// [31:0]`, and a typedef of a structure the one of the structure; arrays
+/// of two enumerations or two structures are two specializations. Each
+/// specialization of a class, analysis of a module and instance of a
+/// generate block declares types of its own (8.25, 6.22, 27.4), whose
+/// specializations are apart. `$typename` and `%m` write the
+/// specialization by its arguments (20.6.1, 21.2.1.5), and its name holds
+/// no hash.
+#[test]
+fn specializations_by_enumeration_and_structure_arguments_are_one_per_matching_type() {
+    let source = r#"`timescale 1ns/1ns
+package p;
+    class C #(type T = int);
+        static int n;
+        static function void bump(); n++; endfunction
+        function string where(); return $sformatf("%m"); endfunction
+    endclass
+    class D #(type T = int);
+        static function void bump(); C#(T)::bump(); endfunction
+    endclass
+    class E #(int W = 1);
+        typedef enum {A, B} t;
+    endclass
+    localparam int W = 4;
+    typedef enum logic [W-1:0] {PA, PB} pe_t;
+    function automatic void from_package(); C#(pe_t)::bump(); endfunction
+endpackage
+module m #(int K = 0) (output int n);
+    typedef enum {A, B} t;
+    initial begin #1 p::C#(t)::bump(); #1 n = p::C#(t)::n; end
+endmodule
+module Top(output int e, output int i, output int s, output int pe, output int c1,
+           output int c2, output int m1, output int m2, output int g0, output int g1,
+           output int ea, output int oa, output int sa, output int ta,
+           output bit typename, output bit scope);
+    import p::*;
+    typedef enum {A, B} e_t;
+    typedef e_t f_t;
+    typedef struct packed {logic [3:0] a;} s_t;
+    typedef s_t s2_t;
+    typedef enum {O, P} o_t;
+    typedef struct packed {logic [3:0] b;} t_t;
+    typedef e_t ea_t [2];
+    typedef o_t oa_t [2];
+    typedef s_t sa_t [2];
+    typedef t_t ta_t [2];
+    localparam type LT = e_t;
+    e_t v;
+    C#(e_t) h = new;
+    m #(1) i1(m1);
+    m #(2) i2(m2);
+    for (genvar k = 0; k < 2; k++) begin : g
+        typedef enum {A, B} t;
+        int n;
+        initial begin #1 C#(t)::bump(); #1 n = C#(t)::n; end
+    end
+    assign g0 = g[0].n;
+    assign g1 = g[1].n;
+    initial begin
+        C#(e_t)::bump(); C#(f_t)::bump(); D#(e_t)::bump(); C#(type(v))::bump();
+        C#(LT)::bump();
+        e = C#(e_t)::n;
+        C#(int)::bump(); C#(bit signed [31:0])::bump(); C#(integer unsigned)::bump();
+        i = C#(int)::n;
+        C#(s_t)::bump(); C#(s2_t)::bump();
+        s = C#(s_t)::n;
+        from_package(); D#(pe_t)::bump();
+        pe = C#(pe_t)::n;
+        C#(E#(1)::t)::bump(); C#(E#(2)::t)::bump(); C#(E#(2)::t)::bump();
+        c1 = C#(E#(1)::t)::n;
+        c2 = C#(E#(2)::t)::n;
+        C#(ea_t)::bump(); C#(oa_t)::bump(); C#(oa_t)::bump();
+        C#(sa_t)::bump(); C#(ta_t)::bump(); C#(ta_t)::bump();
+        ea = C#(ea_t)::n;
+        oa = C#(oa_t)::n;
+        sa = C#(sa_t)::n;
+        ta = C#(ta_t)::n;
+        typename = $typename(h) == "p::C#(enum{A=32'sd0,B=32'sd1}Top.e_t)";
+        scope = h.where() == "p::C#(enum{A=32'sd0,B=32'sd1}Top.e_t)::where";
+    end
+endmodule
+"#;
+    let names = [
+        "e", "i", "s", "pe", "c1", "c2", "m1", "m2", "g0", "g1", "ea", "oa", "sa", "ta",
+        "typename", "scope",
+    ];
+    for run in static_outputs(source, &names) {
+        assert_eq!(
+            run,
+            [5u32, 2, 2, 2, 1, 2, 1, 1, 1, 1, 1, 2, 1, 2, 1, 1]
+                .map(BigUint::from)
+                .to_vec()
+        );
+    }
+    // A specialization's name writes an enumeration or structure type
+    // argument by its declaration: the typedef, then the analysis of the
+    // design element that declares it by the element's name and parameter
+    // values. It is the same in every run, holding no hash, address or id;
+    // the variables of static properties, which `$dumpvars` writes, are
+    // named by it.
+    assert_eq!(
+        static_property_names(),
+        [
+            "C#(T=bit signed[31:0]@m::t@m#(K=1))::n",
+            "C#(T=bit signed[31:0]@m::t@m#(K=2,U=type(logic[7:0])))::n",
+            "C#(T=logic[3:0]@m::s@m#(K=1))::n",
+            "C#(T=logic[7:0]@m::s@m#(K=2,U=type(logic[7:0])))::n",
+            "C2#(T=bit signed[31:0]@mp::t@mp#(P='{1s,2s}))::n",
+            "C2#(T=bit signed[31:0]@mp::t@mp#(P='{3s,4s}))::n",
+            "D#(T=bit signed[31:0]@Top::e_t@Top#())::n",
+            "D#(T=bit signed[31:0]@p::pe_t)::n",
+        ]
+    );
+}
+
+/// The names of the variables of the static properties `n` of the
+/// specializations of `C` and `D` that a design makes for enumeration and
+/// structure type arguments of a module, two analyses of each of two
+/// modules, one with a type parameter and one with an unpacked array
+/// parameter given by an assignment pattern, and a package,
+/// as `$dumpvars` writes them.
+fn static_property_names() -> Vec<String> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("statics.vcd");
+    let source = format!(
+        r#"`timescale 1ns/1ns
+package p;
+    typedef enum {{X, Y}} pe_t;
+endpackage
+module m #(int K = 0, type U = logic [3:0]);
+    class C #(type T = int);
+        static int n;
+        static function void set(int v); n = v; endfunction
+    endclass
+    typedef enum {{A, B}} t;
+    typedef struct packed {{U a;}} s;
+    initial begin C#(t)::set(K); C#(s)::set(K); end
+endmodule
+module mp #(int P [2] = '{{0, 0}});
+    class C2 #(type T = int);
+        static int n;
+        static function void set(int v); n = v; endfunction
+    endclass
+    typedef enum {{A, B}} t;
+    initial C2#(t)::set(P[0]);
+endmodule
+module Top;
+    class D #(type T = int);
+        static int n;
+        static function void set(int v); n = v; endfunction
+    endclass
+    typedef enum {{A, B}} e_t;
+    m #(1) i1();
+    m #(2, logic [7:0]) i2();
+    mp #(.P('{{1, 2}})) j1();
+    mp #(.P('{{3, 4}})) j2();
+    initial begin
+        $dumpfile("{}");
+        $dumpvars(0, Top);
+        D#(e_t)::set(5);
+        D#(p::pe_t)::set(6);
+        #1;
+    end
+endmodule
+"#,
+        path.display()
+    );
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source.as_str(), Path::new("statics.sv"))], "Top")
+            .build()
+            .unwrap_or_else(|error| panic!("{error}"));
+    sim.run_until(2).unwrap();
+    sim.flush_vcd().unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    let mut variables = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("$var wire 32 "))
+        .filter_map(|line| line.split_once(' ').map(|(_, rest)| rest))
+        .filter_map(|line| line.strip_suffix(" $end"))
+        .filter(|name| name.ends_with("::n"))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    variables.sort_unstable();
+    variables
+}
+
 /// A static variable of a method is one per specialization of its class
 /// (IEEE 1800-2023 6.21, 8.25): two specializations of `counter` count
 /// apart, and each specialization of `registry` keeps its own singleton, as
