@@ -388,7 +388,14 @@ pub(crate) fn ir_type(
     env: &ConstEnv,
 ) -> crate::ir::Type {
     let bounds = semantic_types::packed_bounds(&mut session.types, functions, &ty, env);
-    ir_type_with_bounds(&session.types, functions, ty, env, bounds)
+    ir_type_with_bounds(
+        &mut session.types,
+        functions,
+        ty,
+        env,
+        bounds,
+        semantic_types::of_type,
+    )
 }
 
 /// [`ir_type`] for a type `env` may not name the way its declaring scope
@@ -401,15 +408,28 @@ pub(crate) fn declared_ir_type(
     env: &ConstEnv,
 ) -> crate::ir::Type {
     let bounds = semantic_types::declared_packed_bounds(&mut session.types, functions, &ty, env);
-    ir_type_with_bounds(&session.types, functions, ty, env, bounds)
+    ir_type_with_bounds(
+        &mut session.types,
+        functions,
+        ty,
+        env,
+        bounds,
+        semantic_types::of_declared,
+    )
 }
 
 fn ir_type_with_bounds(
-    table: &semantic_types::TyTable,
+    table: &mut semantic_types::TyTable,
     functions: &const_functions::ConstantFunctions,
     ty: Type,
     env: &ConstEnv,
     bounds: Option<Vec<(i128, i128)>>,
+    semantic: fn(
+        &mut semantic_types::TyTable,
+        &const_functions::ConstantFunctions,
+        &Type,
+        &ConstEnv,
+    ) -> Option<semantic_types::TyId>,
 ) -> crate::ir::Type {
     crate::ir::Type::from_ast(
         ty,
@@ -417,7 +437,11 @@ fn ir_type_with_bounds(
             constants: env,
             functions,
         },
-        &|ty| ty.class_in(table).map(|class| class.to_string()),
+        &mut |ty| {
+            let id = semantic(table, functions, ty, env);
+            let class = ty.class_in(table).map(|class| class.to_string());
+            (class, id)
+        },
     )
     .with_packed_bounds(bounds)
 }

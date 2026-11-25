@@ -24,7 +24,7 @@ fn ty(width: ConstExpr, signed: bool) -> crate::ir::Type {
         left: binary_const(width, BinaryOp::Sub, ConstExpr::Literal("1".into())),
         right: ConstExpr::Literal("0".into()),
     });
-    crate::ir::Type::from_ast(ty, &HashMap::default(), &|_| None)
+    crate::ir::Type::from_ast(ty, &HashMap::default(), &mut |_| (None, None))
 }
 
 fn binary_const(left: ConstExpr, op: BinaryOp, right: ConstExpr) -> ConstExpr {
