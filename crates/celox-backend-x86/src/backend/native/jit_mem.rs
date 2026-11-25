@@ -132,6 +132,9 @@ impl JitCode {
 
         if perf_map {
             write_perf_map_entries(image_base as usize, code_len, name, symbols)?;
+            // Safety: the mapping holds `code_len` readable bytes at the base.
+            let code = unsafe { std::slice::from_raw_parts(image_base, code_len) };
+            write_perf_map_code(image_base as usize, code)?;
         }
 
         Ok(Self {
@@ -162,6 +165,10 @@ impl JitCode {
         }
         if perf_map {
             write_perf_map_entries(code as usize, len, name, symbols)?;
+            // Safety: the caller supplies `len` readable bytes at `code`.
+            write_perf_map_code(code as usize, unsafe {
+                std::slice::from_raw_parts(code, len)
+            })?;
         }
         // Safety: the caller supplies a live region with this entry ABI.
         let fn_ptr: JitFn = unsafe { std::mem::transmute(code) };
@@ -260,6 +267,16 @@ fn write_perf_map_entries(
         }
     }
     Ok(())
+}
+
+/// Save the machine code mapped at `addr` beside the perf map, as
+/// `/tmp/perf-<pid>-<addr>.bin`, so that a profile of the run can show the
+/// instructions its samples hit (perf keeps only the addresses).
+fn write_perf_map_code(addr: usize, code: &[u8]) -> Result<(), std::io::Error> {
+    std::fs::write(
+        format!("/tmp/perf-{}-{addr:x}.bin", std::process::id()),
+        code,
+    )
 }
 
 fn sanitize_perf_symbol(name: &str) -> String {

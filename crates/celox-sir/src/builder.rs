@@ -102,6 +102,12 @@ impl<Addr> SIRBuilder<Addr> {
     pub fn new_block(&mut self) -> BlockId {
         self.new_block_with(vec![])
     }
+
+    /// The id the next block will have: blocks are numbered in the order
+    /// they are made, those of an inlined unit included.
+    pub fn next_block_id(&self) -> usize {
+        self.next_block_id
+    }
     pub fn new_block_with(&mut self, params: Vec<RegisterId>) -> BlockId {
         let id = BlockId(self.next_block_id);
         self.next_block_id += 1;

@@ -337,6 +337,8 @@ impl NativeProgramImage {
         crate::ir::RuntimeProgram {
             design: self.design.clone(),
             rtl_accesses: self.runtime_schema.rtl_accesses.iter().copied().collect(),
+            // An image does not keep the names of activation counters.
+            activation_sites: Vec::new(),
             runtime_schema: RuntimeSchema {
                 runtime_errors: self.runtime_schema.runtime_errors.clone(),
                 runtime_event_sites: self.runtime_schema.runtime_event_sites.clone(),

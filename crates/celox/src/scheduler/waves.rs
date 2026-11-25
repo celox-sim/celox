@@ -49,7 +49,7 @@ impl Plan {
         // A pass of the process phase settles before the domains; a
         // deferred one runs now.
         match &self.lazy {
-            Some(_) => g.settle_then(judge),
+            Some(_) => g.settle_then("active waves: before judging", judge),
             None => {
                 g.b.seal_block(SIRTerminator::Jump(judge, Vec::new()));
             }
@@ -74,6 +74,7 @@ impl Plan {
         let triggers = g.binary(self.event_bits, active, BinaryOp::Or, stable_extra);
         g.store(slots.exit_arg, self.event_bits, triggers);
         let quiet = g.binary(1, triggers, BinaryOp::Eq, zero);
+        g.count_judgment("active waves: first", quiet);
         let first = g.b.new_block();
         g.b.seal_block(SIRTerminator::Branch {
             cond: quiet,
@@ -138,6 +139,7 @@ impl Plan {
         let ready = g.binary(self.event_bits, stable, BinaryOp::And, unfired);
         let zero = g.constant(0, self.event_bits);
         let quiet = g.binary(1, ready, BinaryOp::Eq, zero);
+        g.count_judgment("active waves: later", quiet);
         let drained = g.b.new_block();
         let next = g.b.new_block();
         g.b.seal_block(SIRTerminator::Branch {
@@ -194,7 +196,7 @@ impl Plan {
             false_block: (flush, Vec::new()),
         });
         g.b.switch_to_block(settle);
-        g.settle_then(wave);
+        g.settle_then("active waves: after an Active commit", wave);
 
         // No Active work remains: publish the deferred NBA results, then
         // judge the edges that those updates cause in another wave.
@@ -234,7 +236,7 @@ impl Plan {
         );
         let empty = g.constant(0, self.event_bits);
         g.store_at(slots.exit_arg, self.event_bits, self.event_bits, empty);
-        g.settle_then(wave);
+        g.settle_then("active waves: after NBA publication", wave);
     }
 
     pub(super) fn batch(
@@ -253,7 +255,7 @@ impl Plan {
         // A pass of the process phase settles before the domains; a
         // deferred one runs now.
         match &self.lazy {
-            Some(_) => g.settle_then(judge),
+            Some(_) => g.settle_then("waves: before judging", judge),
             None => {
                 g.b.seal_block(SIRTerminator::Jump(judge, Vec::new()));
             }
@@ -278,6 +280,7 @@ impl Plan {
         let triggers = g.binary(self.event_bits, active, BinaryOp::Or, stable_extra);
         g.store(slots.exit_arg, self.event_bits, triggers);
         let quiet = g.binary(1, triggers, BinaryOp::Eq, zero);
+        g.count_judgment("waves: first", quiet);
         let first = g.b.new_block();
         let flush_only = g.b.new_block();
         g.b.seal_block(SIRTerminator::Branch {
@@ -299,7 +302,7 @@ impl Plan {
                 .filter(|_| !self.nba_processes.is_empty()),
             checks,
         );
-        g.settle_then(wave);
+        g.settle_then("waves: after NBA publication without domains", wave);
         g.b.switch_to_block(first);
         g.b.seal_block(SIRTerminator::Jump(fire, vec![triggers]));
 
@@ -329,6 +332,7 @@ impl Plan {
         let ready = g.binary(self.event_bits, stable, BinaryOp::And, unfired);
         let zero = g.constant(0, self.event_bits);
         let quiet = g.binary(1, ready, BinaryOp::Eq, zero);
+        g.count_judgment("waves: later", quiet);
         let next = g.b.new_block();
         g.b.seal_block(SIRTerminator::Branch {
             cond: quiet,
@@ -348,6 +352,12 @@ impl Plan {
         let lower = g.binary(self.event_bits, mask, BinaryOp::Sub, one);
         let others = g.binary(self.event_bits, mask, BinaryOp::And, lower);
         let single = g.binary(1, others, BinaryOp::Eq, zero);
+        if g.profiling() {
+            let several = g.binary(1, others, BinaryOp::Ne, zero);
+            g.count_if(ActivationKind::DomainJudge, "several", several, |_| {
+                "waves".into()
+            });
+        }
         let alone = g.b.new_block();
         let together = g.b.new_block();
         let committed = g.b.new_block();
@@ -406,7 +416,7 @@ impl Plan {
                 .filter(|_| !self.nba_processes.is_empty()),
             checks,
         );
-        g.settle_then(wave);
+        g.settle_then("waves: after a wave", wave);
     }
 
     /// Consume counted occurrences at the same settle boundaries as the

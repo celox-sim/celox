@@ -64,6 +64,9 @@ pub struct SimulatorOptions {
     /// Cross-check every partitioned settle against one that runs every
     /// partition (see [`SimulatorBuilder::settle_check`]).
     pub settle_check: bool,
+    /// The compiled scheduler counts its activations (see
+    /// [`SimulatorBuilder::activation_profile`]).
+    pub activation_profile: bool,
     /// Explicit hierarchical observation and native force targets.
     pub signal_access: crate::SignalAccessOptions,
     /// Dead store elimination policy.
@@ -125,6 +128,7 @@ impl Default for SimulatorOptions {
             #[cfg(test)]
             sir_transform: None,
             settle_check: false,
+            activation_profile: false,
             native_force_support: false,
             observable_updates: false,
             signal_access: crate::SignalAccessOptions::default(),

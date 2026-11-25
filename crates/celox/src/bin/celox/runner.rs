@@ -95,6 +95,13 @@ pub(super) struct ExecutionArgs {
     /// partition's runs and the runs that changed nothing it compares.
     #[arg(long, value_name = "FILE", conflicts_with = "compile_only")]
     pub settle_profile: Option<PathBuf>,
+    /// Count the activations of the compiled scheduler of a native build
+    /// (slots, clock judgments, domains, settles and their causes) and the
+    /// partitioned settle's work, and write them as JSON after the run.
+    /// The counters add a few instructions where they count: measure
+    /// totals without them.
+    #[arg(long, value_name = "FILE", conflicts_with = "compile_only")]
+    pub activation_profile: Option<PathBuf>,
     /// Record waveform changes at each simulation time step (VCD).
     #[arg(long, value_name = "FILE", conflicts_with = "compile_only")]
     pub vcd: Option<PathBuf>,
@@ -244,6 +251,7 @@ struct Options {
     four_state: bool,
     dump_settle_plan: Option<PathBuf>,
     settle_profile: Option<PathBuf>,
+    activation_profile: Option<PathBuf>,
     vcd: Option<PathBuf>,
     fst: Option<PathBuf>,
     compile_only: bool,
@@ -453,8 +461,11 @@ pub(super) fn run(
     if let Some(path) = &opts.dump_settle_plan {
         builder = builder.settle_plan_output(path);
     }
-    if opts.settle_profile.is_some() {
+    if opts.settle_profile.is_some() || opts.activation_profile.is_some() {
         builder = builder.settle_profile(true);
+    }
+    if opts.activation_profile.is_some() {
+        builder = builder.activation_profile(true);
     }
     if let Some(path) = &opts.vcd {
         builder = builder.vcd(path);
@@ -612,6 +623,7 @@ fn resolve_options(
         four_state: design.four_state.unwrap_or(false),
         dump_settle_plan: cli.dump_settle_plan,
         settle_profile: cli.settle_profile,
+        activation_profile: cli.activation_profile,
         vcd: cli.vcd,
         fst: cli.fst,
         compile_only: cli.compile_only,
@@ -926,6 +938,65 @@ fn report_outcome(
 /// partition its runs, the runs that changed something it compares, and the
 /// runs that changed nothing (`--settle-profile`). Partition numbers are
 /// those of `--dump-settle-plan`.
+/// Write the activation profile of a run to `path`, when asked
+/// (`--activation-profile`): the compiled scheduler's counters, the
+/// partitioned settle's, and the scheduler's statistics, as JSON.
+pub(super) fn write_activation_profile(
+    path: Option<&std::path::Path>,
+    activations: Option<celox::ActivationProfile>,
+    settle: Option<celox::SettleProfile>,
+    stats: Option<&celox::SchedulerStats>,
+) -> std::io::Result<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    let mut out = serde_json::Map::new();
+    out.insert("version".into(), 1.into());
+    match activations {
+        Some(activations) => {
+            out.insert(
+                "counters".into(),
+                serde_json::to_value(activations.counters).expect("counters serialize"),
+            );
+        }
+        None => {
+            out.insert("counters".into(), serde_json::Value::Null);
+            out.insert(
+                "unavailable".into(),
+                "no compiled scheduler counted activations: the build is not native, the design has no compiled scheduler with native services, or the code was compiled without --activation-profile".into(),
+            );
+        }
+    }
+    if let Some(settle) = settle {
+        out.insert(
+            "settle_partitions".into(),
+            serde_json::json!({
+                "settles": settle.settles,
+                "runs": settle.runs,
+                "changed": settle.changed,
+            }),
+        );
+    }
+    if let Some(stats) = stats {
+        out.insert(
+            "scheduler".into(),
+            serde_json::json!({
+                "mode": format!("{:?}", stats.mode),
+                "compiled_slots": stats.compiled_slots,
+                "compiled_runs": stats.compiled_runs,
+                "reference_steps": stats.reference_steps,
+                "native_service_calls": stats.native_service_calls,
+                "kernels_compiled": stats.kernels.iter().filter(|kernel| matches!(kernel, celox::KernelSchedule::Compiled)).count(),
+                "kernels_reference": stats.kernels.iter().filter(|kernel| !matches!(kernel, celox::KernelSchedule::Compiled)).count(),
+            }),
+        );
+    }
+    let mut text = serde_json::to_string_pretty(&serde_json::Value::Object(out))
+        .expect("the profile serializes");
+    text.push('\n');
+    fs::write(path, text)
+}
+
 pub(super) fn write_settle_profile(
     path: Option<&std::path::Path>,
     layout: &celox::MemoryLayout,

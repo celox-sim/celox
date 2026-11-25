@@ -121,6 +121,7 @@ pub(super) fn compile_program_with_outlining_threshold(
     let settle_called = settle_callees.iter().any(Option::is_some);
     let callee_jits =
         compile_scheduler_callees(sir, &settle_callees, layout, options, capture_trace, cancel)?;
+    let callee_names = scheduler_callee_names(sir, &settle_callees);
     let kernel_slots = callee_base + callee_jits.len();
     let mut next_compiled = callee_base;
     let callee_calls: Vec<u32> = settle_callees
@@ -408,6 +409,7 @@ pub(super) fn compile_program_with_outlining_threshold(
         force_bindings,
         function_jits,
         callee_jits,
+        callee_names,
         comb_chunk_jits,
         comb_unit_jits,
         process_jits,
@@ -417,6 +419,47 @@ pub(super) fn compile_program_with_outlining_threshold(
         split_comb,
         settle_called,
     )
+}
+
+/// Name each block symbol `<function>.bb<N>` of the compiled scheduler
+/// after what runs in SIR block `N` (`LaidOutProgram::scheduler_block_roles`,
+/// the narrowest range holding it): native blocks keep the ids of the SIR
+/// blocks they lower, and blocks the backend adds keep their plain names.
+fn name_scheduler_blocks(symbols: &mut [NativeCodeSymbol], roles: &[(usize, usize, String)]) {
+    for symbol in symbols {
+        let Some(block) = symbol
+            .name
+            .rsplit_once(".bb")
+            .and_then(|(_, block)| block.parse::<usize>().ok())
+        else {
+            continue;
+        };
+        if let Some((_, _, role)) = roles
+            .iter()
+            .filter(|(start, end, _)| (*start..*end).contains(&block))
+            .min_by_key(|(start, end, _)| end - start)
+        {
+            symbol.name = format!("{} {role}", symbol.name);
+        }
+    }
+}
+
+/// The names of the native functions of the scheduler's callees that are
+/// not the settle, in their order: their index and what the scheduler runs
+/// in them ([`LaidOutProgram::scheduler_callee_roles`]).
+fn scheduler_callee_names(sir: &LaidOutProgram, settle_callees: &[Option<usize>]) -> Vec<String> {
+    settle_callees
+        .iter()
+        .enumerate()
+        .filter(|(_, settle)| settle.is_none())
+        .enumerate()
+        .map(
+            |(index, (callee, _))| match sir.scheduler_callee_roles.get(callee) {
+                Some(role) => format!("scheduler_callee[{index}] {role}"),
+                None => format!("scheduler_callee[{index}]"),
+            },
+        )
+        .collect()
 }
 
 /// Compile the bodies the compiled scheduler calls
@@ -1063,6 +1106,7 @@ fn assemble_program_image(
     force_bindings: Vec<NativeForceBinding>,
     function_jits: Vec<CompiledNativeFunction>,
     callee_jits: Vec<CompiledNativeFunction>,
+    callee_names: Vec<String>,
     comb_chunk_jits: Vec<CompiledNativeFunction>,
     comb_unit_jits: Vec<CompiledNativeFunction>,
     process_jits: Vec<CompiledNativeFunction>,
@@ -1166,12 +1210,12 @@ fn assemble_program_image(
             code,
         )?);
     }
-    for (index, code) in callee_jits.iter().enumerate() {
+    for (name, code) in callee_names.into_iter().zip(&callee_jits) {
         native_kernel_offsets.push(append_native_code(
             &mut packed_image,
             &mut code_entries,
             &mut image_symbols,
-            format!("scheduler_callee[{index}]"),
+            name,
             code,
         )?);
     }
@@ -1198,7 +1242,14 @@ fn assemble_program_image(
         )?);
     }
     let mut process_offsets = Vec::with_capacity(process_jits.len());
+    let scheduler_unit = sir
+        .runtime()
+        .runtime_schema
+        .scheduler
+        .as_ref()
+        .and_then(|scheduler| scheduler.unit);
     for (index, compiled) in process_jits.iter().enumerate() {
+        let first_symbol = image_symbols.len();
         process_offsets.push(append_native_code(
             &mut packed_image,
             &mut code_entries,
@@ -1206,6 +1257,13 @@ fn assemble_program_image(
             format!("process[{index}]"),
             compiled,
         )?);
+        // The names only matter to a perf map (`CELOX_PERF_MAP`).
+        if scheduler_unit == Some(index) && options.x86_options.diagnostics.perf_map {
+            name_scheduler_blocks(
+                &mut image_symbols[first_symbol..],
+                &sir.scheduler_block_roles,
+            );
+        }
     }
     let mut compiled_ff_keys = compiled_ff_codes.keys().copied().collect::<Vec<_>>();
     compiled_ff_keys.sort_unstable();
@@ -1490,5 +1548,40 @@ fn native_runtime_schema(
         initial_copies: sir.runtime().runtime_schema.initial_copies.clone(),
         scheduler: sir.runtime().runtime_schema.scheduler.clone(),
         derived_edges: sir.runtime().runtime_schema.derived_edges.clone(),
+    }
+}
+
+#[cfg(test)]
+mod block_name_tests {
+    use super::*;
+
+    #[test]
+    fn scheduler_blocks_take_the_narrowest_role_holding_them() {
+        let symbol = |name: &str| NativeCodeSymbol {
+            offset: 0,
+            size: 1,
+            name: name.into(),
+        };
+        let mut symbols = vec![
+            symbol("process[3].process[3].prologue"),
+            symbol("process[3].process[3].bb4"),
+            symbol("process[3].process[3].bb12"),
+            symbol("process[3].process[3].bb40"),
+        ];
+        let roles = vec![
+            (0, 20, "scheduler: domain waves".to_string()),
+            (10, 15, "domain clk eval_only".to_string()),
+        ];
+        name_scheduler_blocks(&mut symbols, &roles);
+        let names: Vec<_> = symbols.iter().map(|symbol| symbol.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "process[3].process[3].prologue",
+                "process[3].process[3].bb4 scheduler: domain waves",
+                "process[3].process[3].bb12 domain clk eval_only",
+                "process[3].process[3].bb40",
+            ]
+        );
     }
 }

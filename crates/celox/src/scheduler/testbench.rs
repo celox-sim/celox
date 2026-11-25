@@ -646,6 +646,9 @@ fn generate(
         cont_bits: program.layout().widths[&slots.cont],
         // The unit drains its own events (`resume_after_events`).
         event_batch: None,
+        profile: None,
+        role: "testbench".into(),
+        block_roles: Vec::new(),
     };
     let initialize = g.b.new_block();
     let start = g.b.new_block();
