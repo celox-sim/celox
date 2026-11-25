@@ -3918,6 +3918,74 @@ endmodule"#;
     );
 }
 
+/// The callees of a called native function unit compile while its caller
+/// waits, those it does not call too, with the code of an eager compile.
+#[cfg(lazy_native_functions)]
+#[test]
+fn the_callees_of_a_called_native_function_unit_compile_before_their_call() {
+    let source = r#"module Top(input logic sel, input logic [7:0] a, output logic [7:0] y);
+    function automatic logic [7:0] rare(input logic [7:0] x);
+        return x * 8'd3;
+    endfunction
+    function automatic logic [7:0] inc(input logic [7:0] x);
+        return x + 8'd1;
+    endfunction
+    function automatic logic [7:0] outer(input logic s, input logic [7:0] x);
+        if (s) return rare(x);
+        return inc(x);
+    endfunction
+    always_comb y = outer(sel, a);
+endmodule"#;
+    let (program, _, options, ..) =
+        crate::Simulation::from_sv_sources(vec![(source, std::path::Path::new("lazy.sv"))], "Top")
+            .force_out_of_line_calls()
+            .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, true, true)
+            .unwrap();
+    assert_eq!(program.sir.functions.len(), 3);
+    let program = std::sync::Arc::new(program);
+    let eager = crate::backend::native::NativeBackend::compile_image(&program, &options).unwrap();
+    let shared = std::sync::Arc::new(
+        crate::backend::native::SharedNativeCode::with_lazy_functions(&program, &options).unwrap(),
+    );
+    let mut backend = crate::backend::native::NativeBackend::from_shared(shared.clone());
+    use crate::backend::SimBackend as _;
+    let sel = backend.resolve_signal(&program.get_addr(&[], &["sel"]).unwrap());
+    let a = backend.resolve_signal(&program.get_addr(&[], &["a"]).unwrap());
+    let y = backend.resolve_signal(&program.get_addr(&[], &["y"]).unwrap());
+    backend.set(sel, 0u8);
+    backend.set(a, 41u8);
+    backend.eval_comb().unwrap();
+    assert_eq!(backend.get(y), 42u32.into());
+    let functions = shared.lazy_functions().unwrap();
+    if functions.compile_threads() > 1 {
+        // `rare` is never called; a compile thread takes it after the call.
+        let start = std::time::Instant::now();
+        while functions.compiled() < 3 {
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(60),
+                "the callees of a called unit compile"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+    assert!(functions.failure().is_none());
+    for index in (0..functions.len()).filter(|&index| functions.code(index).is_some()) {
+        let entry = eager
+            .code_entries()
+            .iter()
+            .find(|entry| entry.name == format!("function[{index}]"))
+            .unwrap();
+        assert_eq!(
+            functions.code(index).unwrap(),
+            &eager.code_image()[entry.offset..entry.offset + entry.size],
+            "a unit compiled for its caller has the code of an eager compile"
+        );
+    }
+    backend.set(sel, 1u8);
+    backend.eval_comb().unwrap();
+    assert_eq!(backend.get(y), 123u32.into());
+}
+
 /// A native function unit that fails to compile at its first call fails
 /// the call that reached it with the compiler's error.
 #[cfg(lazy_native_functions)]
