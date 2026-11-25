@@ -151,7 +151,7 @@ impl NativeProgramImage {
         alignment: usize,
     ) -> Result<Vec<u8>, NativeImageContainerError> {
         debug_assert!(alignment.is_power_of_two());
-        self.validate()
+        self.validate(0)
             .map_err(NativeImageContainerError::InvalidImage)?;
         let payload = postcard::to_allocvec(self)?;
         let (code, remaining) = postcard::take_from_bytes::<&[u8]>(&payload)?;
@@ -298,7 +298,7 @@ fn decode_appended_image(
     }
     let image = decode(appended.payload)?;
     image
-        .validate()
+        .validate(0)
         .map_err(NativeImageContainerError::InvalidImage)?;
     Ok(AppendedNativeImage {
         runtime_len: appended.runtime_len,

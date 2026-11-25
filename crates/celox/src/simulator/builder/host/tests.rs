@@ -3840,3 +3840,117 @@ endmodule"#;
         assert!(!homes.contains_key(&home(name)), "{name}");
     }
 }
+
+/// A simulation compiles a native function unit at its first call, with
+/// the code an image that compiles every unit holds for it, and never
+/// compiles a unit it does not call.
+#[cfg(lazy_native_functions)]
+#[test]
+fn native_function_units_compile_at_their_first_call() {
+    let source = r#"module Top(input logic sel, input logic [7:0] a, output logic [7:0] y);
+    function automatic logic [7:0] inc(input logic [7:0] x);
+        return x + 8'd1;
+    endfunction
+    function automatic logic [7:0] triple(input logic [7:0] x);
+        return x * 8'd3;
+    endfunction
+    always_comb begin
+        if (sel) y = triple(a);
+        else y = inc(a);
+    end
+endmodule"#;
+    let (program, _, options, ..) =
+        crate::Simulation::from_sv_sources(vec![(source, std::path::Path::new("lazy.sv"))], "Top")
+            .force_out_of_line_calls()
+            .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, true, true)
+            .unwrap();
+    assert_eq!(program.sir.functions.len(), 2);
+    let program = std::sync::Arc::new(program);
+    let eager = crate::backend::native::NativeBackend::compile_image(&program, &options).unwrap();
+    let shared = std::sync::Arc::new(
+        crate::backend::native::SharedNativeCode::with_lazy_functions(&program, &options).unwrap(),
+    );
+    // Safety: the image was produced in-process by the compiler above.
+    let eager_shared =
+        unsafe { crate::backend::native::SharedNativeCode::from_image(eager.clone()) }.unwrap();
+    assert_eq!(
+        shared.native_memory_size, eager_shared.native_memory_size,
+        "the units an image leaves out need no state of their own"
+    );
+    let mut backend = crate::backend::native::NativeBackend::from_shared(shared.clone());
+    use crate::backend::SimBackend as _;
+    let a = backend.resolve_signal(&program.get_addr(&[], &["a"]).unwrap());
+    let y = backend.resolve_signal(&program.get_addr(&[], &["y"]).unwrap());
+    backend.set(a, 41u8);
+    backend.eval_comb().unwrap();
+    assert_eq!(backend.get(y), 42u32.into());
+    let functions = shared.lazy_functions().unwrap();
+    assert_eq!(functions.compiled(), 1, "only the unit the settle called");
+    let called = (0..functions.len())
+        .find(|&index| functions.code(index).is_some())
+        .unwrap();
+    let entry = eager
+        .code_entries()
+        .iter()
+        .find(|entry| entry.name == format!("function[{called}]"))
+        .unwrap();
+    assert_eq!(
+        functions.code(called).unwrap(),
+        &eager.code_image()[entry.offset..entry.offset + entry.size],
+        "a unit compiled at its first call has the code of an eager compile"
+    );
+    // A second call runs the installed code.
+    backend.set(a, 9u8);
+    backend.eval_comb().unwrap();
+    assert_eq!(backend.get(y), 10u32.into());
+    assert_eq!(functions.compiled(), 1);
+    // The image holds no code for its function units: it does not load
+    // without them.
+    // Safety: the image was produced in-process by the compiler above.
+    let reloaded = unsafe {
+        crate::backend::native::SharedNativeCode::from_image(shared.program_image().clone())
+    };
+    assert!(
+        reloaded
+            .err()
+            .is_some_and(|error| error.to_string().contains("at their first call")),
+        "a lazy image must not load again"
+    );
+}
+
+/// A native function unit that fails to compile at its first call fails
+/// the call that reached it with the compiler's error.
+#[cfg(lazy_native_functions)]
+#[test]
+fn a_native_function_unit_compile_failure_is_a_simulation_error() {
+    let source = r#"module Top(input logic [7:0] a, output logic [7:0] y);
+    function automatic logic [7:0] inc(input logic [7:0] x);
+        return x + 8'd1;
+    endfunction
+    assign y = inc(a);
+endmodule"#;
+    let (program, _, options, ..) = crate::Simulation::from_sv_sources(
+        vec![(source, std::path::Path::new("lazy-failure.sv"))],
+        "Top",
+    )
+    .force_out_of_line_calls()
+    .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, true, true)
+    .unwrap();
+    assert_eq!(program.sir.functions.len(), 1);
+    let program = std::sync::Arc::new(program);
+    let shared =
+        crate::backend::native::SharedNativeCode::with_failing_lazy_functions(&program, &options)
+            .unwrap();
+    let mut backend =
+        crate::backend::native::NativeBackend::from_shared(std::sync::Arc::new(shared));
+    use crate::backend::SimBackend as _;
+    let error = backend.eval_comb().unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            celox_runtime::SimulatorErrorCode::Runtime { message, .. }
+                if message.contains("function[0]") && message.contains("injected by a test")
+        ),
+        "{error:?}"
+    );
+}

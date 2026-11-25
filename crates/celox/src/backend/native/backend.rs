@@ -46,6 +46,8 @@ mod compile_program;
 mod compile_units;
 #[cfg(hotspot_jit)]
 mod hotspot;
+#[cfg(lazy_native_functions)]
+mod lazy_functions;
 mod program_image;
 mod sim_backend;
 mod trace;
@@ -54,8 +56,39 @@ use compile_program::*;
 pub(crate) use compile_units::*;
 #[cfg(hotspot_jit)]
 pub(crate) use hotspot::*;
+#[cfg(lazy_native_functions)]
+pub(crate) use lazy_functions::LazyFunctions;
 pub use program_image::*;
 use trace::*;
+
+/// The kernel offset of a function unit slot whose unit compiles at its
+/// first call (`LazyFunctions`): the image holds no code for it.
+const LAZY_FUNCTION_OFFSET: usize = usize::MAX;
+
+/// The status of a call whose function unit failed to compile at its first
+/// call. Negative and outside the combinational fatal statuses, it is no
+/// loop and no fatal.
+#[cfg_attr(not(lazy_native_functions), allow(dead_code))]
+const NATIVE_FUNCTION_COMPILE_FAILED: i64 = i64::MIN + 1;
+
+/// The message of the error of [`NATIVE_FUNCTION_COMPILE_FAILED`] until
+/// `SharedNativeCode::lazy_error` replaces it with the unit's error.
+const LAZY_COMPILE_FAILED_MESSAGE: &str = "native code generation of a function unit failed";
+
+/// The result a status of generated code stands for.
+fn native_status(code: i64) -> Result<(), SimulatorErrorCode> {
+    match code {
+        0 => Ok(()),
+        code if code > 0 || celox_runtime::comb_fatal_site(code).is_some() => {
+            Err(SimulatorErrorCode::DetectedTrueLoopCode(code))
+        }
+        NATIVE_FUNCTION_COMPILE_FAILED => Err(SimulatorErrorCode::Runtime {
+            message: LAZY_COMPILE_FAILED_MESSAGE.into(),
+            signals: Vec::new(),
+        }),
+        _ => Err(SimulatorErrorCode::InternalError),
+    }
+}
 
 const NATIVE_FEATURE_BMI2: u8 = 1 << 0;
 const NATIVE_FEATURE_AVX: u8 = 1 << 1;
@@ -223,6 +256,10 @@ pub struct SharedNativeCode {
     four_state_inits: Vec<(usize, usize)>,
     /// The extern functions the code calls.
     extern_functions: crate::dpi::ExternFunctionTable,
+    /// The function units that compile at their first call, and the stubs
+    /// their table slots reach until then.
+    #[cfg(lazy_native_functions)]
+    lazy_functions: Option<(Arc<LazyFunctions>, jit_mem::JitCode)>,
 }
 
 // Safety: JitCode contains Mmap which is Send+Sync after creation.
@@ -244,7 +281,7 @@ impl celox_runtime::backend::NativeProcessCode for SharedNativeCode {
             .get(index)
             .ok_or(SimulatorErrorCode::InternalError)?;
         // SAFETY: the invocation owner retains this code and its live image.
-        unsafe { NativeBackend::call_raw(state, func) }
+        unsafe { NativeBackend::call_raw(state, func) }.map_err(|error| self.lazy_error(error))
     }
 }
 
@@ -271,7 +308,71 @@ impl SharedNativeCode {
         program_image: NativeProgramImage,
         dpi: &crate::DpiSymbols,
     ) -> Result<Self, SimulatorError> {
-        program_image.validate().map_err(|message| {
+        // Safety: upheld by this constructor's caller.
+        unsafe { Self::from_image_parts(program_image, dpi, None) }
+    }
+
+    /// Compile `laid_out` without its function units and load the image,
+    /// which compiles each unit at its first call.
+    #[cfg(lazy_native_functions)]
+    pub(crate) fn with_lazy_functions(
+        laid_out: &Arc<LaidOutProgram>,
+        options: &SimulatorOptions,
+    ) -> Result<Self, SimulatorError> {
+        let (image, functions) = Self::compile_lazy(laid_out, options)?;
+        // Safety: the image was produced in-process by the Celox compiler.
+        unsafe { Self::from_image_parts(image, &options.dpi, Some(Arc::new(functions))) }
+    }
+
+    /// [`Self::with_lazy_functions`] whose function units fail to compile,
+    /// for tests of how that failure surfaces.
+    #[cfg(all(test, lazy_native_functions))]
+    pub(crate) fn with_failing_lazy_functions(
+        laid_out: &Arc<LaidOutProgram>,
+        options: &SimulatorOptions,
+    ) -> Result<Self, SimulatorError> {
+        let (image, mut functions) = Self::compile_lazy(laid_out, options)?;
+        functions.fail_compiles = true;
+        // Safety: the image was produced in-process by the Celox compiler.
+        unsafe { Self::from_image_parts(image, &options.dpi, Some(Arc::new(functions))) }
+    }
+
+    /// The image of `laid_out` without its function units, and the units.
+    #[cfg(lazy_native_functions)]
+    fn compile_lazy(
+        laid_out: &Arc<LaidOutProgram>,
+        options: &SimulatorOptions,
+    ) -> Result<(NativeProgramImage, LazyFunctions), SimulatorError> {
+        let image = compile_program_without_functions(laid_out, options)?;
+        let function_options = function_options(laid_out, options)?
+            .ok_or_else(|| codegen_message("no function units to compile lazily"))?;
+        let functions = LazyFunctions::new(
+            Arc::clone(laid_out),
+            function_options,
+            image.native_memory_size,
+        );
+        Ok((image, functions))
+    }
+
+    /// Attach an image whose function units, when `lazy_functions` holds
+    /// them, compile at their first call.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Self::from_image`].
+    unsafe fn from_image_parts(
+        program_image: NativeProgramImage,
+        dpi: &crate::DpiSymbols,
+        #[cfg(lazy_native_functions)] lazy_functions: Option<Arc<LazyFunctions>>,
+        #[cfg(not(lazy_native_functions))] lazy_functions: Option<std::convert::Infallible>,
+    ) -> Result<Self, SimulatorError> {
+        #[cfg(lazy_native_functions)]
+        let lazy_slots = lazy_functions
+            .as_ref()
+            .map_or(0, |functions| functions.len());
+        #[cfg(not(lazy_native_functions))]
+        let lazy_slots = lazy_functions.map_or(0, |never| match never {});
+        program_image.validate(lazy_slots).map_err(|message| {
             codegen_message(format!("invalid native program image: {message}"))
         })?;
         let unavailable = program_image.required_native_features & !current_native_feature_bits();
@@ -344,11 +445,29 @@ impl SharedNativeCode {
                 )
             })
             .map_err(|source| codegen_err(CodegenError::NativeMemory { source }))?;
+        #[cfg(lazy_native_functions)]
+        let lazy_functions = lazy_functions
+            .map(|functions| {
+                let stubs = functions.stubs(program_image.options.perf_map)?;
+                Ok::<_, SimulatorError>((functions, stubs))
+            })
+            .transpose()?;
         let kernel_addresses = program_image
             .runtime_schema
             .native_kernel_offsets
             .iter()
-            .map(|&offset| native_function_at(&jit_image, offset).map(|func| func as usize))
+            .enumerate()
+            .map(|(slot, &offset)| {
+                // `validate` admits the offset only in the lazy slots.
+                #[cfg(lazy_native_functions)]
+                if offset == LAZY_FUNCTION_OFFSET
+                    && let Some((_, stubs)) = &lazy_functions
+                {
+                    return LazyFunctions::stub(stubs, slot);
+                }
+                let _ = slot;
+                native_function_at(&jit_image, offset).map(|func| func as usize)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         extern_functions.append_native_kernels(kernel_addresses);
         let materialize = |event: NativeEventImageRef| -> Result<NativeEventRef, SimulatorError> {
@@ -437,7 +556,34 @@ impl SharedNativeCode {
             four_state_inits: program_image.four_state_inits.clone(),
             program_image,
             extern_functions,
+            #[cfg(lazy_native_functions)]
+            lazy_functions,
         })
+    }
+
+    /// The function units that compile at their first call.
+    #[cfg(lazy_native_functions)]
+    pub(crate) fn lazy_functions(&self) -> Option<&LazyFunctions> {
+        self.lazy_functions
+            .as_ref()
+            .map(|(functions, _)| functions.as_ref())
+    }
+
+    /// `error` of a status of this code, with the error of the function
+    /// unit that failed to compile at its first call when that status says
+    /// so.
+    fn lazy_error(&self, error: SimulatorErrorCode) -> SimulatorErrorCode {
+        #[cfg(lazy_native_functions)]
+        if let SimulatorErrorCode::Runtime { message, .. } = &error
+            && message == LAZY_COMPILE_FAILED_MESSAGE
+            && let Some(failure) = self.lazy_functions().and_then(LazyFunctions::failure)
+        {
+            return SimulatorErrorCode::Runtime {
+                message: failure,
+                signals: Vec::new(),
+            };
+        }
+        error
     }
 
     /// Returns a reference to the memory layout.
@@ -632,7 +778,7 @@ impl NativeBackend {
         program: &LaidOutProgram,
         options: &SimulatorOptions,
     ) -> Result<NativeProgramImage, SimulatorError> {
-        compile_program_with_outlining_threshold(program, options, false, None, 0)
+        compile_program_with_outlining_threshold(program, options, false, None, 0, false)
             .map(|(image, _)| image)
     }
 
@@ -750,6 +896,23 @@ impl NativeBackend {
         let image = Self::compile_image(laid_out, options)?;
         // Safety: `image` was produced in-process by the Celox compiler above.
         unsafe { Self::from_image_with_dpi(image, &options.dpi) }
+    }
+
+    /// [`Self::new`] for a program the backend may keep: its function units
+    /// compile at their first call, so a unit the simulation never calls is
+    /// never compiled. A program without function units, or a host whose
+    /// generated code cannot enter the compiler, compiles as [`Self::new`].
+    pub(crate) fn new_shared(
+        laid_out: &Arc<LaidOutProgram>,
+        options: &SimulatorOptions,
+    ) -> Result<Self, SimulatorError> {
+        #[cfg(lazy_native_functions)]
+        if !laid_out.sir.functions.is_empty() {
+            return Ok(Self::from_shared(Arc::new(
+                SharedNativeCode::with_lazy_functions(laid_out, options)?,
+            )));
+        }
+        Self::new(laid_out, options)
     }
 
     #[cfg(any(
@@ -1171,11 +1334,12 @@ impl NativeBackend {
             timing.elapsed = timing.elapsed.saturating_add(start.elapsed());
             timing.calls = timing.calls.saturating_add(1);
         }
-        result.map_err(|failure| match failure.code {
-            code if code > 0 || celox_runtime::comb_fatal_site(code).is_some() => {
-                SimulatorErrorCode::DetectedTrueLoopCode(code)
-            }
-            _ => SimulatorErrorCode::InternalError,
+        result.map_err(|failure| {
+            self.compiled.lazy_error(
+                native_status(failure.code)
+                    .err()
+                    .unwrap_or(SimulatorErrorCode::InternalError),
+            )
         })
     }
 
@@ -1211,21 +1375,16 @@ impl NativeBackend {
 
     unsafe fn call_raw(ptr: *mut u8, func: NativeSimFunc) -> Result<(), SimulatorErrorCode> {
         // SAFETY: the caller supplies the native image and exclusive execution.
-        let ret = unsafe { func(ptr) };
-        match ret {
-            0 => Ok(()),
-            code if code > 0 || celox_runtime::comb_fatal_site(code).is_some() => {
-                Err(SimulatorErrorCode::DetectedTrueLoopCode(code))
-            }
-            _ => Err(SimulatorErrorCode::InternalError),
-        }
+        native_status(unsafe { func(ptr) })
     }
 
     fn call_func_timed(&mut self, func: NativeSimFunc) -> Result<(), SimulatorErrorCode> {
         if !self.slow_calls {
-            return Self::call_func(self.memory.as_mut_slice(), func);
+            return Self::call_func(self.memory.as_mut_slice(), func)
+                .map_err(|error| self.compiled.lazy_error(error));
         }
         self.call_func_slow(func)
+            .map_err(|error| self.compiled.lazy_error(error))
     }
 
     #[cold]
@@ -1275,17 +1434,22 @@ impl NativeBackend {
         let ptr = memory.as_mut_ptr() as *mut u8;
         let ret = unsafe { func(ptr) };
         let completed = count.saturating_sub(memory[remaining_word]);
-        let result = match ret {
-            0 => Ok(()),
-            code if code > 0 || celox_runtime::comb_fatal_site(code).is_some() => {
-                Err(SimulatorErrorCode::DetectedTrueLoopCode(code))
-            }
-            _ => Err(SimulatorErrorCode::InternalError),
-        };
-        (completed, result)
+        (completed, native_status(ret))
     }
 
     fn call_func_many_timed(
+        &mut self,
+        func: NativeSimFunc,
+        count: u64,
+    ) -> (u64, Result<(), SimulatorErrorCode>) {
+        let (completed, result) = self.call_func_many_measured(func, count);
+        (
+            completed,
+            result.map_err(|error| self.compiled.lazy_error(error)),
+        )
+    }
+
+    fn call_func_many_measured(
         &mut self,
         func: NativeSimFunc,
         count: u64,
