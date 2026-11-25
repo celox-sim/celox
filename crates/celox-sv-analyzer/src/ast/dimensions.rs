@@ -499,6 +499,11 @@ fn extend_variable_dimensions_from_markers(
             shape.is_2state = existing.is_2state;
             shape.signed_element_depth = existing.signed_element_depth;
             shape = shape.with_enumeration(existing.retained_enumeration());
+            // The marker keeps the container type the variable keeps, after
+            // the changes above, which forget it.
+            if let Some(container) = existing.container_declaration() {
+                shape.keep_container(Some(container.clone()));
+            }
         }
         context.insert(name.to_string(), shape);
     }

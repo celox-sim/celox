@@ -260,6 +260,10 @@ pub(super) struct TyTable {
     /// (7.2), as the declaration of the first value converted to it gives
     /// them.
     structs: HashMap<TyId, Arc<super::unpacked_structs::UnpackedStruct>>,
+    /// The layout, element and index types of each dynamic array, queue or
+    /// associative array type (7.5, 7.10, 7.8), as the first value converted
+    /// to it gives them.
+    containers: HashMap<TyId, Arc<super::ContainerType>>,
     /// The declarations the types of the table name.
     decls: Vec<DeclData>,
     /// The declarations by name, then by scope (`""` for none, which no
@@ -797,6 +801,36 @@ impl TyTable {
                 _ => None,
             }
         );
+    }
+
+    /// Record the container type `container` of dynamic array, queue or
+    /// associative array type `id`.
+    pub(super) fn record_container(&mut self, id: TyId, container: &Arc<super::ContainerType>) {
+        // The storage of a fixed-size array property has the range of its
+        // declaration, which the type does not tell (see
+        // `classes::Property::storage`).
+        if container.fixed.is_some() {
+            return;
+        }
+        let Some(known) = self.containers.get(&id) else {
+            self.containers.insert(id, container.clone());
+            return;
+        };
+        // Containers of the same type agree in what their element and index
+        // types evaluate to, though another scope may spell their bounds
+        // with other constants.
+        debug_assert!(
+            known.layout == container.layout && known.record == container.record,
+            "one container type of dynamic array type {:?}: {known:?} and {container:?}",
+            self.data(id)
+        );
+    }
+
+    /// The container type of dynamic array, queue or associative array type
+    /// `id` (7.5, 7.10, 7.8), or of the elements of a fixed-size unpacked
+    /// array of them (7.4.2), once a value of it has been converted.
+    pub(super) fn container(&self, id: TyId) -> Option<&Arc<super::ContainerType>> {
+        self.containers.get(&self.fixed_element(id))
     }
 
     /// The declaration of unpacked structure type `id`, or of the elements

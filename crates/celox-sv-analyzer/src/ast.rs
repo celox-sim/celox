@@ -525,6 +525,11 @@ pub struct Type {
     /// unpacked dimensions keep and any other change forgets. Only
     /// [`Type::keep_structure`] sets it, with the field that tells it.
     structure: variable_dimensions::kept::KeptStructure,
+    /// The container type (7.5, 7.10, 7.8) the type is, or whose elements a
+    /// fixed-size unpacked array of the type has, which changes of its
+    /// unpacked dimensions keep and any other change forgets. Only
+    /// [`Type::keep_container`] sets it, with the field that tells it.
+    kept_container: variable_dimensions::kept::KeptContainer,
 }
 
 /// What a [`Type`] is made of.
@@ -587,6 +592,7 @@ impl std::ops::DerefMut for Type {
         self.element.forget();
         self.enumeration.forget();
         self.structure.forget();
+        self.kept_container.forget();
         Arc::make_mut(&mut self.shape)
     }
 }
@@ -651,6 +657,16 @@ impl Type {
             Some(aggregate) => self.keep_structure(Some(aggregate.clone())),
             None => self.structure.forget(),
         }
+        // The type's own container, whose bounds its scope names, or else
+        // the one registered for the semantic type or that of its elements.
+        match self
+            .container
+            .clone()
+            .or_else(|| table.container(id).cloned())
+        {
+            Some(container) => self.keep_container(Some(container)),
+            None => self.kept_container.forget(),
+        }
     }
 }
 
@@ -662,6 +678,7 @@ impl From<TypeShape> for Type {
             element: semantic_types::Binding::default(),
             enumeration: variable_dimensions::kept::KeptEnumeration::default(),
             structure: variable_dimensions::kept::KeptStructure::default(),
+            kept_container: variable_dimensions::kept::KeptContainer::default(),
         }
     }
 }

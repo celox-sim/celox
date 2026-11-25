@@ -1110,6 +1110,11 @@ impl Renamer<'_> {
             .container
             .take()
             .map(|container| self.container(&container));
+        // The type keeps its container, renamed.
+        if r#type.kept_container.declaration().is_some() {
+            let container = r#type.container.clone();
+            r#type.keep_container(container);
+        }
         r#type
     }
 
