@@ -829,21 +829,12 @@ fn lower_methods(
             // randomize is virtual, while its pre/post hooks are not (18.6.2).
             // Object-wide rand_mode also covers the dynamic object's members.
             let mut items = Vec::new();
-            for name in classes::visible_classes(tree, builder.session) {
-                if name == class.name {
-                    continue;
-                }
-                let Ok(derived) = classes::class(tree, builder.session, &name, env, &aliases)
-                else {
-                    continue;
-                };
-                if derived.is_abstract || derived.is_interface {
-                    continue;
-                }
+            let derived_classes =
+                classes::concrete_derived(tree, builder.session, &class.name, env, &aliases);
+            for (name, derived) in derived_classes {
                 if (inline.is_some() && derived.check_constraint_program().is_err())
                     || (method == "randomize"
                         && derived.check_randomize(&builder.session.types).is_err())
-                    || !derived.derives_from(tree, builder.session, &class.name, env, &aliases)
                 {
                     continue;
                 }

@@ -2422,6 +2422,23 @@ fn object_classes(
     Ok(classes)
 }
 
+/// The classes of [`ConcreteClasses`] other than `ancestor` that derive from
+/// or implement it, in the order of [`visible_classes`], with their names.
+pub(super) fn concrete_derived(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    ancestor: &str,
+    env: &ConstEnv,
+    aliases: &TypeAliases,
+) -> Vec<(String, Rc<Class>)> {
+    ConcreteClasses::of(tree, session, env, aliases)
+        .classes
+        .iter()
+        .filter(|(name, _, lineage)| name != ancestor && lineage.contains(ancestor))
+        .map(|(name, class, _)| (name.clone(), class.clone()))
+        .collect()
+}
+
 /// The classes of [`visible_classes`] that can be laid out and are neither
 /// abstract nor interface classes, each with the classes it is, derives from
 /// or implements (see [`Class::derives_from`]). A scope keeps them while no
