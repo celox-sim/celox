@@ -99,6 +99,7 @@ use super::procedural::{
     system_task_kind,
 };
 use super::*;
+use celox_frontend_core::symbolic::artifact::EdgeEvaluation;
 use celox_sir::{FrameLayout, FrameSlot, FunctionUnit, RegisterId};
 use std::collections::BTreeMap;
 
@@ -903,6 +904,17 @@ pub(super) fn attach_functions(
                     .processes
                     .iter_mut()
                     .map(|process| &mut process.kernel),
+            )
+            .chain(
+                module
+                    .next_state
+                    .evaluations
+                    .values_mut()
+                    .flatten()
+                    .filter_map(|batch| match batch {
+                        EdgeEvaluation::Procedure(unit) => Some(unit),
+                        EdgeEvaluation::Graph(_) => None,
+                    }),
             );
         for unit in units {
             renumber(unit, kept);
@@ -916,7 +928,9 @@ pub(super) fn attach_functions(
 }
 
 /// The units of `module` whose addresses carry a region: all but its
-/// combinational process units.
+/// combinational process units. The procedures of an edge that also has
+/// next-state graphs are among them: the edge schedule moved them out of
+/// `event_bodies` (see `ff_graph::EdgeSchedule::finish`).
 fn module_units(module: &SimModule) -> impl Iterator<Item = &ExecutionUnit<Addr>> {
     module
         .event_bodies
@@ -936,6 +950,17 @@ fn module_units(module: &SimModule) -> impl Iterator<Item = &ExecutionUnit<Addr>
                 .flat_map(|part| [&part.evaluate, &part.apply]),
         )
         .chain(module.processes.iter().map(|process| &process.kernel))
+        .chain(
+            module
+                .next_state
+                .evaluations
+                .values()
+                .flatten()
+                .filter_map(|batch| match batch {
+                    EdgeEvaluation::Procedure(unit) => Some(unit),
+                    EdgeEvaluation::Graph(_) => None,
+                }),
+        )
 }
 
 /// The FRAME address of the slot of variable `id`.
