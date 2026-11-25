@@ -110,12 +110,17 @@ compiles each function unit, an out-of-line SystemVerilog subroutine, at its
 first call. Until that call the unit's slot in the extern address table holds
 a stub, which has a compile thread compile the unit with the same pipeline
 and options an image compiles it with, points the slot at the code and
-continues the call. The thread starts at the first call and compiles every
-unit after it, with the stack an eager compile worker has. A unit
-the simulation never calls is never compiled; a design without function units
-compiles as before. A compile error at that call ends the call as a
-simulation error. The program stays in memory for these compiles, so such an
-image holds no code for its units and cannot be loaded again or written out.
+continues the call. The threads start at the first call, as many as an
+eager compile of the units would use, with the stack an eager compile worker
+has. While the caller waits, the other threads compile the units the called
+unit calls, the callees of the latest call first: most of them are called
+soon after, and a call of a unit being compiled waits for that compile. On a
+UVM case about a quarter of these compiles are never called: the threads
+spend that work on a shorter wait. A unit that neither the simulation nor a
+called unit calls is never compiled; a design without function units
+compiles as before. A compile error at a call ends the call as a simulation
+error. The program stays in memory for these compiles, so such an image
+holds no code for its units and cannot be loaded again or written out.
 Images that are written out or loaded again (`compile_native`,
 `build_native_from_image`) compile every unit, as do codegen traces, the
 tiered backend and AArch64.
