@@ -543,6 +543,7 @@ fn prepare_external_hierarchy_collecting(
         resolved.instances.retain(|instance| {
             module_ids.contains_key(&LoweredSvModuleKey::instance_key(instance))
         });
+        let mut calls = lowered.calls.clone();
         elaborate_instances(
             &mut sim_module,
             &resolved,
@@ -556,9 +557,14 @@ fn prepare_external_hierarchy_collecting(
             false,
             &HashSet::default(),
             warnings,
-            None,
+            calls.as_mut(),
             &mut design,
         )?;
+        // Port expressions and processes share the module's call graph, as
+        // in a SystemVerilog hierarchy (see `schedule_sources`).
+        if let Some(functions) = calls.as_ref().and_then(|graph| graph.out_of_line.as_ref()) {
+            out_of_line::attach_functions(&mut sim_module, functions.units(), functions.frames());
+        }
         modules.insert(
             module_id,
             ExternalModule {
