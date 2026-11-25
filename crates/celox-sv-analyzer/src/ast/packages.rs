@@ -22,10 +22,12 @@ use super::*;
 
 /// The subroutines and their locals of every package of a design, by name,
 /// with what their bodies may name of their packages: the packages'
-/// variables and DPI imports.
+/// variables and DPI imports; and the classes of the packages, whose
+/// objects any scope may handle.
 #[derive(Debug, Default)]
 pub(crate) struct DesignSubroutines {
     pub(super) subroutines: HashMap<String, Arc<Subroutine>>,
+    pub(super) classes: HashMap<String, Arc<classes::Class>>,
     pub(super) locals: HashMap<String, Arc<LocalVariable>>,
     pub(super) state_signals: HashMap<String, Signal>,
     pub(super) dpi_imports: HashMap<String, crate::ir::DpiImport>,
@@ -327,6 +329,12 @@ impl Packages {
                     .subroutines
                     .entry(subroutine.name.clone())
                     .or_insert_with(|| subroutine.clone());
+            }
+            for class in &package.symbols.classes {
+                design
+                    .classes
+                    .entry(class.name.clone())
+                    .or_insert_with(|| class.clone());
             }
             for local in &package.symbols.locals {
                 design

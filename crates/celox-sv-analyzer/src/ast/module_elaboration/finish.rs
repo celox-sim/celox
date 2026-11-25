@@ -174,6 +174,14 @@ impl ScopeElaboration<'_> {
                     subroutine_names(subroutine, &mut named);
                     missing.push((**subroutine).clone());
                 }
+                // So do the other package subroutines the scope has: its own
+                // copies, such as a dispatcher it completed (see
+                // `Self::complete_dispatchers`), and those it imports from
+                // an interface whose instance it binds, which declares their
+                // locals as names of its own (IEEE 1800-2023 25.3).
+                for subroutine in self.subroutines.iter().chain(&missing) {
+                    foreign_locals.extend(subroutine_locals(subroutine));
+                }
                 foreign_locals.retain(|local| design.locals.contains_key(local));
                 let mut named: Vec<String> = named.into_iter().collect();
                 named.sort_unstable();
