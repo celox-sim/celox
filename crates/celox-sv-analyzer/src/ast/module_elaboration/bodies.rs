@@ -354,6 +354,15 @@ impl ScopeElaboration<'_> {
             &self.subroutine_params,
             &nets,
         )?;
+        procedural::references::validate_const_ref_ports(
+            &self.name,
+            &self.ports,
+            self.subroutines.iter(),
+            &self.comb_processes,
+            &self.ff_processes,
+            &self.initial_processes,
+            &self.subroutine_directions,
+        )?;
         procedural::timed_tasks::classify(
             self.subroutines.iter().chain(
                 self.imported

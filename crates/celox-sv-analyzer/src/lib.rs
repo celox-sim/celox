@@ -40,7 +40,7 @@ pub use ast::interfaces::{
     InterfacePrototype, interface_prototypes, interface_prototypes_for,
     interface_prototypes_with_options,
 };
-pub use ast::packages::{Design, Packages};
+pub use ast::packages::{Design, Packages, RefPortTypeError};
 pub use ast::virtual_interfaces::{
     VirtualInterface, VirtualInterfaceDeclaration, VirtualInterfaceMember, VirtualInterfaceSignal,
     VirtualInterfaces,
@@ -357,6 +357,10 @@ pub enum AnalyzerError {
         argument: String,
         detail: String,
     },
+    /// A `const ref` port written inside its module or program (IEEE
+    /// 1800-2023 13.5.2, 23.3.3.2).
+    #[error("const ref port `{port}` of `{module}` cannot be written (IEEE 1800-2023 13.5.2)")]
+    ConstRefPortAssignment { module: String, port: String },
     /// Actuals that cannot be bound to the formals of a task or function:
     /// a name it has no formal for, a formal bound twice, too many actuals,
     /// a positional actual after a named one (IEEE 1800-2023 13.5.4), or
@@ -434,7 +438,7 @@ pub const SV_FRONTEND_TRACKING_ISSUE: u32 = 88;
 /// carried by [`AnalyzerError::Unsupported`].
 const UNSUPPORTED_CONSTRUCT_ISSUES: &[(&str, u32)] = &[
     ("non-ANSI port expressions", 1953),
-    ("ref port direction", 427),
+    ("ref port", 427),
     (
         "unpacked struct, union, or unsupported packed struct member",
         440,

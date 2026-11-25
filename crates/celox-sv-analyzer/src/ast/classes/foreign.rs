@@ -1062,7 +1062,9 @@ mod tests {
         // locals of its own so too. The method's must not become those,
         // whatever their spelling holds.
         let logic =
-            crate::ir::Type::from_ast(Type::new(TypeKind::Logic), &HashMap::default(), &|_| None);
+            crate::ir::Type::from_ast(Type::new(TypeKind::Logic), &HashMap::default(), &mut |_| {
+                (None, None)
+            });
         let local = |name: &str, source: &str, owned: bool| LocalVariable {
             name: name.into(),
             source_name: source.into(),

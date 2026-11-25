@@ -574,6 +574,11 @@ fn check_target(
         }
         signal.is_net()
     } else if let Some(port) = port {
+        if port.direction() == PortDirection::Ref {
+            return Err(unsupported(format!(
+                "force or release of ref port `{name}`"
+            )));
+        }
         port.is_net
     } else {
         return Err(unsupported(format!(

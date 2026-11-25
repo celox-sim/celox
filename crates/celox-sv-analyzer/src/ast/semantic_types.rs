@@ -79,7 +79,7 @@ pub(super) use streams::{StreamLayout, StreamRole};
 
 /// An interned semantic type of a [`TyTable`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(super) struct TyId(u32);
+pub(crate) struct TyId(u32);
 
 /// The bounds of one dimension, `[left:right]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

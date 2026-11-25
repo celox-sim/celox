@@ -153,6 +153,111 @@ impl Design {
     pub(crate) fn restore_publication(&mut self, publication: super::Publication) {
         self.types = publication.0;
     }
+
+    /// Check whether `actual` and `formal` have equivalent types for binding a
+    /// `ref` port (IEEE 1800-2023 6.22.2, 23.3.3.2), and identical queue bounds.
+    pub fn check_ref_port_type_equivalent(
+        &self,
+        actual: &crate::ir::Type,
+        formal: &crate::ir::Type,
+    ) -> Result<(), RefPortTypeError> {
+        let equivalent = match (actual.semantic_type(), formal.semantic_type()) {
+            (Some(actual_id), Some(formal_id)) => self.types.equivalent(actual_id, formal_id),
+            (None, None) => {
+                actual.kind() == formal.kind()
+                    && actual.is_signed() == formal.is_signed()
+                    && actual.class() == formal.class()
+                    && actual.is_chandle() == formal.is_chandle()
+                    && actual.tagged_identity() == formal.tagged_identity()
+                    && actual.resolved_width() == formal.resolved_width()
+                    && actual.packed_bounds() == formal.packed_bounds()
+                    && actual.unpacked_ranges().len() == formal.unpacked_ranges().len()
+                    && actual
+                        .unpacked_ranges()
+                        .iter()
+                        .zip(formal.unpacked_ranges())
+                        .all(|(a, b)| {
+                            unpacked_range_len(a).is_some()
+                                && unpacked_range_len(a) == unpacked_range_len(b)
+                        })
+            }
+            (Some(_), None) | (None, Some(_)) => false,
+        };
+        if !equivalent {
+            return Err(RefPortTypeError::NotEquivalent);
+        }
+        let queue_bounds_ok = match (actual.semantic_type(), formal.semantic_type()) {
+            (Some(actual_id), Some(formal_id)) => {
+                self.types.queue_bounds_match(actual_id, formal_id)
+            }
+            _ => true,
+        } && match (
+            actual
+                .container()
+                .and_then(|c| c.container().map(|ct| &**ct)),
+            formal
+                .container()
+                .and_then(|c| c.container().map(|ct| &**ct)),
+        ) {
+            (Some(actual_container), Some(formal_container)) => {
+                container_queue_bounds_match(actual_container, formal_container)
+            }
+            _ => true,
+        };
+        if !queue_bounds_ok {
+            return Err(RefPortTypeError::QueueBoundsDiffer);
+        }
+        Ok(())
+    }
+}
+
+fn container_queue_bounds_match(actual: &ContainerType, formal: &ContainerType) -> bool {
+    if let (
+        crate::system_functions::ContainerKind::Queue {
+            capacity: actual_cap,
+        },
+        crate::system_functions::ContainerKind::Queue {
+            capacity: formal_cap,
+        },
+    ) = (actual.layout.kind, formal.layout.kind)
+        && actual_cap != formal_cap
+    {
+        return false;
+    }
+    if let (Some(actual_key), Some(formal_key)) = (&actual.key, &formal.key)
+        && let (Some(actual_kc), Some(formal_kc)) = (actual_key.container(), formal_key.container())
+        && !container_queue_bounds_match(actual_kc, formal_kc)
+    {
+        return false;
+    }
+    match (actual.element.container(), formal.element.container()) {
+        (Some(actual_ec), Some(formal_ec)) => container_queue_bounds_match(actual_ec, formal_ec),
+        _ => true,
+    }
+}
+
+fn unpacked_range_len(range: &crate::ir::UnpackedRange) -> Option<u128> {
+    let (left, right) = match range.resolved_bounds() {
+        Some(bounds) => bounds,
+        None => {
+            let empty = HashMap::default();
+            (
+                crate::typecheck::eval_const_expr(range.left(), &empty)?,
+                crate::typecheck::eval_const_expr(range.right(), &empty)?,
+            )
+        }
+    };
+    Some(left.abs_diff(right) + 1)
+}
+
+/// Why connecting an actual variable to a `ref` port fails the compatibility
+/// check in [`Design::check_ref_port_type_equivalent`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefPortTypeError {
+    /// The actual and formal types are not equivalent per IEEE 1800-2023 6.22.2.
+    NotEquivalent,
+    /// Equivalent queue types differ in declared bound, which Celox cannot alias.
+    QueueBoundsDiffer,
 }
 
 /// The compilation-unit scope of a source file.
