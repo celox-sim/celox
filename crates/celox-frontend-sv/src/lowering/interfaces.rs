@@ -72,6 +72,8 @@ fn interface_signatures_collecting(
                 &HashMap::default(),
                 &HashMap::default(),
                 SharedAlways::default(),
+                &HashSet::default(),
+                &[],
                 None,
             )?;
             Ok(InterfaceSignature {

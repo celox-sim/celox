@@ -123,6 +123,8 @@ mod procedural_assigns;
 mod procedural_forces;
 #[path = "frontends/systemverilog/realtime.rs"]
 mod realtime;
+#[path = "frontends/systemverilog/ref_ports.rs"]
+mod ref_ports;
 #[path = "frontends/systemverilog/review_regressions.rs"]
 mod review_regressions;
 #[path = "frontends/systemverilog/scan.rs"]

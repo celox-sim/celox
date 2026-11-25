@@ -40,6 +40,9 @@ pub(crate) fn elaborate_instances(
     foreign: bool,
     private_wires: bool,
     hierarchical_targets: &HashSet<String>,
+    same_instance_aliased: &HashSet<String>,
+    same_instance_alias_groups: &[Vec<String>],
+    same_instance_alias_partitions: &[Vec<Vec<String>>],
     warnings: &mut Vec<crate::warning::PendingWarning>,
     calls: Option<&mut recursion::CallGraph>,
     design: &mut sv::Design,
@@ -264,6 +267,8 @@ pub(crate) fn elaborate_instances(
             waits,
             watch_seeds.as_ref(),
             gated_waits,
+            same_instance_aliased,
+            same_instance_alias_partitions,
             calls,
         )
         .map_err(|error| match error {
@@ -315,6 +320,9 @@ pub(crate) fn elaborate_instances(
             &mut module.arena,
             &mut module.comb_blocks,
             &mut child_ref,
+            name,
+            index,
+            &mut module.ref_port_bindings,
             &parent_variables,
             &signal_names,
             &lowered.constants,
@@ -417,10 +425,25 @@ pub(crate) fn elaborate_instances(
     // Signals a kernel or an imperative combinational unit may store twice
     // between two runtime checks get counters; assembly uses them only for
     // the ones a flip-flop domain or wait watches.
+    let alias_groups: Vec<HashSet<SourceVarId>> = same_instance_alias_groups
+        .iter()
+        .filter_map(|group| {
+            let ids: HashSet<SourceVarId> = group
+                .iter()
+                .filter_map(|name| signal_names.get(name).copied())
+                .collect();
+            (ids.len() > 1).then_some(ids)
+        })
+        .collect();
     let mut candidates = Vec::new();
     for process in &module.processes {
         candidates.extend(celox_frontend_core::watch::multi_store_candidates(
             &process.kernel,
+            |address| (address.region == STABLE_REGION).then_some(address.var_id),
+        ));
+        candidates.extend(alias_group_multi_store_candidates(
+            &process.kernel,
+            &alias_groups,
             |address| (address.region == STABLE_REGION).then_some(address.var_id),
         ));
     }
@@ -428,6 +451,11 @@ pub(crate) fn elaborate_instances(
         if let LogicPathTarget::Process { unit, .. } = &path.target {
             candidates.extend(celox_frontend_core::watch::multi_store_candidates(
                 unit,
+                |address| Some(*address),
+            ));
+            candidates.extend(alias_group_multi_store_candidates(
+                unit,
+                &alias_groups,
                 |address| Some(*address),
             ));
         }
@@ -557,8 +585,8 @@ pub(crate) fn elaborate_instances(
         &signal_names,
         four_state,
     )?;
+    candidates.extend(lowered.repeated_ff_writes.iter().map(|&(signal, _)| signal));
     if waits {
-        candidates.extend(lowered.repeated_ff_writes.iter().map(|&(signal, _)| signal));
         for alternative in &comb_alternatives {
             candidates.extend(alternative.candidates.iter().copied());
         }
@@ -1037,6 +1065,9 @@ fn lower_port_connections(
     arena: &mut SLTNodeArena<SourceVarId>,
     paths: &mut Vec<LogicPath<SourceVarId>>,
     child_ref: &mut impl FnMut(SourceVarId) -> SourceVarId,
+    instance_name: &str,
+    instance_index: usize,
+    ref_port_bindings: &mut Vec<RefPortBinding>,
     parent_variables: &HashMap<SourceVarId, SvVariable>,
     parent_signal_names: &HashMap<String, SourceVarId>,
     parent_constants: &HashMap<String, i128>,
@@ -1399,6 +1430,32 @@ fn lower_port_connections(
                     });
                 }
             }
+            VariableKind::Ref => {
+                let Some(sv::ir::Expr::Ident(actual_name)) =
+                    connection.and_then(|item| item.actual_expr.as_ref())
+                else {
+                    return Err(ParserError::illegal_context(
+                        "systemverilog ref port",
+                        format!(
+                            "ref port `{formal}` requires a connected variable (IEEE 1800-2023 23.3.3.2)"
+                        ),
+                        None,
+                    ));
+                };
+                let Some(&parent_var) = parent_signal_names.get(actual_name) else {
+                    return Err(ParserError::illegal_context(
+                        "systemverilog ref port",
+                        format!("ref port `{formal}` bound to unknown variable `{actual_name}`"),
+                        None,
+                    ));
+                };
+                ref_port_bindings.push(RefPortBinding {
+                    instance: instance_name.to_owned(),
+                    index: instance_index,
+                    child_port: *child_port_id,
+                    parent_var,
+                });
+            }
             _ => {}
         }
     }
@@ -1702,4 +1759,37 @@ pub(super) fn output_lvalue_accesses(
             },
         ),
     }
+}
+
+fn alias_group_multi_store_candidates<A>(
+    unit: &celox_sir::ExecutionUnit<A>,
+    alias_groups: &[HashSet<SourceVarId>],
+    key: impl Fn(&A) -> Option<SourceVarId>,
+) -> Vec<SourceVarId> {
+    let mut result = Vec::new();
+    for group in alias_groups {
+        let mut ids: HashSet<SourceVarId> = HashSet::default();
+        for block in unit.blocks.values() {
+            for instruction in &block.instructions {
+                if let Some(id) = celox_frontend_core::watch::write_destination(instruction)
+                    .and_then(&key)
+                    .filter(|id| group.contains(id))
+                {
+                    ids.insert(id);
+                }
+            }
+        }
+        if ids.len() > 1
+            && !celox_frontend_core::watch::multi_write_candidates(unit, |instruction| {
+                celox_frontend_core::watch::write_destination(instruction)
+                    .and_then(&key)
+                    .filter(|id| group.contains(id))
+                    .map(|_| ())
+            })
+            .is_empty()
+        {
+            result.extend(ids);
+        }
+    }
+    result
 }

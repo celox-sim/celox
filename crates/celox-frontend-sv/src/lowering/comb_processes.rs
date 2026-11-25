@@ -19,6 +19,8 @@ pub(super) fn lower_comb_processes(
     waits: bool,
     watch_seeds: Option<&HashSet<SourceVarId>>,
     gated_waits: bool,
+    same_instance_aliased: &HashSet<String>,
+    same_instance_alias_partitions: &[Vec<Vec<String>>],
     calls: Option<&mut recursion::CallGraph>,
 ) -> Result<
     (
@@ -152,6 +154,13 @@ pub(super) fn lower_comb_processes(
             || pm.calls_out_of_line(process.body())
             || (process.kind() != sv::ir::CombProcessKind::ContinuousAssign
                 && pm.calls_task(process.body()))
+            || (process.kind() != sv::ir::CombProcessKind::ContinuousAssign
+                && !same_instance_aliased.is_empty()
+                && {
+                    let mut written = HashSet::default();
+                    procedural::written_names_with_calls(module, process.body(), &mut written);
+                    written.iter().any(|name| same_instance_aliased.contains(name))
+                })
         {
             if net_driver {
                 return Err(driver_error(process));
@@ -159,15 +168,17 @@ pub(super) fn lower_comb_processes(
             pm.runtime.event_sites = std::mem::take(&mut sites);
             let reads = pm.comb_reads(process);
             comb_blocks.extend(
-                ff::Ff::new(&mut pm, random_seeds[&(2, index)]).lower_comb_process(
-                    process.body(),
-                    reads,
-                    process.kind(),
-                    allow_inferred_latches,
-                    process.site(),
-                    &[],
-                    &mut arena,
-                )?,
+                ff::Ff::new(&mut pm, random_seeds[&(2, index)])
+                    .with_alias_partitions(same_instance_alias_partitions)
+                    .lower_comb_process(
+                        process.body(),
+                        reads,
+                        process.kind(),
+                        allow_inferred_latches,
+                        process.site(),
+                        &[],
+                        &mut arena,
+                    )?,
             );
             sites = std::mem::take(&mut pm.runtime.event_sites);
             continue;
@@ -331,15 +342,17 @@ pub(super) fn lower_comb_processes(
                 pm.runtime.event_sites = std::mem::take(&mut sites);
                 let reads = pm.comb_reads(process);
                 comb_blocks.extend(
-                    ff::Ff::new(&mut pm, random_seeds[&(2, index)]).lower_comb_process(
-                        process.body(),
-                        reads,
-                        process.kind(),
-                        allow_inferred_latches,
-                        process.site(),
-                        &[],
-                        &mut arena,
-                    )?,
+                    ff::Ff::new(&mut pm, random_seeds[&(2, index)])
+                        .with_alias_partitions(same_instance_alias_partitions)
+                        .lower_comb_process(
+                            process.body(),
+                            reads,
+                            process.kind(),
+                            allow_inferred_latches,
+                            process.site(),
+                            &[],
+                            &mut arena,
+                        )?,
                 );
                 sites = std::mem::take(&mut pm.runtime.event_sites);
                 continue;

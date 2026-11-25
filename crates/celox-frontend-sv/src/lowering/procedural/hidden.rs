@@ -165,8 +165,12 @@ impl ProcModule<'_> {
         self.temp_counter += 1;
         let mut variable = self.variables[&id].clone();
         variable.path = vec![name.clone()];
+        variable.kind = VariableKind::Variable;
         variable.source = None;
         variable.hidden = true;
+        variable.force_control = None;
+        variable.sampled_from = None;
+        variable.history_of = None;
         variable.activation_scratch = false;
         variable.domain_kind = DomainKind::Other;
         if two_state {

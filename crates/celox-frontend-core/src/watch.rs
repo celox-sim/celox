@@ -830,16 +830,51 @@ pub fn instrument_writes_in_passes<A: Clone>(
 /// publishes over, so `first` keeps the value it wrote there. A commit
 /// counts, in the bits it publishes, the occurrence from the published value
 /// to `first` and the held ones, and releases those bits.
+/// Where a flip-flop evaluation's repeated writes to a watched signal go.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PendingWrite<A> {
+    /// Writes go directly to the signal's `WORKING` state and commit to `STABLE`.
+    NextState,
+    /// Writes go to a process-private `alias_work` shadow in `WORKING` that
+    /// commits to the canonical `signal` in `STABLE`.
+    WorkingShadow(A),
+    /// Nonblocking writes are staged in a `nba_value` shadow before merging
+    /// into `STABLE`.
+    StagedNba(A),
+}
+
+impl<A> PendingWrite<A> {
+    pub fn map<B>(self, mut map: impl FnMut(A) -> B) -> PendingWrite<B> {
+        match self {
+            Self::NextState => PendingWrite::NextState,
+            Self::WorkingShadow(addr) => PendingWrite::WorkingShadow(map(addr)),
+            Self::StagedNba(addr) => PendingWrite::StagedNba(map(addr)),
+        }
+    }
+
+    pub fn is_staged_nba(&self) -> bool {
+        matches!(self, Self::StagedNba(_))
+    }
+
+    pub fn write_addr(&self, signal: A) -> A
+    where
+        A: Copy,
+    {
+        match self {
+            Self::NextState => signal,
+            Self::WorkingShadow(addr) | Self::StagedNba(addr) => *addr,
+        }
+    }
+}
+
 ///
 /// A waiter compares a counter only with the value it saw, so the commit
 /// counts one change for all the changes it releases.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PendingSlots<A> {
     pub signal: A,
-    /// For the nonblocking writes of a variable the process also writes by
-    /// blocking assignments: the staging value they go to. Otherwise the
-    /// writes go to the signal's next state.
-    pub staged: Option<A>,
+    /// Where the writes of the repeated stream go until publication.
+    pub write: PendingWrite<A>,
     pub value: A,
     pub covered: A,
     pub first: A,
@@ -854,7 +889,7 @@ impl<A: Copy> PendingSlots<A> {
     pub fn map<B>(self, mut map: impl FnMut(A) -> B) -> PendingSlots<B> {
         PendingSlots {
             signal: map(self.signal),
-            staged: self.staged.map(&mut map),
+            write: self.write.map(&mut map),
             value: map(self.value),
             covered: map(self.covered),
             first: map(self.first),
@@ -1426,12 +1461,12 @@ fn declare_slots(
 }
 
 /// Declare the [`PendingSlots`] of `streams` among the variables of a
-/// module and return them. A stream is a signal and, for nonblocking writes
-/// staged apart from blocking ones, its staging value. Streams of signals
-/// that are not watchable (see `watchable`) are skipped.
+/// module and return them. A stream is a signal and where its repeated writes
+/// go ([`PendingWrite`]). Streams of signals that are not watchable (see
+/// `watchable`) are skipped.
 pub fn declare_pending_slots(
     variables: &mut SymbolicVariables,
-    streams: impl IntoIterator<Item = (crate::SourceVarId, Option<crate::SourceVarId>)>,
+    streams: impl IntoIterator<Item = (crate::SourceVarId, PendingWrite<crate::SourceVarId>)>,
 ) -> Vec<PendingSlots<crate::SourceVarId>> {
     let mut streams: Vec<_> = streams
         .into_iter()
@@ -1441,15 +1476,17 @@ pub fn declare_pending_slots(
     streams.dedup();
     streams
         .into_iter()
-        .map(|(signal, staged)| {
+        .map(|(signal, write)| {
             let name = variables[&signal].path.join(".");
             let (width, is_4state) = {
                 let metadata = &variables[&signal].metadata;
                 (metadata.width, metadata.is_4state)
             };
-            let stream = match staged {
-                Some(_) => format!("$staged[{name}]"),
-                None => format!("$pending[{name}]"),
+            let stream = match write {
+                PendingWrite::StagedNba(_) => format!("$staged[{name}]"),
+                PendingWrite::NextState | PendingWrite::WorkingShadow(_) => {
+                    format!("$pending[{name}]")
+                }
             };
             let mut hidden = |kind: &str, width: usize, is_4state: bool| {
                 declare_hidden(
@@ -1461,7 +1498,7 @@ pub fn declare_pending_slots(
             };
             PendingSlots {
                 signal,
-                staged,
+                write,
                 value: hidden("value", width, is_4state),
                 covered: hidden("covered", width, false),
                 first: hidden("first", width, is_4state),

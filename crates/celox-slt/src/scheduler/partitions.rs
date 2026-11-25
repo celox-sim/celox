@@ -955,6 +955,7 @@ mod tests {
                 process: 1,
                 after_initials: false,
                 sensitivity_counters: Vec::new(),
+                written_excluded_inputs: Vec::new(),
                 startup: None,
                 target: VarAtomBase::new(2, 0, 7),
                 unit: Box::new(ExecutionUnit {

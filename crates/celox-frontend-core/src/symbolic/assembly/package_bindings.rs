@@ -10,6 +10,13 @@ pub(crate) struct PackageBindings {
     /// Declared aliases have entries in the state lookup. Graph operands do not.
     pub(super) object_aliases: Vec<(AbsoluteAddr, AbsoluteAddr)>,
     targets: HashMap<AbsoluteAddr, AbsoluteAddr>,
+    /// Per-instance aliases of staged nonblocking shadow pairs (`value`, `mask`).
+    /// Kept separate from `targets`/`is_bound` so per-module `module_variables`
+    /// remains in 1-to-1 bijection with `state_objects`.
+    staged_nba_aliases: HashMap<AbsoluteAddr, AbsoluteAddr>,
+    /// Maps a process-private `alias_work` shadow address back to its
+    /// canonical target address for sensitivity probes and occurrence counters.
+    alias_working_targets: HashMap<AbsoluteAddr, AbsoluteAddr>,
 }
 
 impl PackageBindings {
@@ -285,6 +292,169 @@ impl PackageBindings {
                 }
             }
         }
+        let mut staged_nba_aliases = HashMap::default();
+        let mut alias_working_targets = HashMap::default();
+        let mut sorted_instances: Vec<_> = instance_modules
+            .iter()
+            .map(|(&instance_id, &module_id)| (instance_id, module_id))
+            .collect();
+        sorted_instances.sort_unstable_by_key(|(instance_id, _)| instance_id.0);
+        for (instance_id, module_id) in sorted_instances {
+            let module = &modules[&module_id];
+            if !module.staged_nba_bindings.is_empty() {
+                let mut canonical: HashMap<
+                    (usize, u64, AbsoluteAddr),
+                    (AbsoluteAddr, AbsoluteAddr),
+                > = HashMap::default();
+                for binding in &module.staged_nba_bindings {
+                    let (Some(value_var), Some(mask_var)) = (
+                        module.variables.get(&binding.value),
+                        module.variables.get(&binding.mask),
+                    ) else {
+                        return Err(ParserError::illegal_context(
+                            "staged nba binding",
+                            format!(
+                                "module `{}` references unknown staged nonblocking shadow variable",
+                                module.name
+                            ),
+                            None,
+                        ));
+                    };
+                    let raw_target = AbsoluteAddr {
+                        instance_id,
+                        var_id: binding.target,
+                    };
+                    let target_addr = targets.get(&raw_target).copied().unwrap_or(raw_target);
+                    let value = AbsoluteAddr {
+                        instance_id,
+                        var_id: binding.value,
+                    };
+                    let mask = AbsoluteAddr {
+                        instance_id,
+                        var_id: binding.mask,
+                    };
+                    match canonical.entry((binding.process, binding.delay, target_addr)) {
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert((value, mask));
+                        }
+                        std::collections::hash_map::Entry::Occupied(entry) => {
+                            let &(canon_value, canon_mask) = entry.get();
+                            let canon_value_meta = &module.variables[&canon_value.var_id].metadata;
+                            let canon_mask_meta = &module.variables[&canon_mask.var_id].metadata;
+                            let value_matches = (
+                                value_var.metadata.width,
+                                value_var.metadata.is_4state,
+                                &value_var.metadata.array_dims,
+                                value_var.metadata.value_kind,
+                            ) == (
+                                canon_value_meta.width,
+                                canon_value_meta.is_4state,
+                                &canon_value_meta.array_dims,
+                                canon_value_meta.value_kind,
+                            );
+                            let mask_matches = (
+                                mask_var.metadata.width,
+                                mask_var.metadata.is_4state,
+                                &mask_var.metadata.array_dims,
+                                mask_var.metadata.value_kind,
+                            ) == (
+                                canon_mask_meta.width,
+                                canon_mask_meta.is_4state,
+                                &canon_mask_meta.array_dims,
+                                canon_mask_meta.value_kind,
+                            );
+                            if !value_matches || !mask_matches {
+                                return Err(ParserError::illegal_context(
+                                    "staged nba binding",
+                                    format!(
+                                        "staged nonblocking bindings in `{}` alias variables with \
+                                         mismatched storage metadata",
+                                        module.name
+                                    ),
+                                    None,
+                                ));
+                            }
+                            if value != canon_value
+                                && !targets.contains_key(&value)
+                                && !staged_nba_aliases.contains_key(&value)
+                            {
+                                staged_nba_aliases.insert(value, canon_value);
+                            }
+                            if mask != canon_mask
+                                && !targets.contains_key(&mask)
+                                && !staged_nba_aliases.contains_key(&mask)
+                            {
+                                staged_nba_aliases.insert(mask, canon_mask);
+                            }
+                        }
+                    }
+                }
+            }
+            if !module.alias_working_bindings.is_empty() {
+                let mut canonical_work: HashMap<(usize, AbsoluteAddr), AbsoluteAddr> =
+                    HashMap::default();
+                for binding in &module.alias_working_bindings {
+                    let Some(shadow_var) = module.variables.get(&binding.shadow) else {
+                        return Err(ParserError::illegal_context(
+                            "alias working binding",
+                            format!(
+                                "module `{}` references unknown alias working shadow variable",
+                                module.name
+                            ),
+                            None,
+                        ));
+                    };
+                    let raw_target = AbsoluteAddr {
+                        instance_id,
+                        var_id: binding.target,
+                    };
+                    let target_addr = targets.get(&raw_target).copied().unwrap_or(raw_target);
+                    let shadow = AbsoluteAddr {
+                        instance_id,
+                        var_id: binding.shadow,
+                    };
+                    match canonical_work.entry((binding.process, target_addr)) {
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert(shadow);
+                            alias_working_targets.insert(shadow, target_addr);
+                        }
+                        std::collections::hash_map::Entry::Occupied(entry) => {
+                            let &canon_shadow = entry.get();
+                            let canon_shadow_meta =
+                                &module.variables[&canon_shadow.var_id].metadata;
+                            let shadow_matches = (
+                                shadow_var.metadata.width,
+                                shadow_var.metadata.is_4state,
+                                &shadow_var.metadata.array_dims,
+                                shadow_var.metadata.value_kind,
+                            ) == (
+                                canon_shadow_meta.width,
+                                canon_shadow_meta.is_4state,
+                                &canon_shadow_meta.array_dims,
+                                canon_shadow_meta.value_kind,
+                            );
+                            if !shadow_matches {
+                                return Err(ParserError::illegal_context(
+                                    "alias working binding",
+                                    format!(
+                                        "alias working bindings in `{}` alias variables with \
+                                         mismatched storage metadata",
+                                        module.name
+                                    ),
+                                    None,
+                                ));
+                            }
+                            if shadow != canon_shadow
+                                && !targets.contains_key(&shadow)
+                                && !staged_nba_aliases.contains_key(&shadow)
+                            {
+                                staged_nba_aliases.insert(shadow, canon_shadow);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let object_aliases = targets.iter().map(|(&a, &b)| (a, b)).collect();
         for (path, &instance_id) in expanded {
             let module = &modules[&instance_modules[&instance_id]];
@@ -342,7 +512,15 @@ impl PackageBindings {
         Ok(Self {
             targets,
             object_aliases,
+            staged_nba_aliases,
+            alias_working_targets,
         })
+    }
+
+    /// Returns the canonical target address that an `alias_work` shadow serves,
+    /// if `address` is one.
+    pub(crate) fn alias_working_target(&self, address: AbsoluteAddr) -> Option<AbsoluteAddr> {
+        self.alias_working_targets.get(&address).copied()
     }
 
     /// The object variable `var_id` of instance `instance_id` denotes.
@@ -351,7 +529,11 @@ impl PackageBindings {
             instance_id,
             var_id,
         };
-        self.targets.get(&address).copied().unwrap_or(address)
+        self.staged_nba_aliases
+            .get(&address)
+            .or_else(|| self.targets.get(&address))
+            .copied()
+            .unwrap_or(address)
     }
 
     pub(crate) fn locate_regioned(
@@ -630,6 +812,8 @@ mod tests {
             package_bindings: HashMap::default(),
             hierarchical_bindings: HashMap::default(),
             ref_port_bindings: Vec::new(),
+            staged_nba_bindings: Vec::new(),
+            alias_working_bindings: Vec::new(),
             counter_slots: Vec::new(),
             pending_slots: Vec::new(),
             comb_alternatives: Vec::new(),
@@ -798,5 +982,322 @@ mod tests {
             .err()
             .unwrap();
         assert!(err.to_string().contains("another type"), "{err}");
+    }
+
+    #[test]
+    fn staged_nba_bindings_alias_only_when_targets_collide_per_instance() {
+        use crate::symbolic::artifact::StagedNbaBinding;
+
+        let top_id = ModuleId(0);
+        let child_id = ModuleId(1);
+
+        let mut top = dummy_module("Top");
+        top.variables.insert(
+            SourceVarId(0),
+            var("shared", VariableKind::Variable, 32, false),
+        );
+        top.variables.insert(
+            SourceVarId(1),
+            var("sep_a", VariableKind::Variable, 32, false),
+        );
+        top.variables.insert(
+            SourceVarId(2),
+            var("sep_b", VariableKind::Variable, 32, false),
+        );
+        for (instance, a_var, b_var) in [
+            ("u_alias", SourceVarId(0), SourceVarId(0)),
+            ("u_sep", SourceVarId(1), SourceVarId(2)),
+        ] {
+            top.ref_port_bindings.push(RefPortBinding {
+                instance: instance.into(),
+                index: 0,
+                child_port: SourceVarId(0),
+                parent_var: a_var,
+            });
+            top.ref_port_bindings.push(RefPortBinding {
+                instance: instance.into(),
+                index: 0,
+                child_port: SourceVarId(1),
+                parent_var: b_var,
+            });
+        }
+
+        let mut child = dummy_module("Child");
+        child
+            .variables
+            .insert(SourceVarId(0), var("a", VariableKind::Ref, 32, false));
+        child
+            .variables
+            .insert(SourceVarId(1), var("b", VariableKind::Ref, 32, false));
+        child.variables.insert(
+            SourceVarId(2),
+            var("nba_val_a", VariableKind::Variable, 32, false),
+        );
+        child.variables.insert(
+            SourceVarId(3),
+            var("nba_mask_a", VariableKind::Variable, 32, false),
+        );
+        child.variables.insert(
+            SourceVarId(4),
+            var("nba_val_b", VariableKind::Variable, 32, false),
+        );
+        child.variables.insert(
+            SourceVarId(5),
+            var("nba_mask_b", VariableKind::Variable, 32, false),
+        );
+        child.variables.insert(
+            SourceVarId(6),
+            var("nba_val_b_d1", VariableKind::Variable, 32, false),
+        );
+        child.variables.insert(
+            SourceVarId(7),
+            var("nba_mask_b_d1", VariableKind::Variable, 32, false),
+        );
+        child.variables.insert(
+            SourceVarId(8),
+            var("nba_val_b_p1", VariableKind::Variable, 32, false),
+        );
+        child.variables.insert(
+            SourceVarId(9),
+            var("nba_mask_b_p1", VariableKind::Variable, 32, false),
+        );
+        child.staged_nba_bindings = vec![
+            StagedNbaBinding {
+                process: 0,
+                delay: 0,
+                target: SourceVarId(0),
+                value: SourceVarId(2),
+                mask: SourceVarId(3),
+            },
+            StagedNbaBinding {
+                process: 0,
+                delay: 0,
+                target: SourceVarId(1),
+                value: SourceVarId(4),
+                mask: SourceVarId(5),
+            },
+            StagedNbaBinding {
+                process: 0,
+                delay: 5,
+                target: SourceVarId(1),
+                value: SourceVarId(6),
+                mask: SourceVarId(7),
+            },
+            StagedNbaBinding {
+                process: 1,
+                delay: 0,
+                target: SourceVarId(1),
+                value: SourceVarId(8),
+                mask: SourceVarId(9),
+            },
+        ];
+
+        let mut modules = HashMap::default();
+        modules.insert(top_id, top);
+        modules.insert(child_id, child);
+
+        let top_inst = InstanceId(0);
+        let alias_inst = InstanceId(1);
+        let sep_inst = InstanceId(2);
+
+        let mut expanded = HashMap::default();
+        expanded.insert(InstancePath(vec![]), top_inst);
+        expanded.insert(InstancePath(vec![("u_alias".into(), 0)]), alias_inst);
+        expanded.insert(InstancePath(vec![("u_sep".into(), 0)]), sep_inst);
+
+        let mut instance_modules = HashMap::default();
+        instance_modules.insert(top_inst, top_id);
+        instance_modules.insert(alias_inst, child_id);
+        instance_modules.insert(sep_inst, child_id);
+
+        let bindings =
+            PackageBindings::new(&expanded, &instance_modules, &modules, &HashMap::default())
+                .unwrap();
+
+        // u_alias shares (process=0, delay=0) value & mask stages for aliased a/b
+        assert_eq!(
+            bindings.locate(alias_inst, SourceVarId(4)),
+            AbsoluteAddr {
+                instance_id: alias_inst,
+                var_id: SourceVarId(2),
+            }
+        );
+        assert_eq!(
+            bindings.locate(alias_inst, SourceVarId(5)),
+            AbsoluteAddr {
+                instance_id: alias_inst,
+                var_id: SourceVarId(3),
+            }
+        );
+        assert!(!bindings.is_bound(&AbsoluteAddr {
+            instance_id: alias_inst,
+            var_id: SourceVarId(4),
+        }));
+        assert!(!bindings.is_bound(&AbsoluteAddr {
+            instance_id: alias_inst,
+            var_id: SourceVarId(5),
+        }));
+        // Distinct delay and distinct process keep independent stages even in u_alias
+        assert_eq!(
+            bindings.locate(alias_inst, SourceVarId(6)),
+            AbsoluteAddr {
+                instance_id: alias_inst,
+                var_id: SourceVarId(6),
+            }
+        );
+        assert_eq!(
+            bindings.locate(alias_inst, SourceVarId(8)),
+            AbsoluteAddr {
+                instance_id: alias_inst,
+                var_id: SourceVarId(8),
+            }
+        );
+        // u_sep keeps independent stages for unaliased a/b
+        assert_eq!(
+            bindings.locate(sep_inst, SourceVarId(4)),
+            AbsoluteAddr {
+                instance_id: sep_inst,
+                var_id: SourceVarId(4),
+            }
+        );
+        assert_eq!(
+            bindings.locate(sep_inst, SourceVarId(5)),
+            AbsoluteAddr {
+                instance_id: sep_inst,
+                var_id: SourceVarId(5),
+            }
+        );
+    }
+
+    #[test]
+    fn alias_working_bindings_alias_only_within_same_instance_and_process() {
+        use crate::symbolic::artifact::AliasWorkingBinding;
+
+        let top_id = ModuleId(0);
+        let child_id = ModuleId(1);
+
+        let mut top = dummy_module("Top");
+        top.variables.insert(
+            SourceVarId(0),
+            var("shared", VariableKind::Variable, 8, false),
+        );
+        top.variables.insert(
+            SourceVarId(1),
+            var("sep_a", VariableKind::Variable, 8, false),
+        );
+        top.variables.insert(
+            SourceVarId(2),
+            var("sep_b", VariableKind::Variable, 8, false),
+        );
+        for (instance, a_var, b_var) in [
+            ("u_alias", SourceVarId(0), SourceVarId(0)),
+            ("u_sep", SourceVarId(1), SourceVarId(2)),
+        ] {
+            top.ref_port_bindings.push(RefPortBinding {
+                instance: instance.into(),
+                index: 0,
+                child_port: SourceVarId(0),
+                parent_var: a_var,
+            });
+            top.ref_port_bindings.push(RefPortBinding {
+                instance: instance.into(),
+                index: 0,
+                child_port: SourceVarId(1),
+                parent_var: b_var,
+            });
+        }
+
+        let mut child = dummy_module("Child");
+        child
+            .variables
+            .insert(SourceVarId(0), var("a", VariableKind::Ref, 8, false));
+        child
+            .variables
+            .insert(SourceVarId(1), var("b", VariableKind::Ref, 8, false));
+        child.variables.insert(
+            SourceVarId(2),
+            var("alias_work_p0_a", VariableKind::Variable, 8, false),
+        );
+        child.variables.insert(
+            SourceVarId(3),
+            var("alias_work_p0_b", VariableKind::Variable, 8, false),
+        );
+        child.variables.insert(
+            SourceVarId(4),
+            var("alias_work_p1_b", VariableKind::Variable, 8, false),
+        );
+        child.alias_working_bindings = vec![
+            AliasWorkingBinding {
+                process: 0,
+                target: SourceVarId(0),
+                shadow: SourceVarId(2),
+            },
+            AliasWorkingBinding {
+                process: 0,
+                target: SourceVarId(1),
+                shadow: SourceVarId(3),
+            },
+            AliasWorkingBinding {
+                process: 1,
+                target: SourceVarId(1),
+                shadow: SourceVarId(4),
+            },
+        ];
+
+        let mut modules = HashMap::default();
+        modules.insert(top_id, top);
+        modules.insert(child_id, child);
+
+        let top_inst = InstanceId(0);
+        let alias_inst = InstanceId(1);
+        let sep_inst = InstanceId(2);
+
+        let mut expanded = HashMap::default();
+        expanded.insert(InstancePath(vec![]), top_inst);
+        expanded.insert(InstancePath(vec![("u_alias".into(), 0)]), alias_inst);
+        expanded.insert(InstancePath(vec![("u_sep".into(), 0)]), sep_inst);
+
+        let mut instance_modules = HashMap::default();
+        instance_modules.insert(top_inst, top_id);
+        instance_modules.insert(alias_inst, child_id);
+        instance_modules.insert(sep_inst, child_id);
+
+        let bindings =
+            PackageBindings::new(&expanded, &instance_modules, &modules, &HashMap::default())
+                .unwrap();
+
+        // u_alias shares process 0 shadows between a and b, pointing back to Top::shared
+        let p0_canon = AbsoluteAddr {
+            instance_id: alias_inst,
+            var_id: SourceVarId(2),
+        };
+        let top_shared = AbsoluteAddr {
+            instance_id: top_inst,
+            var_id: SourceVarId(0),
+        };
+        assert_eq!(bindings.locate(alias_inst, SourceVarId(3)), p0_canon);
+        assert_eq!(bindings.alias_working_target(p0_canon), Some(top_shared));
+
+        // Process 1 keeps its own shadow even for the same target
+        let p1_shadow = AbsoluteAddr {
+            instance_id: alias_inst,
+            var_id: SourceVarId(4),
+        };
+        assert_eq!(bindings.locate(alias_inst, SourceVarId(4)), p1_shadow);
+        assert_eq!(bindings.alias_working_target(p1_shadow), Some(top_shared));
+
+        // u_sep keeps independent shadows for unaliased a and b
+        let sep_p0_b = AbsoluteAddr {
+            instance_id: sep_inst,
+            var_id: SourceVarId(3),
+        };
+        assert_eq!(bindings.locate(sep_inst, SourceVarId(3)), sep_p0_b);
+        assert_eq!(
+            bindings.alias_working_target(sep_p0_b),
+            Some(AbsoluteAddr {
+                instance_id: top_inst,
+                var_id: SourceVarId(2),
+            })
+        );
     }
 }

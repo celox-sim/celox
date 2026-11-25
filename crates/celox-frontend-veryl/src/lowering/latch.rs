@@ -233,6 +233,7 @@ pub(crate) fn lower_retained_comb_process(
             process: initialized,
             after_initials: true,
             sensitivity_counters: sensitivity_counters.clone(),
+            written_excluded_inputs: Vec::new(),
             startup: None,
             target,
             unit: Box::new(unit.clone()),

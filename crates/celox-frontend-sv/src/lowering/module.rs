@@ -15,6 +15,8 @@ pub(super) fn lower_module(
     foreign_writes: &HashMap<String, hierarchy::ForeignWrites>,
     reflected_paths: &HashMap<String, sv::InterfaceMemberPath>,
     shared: SharedAlways<'_>,
+    same_instance_aliased: &HashSet<String>,
+    same_instance_alias_groups: &[Vec<String>],
     calls: Option<&mut recursion::CallGraph>,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     lower_module_with_overrides(
@@ -30,6 +32,8 @@ pub(super) fn lower_module(
         foreign_writes,
         reflected_paths,
         shared,
+        same_instance_aliased,
+        same_instance_alias_groups,
         calls,
     )
 }
@@ -107,6 +111,8 @@ fn lower_module_with_overrides(
     foreign_writes: &HashMap<String, hierarchy::ForeignWrites>,
     reflected_paths: &HashMap<String, sv::InterfaceMemberPath>,
     shared: SharedAlways<'_>,
+    same_instance_aliased: &HashSet<String>,
+    same_instance_alias_groups: &[Vec<String>],
     mut calls: Option<&mut recursion::CallGraph>,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     let parameter_types = module_parameter_types(&module);
@@ -144,7 +150,12 @@ fn lower_module_with_overrides(
         None => None,
     };
     let shared_process_variables = shared_process_variables.as_ref();
-    let level = always_star_processes_sharing_edge_variables(&module, &constants, &parameter_types);
+    let level = always_star_processes_sharing_edge_variables(
+        &module,
+        &constants,
+        &parameter_types,
+        foreign_writes,
+    );
     if !level.is_empty() {
         module = std::borrow::Cow::Owned(
             module
@@ -316,7 +327,9 @@ fn lower_module_with_overrides(
                     written_mask: (BigUint::from(1u8) << type_info.width) - BigUint::from(1u8),
                 },
             });
-        } else if port.is_net() || type_info.is_4state {
+        } else if port.direction() != sv::ir::PortDirection::Ref
+            && (port.is_net() || type_info.is_4state)
+        {
             let written_mask = (BigUint::from(1u8) << type_info.width) - BigUint::from(1u8);
             let value = if port.is_net() {
                 BigUint::default()
@@ -653,6 +666,8 @@ fn lower_module_with_overrides(
             next_state_forms,
             arena,
             edge_schedule,
+            staged_nba_bindings,
+            alias_working_bindings,
         ),
         mut runtime_event_sites,
         mut runtime_errors,
@@ -685,6 +700,8 @@ fn lower_module_with_overrides(
             &shared_memories,
             foreign_writes,
             &shared_variables,
+            same_instance_aliased,
+            same_instance_alias_groups,
             &mut repeated_ff_writes,
         )?;
         (
@@ -776,6 +793,8 @@ fn lower_module_with_overrides(
             package_bindings: HashMap::default(),
             hierarchical_bindings: HashMap::default(),
             ref_port_bindings: Vec::new(),
+            staged_nba_bindings,
+            alias_working_bindings,
             counter_slots: Vec::new(),
             pending_slots: Vec::new(),
             comb_alternatives: Vec::new(),

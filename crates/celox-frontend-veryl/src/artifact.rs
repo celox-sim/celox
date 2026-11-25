@@ -727,6 +727,8 @@ pub(crate) fn project_module_with_ids(
             package_bindings: HashMap::default(),
             hierarchical_bindings: HashMap::default(),
             ref_port_bindings: Vec::new(),
+            staged_nba_bindings: Vec::new(),
+            alias_working_bindings: Vec::new(),
             counter_slots: Vec::new(),
             pending_slots: Vec::new(),
             comb_alternatives: Vec::new(),

@@ -5646,7 +5646,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "ref port direction",
+            "top-level ref port",
             r#"
             module Top(ref logic value); endmodule
         "#,

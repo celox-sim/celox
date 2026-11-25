@@ -276,6 +276,8 @@ pub(super) fn specialize_module(
         hierarchical.foreign_writes,
         &module.interface_member_paths,
         hierarchical.shared,
+        hierarchical.same_instance_aliased,
+        hierarchical.same_instance_alias_groups,
         calls.as_mut(),
     );
     let mut lowered = match (lowered, &calls, hierarchical.recursion_report, reported) {

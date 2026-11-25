@@ -2029,6 +2029,7 @@ fn acyclic_process_unit_runs_at_its_first_projection_only() {
                 process: PROCESS,
                 after_initials: false,
                 sensitivity_counters: Vec::new(),
+                written_excluded_inputs: Vec::new(),
                 startup: None,
                 target: VarAtomBase::new(output, 0, 7),
                 unit: Box::new(unit.clone()),

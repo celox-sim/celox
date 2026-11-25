@@ -147,6 +147,11 @@ pub(super) struct Ff<'p, 'a> {
     call_top: Option<SourceVarId>,
     /// Whether every call is inlined, in code that must not call.
     inline_calls: bool,
+    /// Delay-0 NBA `(value_name, mask_name)` stages for the current `always_ff`
+    /// process so inlined task calls redirect matching nonblocking writes to staging.
+    staged_nbas: HashMap<SourceVarId, (String, String)>,
+    /// Per-instance canonical storage partitions for combinational latch coverage.
+    alias_partitions: Vec<HashMap<SourceVarId, SourceVarId>>,
 }
 
 /// The clock of an edge-triggered process.
@@ -217,6 +222,8 @@ impl<'p, 'a> Ff<'p, 'a> {
             frame: None,
             call_top: None,
             inline_calls: false,
+            staged_nbas: HashMap::default(),
+            alias_partitions: Vec::new(),
         }
     }
 
@@ -262,14 +269,49 @@ impl<'p, 'a> Ff<'p, 'a> {
         self
     }
 
+    /// Groups of formal `ref` port names within this specialization that may
+    /// alias the same parent variable in at least one instance, so blocking
+    /// reads of a sibling follow blocking writes to the aliased storage.
+    pub fn with_alias_groups(mut self, groups: &[Vec<String>]) -> Self {
+        self.writes.alias_groups = groups
+            .iter()
+            .filter_map(|group| {
+                let ids: Vec<_> = group.iter().filter_map(|name| self.m.id(name)).collect();
+                (ids.len() > 1).then_some(ids)
+            })
+            .collect();
+        self
+    }
+
+    /// Per-instance canonical storage partitions used when checking
+    /// combinational latch coverage across sibling `ref` ports.
+    pub fn with_alias_partitions(mut self, partitions: &[Vec<Vec<String>>]) -> Self {
+        self.alias_partitions = partitions
+            .iter()
+            .map(|partition| {
+                let mut map = HashMap::default();
+                for group in partition {
+                    let ids: Vec<_> = group.iter().filter_map(|name| self.m.id(name)).collect();
+                    if let Some(&canonical) = ids.first() {
+                        for &id in &ids[1..] {
+                            map.insert(id, canonical);
+                        }
+                    }
+                }
+                map
+            })
+            .collect();
+        self
+    }
+
     /// Where a write of `id`, and a read of a value the process wrote, go:
-    /// the working region, or stable state in a process kernel and for a
-    /// shared variable.
+    /// the working region (or this process's private `alias_work` shadow), or
+    /// stable state in a process kernel and for a shared variable.
     fn target(&self, id: SourceVarId) -> Addr {
         if self.kernel.is_some() || self.direct || self.writes.shared.contains(&id) {
             stable(id)
         } else {
-            working(id)
+            working(self.writes.alias_work.get(&id).copied().unwrap_or(id))
         }
     }
 

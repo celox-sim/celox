@@ -41,6 +41,7 @@ fn clock_cones_include_procedural_reads_and_reject_opaque_dependencies() {
             process: addr(0),
             after_initials: false,
             sensitivity_counters: Vec::new(),
+            written_excluded_inputs: Vec::new(),
             startup: None,
             target: VarAtomBase::new(addr(0), 0, 0),
             unit: Box::new(unit),
@@ -140,6 +141,7 @@ fn clock_cones_include_what_calls_read() {
             process: addr(0),
             after_initials: false,
             sensitivity_counters: Vec::new(),
+            written_excluded_inputs: Vec::new(),
             startup: None,
             target: VarAtomBase::new(addr(0), 0, 0),
             unit: Box::new(unit),
@@ -457,4 +459,225 @@ fn relocation_keeps_heap_helper_calls() {
         })
         .collect();
     assert_eq!(functions, [5, HEAP_HELPER_ID, COVERAGE_HELPER_ID]);
+}
+
+#[test]
+fn exclude_written_process_sensitivity_handles_full_partial_and_unguarded_cases() {
+    use celox_sir::{BinaryOp, RegisterId, RegisterType};
+
+    let make_guard_unit = || {
+        let mut register_map = HashMap::default();
+        for (id, width) in [(0, 8), (1, 8), (2, 1), (3, 8), (4, 8), (5, 1)] {
+            register_map.insert(
+                RegisterId(id),
+                RegisterType::Bit {
+                    width,
+                    signed: false,
+                },
+            );
+        }
+        ExecutionUnit {
+            entry_block_id: celox_sir::BlockId(0),
+            blocks: [(
+                celox_sir::BlockId(0),
+                BasicBlock {
+                    id: celox_sir::BlockId(0),
+                    params: Vec::new(),
+                    instructions: vec![
+                        SIRInstruction::Load(RegisterId(0), addr(1), SIROffset::Static(0), 8),
+                        SIRInstruction::Load(RegisterId(1), addr(300), SIROffset::Static(0), 8),
+                        SIRInstruction::Binary(
+                            RegisterId(2),
+                            RegisterId(0),
+                            BinaryOp::NeCase,
+                            RegisterId(1),
+                        ),
+                        SIRInstruction::Store(
+                            addr(300),
+                            SIROffset::Static(0),
+                            8,
+                            RegisterId(0),
+                            Vec::new(),
+                            Vec::new(),
+                        ),
+                        SIRInstruction::Load(RegisterId(3), addr(2), SIROffset::Static(0), 8),
+                        SIRInstruction::Load(RegisterId(4), addr(301), SIROffset::Static(0), 8),
+                        SIRInstruction::Binary(
+                            RegisterId(5),
+                            RegisterId(3),
+                            BinaryOp::NeCase,
+                            RegisterId(4),
+                        ),
+                        SIRInstruction::Store(
+                            addr(301),
+                            SIROffset::Static(0),
+                            8,
+                            RegisterId(3),
+                            Vec::new(),
+                            Vec::new(),
+                        ),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map,
+        }
+    };
+
+    let make_path = |target_lsb, target_msb, exclude_guard: bool| {
+        let excluded = if exclude_guard {
+            vec![
+                (VarAtomBase::new(addr(1), 0, 7), addr(300)),
+                (VarAtomBase::new(addr(2), 0, 7), addr(301)),
+            ]
+        } else {
+            Vec::new()
+        };
+        LogicPath {
+            target: LogicPathTarget::Process {
+                process: addr(100),
+                after_initials: true,
+                sensitivity_counters: vec![
+                    (VarAtomBase::new(addr(1), 0, 7), addr(200)),
+                    (VarAtomBase::new(addr(2), 0, 7), addr(201)),
+                ],
+                written_excluded_inputs: excluded,
+                startup: None,
+                target: VarAtomBase::new(addr(1), target_lsb, target_msb),
+                unit: Box::new(make_guard_unit()),
+            },
+            transparent_copy: false,
+            sources: [
+                VarAtomBase::new(addr(1), 0, 7),
+                VarAtomBase::new(addr(2), 0, 7),
+            ]
+            .into_iter()
+            .collect(),
+            previous_sources: HashSet::default(),
+            address_sources: HashSet::default(),
+            local_inputs: Vec::new(),
+            order_before: HashSet::default(),
+            comb_capture_enable_sites: Vec::new(),
+            comb_capture_enable_always: false,
+            pre_lower_nodes: Vec::new(),
+            expr: NodeId(0),
+        }
+    };
+
+    // Case A: full overlap drops source, counters, guard snapshot load/store, and dead source load.
+    let mut full = vec![make_path(0, 7, true)];
+    relocation::exclude_written_process_sensitivity(&mut full);
+    assert_eq!(
+        full[0].sources,
+        [VarAtomBase::new(addr(2), 0, 7)].into_iter().collect()
+    );
+    let LogicPathTarget::Process {
+        sensitivity_counters,
+        written_excluded_inputs,
+        unit,
+        ..
+    } = &full[0].target
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        sensitivity_counters,
+        &[(VarAtomBase::new(addr(2), 0, 7), addr(201))]
+    );
+    assert_eq!(
+        written_excluded_inputs,
+        &[(VarAtomBase::new(addr(2), 0, 7), addr(301))]
+    );
+    let insts = &unit.blocks[&celox_sir::BlockId(0)].instructions;
+    assert!(!insts.iter().any(|inst| match inst {
+        SIRInstruction::Load(_, a, ..) | SIRInstruction::Store(a, ..) => {
+            *a == addr(1) || *a == addr(300)
+        }
+        _ => false,
+    }));
+    assert!(insts.contains(&SIRInstruction::Imm(
+        RegisterId(2),
+        celox_sir::SIRValue::new(0u8)
+    )));
+
+    // Case B: partial multi-gap overlap ([0..7] minus [2..5] -> [0..1] and [6..7]) slices guard check.
+    let mut partial = vec![make_path(2, 5, true)];
+    relocation::exclude_written_process_sensitivity(&mut partial);
+    assert_eq!(
+        partial[0].sources,
+        [
+            VarAtomBase::new(addr(1), 0, 1),
+            VarAtomBase::new(addr(1), 6, 7),
+            VarAtomBase::new(addr(2), 0, 7),
+        ]
+        .into_iter()
+        .collect()
+    );
+    let LogicPathTarget::Process {
+        sensitivity_counters,
+        written_excluded_inputs,
+        unit,
+        ..
+    } = &partial[0].target
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        sensitivity_counters,
+        &[
+            (VarAtomBase::new(addr(1), 0, 1), addr(200)),
+            (VarAtomBase::new(addr(1), 6, 7), addr(200)),
+            (VarAtomBase::new(addr(2), 0, 7), addr(201)),
+        ]
+    );
+    assert_eq!(
+        written_excluded_inputs,
+        &[
+            (VarAtomBase::new(addr(1), 0, 1), addr(300)),
+            (VarAtomBase::new(addr(1), 6, 7), addr(300)),
+            (VarAtomBase::new(addr(2), 0, 7), addr(301)),
+        ]
+    );
+    let insts = &unit.blocks[&celox_sir::BlockId(0)].instructions;
+    let slice_ranges: Vec<_> = insts
+        .iter()
+        .filter_map(|inst| match inst {
+            SIRInstruction::Slice(_, src, offset, width) => Some((*src, *offset, *width)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        slice_ranges,
+        vec![
+            (RegisterId(0), 0, 2),
+            (RegisterId(1), 0, 2),
+            (RegisterId(0), 6, 2),
+            (RegisterId(1), 6, 2),
+        ]
+    );
+
+    // Case C: always @* (`written_excluded_inputs` empty) strips sources but leaves counters and guard intact.
+    let mut star = vec![make_path(0, 7, false)];
+    relocation::exclude_written_process_sensitivity(&mut star);
+    assert_eq!(
+        star[0].sources,
+        [VarAtomBase::new(addr(2), 0, 7)].into_iter().collect()
+    );
+    let LogicPathTarget::Process {
+        sensitivity_counters,
+        unit,
+        ..
+    } = &star[0].target
+    else {
+        unreachable!()
+    };
+    assert_eq!(sensitivity_counters.len(), 2);
+    assert_eq!(
+        unit.blocks[&celox_sir::BlockId(0)].instructions.len(),
+        make_guard_unit().blocks[&celox_sir::BlockId(0)]
+            .instructions
+            .len()
+    );
 }

@@ -202,7 +202,9 @@ pub(super) fn instrument_occurrences(
                 && address.region == WORKING_REGION
                 && ff_multi_stored.contains(&address.absolute_addr())
                 && let Some(index) = first_probe(
-                    address.absolute_addr(),
+                    bindings
+                        .alias_working_target(address.absolute_addr())
+                        .unwrap_or_else(|| address.absolute_addr()),
                     written_bits_of(instruction, address),
                     |index| 2 * index + 1,
                     after,
@@ -307,6 +309,7 @@ pub(super) fn instrument_occurrences(
             ff_units,
         );
         count_repeated_evaluation_stores(
+            bindings,
             &counted,
             timing,
             &ff_multi_stored,
@@ -322,7 +325,9 @@ pub(super) fn instrument_occurrences(
 
 /// Count each store of a flip-flop evaluation to a counted signal it may
 /// store twice, for the signals whose commit alone is counted.
+#[allow(clippy::too_many_arguments)]
 fn count_repeated_evaluation_stores(
+    bindings: &PackageBindings,
     counted: &BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>>,
     timing: &TimingMetadata,
     ff_multi_stored: &HashSet<AbsoluteAddr>,
@@ -339,17 +344,28 @@ fn count_repeated_evaluation_stores(
         .iter()
         .map(|slots| slots.signal)
         .collect();
-    // One pass per signal, in signal order; each pass watches only its
-    // own signal.
+    // One pass per working object, in deterministic order; each pass watches
+    // only its own working object, counting against the canonical target.
     let regioned = RegionedAbsoluteAddr::from_absolute_addr;
-    let multi_stored: HashMap<AbsoluteAddr, (usize, crate::watch::WatchCode<_>)> = counted
-        .iter()
-        .filter(|(signal, _)| ff_multi_stored.contains(signal) && !pending.contains(signal))
+    let mut multi_addrs: Vec<_> = ff_multi_stored.iter().copied().collect();
+    multi_addrs.sort_unstable();
+    let multi_stored: HashMap<AbsoluteAddr, (usize, crate::watch::WatchCode<_>)> = multi_addrs
+        .into_iter()
+        .filter_map(|store_addr| {
+            let target = bindings
+                .alias_working_target(store_addr)
+                .unwrap_or(store_addr);
+            if pending.contains(&target) {
+                return None;
+            }
+            let slots = counted.get(&target)?;
+            Some((store_addr, slots))
+        })
         .enumerate()
-        .map(|(pass, (&signal, slots))| {
-            let (width, is_4state) = variables[&signal];
+        .map(|(pass, (store_addr, slots))| {
+            let (width, is_4state) = variables[&slots.signal];
             let code = crate::watch::WatchCode {
-                signal: regioned(WORKING_REGION, signal),
+                signal: regioned(WORKING_REGION, store_addr),
                 offset: celox_sir::SIROffset::Static(0),
                 width,
                 four_state: four_state && is_4state,
@@ -359,7 +375,7 @@ fn count_repeated_evaluation_stores(
                     .collect(),
                 gated: Vec::new(),
             };
-            (signal, (pass, code))
+            (store_addr, (pass, code))
         })
         .collect();
     if !multi_stored.is_empty() {
