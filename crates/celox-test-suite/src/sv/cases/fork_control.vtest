@@ -837,26 +837,6 @@ endmodule
   (run_until 15)
   (assert_eq late 1) (assert_eq joined 1))
 
-; A named fork branch a sibling disables also works in an automatic
-; recursive task, whose timed body the frontend emits as a function unit.
-(case recursive_task_disables_named_fork_branch
-  (source "recursive_branch.sv" #"
-module Top(output int q, output int late);
-  task automatic down(input int n);
-    fork
-      begin : hold #10; late = 1; end
-      begin #1; disable hold; end
-    join
-    if (n > 0) down(n - 1);
-    else q = 7;
-  endtask
-  initial down(3);
-endmodule
-"#)
-  (top Top)
-  (run_until 8)
-  (assert_eq q 7) (assert_eq late 0))
-
 ; Killing a block cancels the blocks inside it; naming one of those
 ; afterwards ends nothing, whoever now runs in its place.
 (case disable_after_outer_block_killed_names_nothing

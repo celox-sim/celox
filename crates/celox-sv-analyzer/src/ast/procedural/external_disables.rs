@@ -474,6 +474,7 @@ pub(in crate::ast) fn random_state_may_change<'a>(
             });
             let mut named = Vec::new();
             let mut called = Vec::new();
+            let mut target_calls = Vec::new();
             let mut target_random = false;
             stmt.visit(
                 &mut |expr| {
@@ -484,10 +485,17 @@ pub(in crate::ast) fn random_state_may_change<'a>(
                         }
                     });
                 },
-                &mut |lvalue| target_random |= lvalue_randomizes(lvalue),
+                &mut |lvalue| {
+                    target_random |= lvalue_randomizes(lvalue);
+                    // A selector may call the randomizing subroutine:
+                    // its calls are the target's, not the expression's.
+                    let mut asks = false;
+                    lvalue_effects(lvalue, &mut asks, &mut target_calls);
+                },
                 &mut |name| called.push(name.to_string()),
             );
             named.extend(called);
+            named.extend(target_calls);
             random |= target_random || named.iter().any(|name| randomizes.contains(name));
         }
         present && random
@@ -514,9 +522,19 @@ pub(in crate::ast) fn own_process_may_be_named<'a>(
             });
             let mut target_asks = false;
             let mut called = Vec::new();
+            let mut expr_calls = Vec::new();
             let mut named_calls = Vec::new();
             stmt.visit(
-                &mut |expr| named |= calls_self_handle(expr),
+                &mut |expr| {
+                    named |= calls_self_handle(expr);
+                    // A function in an expression may capture the
+                    // process for its caller, as a statement call may.
+                    const_functions::visit_expr_calls(expr, &mut |callee, _| {
+                        if let Callee::Subroutine(name) = callee {
+                            expr_calls.push(name.clone());
+                        }
+                    });
+                },
                 &mut |lvalue| {
                     let mut calls = Vec::new();
                     lvalue_effects(lvalue, &mut target_asks, &mut calls);
@@ -524,6 +542,7 @@ pub(in crate::ast) fn own_process_may_be_named<'a>(
                 },
                 &mut |name| named_calls.push(name.to_string()),
             );
+            called.extend(expr_calls);
             called.extend(named_calls);
             named |= target_asks || called.iter().any(|name| needs.contains(name));
         }
@@ -1200,16 +1219,25 @@ mod tests {
 
     #[test]
     fn a_process_that_names_itself_keeps_its_blocks() {
-        // Another process could suspend the saved handle while the
-        // block runs; as a branch it would keep running.
-        let error = analyze(
+        for source in [
+            // Another process could suspend the saved handle while the
+            // block runs; as a branch it would keep running.
             "module Top; process p; bit done; \
              initial begin p = process::self(); \
              begin : work #5; done = 1; end end \
              initial #1 disable work; endmodule",
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("disable statement"), "{error}");
+            // Through a function in an expression around the block.
+            "module Top; process p; int q; \
+             function automatic int capture; p = process::self(); return 1; endfunction \
+             initial begin q = capture(); begin : work #5; end end \
+             initial #1 disable work; endmodule",
+        ] {
+            let error = analyze(source).unwrap_err();
+            assert!(
+                error.to_string().contains("disable statement"),
+                "{source}: {error}"
+            );
+        }
     }
 
     #[test]
@@ -1226,6 +1254,11 @@ mod tests {
             // Through a subroutine the process calls around the block.
             "module Top; int q; task draw; q = $urandom; endtask \
              initial begin draw(); begin : work #5; end end \
+             initial #1 disable work; endmodule",
+            // Through a selector of an assignment around the block.
+            "module Top; bit [3:0] bits; \
+             function int idx; return $urandom; endfunction \
+             initial begin begin : work #5; end bits[idx()] = 1'b1; end \
              initial #1 disable work; endmodule",
         ] {
             let error = analyze(source).unwrap_err();
