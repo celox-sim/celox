@@ -105,6 +105,19 @@ design with a testbench scheduler keeps them inline, as does
 `-sir:scheduler_callees` (`SirPass::SchedulerCallees`), which is on at every
 level.
 
+A timed simulation built on the x86-64 native backend (`Simulation::build`)
+compiles each function unit, an out-of-line SystemVerilog subroutine, at its
+first call. Until that call the unit's slot in the extern address table holds
+a stub, which compiles the unit with the same pipeline and options an image
+compiles it with, points the slot at the code and continues the call. A unit
+the simulation never calls is never compiled; a design without function units
+compiles as before. A compile error at that call ends the call as a
+simulation error. The program stays in memory for these compiles, so such an
+image holds no code for its units and cannot be loaded again or written out.
+Images that are written out or loaded again (`compile_native`,
+`build_native_from_image`) compile every unit, as do codegen traces, the
+tiered backend and AArch64.
+
 At O2 the SystemVerilog frontend builds eligible two-state register updates
 and combinational expressions in the same SLT arena. Each register range has
 a next-value root and samples its inputs on its trigger. Combinational

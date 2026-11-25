@@ -5,6 +5,7 @@
 fn main() {
     println!("cargo::rerun-if-changed=build.rs");
     println!("cargo::rustc-check-cfg=cfg(hotspot_jit)");
+    println!("cargo::rustc-check-cfg=cfg(lazy_native_functions)");
     // Incremental (hotspot) compilation runs generated code in this process,
     // so it needs a native backend for the host: x86-64 or AArch64 without
     // the other architecture's cross-codegen feature.
@@ -17,6 +18,11 @@ fn main() {
     };
     if native {
         println!("cargo::rustc-cfg=hotspot_jit");
+    }
+    // Native function units compiled at their first call enter the compiler
+    // through x86-64 stubs.
+    if arch == "x86_64" && native {
+        println!("cargo::rustc-cfg=lazy_native_functions");
     }
     if feature("CLI") {
         export_vpi_host_symbols();

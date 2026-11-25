@@ -130,13 +130,15 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
         mut self,
     ) -> Result<crate::Simulation<crate::backend::native::NativeBackend>, SimulatorError> {
         self.native_file_calls = true;
-        self.build_with_backend(
+        // The backend keeps a program with function units, which compile at
+        // their first call.
+        self.build_with_shared_backend(
             crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
             true,
             true,
             |program, options| {
                 if !(options.trace.mir || options.trace.native) {
-                    return crate::backend::native::NativeBackend::new(program, options);
+                    return crate::backend::native::NativeBackend::new_shared(program, options);
                 }
                 let (backend, native_trace) =
                     crate::backend::native::NativeBackend::new_with_codegen_trace(

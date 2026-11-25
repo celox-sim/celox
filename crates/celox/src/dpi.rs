@@ -9,6 +9,12 @@
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
+#[expect(
+    clippy::disallowed_types,
+    reason = "cross-thread: a native function unit compiled at its first call, on any thread that runs generated code, points its table slot at its code"
+)]
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 use celox_design::ExternFunction;
 use thiserror::Error;
@@ -115,9 +121,7 @@ impl DpiSymbols {
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         );
-        Ok(ExternFunctionTable {
-            addresses: addresses.into(),
-        })
+        Ok(ExternFunctionTable::from_addresses(addresses))
     }
 
     /// The indices of `functions` that nothing provides, when the design may
@@ -250,32 +254,54 @@ fn library_symbol(_path: &std::path::Path, _name: &str) -> Result<Option<usize>,
 
 /// The addresses of a design's extern functions, indexed like its
 /// `ExternCall` instructions.
+///
+/// The slots are atomic words: the slot of a native function unit compiled
+/// at its first call is pointed at its code while generated code runs.
 #[derive(Clone, Debug)]
+#[expect(
+    clippy::disallowed_types,
+    reason = "cross-thread: generated code on any thread reads the slots a function unit compiled at its first call writes"
+)]
 pub(crate) struct ExternFunctionTable {
-    addresses: Arc<[usize]>,
+    addresses: Arc<[AtomicUsize]>,
 }
 
 impl Default for ExternFunctionTable {
     fn default() -> Self {
-        Self {
-            addresses: internal_helpers().into(),
-        }
+        Self::from_addresses(internal_helpers())
     }
 }
 
 impl ExternFunctionTable {
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the slots of `ExternFunctionTable`"
+    )]
+    fn from_addresses(addresses: impl IntoIterator<Item = usize>) -> Self {
+        Self {
+            addresses: addresses.into_iter().map(AtomicUsize::new).collect(),
+        }
+    }
+
     /// Append image-local compiled callees after the DPI imports.
     pub(crate) fn append_native_kernels(&mut self, addresses: impl IntoIterator<Item = usize>) {
-        let mut table = self.addresses.to_vec();
-        table.extend(addresses);
-        self.addresses = table.into();
+        *self = Self::from_addresses(
+            self.addresses
+                .iter()
+                .map(|address| address.load(Ordering::Relaxed))
+                .chain(addresses)
+                .collect::<Vec<_>>(),
+        );
     }
 
     /// The user table's address, which the state header holds. The internal
     /// floating-point helper occupies the immediately preceding slot, and the
     /// heap helper the one before it.
     pub(crate) fn as_ptr(&self) -> *const usize {
-        self.addresses.as_ptr().wrapping_add(INTERNAL_HELPERS)
+        self.addresses
+            .as_ptr()
+            .wrapping_add(INTERNAL_HELPERS)
+            .cast::<usize>()
     }
 
     /// Call function `func` with C integer arguments and return its C integer
@@ -287,7 +313,8 @@ impl ExternFunctionTable {
     /// integer or nothing, as its DPI-C import declares.
     pub(crate) unsafe fn call(&self, func: u32, args: &[u64]) -> u64 {
         // SAFETY: forwarded from the caller.
-        unsafe { call_c(self.addresses[func as usize + INTERNAL_HELPERS], args) }
+        let address = self.addresses[func as usize + INTERNAL_HELPERS].load(Ordering::Relaxed);
+        unsafe { call_c(address, args) }
     }
 }
 
