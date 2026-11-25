@@ -79,8 +79,26 @@ pub struct OverrideArm {
 }
 
 impl ExportedOverride {
+    /// Whether the subroutine selects the arm of the instance the object was
+    /// created in: the override reads the module's items, or makes a site,
+    /// whose `%m` names that instance (IEEE 1800-2023 21.2.1.5).
+    fn selects_instance(&self) -> bool {
+        let makes_sites = |stmts: &[Stmt]| {
+            let mut stmts = stmts.to_vec();
+            let mut sites = false;
+            crate::procedural::visit_site_homes(&mut stmts, &mut |_| sites = true);
+            sites
+        };
+        !self.members.is_empty()
+            || self
+                .arms
+                .iter()
+                .any(|arm| makes_sites(&arm.body) || makes_sites(&arm.sensitivity_body))
+    }
+
     /// The subroutine that the dispatchers call. The override of one
-    /// definition that reads no item of its module is that subroutine.
+    /// definition that selects no instance (see `selects_instance`) is that
+    /// subroutine.
     /// Otherwise it selects the arm of the definition and the instance the
     /// object was created in, as a call through a virtual interface selects
     /// an interface instance: the objects of the classes of every
@@ -88,7 +106,7 @@ impl ExportedOverride {
     pub fn subroutine(&self) -> Subroutine {
         let mut subroutine = self.template.clone();
         if let [arm] = self.arms.as_slice()
-            && self.members.is_empty()
+            && !self.selects_instance()
         {
             subroutine.body = arm.body.clone();
             subroutine.sensitivity_body = arm.sensitivity_body.clone();
@@ -910,7 +928,7 @@ pub fn merge_overrides(
     }
     let mut merged: Vec<ExportedOverride> = merged.into_values().collect();
     for export in &mut merged {
-        if export.arms.len() == 1 && export.members.is_empty() {
+        if export.arms.len() == 1 && !export.selects_instance() {
             continue;
         }
         export.wrapper = Some(fresh(

@@ -353,10 +353,13 @@ pub(super) fn port_homes(
     (Vec<(String, usize)>, String),
 )> {
     // Only an interface port denotes another instance.
-    if !elaborated
-        .values()
-        .any(|module| module.home_handles.iter().any(|handle| handle.port))
-    {
+    if !elaborated.values().any(|module| {
+        module.home_handles.iter().any(|handle| handle.port)
+            || module
+                .instances()
+                .iter()
+                .any(|instance| !instance.interface_actuals.is_empty())
+    }) {
         return Vec::new();
     }
     let mut homes: HashMap<(Vec<(String, usize)>, String), (Vec<(String, usize)>, String)> =
@@ -374,7 +377,23 @@ pub(super) fn port_homes(
             continue;
         };
         for handle in &module.home_handles {
-            let home = if handle.port {
+            // The actual the parent connects the port to, when it says so;
+            // a port of an interface without members has no member actuals
+            // to follow.
+            let connected = parent.as_ref().and_then(|(parent_path, _, instance)| {
+                instance
+                    .interface_actuals
+                    .iter()
+                    .find(|(port, _)| *port == handle.handle)
+                    .map(|(_, actual)| (parent_path, actual))
+            });
+            let home = if let Some((parent_path, actual)) = connected {
+                let key = (parent_path.clone(), actual.clone());
+                match homes.get(&key) {
+                    Some(home) => home.clone(),
+                    None => key,
+                }
+            } else if handle.port {
                 let Some((parent_path, parent_module, instance)) = &parent else {
                     continue;
                 };

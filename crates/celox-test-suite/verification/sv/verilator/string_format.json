@@ -147,6 +147,28 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator 5.054 names the method of a class declared in a module by the module's first instance for the objects of every instance: `%m` in the override prints `.m0.C.f` for the object created in `m1` too. IEEE 1800-2023 21.2.1.5 makes `%m` print the hierarchical name of the subroutine that invokes the task, here the method of the class that instance `m1` declares. Celox prints `.m0.` and `.m1.`.",
+      "expectation": "Simulation",
+      "name": "string_format::scope_name_of_module_class_overrides",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "src/sv/cases/string_format.vtest"
+        ],
+        "id": "sv_verilator_module_class_instance_scope",
+        "observed_version": "Verilator 5.054",
+        "phase": "execute",
+        "reason": "Verilator 5.054 names the method of a class declared in a module by the module's first instance for the objects of every instance: `%m` in the override prints `.m0.C.f` for the object created in `m1` too. IEEE 1800-2023 21.2.1.5 makes `%m` print the hierarchical name of the subroutine that invokes the task, here the method of the class that instance `m1` declares. Celox prints `.m0.` and `.m1.`.",
+        "upstream": []
+      }
     }
   ]
 }

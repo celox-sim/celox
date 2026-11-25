@@ -685,3 +685,108 @@ endmodule
   (assert_eq d 0x5a)
   (assert_eq p 0x6869)
   (assert_eq tail 0x6f6b))
+
+; IEEE 1800-2023 21.2.1.5: `%m` in a function that an interface port imports
+; names the function in the interface instance the port is connected to,
+; also for an interface without data members, an instance of a generate
+; block, an instance outside the generate block that connects it, and a
+; port passed on through a port of the parent, and an instance of an
+; enclosing generate block that hides one of the module, with and without
+; data members. The names are printed from the top's own (`%m` of the
+; top, which a testbench may hold).
+(case scope_name_of_port_imported_functions
+  (source "port_imported_scope.sv" #"
+interface bfm;
+    function automatic string pf(); return $sformatf("%m"); endfunction
+    modport mp(import pf);
+endinterface
+interface bmem;
+    logic x;
+    function automatic string pf(); return $sformatf("%m"); endfunction
+    modport mp(input x, import pf);
+endinterface
+module user(bfm.mp port);
+    string s;
+    initial s = port.pf();
+endmodule
+module muser(bmem.mp port);
+    string s;
+    initial s = port.pf();
+endmodule
+module mid(bfm.mp q);
+    user u (.port(q));
+endmodule
+module Top(output bit done);
+    bfm b0 ();
+    bfm b1 ();
+    user u (.port(b1));
+    mid md (.q(b0));
+    for (genvar i = 0; i < 1; i++) begin : gg
+        bfm bus ();
+        user gu (.port(bus));
+        user go (.port(b0));
+    end
+    bfm bus ();
+    bmem mbus ();
+    for (genvar i = 0; i < 1; i++) begin : outer
+        bfm bus ();
+        bmem mbus ();
+        if (1) begin : inner
+            user iu (.port(bus));
+            muser mu (.port(mbus));
+        end
+    end
+    string root;
+    function automatic string below(string name);
+        return name.substr(root.len(), name.len() - 1);
+    endfunction
+    initial begin
+        root = $sformatf("%m");
+        #1;
+        $display("%s|%s|%s|%s|%s|%s", below(u.s), below(md.u.s), below(gg[0].gu.s),
+            below(gg[0].go.s), below(outer[0].inner.iu.s), below(outer[0].inner.mu.s));
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 2) (assert_eq done 1)
+  (expect_output ".b1.pf|.b0.pf|.gg[0].bus.pf|.b0.pf|.outer[0].bus.pf|.outer[0].mbus.pf\n"))
+
+; IEEE 1800-2023 21.2.1.5, 8.20: `%m` in an override of a class of a module,
+; called from package code through a handle of the package class, names
+; the module instance the object was created in, also when the override
+; reads no item of the module. The names are printed from the top's own.
+(case scope_name_of_module_class_overrides
+  (source "override_scope.sv" #"
+package p;
+    virtual class B; pure virtual function string f(); endclass
+    B obj[$];
+endpackage
+module m;
+    class C extends p::B;
+        virtual function string f(); return $sformatf("%m"); endfunction
+    endclass
+    initial begin
+        C c = new;
+        p::obj.push_back(c);
+    end
+endmodule
+module Top(output bit done);
+    m m0 ();
+    m m1 ();
+    string root, a, b;
+    initial begin
+        root = $sformatf("%m");
+        #1;
+        a = p::obj[0].f();
+        b = p::obj[1].f();
+        a = a.substr(root.len(), root.len() + 3);
+        b = b.substr(root.len(), root.len() + 3);
+        if (a > b) $display("%s|%s", b, a);
+        else $display("%s|%s", a, b);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 2) (assert_eq done 1)
+  (expect_output ".m0.|.m1.\n"))

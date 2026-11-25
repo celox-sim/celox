@@ -129,6 +129,7 @@ pub(super) fn lower_instances(
                     .collect(),
                 array_element,
                 array_index_base,
+                interface_actuals: instance.interface_actuals().to_vec(),
             });
         }
     }
