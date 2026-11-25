@@ -4,10 +4,37 @@
 //! [`VariableDimensions::keep_enumeration`] set the enumerated type,
 //! together with the spelling that names it, and only
 //! [`Type::keep_structure`] and [`VariableDimensions::keep_structure`] the
-//! structure.
+//! structure. The container type (7.5, 7.10, 7.8) only
+//! [`Type::keep_container`] and [`VariableDimensions::keep_container`] set,
+//! together with the field that tells it.
 use super::*;
 use semantic_types::{EnumBinding, EnumDeclaration};
 use unpacked_structs::UnpackedStruct;
+
+/// The container type, a dynamic array, queue or associative array (7.5,
+/// 7.10, 7.8), a holder is, or whose elements a fixed-size unpacked array
+/// of it has (7.4.2). It is no `Clone`: a holder clones it with itself, and
+/// another holder takes it only through its own `keep_container`.
+#[derive(Debug, Default)]
+pub(in crate::ast) struct KeptContainer(Option<Arc<ContainerType>>);
+
+impl KeptContainer {
+    /// The kept container type.
+    pub(in crate::ast) fn declaration(&self) -> Option<&Arc<ContainerType>> {
+        self.0.as_ref()
+    }
+
+    /// The kept container type, for another holder to keep.
+    pub(in crate::ast) fn binding(&self) -> Option<Arc<ContainerType>> {
+        self.0.clone()
+    }
+
+    /// Forget the container type, as the shape of its holder changes in a
+    /// way that may change its type. The field stays: it tells the shape.
+    pub(in crate::ast) fn forget(&mut self) {
+        self.0 = None;
+    }
+}
 
 /// The declaration of the unpacked structure type (7.2) a holder is, or
 /// whose elements a fixed-size unpacked array of it has (7.4.2). It is no
@@ -72,6 +99,7 @@ impl Clone for Type {
             element: self.element.clone(),
             enumeration: KeptEnumeration(self.enumeration.0.clone()),
             structure: KeptStructure(self.structure.0.clone()),
+            kept_container: KeptContainer(self.kept_container.0.clone()),
         }
     }
 }
@@ -84,6 +112,7 @@ impl Clone for VariableDimensions {
             element: self.element.clone(),
             enumeration: KeptEnumeration(self.enumeration.0.clone()),
             structure: KeptStructure(self.structure.0.clone()),
+            kept_container: KeptContainer(self.kept_container.0.clone()),
         }
     }
 }
@@ -200,6 +229,15 @@ impl Type {
     pub(in crate::ast) fn keep_structure(&mut self, aggregate: Option<Arc<UnpackedStruct>>) {
         self.structure = KeptStructure(aggregate);
     }
+
+    /// Keep the container type `container`, or none, with the field that
+    /// tells it: the type is it or a fixed-size unpacked array of it
+    /// (7.4.2). The field only comes to agree with the semantic type, so
+    /// the type keeps its binding.
+    pub(in crate::ast) fn keep_container(&mut self, container: Option<Arc<ContainerType>>) {
+        Arc::make_mut(&mut self.shape).container = container.clone();
+        self.kept_container = KeptContainer(container);
+    }
 }
 
 impl VariableDimensions {
@@ -218,6 +256,16 @@ impl VariableDimensions {
     pub(in crate::ast) fn derived(&self, shape: VariableShape) -> VariableDimensions {
         let mut derived = VariableDimensions::new(shape);
         derived.keep_structure(self.structure.binding());
+        // The container type stays while the derived shape still has it.
+        if let Some(container) = self.kept_container.declaration()
+            && derived
+                .shape
+                .container
+                .as_ref()
+                .is_some_and(|field| **field == **container)
+        {
+            derived.keep_container(Some(container.clone()));
+        }
         derived
     }
 
@@ -225,5 +273,12 @@ impl VariableDimensions {
     /// as [`Type::keep_structure`] does.
     pub(in crate::ast) fn keep_structure(&mut self, aggregate: Option<Arc<UnpackedStruct>>) {
         self.structure = KeptStructure(aggregate);
+    }
+
+    /// Keep the container type `container`, or none, with the field that
+    /// tells it, as [`Type::keep_container`] does.
+    pub(in crate::ast) fn keep_container(&mut self, container: Option<Arc<ContainerType>>) {
+        self.shape.container = container.clone();
+        self.kept_container = KeptContainer(container);
     }
 }

@@ -30,6 +30,11 @@ pub(super) fn with_dimensions(
     if let Some(container) = &mut ty.shape_keeping_binding().container {
         Arc::make_mut(container).binding = binding;
     }
+    // The type keeps its container, with the binding.
+    if ty.kept_container.declaration().is_some() {
+        let container = ty.container.clone();
+        ty.keep_container(container);
+    }
     Ok(ty)
 }
 
@@ -450,7 +455,7 @@ pub(super) fn of(container: ContainerType) -> Type {
         ConstExpr::Literal("31".into()),
         ConstExpr::Literal("0".into()),
     ));
-    ty.container = Some(Arc::new(container));
+    ty.keep_container(Some(Arc::new(container)));
     // A container's type is the one it was bound to, if it was, and so is
     // its element type, as it has no unpacked dimensions.
     ty.element = binding.clone();
@@ -2488,7 +2493,7 @@ mod tests {
             ConstExpr::Literal("31".into()),
             ConstExpr::Literal("0".into()),
         ));
-        queue.container = Some(Arc::new(ContainerType {
+        queue.keep_container(Some(Arc::new(ContainerType {
             key: None,
             layout: ContainerLayout {
                 kind: ContainerKind::Queue { capacity: 0 },
@@ -2503,8 +2508,40 @@ mod tests {
             record: None,
             fixed: None,
             binding: Default::default(),
-        }));
+        })));
         procedural::dimensions_from_type(&queue)
+    }
+
+    #[test]
+    fn shapes_of_a_container_are_not_those_of_its_handle() {
+        // A queue (IEEE 1800-2023 7.10) is held by a handle of the shape of
+        // a class handle: the closed-shape cache, which keys on the shape,
+        // does not give a shape that keeps a queue the type of a handle
+        // typed before it, nor the other way round.
+        let env = ConstEnv::from_iter([("N".into(), 4)]);
+        let functions = const_functions::ConstantFunctions::default();
+        let mut table = semantic_types::TyTable::default();
+        let mut handle = Type::new(TypeKind::Bit);
+        handle.packed_ranges.push(PackedRange::new(
+            ConstExpr::Literal("31".into()),
+            ConstExpr::Literal("0".into()),
+        ));
+        let queue = symbolic_queue();
+        let handle = VariableDimensions::new(VariableShape {
+            declared: type_names::Declared::default(),
+            container: None,
+            ..queue.clone_shape()
+        });
+        let handle = handle.type_id(&mut table, &functions, &env);
+        let queue = queue.type_id(&mut table, &functions, &env).unwrap();
+        assert_ne!(handle, Some(queue));
+        assert!(matches!(
+            table.data(queue),
+            semantic_types::TyData::Array {
+                kind: semantic_types::ArrayKind::Queue { .. },
+                ..
+            }
+        ));
     }
 
     #[test]

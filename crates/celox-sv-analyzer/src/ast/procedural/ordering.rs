@@ -104,7 +104,7 @@ impl BodyBuilder<'_, '_, '_> {
             ConstExpr::Literal("31".into()),
             ConstExpr::Literal("0".into()),
         ));
-        held.container = Some(target.clone());
+        held.keep_container(Some(target.clone()));
         let ordered = self.declare("$celox_ordered", held);
         let ident = || Expr::Ident(ordered.clone());
         let mut stmts = vec![
@@ -265,14 +265,14 @@ impl BodyBuilder<'_, '_, '_> {
             ConstExpr::Literal("31".into()),
             ConstExpr::Literal("0".into()),
         ));
-        keys_type.container = Some(Arc::new(ContainerType {
+        keys_type.keep_container(Some(Arc::new(ContainerType {
             key: None,
             layout: key_layout.clone(),
             element: key_type.clone(),
             record: None,
             fixed: None,
             binding: Default::default(),
-        }));
+        })));
         let keys = self.declare("$celox_sort_keys", keys_type);
         let index = self.declare("$celox_sort_index", int_type());
         let slot = self.declare("$celox_sort_slot", int_type());
