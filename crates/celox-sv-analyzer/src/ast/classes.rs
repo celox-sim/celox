@@ -846,8 +846,12 @@ impl Class {
         aliases: &TypeAliases,
     ) -> semantic_types::TyId {
         let class = handle_type_id(&mut session.types, &self.name);
-        if session.types.supertypes(class).is_none() {
-            let supertypes = self.supertype_ids(&mut session.types);
+        // A class of a module is one class per specialization of the module
+        // (IEEE 1800-2023 8.25), whose base may differ between them, but
+        // the types of all share its name: they take the supertypes of the
+        // specialization being analyzed, the one this class is of.
+        let supertypes = self.supertype_ids(&mut session.types);
+        if session.types.supertypes(class) != Some(&supertypes) {
             session.types.record_supertypes(class, supertypes);
         }
         // A class that does not resolve is retried by the next query, as its
