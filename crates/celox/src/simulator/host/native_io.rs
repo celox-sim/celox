@@ -178,7 +178,11 @@ impl Metadata {
                     .iter()
                     .all(|arg| arg.id.array_layout.is_none());
             let site = if supported {
-                let scope = process_scope(program, request.process.index());
+                // See `run_file_io_request`: a resolved home names the scope.
+                let scope = match &request.scope {
+                    Some(celox_design::FormatScope::Absolute(name)) => Some(name.clone()),
+                    _ => process_scope(program, request.process.index()),
+                };
                 let format = RuntimeEventSite {
                     kind: RuntimeEventKind::Write,
                     template: request.strings.first().cloned(),
@@ -199,6 +203,7 @@ impl Metadata {
                     arg_is_string: Vec::new(),
                     arg_float_precision: Vec::new(),
                     arg_is_handle: Vec::new(),
+                    home: None,
                 };
                 Some(WriteSite {
                     request: resolved,

@@ -31,6 +31,8 @@ pub(super) struct ElaboratedModule {
     name: String,
     /// The interface instances and ports a virtual interface may denote.
     pub(super) interface_handles: Vec<sv::ir::InterfaceHandle>,
+    /// See [`sv::ir::Module::home_handles`].
+    pub(super) home_handles: Vec<sv::ir::InterfaceHandle>,
     /// Ports and signals, by local name, with their net kind.
     signals: Vec<(String, sv::ir::Type, bool)>,
     interface_scopes: HashSet<String>,
@@ -82,6 +84,7 @@ impl ElaboratedModule {
         Ok(Self {
             name: source.name().to_string(),
             interface_handles: source.interface_handles().to_vec(),
+            home_handles: source.home_handles().to_vec(),
             signals: signals(source),
             interface_scopes: source.interface_scope_names().iter().cloned().collect(),
             instances,

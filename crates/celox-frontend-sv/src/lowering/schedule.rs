@@ -798,11 +798,19 @@ fn schedule_sources_collecting(
                 &definitions,
             )
         });
+    let port_homes = virtual_interfaces::port_homes(root_id, &module_ids, &elaborated);
     drop(elaborated);
     let virtual_ids = virtual_instances
         .as_ref()
         .map(|instances| instances.ids())
         .unwrap_or_default();
+    let site_homes = celox_design::SiteHomes {
+        instances: virtual_instances
+            .as_ref()
+            .map(|instances| instances.site_homes())
+            .unwrap_or_default(),
+        ports: port_homes,
+    };
     let expansion = sv::ir::InstanceExpansion::new(&virtual_ids, &overrides);
     if virtual_instances.is_some() || !overrides.is_empty() {
         let names: HashMap<ModuleId, &str> = module_ids
@@ -1183,6 +1191,7 @@ fn schedule_sources_collecting(
             hidden_root,
             packages,
             instance_values,
+            site_homes: site_homes.clone(),
         };
         checkpoint!("packages");
         drop(package_states);

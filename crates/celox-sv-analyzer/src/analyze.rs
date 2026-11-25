@@ -305,6 +305,7 @@ fn publish(
         )
         .with_interface_scope_names(module.interface_scope_names().to_vec())
         .with_interface_handles(module.interface_handles().to_vec())
+        .with_home_handles(module.home_handles().to_vec())
         .with_dpi_imports(module.dpi_imports().to_vec())
         .with_program(module.is_program())
         .with_imported_parameters(imported_parameters)

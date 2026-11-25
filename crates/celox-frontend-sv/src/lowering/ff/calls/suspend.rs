@@ -144,6 +144,7 @@ impl Ff<'_, '_> {
                     arg_is_string: Vec::new(),
                     arg_float_precision: Vec::new(),
                     arg_is_handle: Vec::new(),
+                    home: None,
                 });
                 self.m.function_sites.flush = Some(site);
                 site

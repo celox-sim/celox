@@ -68,6 +68,8 @@ impl ProcModule<'_> {
                     event_sites: runtime_event_sites,
                     errors: runtime_errors,
                 },
+            // Set around the lowering of one statement.
+            site_home: _,
             function_sites:
                 FunctionSites {
                     host_request: function_host_request_sites,

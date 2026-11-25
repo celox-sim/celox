@@ -243,6 +243,11 @@ pub struct RuntimeEventSite {
     /// contents. Missing entries are not handles.
     #[serde(default)]
     pub arg_is_handle: Vec<bool>,
+    /// The instance whose scope `%m` names when the site's code is a copy
+    /// that runs in another instance's (see [`SiteHome`]). Relocation
+    /// resolves it into `scope` and clears it.
+    #[serde(default)]
+    pub home: Option<SiteHome>,
 }
 
 /// A function in the host's C ABI that the design calls, such as a
@@ -1053,10 +1058,83 @@ pub struct HostRequestSite<A> {
     pub results: Vec<HostRequestValue<A>>,
     pub strings: Vec<String>,
     /// The scope that `%m` names in a `Format` request whose format is read
-    /// at run time (IEEE 1800-2023 21.2.1.5); `None` for every other
-    /// request, which names the instance that runs it.
+    /// at run time (IEEE 1800-2023 21.2.1.5), or, once relocation resolved
+    /// [`Self::home`], in any request; `None` names the instance that runs
+    /// the request.
     #[serde(default)]
     pub scope: Option<FormatScope>,
+    /// See [`RuntimeEventSite::home`]: relocation resolves it into an
+    /// absolute `scope`.
+    #[serde(default)]
+    pub home: Option<SiteHome>,
+}
+
+/// The instance whose scope a site's `%m` names (IEEE 1800-2023 21.2.1.5)
+/// when the site's code is a copy of a subroutine of another instance,
+/// which runs in the instance that calls it: a hierarchical call's callee,
+/// an arm of a call through a virtual interface or of a module-class
+/// override, or a subroutine an interface port imports.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SiteHome {
+    /// `up` levels above the module instance whose code holds the site (the
+    /// top for `None`), then down `down`, module instances as hierarchy
+    /// paths spell them (name and element index), and within that module
+    /// instance the interface instance `within`, if any, as its parent
+    /// spells it: an instance, or an interface port, which denotes the
+    /// instance connected to it ([`SiteHomes::ports`]).
+    Path {
+        up: Option<u32>,
+        down: Vec<(String, usize)>,
+        within: Option<String>,
+    },
+    /// The numbered instance `id` of [`SiteHomes::instances`].
+    Instance(u32),
+}
+
+impl SiteHome {
+    /// This home, of a site in a subroutine of the module instance `up`
+    /// levels above (the top for `None`) and then `down` from the one
+    /// holding a copy of it: the same instance, from the copy.
+    pub fn from_copy(self, up: Option<u32>, down: &[(String, usize)]) -> Self {
+        match self {
+            SiteHome::Path {
+                up: Some(inner),
+                down: below,
+                within,
+            } => {
+                let inner = inner as usize;
+                let (up, kept) = if inner <= down.len() {
+                    (up, &down[..down.len() - inner])
+                } else {
+                    let extra = u32::try_from(inner - down.len()).unwrap_or(u32::MAX);
+                    (up.map(|up| up.saturating_add(extra)), &[][..])
+                };
+                SiteHome::Path {
+                    up,
+                    down: kept.iter().cloned().chain(below).collect(),
+                    within,
+                }
+            }
+            // From the top, or numbered: the same from anywhere.
+            home => home,
+        }
+    }
+}
+
+/// What [`SiteHome::Instance`] and the ports [`SiteHome::Path`] names denote.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiteHomes {
+    /// Instance `id` is entry `id - 1`: the module instance that holds it
+    /// and its handle there (empty for a module instance itself).
+    pub instances: Vec<(Vec<(String, usize)>, String)>,
+    /// The interface instance each interface port of each module instance
+    /// denotes, by the module instance's path and the port's handle: the
+    /// module instance that holds it and its handle there.
+    #[allow(clippy::type_complexity)]
+    pub ports: Vec<(
+        (Vec<(String, usize)>, String),
+        (Vec<(String, usize)>, String),
+    )>,
 }
 
 /// The scope that `%m` names in a format read at run time.
@@ -1083,6 +1161,7 @@ impl<A: Copy> HostRequestSite<A> {
                 .collect(),
             strings: self.strings.clone(),
             scope: self.scope.clone(),
+            home: self.home.clone(),
         }
     }
 

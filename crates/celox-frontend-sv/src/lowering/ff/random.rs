@@ -603,6 +603,7 @@ impl Ff<'_, '_> {
             results: vec![value(ret_id), value(seed_id)],
             strings: Vec::new(),
             scope: None,
+            home: None,
         });
         self.request_host(HostRequestKind::Distribution, site)?;
         self.check_tagged_guards(&guards)?;

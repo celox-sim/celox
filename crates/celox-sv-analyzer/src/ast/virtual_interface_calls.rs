@@ -805,12 +805,16 @@ fn dispatching(
             leaves: Vec::new(),
         },
     );
+    // The arm is a copy of the interface's subroutine, which runs in the
+    // instance the handle denotes: its sites name that instance.
+    let mut body = std::mem::take(&mut subroutine.body);
+    crate::procedural::set_site_home(&mut body, &crate::procedural::arm_home());
     subroutine.body = vec![Stmt::Case {
         kind: crate::procedural::CaseKind::Exact,
         selector: value.clone(),
         items: vec![crate::procedural::CaseItemBase {
             labels: vec![crate::procedural::CaseLabel::Value(Expr::Ident(instance))],
-            body: std::mem::take(&mut subroutine.body),
+            body,
         }],
         default: Some(vec![Stmt::Eval(virtual_interfaces::null_access(
             &value, 1, false,

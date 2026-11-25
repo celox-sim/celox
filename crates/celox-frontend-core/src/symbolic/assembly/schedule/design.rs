@@ -18,6 +18,7 @@ pub(super) fn expand_design(
         hidden_root,
         packages,
         instance_values,
+        site_homes,
     } = symbolic;
     let time_precision = modules
         .values()
@@ -176,6 +177,7 @@ pub(super) fn expand_design(
             unpacked_element_widths,
             clock_domains,
             startup_ready,
+            site_homes,
         },
         instance_values,
     ))
@@ -206,6 +208,13 @@ pub(super) fn relocate_design(
     } = design;
     let root_id = design.root_id;
     let startup_ready = design.startup_ready;
+    // The hidden root names no scope (see `elaborated_scope_name`).
+    let root_name = if design.hidden_root {
+        ""
+    } else {
+        &module_names[&root_id]
+    };
+    let homes = HomeNames::new(root_name, expanded, indexed_instances, &design.site_homes);
 
     let mut parallel_ff_units = HashMap::default();
     let mut split_commits = SplitCommits::default();
@@ -230,12 +239,7 @@ pub(super) fn relocate_design(
             expanded,
             instance_modules,
             modules,
-            // The hidden root names no scope (see `elaborated_scope_name`).
-            if design.hidden_root {
-                ""
-            } else {
-                &module_names[&root_id]
-            },
+            root_name,
             indexed_instances,
             global_boundaries,
             unpacked_element_widths,
@@ -246,9 +250,17 @@ pub(super) fn relocate_design(
             trace_opts,
             trace,
             startup_ready,
+            &homes,
         )
     )?;
-    let timing = relocate_timing(bindings, instance_modules, modules, &processes);
+    let timing = relocate_timing(
+        bindings,
+        expanded,
+        instance_modules,
+        modules,
+        &processes,
+        &homes,
+    );
     Ok((
         StateGraph {
             evaluations,
