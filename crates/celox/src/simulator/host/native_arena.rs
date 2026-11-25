@@ -37,6 +37,9 @@ pub(crate) struct Header {
     pub recent: [u64; 64],
     /// The slot observer watches every update (`AFTER_UPDATE`).
     pub observes_updates: u64,
+    /// The activation counters a profiled compiled scheduler increments
+    /// (`scheduler::profile`), one word per counter.
+    pub profile: *mut u64,
 }
 
 impl Default for Header {
@@ -70,6 +73,7 @@ impl Default for Header {
             recent_next: 0,
             recent: [u64::MAX; 64],
             observes_updates: 0,
+            profile: std::ptr::null_mut(),
         }
     }
 }
@@ -96,6 +100,8 @@ pub(crate) struct Arena {
     pub nba: super::native_nba::Pool,
     records: Vec<u64>,
     images: Vec<u64>,
+    /// The words [`Header::profile`] points to.
+    pub profile: Vec<u64>,
 }
 
 // These pointers borrow allocations owned by this same object. They

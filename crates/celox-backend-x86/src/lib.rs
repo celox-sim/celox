@@ -48,6 +48,9 @@ pub struct NativeDiagnostics {
     pub verify_regalloc: bool,
     pub isel_trace_regs: Vec<usize>,
     pub dump: Option<NativeDumpOptions>,
+    /// Write `/tmp/perf-<pid>.map` (`CELOX_PERF_MAP`), naming each function
+    /// and block of the mapped code, and save that code beside it as
+    /// `/tmp/perf-<pid>-<address>.bin`.
     pub perf_map: bool,
 }
 

@@ -119,12 +119,12 @@ impl Plan {
                 false_block: (first, Vec::new()),
             });
             g.b.switch_to_block(first);
-            g.settle_then(settled);
+            g.settle_then("process phase: first settle before gate edges", settled);
             g.b.switch_to_block(later);
         }
         match &self.lazy {
-            Some(lazy) => g.eager_then(&lazy.eager, settled),
-            None => g.settle_then(settled),
+            Some(lazy) => g.eager_then("process phase: after a pass", &lazy.eager, settled),
+            None => g.settle_then("process phase: after a pass", settled),
         }
 
         // After the settle of a pass the waits see its writes; woken
@@ -215,7 +215,7 @@ impl Plan {
         }
         if wait_observers {
             g.b.switch_to_block(another);
-            g.settle_then(pick);
+            g.settle_then("process phase: before woken waits", pick);
         }
         (slot_end, domains, resume_domains)
     }
@@ -250,6 +250,7 @@ impl Plan {
         let mask = g.load(slots.exit_arg, self.event_bits);
         let zero = g.constant(0, self.event_bits);
         let quiet = g.binary(1, mask, BinaryOp::Eq, zero);
+        g.count_judgment("simple", quiet);
         let triggered = g.b.new_block();
         let untriggered = g.b.new_block();
         g.b.seal_block(SIRTerminator::Branch {
@@ -267,7 +268,7 @@ impl Plan {
                     .filter(|_| !self.nba_processes.is_empty()),
                 checks,
             );
-            g.eager_then(&lazy.eager, slot_end);
+            g.eager_then("domains: none triggered", &lazy.eager, slot_end);
         } else if staged.is_empty() && self.nba_processes.is_empty() {
             g.b.seal_block(SIRTerminator::Jump(slot_end, Vec::new()));
         } else {
@@ -289,7 +290,7 @@ impl Plan {
                 false_block: (slot_end, Vec::new()),
             });
             g.b.switch_to_block(publish_settle);
-            g.settle_then(wave_end);
+            g.settle_then("domains: none triggered, NBAs published", wave_end);
         }
 
         g.b.switch_to_block(triggered);
@@ -302,6 +303,12 @@ impl Plan {
             let lower = g.binary(self.event_bits, mask, BinaryOp::Sub, one);
             let others = g.binary(self.event_bits, mask, BinaryOp::And, lower);
             let single = g.binary(1, others, BinaryOp::Eq, zero);
+            if g.profiling() {
+                let several = g.binary(1, others, BinaryOp::Ne, zero);
+                g.count_if(ActivationKind::DomainJudge, "several", several, |_| {
+                    "simple".into()
+                });
+            }
             let one_domain = g.b.new_block();
             let domains = g.b.new_block();
             g.b.seal_block(SIRTerminator::Branch {
@@ -344,7 +351,7 @@ impl Plan {
                     // waves, but `$finish` must still precede NBA publication.
                     if self.lazy.is_some() {
                         let evaluate = g.b.new_block();
-                        g.settle_then(evaluate);
+                        g.settle_then("domains: before an active-commit domain", evaluate);
                         g.b.switch_to_block(evaluate);
                     }
                     g.inline_event_writers(event, eval, finish_exit);
@@ -375,7 +382,7 @@ impl Plan {
                     }
                     Some(DomainSettle::Settled) => {
                         let evaluate = g.b.new_block();
-                        g.settle_then(evaluate);
+                        g.settle_then("domains: before a settled domain", evaluate);
                         g.b.switch_to_block(evaluate);
                         &event.eval_apply
                     }
@@ -395,7 +402,7 @@ impl Plan {
                 let mut zero = zero;
                 if self.lazy.as_ref().is_some_and(|lazy| lazy.several) {
                     let evaluate = g.b.new_block();
-                    g.settle_then(evaluate);
+                    g.settle_then("domains: before several domains", evaluate);
                     g.b.switch_to_block(evaluate);
                     mask = g.load(slots.exit_arg, self.event_bits);
                     zero = g.constant(0, self.event_bits);
@@ -444,8 +451,8 @@ impl Plan {
             checks,
         );
         match &self.lazy {
-            Some(lazy) => g.eager_then(&lazy.eager, wave_end),
-            None => g.settle_then(wave_end),
+            Some(lazy) => g.eager_then("domains: after domains", &lazy.eager, wave_end),
+            None => g.settle_then("domains: after domains", wave_end),
         }
         if let Some(rewave) = rewave {
             g.b.switch_to_block(wave_end);
@@ -542,7 +549,7 @@ impl Plan {
                 g.store(slots.exit_arg, SCHEDULER_TIME_WIDTH, clock);
                 // The slot is complete: the host reads its results settled.
                 match &self.lazy {
-                    Some(_) => g.settle_then(overflow_exit),
+                    Some(_) => g.settle_then("host clocks: before an overflow exit", overflow_exit),
                     None => {
                         g.b.seal_block(SIRTerminator::Jump(overflow_exit, Vec::new()));
                     }
@@ -684,7 +691,10 @@ impl Plan {
             // IEEE 1800-2023 4.4.2.5-6: drain all Observed evaluations,
             // then their Reactive actions, before returning to Active work.
             // Predicates may read live combinational disable conditions.
-            g.settle_then(observed_entry.unwrap());
+            g.settle_then(
+                "assertion regions: before Observed",
+                observed_entry.unwrap(),
+            );
             for (entry, kernels, status, phase, empty) in [
                 (
                     observed_entry.unwrap(),

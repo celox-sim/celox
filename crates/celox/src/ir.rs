@@ -592,6 +592,11 @@ pub struct RuntimeProgram {
     /// Objects accessed by RTL before optimization. Retained so host-side
     /// testbench writes can distinguish private variables from hardware.
     pub(crate) rtl_accesses: HashSet<AbsoluteAddr>,
+    /// The activation counters the compiled scheduler increments, in the
+    /// order of their words (`SimulatorBuilder::activation_profile`);
+    /// empty when it counts none. Only a host runtime reads them.
+    #[cfg_attr(not(feature = "host-runtime"), allow(dead_code))]
+    pub(crate) activation_sites: Vec<crate::ActivationSite>,
 }
 
 /// Lowered SIR whose backend-independent optimization pipeline has not run.
@@ -712,6 +717,16 @@ pub struct LaidOutProgram {
     /// binds to its slot.
     #[cfg(feature = "host-runtime")]
     pub(crate) scheduler_callees: Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
+    /// What the scheduler runs in each of [`Self::scheduler_callees`], as
+    /// far as known: the work that first outlined it, which names its native
+    /// function (and its perf map symbols).
+    #[cfg(feature = "host-runtime")]
+    pub(crate) scheduler_callee_roles: Vec<String>,
+    /// What runs in the blocks of the compiled scheduler's unit
+    /// (`scheduler::GeneratedUnit::block_roles`), which names its perf map
+    /// symbols.
+    #[cfg(feature = "host-runtime")]
+    pub(crate) scheduler_block_roles: Vec<(usize, usize, String)>,
     /// The settle units carry the records and `$finish` flags of the
     /// compiled scheduler that calls them, so that the scheduler calls the
     /// settle's own code (`Plan::settle_instrumentation` in the scheduler).
@@ -1114,6 +1129,10 @@ impl OptimizedSir {
             cone_homes: None,
             #[cfg(feature = "host-runtime")]
             scheduler_callees: Vec::new(),
+            #[cfg(feature = "host-runtime")]
+            scheduler_callee_roles: Vec::new(),
+            #[cfg(feature = "host-runtime")]
+            scheduler_block_roles: Vec::new(),
             #[cfg(feature = "host-runtime")]
             settle_instrumented: false,
         };
@@ -1614,6 +1633,7 @@ impl RuntimeProgram {
                 runtime_schema: scheduled.runtime_schema,
                 testbench: None,
                 rtl_accesses,
+                activation_sites: Vec::new(),
             },
         ))
     }

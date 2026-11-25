@@ -537,6 +537,7 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
                 !self.options.native_force_support
                     && self.options.signal_access.force_signals.is_empty(),
                 outline,
+                self.options.activation_profile,
             );
             if let Some(start) = plan_start {
                 tracing::debug!("[phase-timing] scheduler_plan: {:?}", start.elapsed());

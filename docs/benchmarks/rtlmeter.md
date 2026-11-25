@@ -102,3 +102,55 @@ nix develop .#xezim --command work/rtlmeter-python/bin/python scripts/run-rtlmet
 
 Repeat with `e906` or `e203` and a fresh output directory. Local dirty-checkout results
 are useful for investigation and cannot be published as release measurements.
+
+## Profile a case per clock
+
+`scripts/rtlmeter-profile.py` explains where the work of a case goes, per RTL
+clock, and compares two builds on the same input. It uses the steady-state
+command line of the case and needs the same Python environment:
+
+```sh
+work/rtlmeter-python/bin/python scripts/rtlmeter-profile.py run e902 \
+  --celox work/rtlmeter-bin/celox --out work/profile/e902-before --sample
+work/rtlmeter-python/bin/python scripts/rtlmeter-profile.py run e902 \
+  --celox work/candidate/celox --out work/profile/e902-after --sample
+work/rtlmeter-python/bin/python scripts/rtlmeter-profile.py compare \
+  work/profile/e902-before work/profile/e902-after
+```
+
+`run` runs the case several times and checks that every run reaches the same
+clock count and prints the same program output:
+
+- A profiled run uses `celox run --activation-profile FILE`. The compiled
+  scheduler counts what each part of a time slot did: its slots, the domain
+  judgments of each wave and how many found no edge, the units of each clock
+  domain, each kernel's runs and the edges it gave, each request of the
+  settle by what requested it, the settle's runs and skips with the cause
+  (inputs, clock or time only, published values), the groups of an
+  event-driven settle, the observers, and the partitions of a partitioned
+  settle with the runs that changed nothing they compare.
+- A clean run has no counters. Its `CELOX_TEST_COUNTERS` line (`--report`)
+  gives the user instructions and cycles of the execute phase alone, without
+  compilation: the totals to judge a change by. The report also says how many
+  instructions per clock the counters added to the profiled run.
+- With `--sample`, a sampled run records user instructions with
+  `perf record` and `CELOX_PERF_MAP=1`. The perf map names every native
+  function, and an outlined body of the compiled scheduler is named after
+  the domain, kernel or settle group it runs, so the report gives
+  instructions per clock, activations per clock and instructions per
+  activation of each of them. `disasm RUN_DIR [--match TEXT]` prints the
+  machine code of the hottest blocks of that same run (`CELOX_PERF_MAP` saves
+  the mapped code as `/tmp/perf-<pid>-<address>.bin`, which `run` moves next to
+  the samples).
+
+`compare` lists the totals per clock of both runs, the roles whose
+instructions per clock changed the most (with their activations and cost per
+activation), and the activation counters that changed the most per clock. A
+counter that grows tells which work started more often; a cost per activation
+that grows tells which work got slower. `verilator CASE --out DIR` measures
+the Verilator model of a case under `perf stat` for a whole-process upper bound
+of its instructions per clock.
+
+`scripts/activation-profile.py show FILE` and `diff BEFORE AFTER` read the
+profile files directly, normalizing per clock with `--cycles`, the
+`_rtlmeter_cycles.txt` of the run, or the runs of the most frequent domain.

@@ -27,7 +27,10 @@ impl Plan {
             false_block: (done, Vec::new()),
         });
         g.b.switch_to_block(begin);
-        g.settle_then(notify);
+        g.count(ActivationKind::Observer, "notified", |_| {
+            "slot observer".into()
+        });
+        g.settle_then("slot observer: before notifying", notify);
         g.b.switch_to_block(notify);
         let before: Vec<_> = if first {
             self.events.iter().map(|event| g.level(event)).collect()
@@ -84,7 +87,7 @@ impl Plan {
         }
         g.store(g.slots.exit_arg, self.event_bits, edges);
         let settled = g.b.new_block();
-        g.settle_then(settled);
+        g.settle_then("slot observer: after notifying", settled);
         g.b.switch_to_block(settled);
         g.check_waits(checks);
         self.judge_gates(g, tracked);
@@ -195,7 +198,7 @@ impl Generator<'_> {
             }
             AfterWrites::Settled => {
                 let settled = self.b.new_block();
-                self.settle_then(settled);
+                self.settle_then("update point: report", settled);
                 self.b.switch_to_block(settled);
                 self.check_waits(checks);
                 self.b.seal_block(SIRTerminator::Jump(done, Vec::new()));
