@@ -650,3 +650,84 @@ endmodule"#;
     check(build().build_native().unwrap());
     check(build().build_interpreter().unwrap());
 }
+
+/// A process handle compares, passes through formals, returns, properties
+/// and `$cast`, and formats as a handle does (IEEE 1800-2023 9.7), whatever
+/// value the scheduler gives it.
+#[test]
+fn process_values_compare_assign_cast_and_format() {
+    fn verify<B: SimBackend>(mut sim: Simulation<B>) {
+        sim.run_until(1).unwrap();
+        let lines: Vec<String> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lines, ["checks 1023"]);
+    }
+    let source = r#"`timescale 1ns/1ns
+    module Top;
+      class Holder;
+        process p;
+        function process get(); return p; endfunction
+      endclass
+      process a, b, c, n, r;
+      Holder h;
+      int checks;
+      function automatic process pass(process p); return p; endfunction
+      task automatic out(output process p); p = process::self(); endtask
+      initial begin
+        h = new;
+        a = process::self();
+        b = process::self();
+        fork begin c = process::self(); end join
+        checks = (a == b) + (a != c) * 2 + (n == null) * 4 + (a != null) * 8;
+        r = pass(a); checks += (r == a) * 16;
+        out(r); checks += (r == a) * 32;
+        h.p = c; checks += (h.get() == c && h.get() != a) * 64;
+        checks += ($cast(r, c) && r == c) * 128;
+        checks += ($sformatf("%0d", a) == $sformatf("%0d", b)
+          && $sformatf("%0d", a) != $sformatf("%0d", c)
+          && $sformatf("%0d", n) == "0") * 256;
+        checks += ($sformatf("%p", a) == $sformatf("%p", b)
+          && $sformatf("%p", a) != $sformatf("%p", c)
+          && $sformatf("%p", a).substr(0, 0) == "@"
+          && $sformatf("%p", n) == "null") * 512;
+        $display("checks %0d", checks);
+      end
+    endmodule"#;
+    for four_state in [false, true] {
+        let build = || {
+            Simulation::from_sv_sources(vec![(source, Path::new("values.sv"))], "Top")
+                .four_state(four_state)
+        };
+        verify(build().build_native().unwrap());
+        verify(build().build_interpreter().unwrap());
+    }
+}
+
+/// A process method on a handle that names no process is an error naming
+/// the handle, not a crash.
+#[test]
+fn methods_on_a_handle_that_names_no_process_report_it() {
+    let source = r#"`timescale 1ns/1ns
+    module Top;
+      process p;
+      initial begin #1; void'(p.status()); end
+    endmodule"#;
+    let mut sim = Simulation::from_sv_sources(vec![(source, Path::new("stale.sv"))], "Top")
+        .build_native()
+        .unwrap();
+    let p = sim.signal("p");
+    sim.modify(|io| io.set(p, 777u32)).unwrap();
+    let error = sim.run_until(2).expect_err("a handle naming no process");
+    assert!(
+        error.to_string().contains("invalid process handle 777"),
+        "{error}"
+    );
+}

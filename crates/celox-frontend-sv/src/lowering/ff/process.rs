@@ -77,28 +77,37 @@ impl Ff<'_, '_> {
                 arg
             };
             let (id, _) = self.host_hidden("process_argument", &arg, 32, false, !string)?;
-            if string {
-                self.m.variables.get_mut(&id).unwrap().value_kind = ValueKind::StrRef;
-            }
+            // The receiver of a process method is a process handle, which a
+            // process blocked in `await` holds while it waits.
+            let process = index == 0 && is_process_method(op);
+            let value_kind = if string {
+                ValueKind::StrRef
+            } else if process {
+                ValueKind::ObjRef
+            } else {
+                ValueKind::Bits
+            };
+            self.m.variables.get_mut(&id).unwrap().value_kind = value_kind;
             values.push(HostRequestValue {
                 id,
                 width: 32,
                 signed: false,
                 is_string: false,
-                value_kind: if string {
-                    ValueKind::StrRef
-                } else {
-                    ValueKind::Bits
-                },
+                value_kind,
                 float_precision: None,
             });
         }
         let signed = matches!(op, ProcessOp::Status | ProcessOp::SemaphoreTryGet);
         let (id, name) = self.m.temp("process_result", 32, signed, false);
         let string = op == ProcessOp::GetRandstate;
-        if string {
-            self.m.variables.get_mut(&id).unwrap().value_kind = ValueKind::StrRef;
-        }
+        let value_kind = if string {
+            ValueKind::StrRef
+        } else if op == ProcessOp::SelfHandle {
+            ValueKind::ObjRef
+        } else {
+            ValueKind::Bits
+        };
+        self.m.variables.get_mut(&id).unwrap().value_kind = value_kind;
         let index = self
             .sites
             .host_request
@@ -117,11 +126,7 @@ impl Ff<'_, '_> {
                 width: 32,
                 signed,
                 is_string: false,
-                value_kind: if string {
-                    ValueKind::StrRef
-                } else {
-                    ValueKind::Bits
-                },
+                value_kind,
                 float_precision: None,
             }],
             strings: Vec::new(),
@@ -397,4 +402,20 @@ enum Destination {
     Variable(Box<SystemActual>, sv::ir::Expr, Vec<sv::ir::Expr>),
     /// The store of the message into a class property.
     Property(sv::ir::Expr),
+}
+
+/// Whether `op` is a method of a process handle, its first argument (IEEE
+/// 1800-2023 9.7).
+fn is_process_method(op: ProcessOp) -> bool {
+    matches!(
+        op,
+        ProcessOp::Status
+            | ProcessOp::Kill
+            | ProcessOp::Await
+            | ProcessOp::Suspend
+            | ProcessOp::Resume
+            | ProcessOp::Srandom
+            | ProcessOp::GetRandstate
+            | ProcessOp::SetRandstate
+    )
 }

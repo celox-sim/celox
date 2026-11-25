@@ -141,7 +141,8 @@ pub(super) fn signal_type_from_sv(
     };
     let value_kind = match typ.kind() {
         sv::ir::TypeKind::String => celox_design::ValueKind::StrRef,
-        sv::ir::TypeKind::Object => celox_design::ValueKind::ObjRef,
+        // A process handle is a heap object (see `ProcessOp::SelfHandle`).
+        sv::ir::TypeKind::Object | sv::ir::TypeKind::Process => celox_design::ValueKind::ObjRef,
         _ => celox_design::ValueKind::Bits,
     };
     Ok(SvSignalType {

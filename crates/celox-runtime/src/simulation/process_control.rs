@@ -194,20 +194,15 @@ impl<B: SimBackend> SimulationState<B> {
         let target = if op == ProcessOp::SelfHandle {
             final_identity.unwrap_or(current)
         } else {
-            let raw: u32 = executor.backend().get_as(request.args[0].id);
-            let target = raw
-                .checked_sub(1)
-                .map(|id| id as usize)
-                .ok_or_else(|| error("method called on a null process handle"))?;
-            if !self
-                .process_state
-                .activations
-                .get(target)
-                .is_some_and(|a| a.control.exposed)
-            {
-                return Err(error("invalid process handle"));
+            let handle: u32 = executor.backend().get_as(request.args[0].id);
+            if handle == celox_heap::NULL {
+                return Err(error("method called on a null process handle"));
             }
-            target
+            *self
+                .process_state
+                .process_handles
+                .get(&handle)
+                .ok_or_else(|| error(format!("invalid process handle {handle}")))?
         };
         if matches!(
             op,
@@ -221,11 +216,7 @@ impl<B: SimBackend> SimulationState<B> {
         let mut value = 0u32;
         match op {
             ProcessOp::SelfHandle => {
-                value = u32::try_from(target)
-                    .ok()
-                    .and_then(|id| id.checked_add(1))
-                    .ok_or_else(|| error("process handle space exhausted"))?;
-                self.process_state.activations[target].control.exposed = true;
+                value = self.process_handle(executor.backend_mut().heap_mut(), target);
             }
             ProcessOp::Status => {
                 let activation = &self.process_state.activations[target];
@@ -698,6 +689,71 @@ impl<B: SimBackend> SimulationState<B> {
                 .control
                 .suspended
                 .is_none())
+    }
+
+    /// The handle that names activation `target` (IEEE 1800-2023 9.7): the
+    /// heap object made for it the first time, while the heap keeps it, so
+    /// that two handles of a process are equal. The collector keeps it while
+    /// a handle is anywhere: the activation is free for reuse once it ended
+    /// and the heap collected its handle (see
+    /// [`Self::forget_collected_process_handles`]).
+    fn process_handle(&mut self, heap: &mut celox_heap::Heap, target: usize) -> u32 {
+        let control = &self.process_state.activations[target].control;
+        if let Some(handle) = control.handle
+            && heap.contains_object(handle)
+        {
+            return handle;
+        }
+        self.forget_collected_process_handles(heap);
+        let handle = heap.new_object(SCHEDULER_CLASS, 0);
+        let state = &mut self.process_state;
+        let control = &mut state.activations[target].control;
+        if let Some(previous) = control.handle.replace(handle) {
+            state.process_handles.remove(&previous);
+        }
+        control.exposed = true;
+        state.process_handles.insert(handle, target);
+        handle
+    }
+
+    /// Forget the process handles the heap collected, once after each
+    /// collection: no handle names their activations any more, and each
+    /// that ended may be reused. One that another process awaits or
+    /// observes the status of keeps its handle (the waiter holds a copy of
+    /// it).
+    fn forget_collected_process_handles(&mut self, heap: &celox_heap::Heap) {
+        let state = &mut self.process_state;
+        if state.process_handle_collection == heap.collections() {
+            return;
+        }
+        state.process_handle_collection = heap.collections();
+        let watched: fxhash::FxHashSet<usize> = state
+            .activations
+            .iter()
+            .filter(|activation| activation.live)
+            .flat_map(|activation| {
+                activation
+                    .control
+                    .awaiting
+                    .iter()
+                    .chain(&activation.control.observes)
+                    .copied()
+            })
+            .collect();
+        let mut released = Vec::new();
+        state.process_handles.retain(|&handle, &mut id| {
+            let live = heap.contains_object(handle) || watched.contains(&id);
+            if !live {
+                released.push(id);
+            }
+            live
+        });
+        for id in released {
+            let control = &mut self.process_state.activations[id].control;
+            control.exposed = false;
+            control.handle = None;
+            self.offer_ended_activation(id);
+        }
     }
 
     /// Forget the semaphores the heap collected that no process waits for,

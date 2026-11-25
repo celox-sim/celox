@@ -728,6 +728,10 @@ impl<B: SimBackend> Simulation<B> {
         if self.state.is_suspended() {
             return Err(CheckpointError::Stopped.into());
         }
+        // Before the variables, which hold the handles as objects.
+        if self.state.names_processes() {
+            return Err(StateError::Objects("built-in process handles".into()));
+        }
         let mut file = self
             .simulator
             .state_schema()

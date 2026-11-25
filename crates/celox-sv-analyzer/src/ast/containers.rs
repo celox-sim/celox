@@ -107,10 +107,11 @@ fn dimensioned(
                                 .collect(),
                         ));
                     }
-                    // A process handle is an identity that the simulation
-                    // keeps until it ends, so it serves as an integral key
-                    // whose entry outlives the process (IEEE 1800-2023 7.8.5,
-                    // 9.7).
+                    // A process handle is an identity, so it serves as an
+                    // integral key whose entry outlives the process (IEEE
+                    // 1800-2023 7.8.5, 9.7): the key keeps the heap object
+                    // that names the process, as a class key keeps its
+                    // object.
                     if !string
                         && !object
                         && (!matches!(
@@ -130,7 +131,7 @@ fn dimensioned(
                         key_width: shape.width as u32,
                         signed: shape.signed && !object,
                         string,
-                        object,
+                        object: object || ty.kind() == TypeKind::Process,
                     })
                 }
             }
@@ -228,7 +229,7 @@ fn container_type(
         // An element in a record, or a nested container, is a handle.
         _ if record.is_some() || base.container().is_some() => Some(HandleProperty::Object),
         TypeKind::String => Some(HandleProperty::String),
-        TypeKind::Object => Some(HandleProperty::Object),
+        TypeKind::Object | TypeKind::Process => Some(HandleProperty::Object),
         _ => None,
     };
     let layout = ContainerLayout {

@@ -555,10 +555,13 @@ which designs need the timed `Simulation` API and what the host can observe.
   named `p::v` and a compilation-unit variable `$unit::v` in
   `sim.signal(…)`. Hierarchical names can address signals, including
   `string` variables, in both SystemVerilog code and the host API.
-- **Heap and checkpoints.** Strings, class objects, and containers live in
-  a heap collected between time slots and after each `tick`; a `string`,
-  class handle, `process` handle, or virtual interface is stored like a
-  32-bit integer. Core checkpoints (`checkpoint()` / `restore()`) preserve
+- **Heap and checkpoints.** Strings, class objects, containers, and the
+  objects `process::self()` returns live in a heap collected between time
+  slots and after each `tick`; a `string`, class handle, `process` handle,
+  or virtual interface is stored like a 32-bit integer. A process that
+  ended keeps its status for as long as a `process` handle names it, and
+  its storage is reused once the heap has collected every such handle.
+  Core checkpoints (`checkpoint()` / `restore()`) preserve
   heap objects, fork children, process handles, random streams, pending
   strobe/monitor state, and deferred assertion queues. Portable state
   files are narrower: saving fails while any variable holds a class

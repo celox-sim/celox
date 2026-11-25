@@ -1177,6 +1177,9 @@ impl<B: SimBackend> Simulator<B> {
                 semaphore_limit: 0,
                 mailboxes: Default::default(),
                 mailbox_limit: 0,
+                // A state file holds no exposed process (see `capture`).
+                process_handles: Default::default(),
+                process_handle_collection: 0,
             },
         ))
     }

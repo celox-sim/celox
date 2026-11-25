@@ -120,6 +120,9 @@ pub struct Heap {
     pinned: Handle,
     created: usize,
     live_after_collection: usize,
+    /// The number of collections so far (see [`Heap::collections`]).
+    #[serde(default)]
+    collections: u64,
     /// The state of UVM's C library functions, see [`uvm_dpi`].
     uvm: uvm_dpi::UvmDpi,
     /// The constraint programs of classes by class id, see
@@ -225,6 +228,7 @@ impl Heap {
             fault: None,
             pinned: 1,
             created: 0,
+            collections: 0,
             live_after_collection: 1,
             uvm: uvm_dpi::UvmDpi::default(),
             programs: HashMap::default(),
@@ -344,6 +348,13 @@ impl Heap {
         self.created >= MIN_COLLECTION_INTERVAL.max(self.live_after_collection)
     }
 
+    /// The number of collections so far: an entry that a holder of handles
+    /// outside the heap knows of is unreachable once it is gone after a
+    /// collection.
+    pub fn collections(&self) -> u64 {
+        self.collections
+    }
+
     /// Free every unpinned entry that `roots` cannot reach through the
     /// handle properties of objects. Roots that name no entry are ignored.
     pub fn collect(&mut self, roots: impl IntoIterator<Item = Root>) {
@@ -395,6 +406,7 @@ impl Heap {
         self.streams.clear();
         self.free_streams.clear();
         self.created = 0;
+        self.collections += 1;
         self.live_after_collection = self.len() + self.objects.len() + self.containers.len();
     }
 

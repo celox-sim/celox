@@ -658,6 +658,12 @@ impl<B: SimBackend> SimulationState<B> {
         &self.stats
     }
 
+    /// Whether a process handle names a process (IEEE 1800-2023 9.7), which
+    /// state files do not record.
+    pub fn names_processes(&self) -> bool {
+        !self.process_state.process_handles.is_empty()
+    }
+
     /// The activations held and the bytes they hold: each one's own state
     /// and saved call stack, each process description they refer to once,
     /// as activations of one kernel share its description, and the pool of
