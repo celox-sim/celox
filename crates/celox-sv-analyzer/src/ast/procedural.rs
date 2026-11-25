@@ -339,6 +339,10 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
     subroutine: bool,
     /// Whether the body's variables are automatic by default.
     automatic: bool,
+    /// Whether the process runs its body again, as an `always` process
+    /// does: a fork it starts can start again in its next run, which the
+    /// `body` a detached branch changes cannot show.
+    repeating: bool,
     task_timing: bool,
     /// While a delayed nonblocking assignment's delay control is being
     /// converted: that delay schedules an update without suspending, so a
@@ -708,6 +712,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         dims.locator_locals = Some(locators::LocalSink::new(session, *state.counter));
         let mut builder = Self {
             automatic,
+            repeating: body == system_functions::Body::Process,
             subroutine: body == system_functions::Body::Subroutine,
             task_timing: false,
             delayed_nonblocking: false,

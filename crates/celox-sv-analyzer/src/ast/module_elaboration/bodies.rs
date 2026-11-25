@@ -102,10 +102,25 @@ impl ScopeElaboration<'_> {
         // in variables of the scope (IEEE 1800-2023 9.6.2); a `disable` of
         // any other name outside its block stays unsupported.
         let disables = std::mem::take(&mut body_state.disables);
+        // A subroutine a branch calls may need the process that runs the
+        // block, which only the lowered subroutines show (9.6.1, 9.6.3).
+        let needs_their_process =
+            procedural::external_disables::subroutines_that_need_their_process(
+                self.subroutines.iter().chain(
+                    self.imported
+                        .subroutines
+                        .iter()
+                        .map(|subroutine| &**subroutine),
+                ),
+            );
         if disables
             .targets
             .iter()
             .any(|target| disables.ambiguous.contains(target) || !disables.blocks.contains(target))
+            || procedural::external_disables::calls_subroutine_that_needs_its_process(
+                &disables,
+                &needs_their_process,
+            )
         {
             return Err(unsupported("disable statement"));
         }
