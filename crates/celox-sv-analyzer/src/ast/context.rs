@@ -34,6 +34,10 @@ pub(crate) struct AnalysisContext<'a> {
     /// subroutines see every value name they may read in their tables, so
     /// that another one is undeclared (IEEE 1800-2023 6.6, 23.9).
     pub(super) declared_values: bool,
+    /// The instance of a generate block whose declarations are being
+    /// bound, which declares types of its own (see
+    /// [`types::declaring_scope`]).
+    pub(super) generate_scope: Option<Arc<types::GenerateScope>>,
 }
 
 impl<'a> AnalysisContext<'a> {
@@ -54,6 +58,7 @@ impl<'a> AnalysisContext<'a> {
             interface_instance: None,
             instance_scope: None,
             declared_values: false,
+            generate_scope: None,
         }
     }
 
@@ -70,6 +75,7 @@ impl<'a> AnalysisContext<'a> {
             interface_instance: None,
             instance_scope: None,
             declared_values: false,
+            generate_scope: None,
         }
     }
 
@@ -90,6 +96,9 @@ impl<'a> AnalysisContext<'a> {
             interface_instance: self.interface_instance.clone(),
             instance_scope: self.instance_scope.clone(),
             declared_values: self.declared_values,
+            // A child is a design element of its own, outside the generate
+            // blocks of this one.
+            generate_scope: None,
         }
     }
 
@@ -97,6 +106,21 @@ impl<'a> AnalysisContext<'a> {
     pub(super) fn importing(&self, symbols: Arc<scope::ScopeSymbols>) -> Self {
         Self {
             imported: symbols,
+            ..self.clone()
+        }
+    }
+
+    /// This context binding the declarations at `tokens` of the instance
+    /// `path` of a generate block, as the path of its elaborated scope
+    /// names it (`g[0].h[1]`).
+    pub(super) fn in_generate_scope(
+        &self,
+        path: &str,
+        tokens: celox_sv_syntax::TokenRange,
+    ) -> Self {
+        Self {
+            generate_scope: (!path.is_empty())
+                .then(|| Arc::new(types::GenerateScope::new(path, self.declarations(), tokens))),
             ..self.clone()
         }
     }

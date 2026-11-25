@@ -533,6 +533,7 @@ pub(super) fn bind_alias(
         classes::enclosing_unit(syntax_tree.declarations(), alias.tokens),
         syntax_tree.declarations(),
         alias.tokens,
+        syntax_tree.generate_scope.as_deref(),
         session,
     );
     base.name_declaration(scope, name);
@@ -622,19 +623,67 @@ impl ClassScope {
     }
 }
 
+/// An instance of a generate block whose declarations at `tokens` of
+/// `declarations` are being bound. Each instance is a scope of its own
+/// (IEEE 1800-2023 27.4), so an anonymous type it declares is a type of
+/// that instance (6.22.1 c).
+#[derive(Debug)]
+pub(super) struct GenerateScope {
+    /// The path of the instance's elaborated scope, as the typedefs it
+    /// declares are named by (see [`declaration_name`]).
+    path: Arc<str>,
+    /// The declarations, by address.
+    declarations: usize,
+    tokens: celox_sv_syntax::TokenRange,
+}
+
+impl GenerateScope {
+    pub(super) fn new(
+        path: &str,
+        declarations: &celox_sv_syntax::Declarations,
+        tokens: celox_sv_syntax::TokenRange,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            declarations: std::ptr::from_ref(declarations) as usize,
+            tokens,
+        }
+    }
+
+    /// Whether the type at `tokens` of `declarations` is declared in it.
+    fn holds(
+        &self,
+        declarations: &celox_sv_syntax::Declarations,
+        tokens: celox_sv_syntax::TokenRange,
+    ) -> bool {
+        self.declarations == std::ptr::from_ref(declarations) as usize
+            && self.tokens.start <= tokens.start
+            && tokens.end <= self.tokens.end
+    }
+}
+
 /// The elaborated scope that declares the type at `tokens` of
-/// `declarations`, in `unit`: that of the unit (see [`unit_scope`]), and
-/// in it the innermost class specialization being laid out whose
-/// declaration holds the type, as each specialization of a parameterized
-/// class declares types of its own (IEEE 1800-2023 8.25), with member
-/// initial values of its parameters (7.2.2).
+/// `declarations`, in `unit`: that of the unit (see [`unit_scope`]); in
+/// it the instance of the generate block `generate` being bound, if that
+/// holds the type, as each instance declares types of its own (IEEE
+/// 1800-2023 27.4, 6.22.1 c); and in that the innermost class
+/// specialization being laid out whose declaration holds the type, as
+/// each specialization of a parameterized class declares types of its own
+/// (8.25), with member initial values of its parameters (7.2.2).
 pub(super) fn declaring_scope(
     unit: Option<&celox_sv_syntax::Unit>,
     declarations: &celox_sv_syntax::Declarations,
     tokens: celox_sv_syntax::TokenRange,
+    generate: Option<&GenerateScope>,
     session: &Session,
 ) -> Option<Arc<str>> {
-    let scope = unit_scope(unit, session);
+    let mut scope = unit_scope(unit, session);
+    if let Some(generate) = generate.filter(|generate| generate.holds(declarations, tokens)) {
+        scope = Some(match scope {
+            Some(scope) => format!("{scope}.{}", generate.path).into(),
+            None => generate.path.clone(),
+        });
+    }
     let address = std::ptr::from_ref(declarations) as usize;
     let Some(class) = session.class_scopes.iter().rev().find(|class| {
         class.declarations == address

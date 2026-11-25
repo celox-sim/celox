@@ -463,6 +463,7 @@ fn declaration(
                         classes::enclosing_unit(tree.declarations(), alias.tokens),
                         tree.declarations(),
                         alias.tokens,
+                        tree.generate_scope.as_deref(),
                         session,
                     );
                     ty.name_declaration(scope, || types::declaration_name(tree, alias, None));

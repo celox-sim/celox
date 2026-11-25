@@ -381,11 +381,20 @@ fn resolve(
         | ExprKind::StreamSelect { .. }
         | ExprKind::Parameterized { .. } => None,
     };
-    resolved.or_else(|| {
-        constant_binding(tree, session, id, native, dims)
-            .ok()??
-            .type_id(&mut session.types)
-    })
+    resolved
+        .or_else(|| {
+            constant_binding(tree, session, id, native, dims)
+                .ok()??
+                .type_id(&mut session.types)
+        })
+        // A variable that a hierarchical name denotes, such as one of an
+        // instance of a generate block, `g[0].x` (IEEE 1800-2023 23.6,
+        // 27.4), has its declared type.
+        .or_else(|| {
+            let path = expression_binding::hierarchical_callee(tree, session, id, native, dims)?;
+            let shape = dims.get(&path.join("."))?;
+            of_shape(session, shape)
+        })
 }
 
 /// The declared result of the ordinary function or class method that `id`,
