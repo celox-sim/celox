@@ -557,9 +557,8 @@ pub struct TypeShape {
     /// named type, which is signed although the whole array is not (IEEE
     /// 1800-2023 7.4.1).
     signed_element_depth: Option<usize>,
-    /// The typedef that names an enumeration, struct or union type, and how
-    /// `$typename` spells the type where its structure does not tell.
-    spelling: type_names::Spelling,
+    /// The integer type keyword that declared the type, for `$typename`.
+    keyword: type_names::Keyword,
 }
 
 /// Two types are equal if their shapes, the identities of their elements

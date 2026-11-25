@@ -1,9 +1,8 @@
 //! The enumerated type (IEEE 1800-2023 6.19) and the unpacked structure
 //! type (7.2) a [`Type`] or a [`VariableDimensions`] keeps. Only
-//! [`Type::keep_enumeration`], [`Type::reshape_keeping_enumeration`] and
-//! [`VariableDimensions::keep_enumeration`] set the enumerated type,
-//! together with the spelling that names it, and only
-//! [`Type::keep_structure`] and [`VariableDimensions::keep_structure`] the
+//! [`Type::keep_enumeration`] and [`VariableDimensions::keep_enumeration`]
+//! set the enumerated type, which [`Type::reshape_keeping_enumeration`]
+//! keeps, and only [`Type::keep_structure`] and [`VariableDimensions::keep_structure`] the
 //! structure. The container type (7.5, 7.10, 7.8) only
 //! [`Type::keep_container`] and [`VariableDimensions::keep_container`] set.
 use super::*;
@@ -117,49 +116,22 @@ impl Clone for VariableDimensions {
 }
 
 impl Type {
-    /// Keep the enumerated type `enumeration` names, with the spelling that
-    /// names it: a packed array of it if the type has more packed
-    /// dimensions than it (7.4.1). The spelling does not change the
-    /// semantic type, so the type keeps its binding.
+    /// Keep the enumerated type `enumeration` names: a packed array of it
+    /// if the type has more packed dimensions than it (7.4.1).
     pub(in crate::ast) fn keep_enumeration(&mut self, enumeration: EnumBinding) {
-        tell_enumeration(Arc::make_mut(&mut self.shape), enumeration.declaration());
         self.enumeration = KeptEnumeration(enumeration);
     }
 
     /// Change the shape of the type in a way that keeps the enumerated type
     /// of its elements, such as its packed dimensions (7.4.1): the type
-    /// forgets its binding and that of its elements, and its spelling names
-    /// the kept enumerated type.
+    /// forgets its binding and that of its elements.
     pub(in crate::ast) fn reshape_keeping_enumeration(
         &mut self,
         change: impl FnOnce(&mut TypeShape),
     ) {
         self.binding.forget();
         self.element.forget();
-        let shape = Arc::make_mut(&mut self.shape);
-        change(shape);
-        tell_enumeration(shape, self.enumeration.0.declaration());
-    }
-}
-
-/// Make the spelling of `shape` tell the enumerated type `declaration`
-/// declares, if any: the typedef that names it, or the scope that declares
-/// an anonymous one.
-fn tell_enumeration(shape: &mut TypeShape, declaration: Option<&EnumDeclaration>) {
-    let Some(declaration) = declaration else {
-        return;
-    };
-    match &declaration.name {
-        Some(name) if declaration.named => shape.spelling.name_spelled(
-            name.clone(),
-            declaration.typename.clone(),
-            declaration.scope.clone(),
-        ),
-        _ => {
-            if let Some(scope) = &declaration.scope {
-                shape.spelling.declared_in(scope.clone());
-            }
-        }
+        change(Arc::make_mut(&mut self.shape));
     }
 }
 
@@ -201,9 +173,9 @@ impl VariableDimensions {
 
 impl Type {
     /// Change the shape of the type in a way that keeps the enumerated and
-    /// unpacked structure types it keeps, such as its spelling or the
-    /// storage members of a structure: the type forgets its binding and
-    /// that of its elements.
+    /// unpacked structure types it keeps, such as the typedef that names its
+    /// members or the storage members of a structure: the type forgets its
+    /// binding and that of its elements.
     pub(in crate::ast) fn reshape_keeping_declarations(
         &mut self,
         change: impl FnOnce(&mut TypeShape),

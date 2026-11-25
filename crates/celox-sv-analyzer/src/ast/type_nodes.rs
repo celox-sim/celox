@@ -11,7 +11,7 @@ impl Type {
             unpacked_ranges: Vec::new(),
             members: Vec::new(),
             signed_element_depth: None,
-            spelling: type_names::Spelling::default(),
+            keyword: type_names::Keyword::default(),
         })
     }
 
@@ -23,7 +23,7 @@ impl Type {
             unpacked_ranges: Vec::new(),
             members: Vec::new(),
             signed_element_depth: None,
-            spelling: type_names::Spelling::default(),
+            keyword: type_names::Keyword::default(),
         })
     }
 
@@ -58,7 +58,6 @@ impl Type {
                 .declaration()
                 .map(|structure| Arc::new(structure.named(naming.clone())));
             self.reshape_keeping_declarations(|shape| {
-                shape.spelling.name(name.into(), typename, scope);
                 packed_structs::name_members(&mut shape.members, &naming);
             });
             self.keep_enumeration(enumeration);
@@ -66,11 +65,6 @@ impl Type {
                 self.keep_structure(structure);
             }
         }
-    }
-
-    /// The typedef that names this enumeration, struct or union type.
-    pub(super) fn declaration_name(&self) -> Option<&str> {
-        self.naming().0
     }
 
     /// Whether the type is a chandle or an unpacked structure with a
@@ -292,7 +286,9 @@ impl Type {
     /// typedef name: a name of a variable or a subroutine of another scope,
     /// whose type is resolved there, has them (IEEE 1800-2023 6.19, 23.6).
     pub fn with_enumeration_of(mut self, other: &Type) -> Self {
-        self.spelling = other.spelling.clone();
+        // The type is no longer the one it was bound to, and has the integer
+        // type keyword of `other`.
+        self.keyword = other.keyword;
         // The type keeps the enumerated type `other` keeps.
         self.keep_enumeration(other.enumeration.binding());
         self

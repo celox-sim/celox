@@ -133,10 +133,6 @@ fn convert(
         unpacked_struct: ty.structure.declaration(),
         kind: ty.kind,
         members: &ty.members,
-        declaration: ty.spelling.declaration(),
-        typename: ty.spelling.name_of(),
-        aggregate: ty.spelling.aggregate_of(),
-        scope: ty.spelling.scope(),
         signed: ty.is_signed,
         signed_element_depth: ty.signed_element_depth,
         packed: ty
@@ -144,7 +140,7 @@ fn convert(
             .iter()
             .map(|range| (range.left(), range.right()))
             .collect(),
-        keyword: ty.spelling.keyword_of(),
+        keyword: ty.keyword.get(),
         chandle: ty.is_chandle(),
     };
     let unpacked = ty
@@ -174,7 +170,6 @@ pub(in crate::ast) fn of_shape(
     } else {
         TypeKind::Logic
     };
-    let declared = type_names::declared_type(shape);
     let parts = Parts {
         // A shape tells no keyword (see above).
         bound_element: shape
@@ -185,10 +180,6 @@ pub(in crate::ast) fn of_shape(
         unpacked_struct: shape.structure_declaration(),
         kind,
         members: &shape.members,
-        declaration: declared.and_then(|ty| ty.spelling.declaration()),
-        typename: declared.and_then(|ty| ty.spelling.name_of()),
-        aggregate: declared.and_then(|ty| ty.spelling.aggregate_of()),
-        scope: declared.and_then(|ty| ty.spelling.scope()),
         signed: shape.signed,
         signed_element_depth: shape.signed_element_depth,
         packed: shape
@@ -218,16 +209,6 @@ struct Parts<'a> {
     unpacked_struct: Option<&'a Arc<UnpackedStruct>>,
     kind: TypeKind,
     members: &'a [PackedMember],
-    /// The typedef that names an enumeration, structure or union type.
-    declaration: Option<&'a str>,
-    /// How `$typename` names that typedef.
-    typename: Option<&'a type_names::TypedefName>,
-    /// `struct` or `union` of a structure or union type other than a soft
-    /// or tagged union.
-    aggregate: Option<&'static str>,
-    /// The elaborated scope that declares the enumeration, structure or
-    /// union type, if not a package or compilation unit.
-    scope: Option<&'a str>,
     signed: bool,
     signed_element_depth: Option<usize>,
     packed: Vec<(&'a ConstExpr, &'a ConstExpr)>,
@@ -412,28 +393,6 @@ impl Parts<'_> {
         members: Arc<[(Arc<str>, TyId)]>,
         (naming, keyword): (&type_names::Naming, Option<&'static str>),
     ) -> Decl {
-        // The declaration keeps the spelling that names it. A type may keep
-        // the declaration of its members without their spelling, such as a
-        // type rebuilt from a shape.
-        debug_assert!(
-            (self.declaration.is_none()
-                && self.typename.is_none()
-                && self.scope.is_none()
-                && self.aggregate.is_none())
-                || (self.declaration == naming.declaration()
-                    && self.typename == naming.name_of()
-                    && self.scope == naming.scope()
-                    && self.aggregate == keyword),
-            "the declaration {owner} is named {:?} {:?} {:?} {:?}, but spelled {:?} {:?} {:?} {:?}",
-            naming.declaration(),
-            naming.name_of(),
-            naming.scope(),
-            keyword,
-            self.declaration,
-            self.typename,
-            self.scope,
-            self.aggregate,
-        );
         let decl = table.declare(naming.declaration().unwrap_or(owner), naming.scope());
         let typename = naming.declaration().and(naming.name_of());
         table.record_spelling(decl, typename, keyword);

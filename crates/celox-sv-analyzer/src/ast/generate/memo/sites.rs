@@ -155,7 +155,7 @@ impl CallSites for Type {
             unpacked_ranges,
             members,
             signed_element_depth: _,
-            spelling: _,
+            keyword: _,
         } = &**self;
         packed_ranges.call_sites(visit);
         unpacked_ranges.call_sites(visit);
