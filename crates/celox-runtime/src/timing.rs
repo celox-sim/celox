@@ -536,6 +536,15 @@ pub struct ProcessState {
     /// those the heap collected.
     #[serde(default)]
     pub mailbox_limit: usize,
+    /// The activations that `process::self()` named, by the handle of the
+    /// heap object it returned for each (IEEE 1800-2023 9.7).
+    #[serde(default)]
+    pub process_handles: std::collections::BTreeMap<u32, usize>,
+    /// The heap collection (see `celox_heap::Heap::collections`) after
+    /// which the next new process handle first forgets those the heap
+    /// collected.
+    #[serde(default)]
+    pub process_handle_collection: u64,
 }
 
 /// A mailbox: its bound and the processes waiting for it (IEEE 1800-2023
