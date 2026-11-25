@@ -1428,6 +1428,32 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                         ("verilator", "covergroup::shallow_copy_has_no_embedded_covergroup") => {
                             ("mismatch", "execute", "assert_eq q: expected 0x7, got 0x5")
                         }
+                        ("icarus", "covergroup::automatic_bins_of_a_coverpoint") => {
+                            ("compile_error", "compile", "Invalid module item")
+                        }
+                        ("icarus", "covergroup::constructor_arguments_set_the_bins") => {
+                            ("compile_error", "compile", "Invalid module item")
+                        }
+                        ("icarus", "covergroup::coverpoint_guard_skips_the_sample") => {
+                            ("compile_error", "compile", "Invalid module item")
+                        }
+                        ("icarus", "covergroup::embedded_covergroup_reads_its_class") => {
+                            ("compile_error", "compile", "Invalid class item")
+                        }
+                        ("icarus", "covergroup::options_of_a_definition") => {
+                            ("compile_error", "compile", "Invalid module item")
+                        }
+                        ("icarus", "covergroup::sample_arguments_are_the_sampled_values") => {
+                            ("compile_error", "compile", "Invalid module item")
+                        }
+                        ("icarus", "covergroup::value_bins_count_samples") => {
+                            ("compile_error", "compile", "Invalid module item")
+                        }
+                        ("verilator", "covergroup::constructor_arguments_set_the_bins") => (
+                            "compile_error",
+                            "compile",
+                            "Non-constant expression in bin range",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

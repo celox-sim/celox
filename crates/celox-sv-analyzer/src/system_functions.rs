@@ -1529,6 +1529,46 @@ pub enum CoverageOp {
     /// What `$get_coverage` gives (19.9): the coverage of every covergroup
     /// type, as a `real`. It has no argument.
     Overall,
+    /// Hand the construction of the instance in the first argument the
+    /// value in the second as integral input `index` of the descriptor, in
+    /// `width` bits.
+    Input {
+        index: u32,
+        width: u32,
+        signed: bool,
+    },
+    /// Hand the construction of the instance in the first argument the
+    /// string in the second as string input `index` of the descriptor.
+    InputString { index: u32 },
+    /// Keep the value in the second argument, of `width` bits, as formal
+    /// `slot` of the instance in the first: an integral argument of the
+    /// covergroup that its samples read (19.3).
+    FormalSet { slot: u32, width: u32, signed: bool },
+    /// The value [`CoverageOp::FormalSet`] kept as formal `slot` of the
+    /// instance in the argument. `four_state` tells a value that may hold
+    /// x or z bits.
+    Formal {
+        slot: u32,
+        width: u32,
+        signed: bool,
+        four_state: bool,
+    },
+    /// Note the values of the `count` coverpoints from item `first` on for
+    /// the sample in progress of the instance in the first argument. The
+    /// second argument is their concatenation, `width` bits in all with the
+    /// first item in the low bits. The third, where there is one, has a bit
+    /// for each item, the first item's lowest: an item whose bit is clear
+    /// is not sampled (its guard is false, 19.5). Without it all are.
+    Points { first: u32, count: u32, width: u32 },
+    /// Note the value in the second argument, of `width` bits, as that of
+    /// coverpoint item `item` for the sample in progress of the instance in
+    /// the first: a coverpoint wider than the 64 bits [`CoverageOp::Points`]
+    /// passes.
+    Point { item: u32, width: u32, signed: bool },
+    /// The text of the warnings of the last [`CoverageOp::Build`] or of the
+    /// illegal bins of the last [`CoverageOp::SampleEnd`] of the instance
+    /// in the argument, as a string.
+    Message,
 }
 
 /// Which result of a coverage query (IEEE 1800-2023 19.8).
@@ -1547,7 +1587,17 @@ impl CoverageOp {
     pub fn result_type(&self) -> (usize, bool) {
         match self {
             Self::Registered | Self::Sampling => (1, false),
-            Self::Register(_) | Self::New { .. } | Self::Build | Self::SampleEnd => (32, false),
+            Self::Register(_)
+            | Self::New { .. }
+            | Self::Build
+            | Self::SampleEnd
+            | Self::Input { .. }
+            | Self::InputString { .. }
+            | Self::FormalSet { .. }
+            | Self::Points { .. }
+            | Self::Point { .. }
+            | Self::Message => (32, false),
+            Self::Formal { width, signed, .. } => (*width as usize, *signed),
             Self::InstCoverage { what } | Self::TypeCoverage { what } => match what {
                 CoverageQuery::Real => (64, false),
                 CoverageQuery::Covered | CoverageQuery::Total => (32, true),
@@ -1809,6 +1859,13 @@ impl fmt::Display for ObjectOp {
                 CoverageOp::InstCoverage { .. } => "covergroup get_inst_coverage",
                 CoverageOp::TypeCoverage { .. } => "covergroup get_coverage",
                 CoverageOp::Overall => "$get_coverage",
+                CoverageOp::Input { .. } | CoverageOp::InputString { .. } => {
+                    "covergroup construction value"
+                }
+                CoverageOp::FormalSet { .. } => "covergroup argument store",
+                CoverageOp::Formal { .. } => "covergroup argument read",
+                CoverageOp::Points { .. } | CoverageOp::Point { .. } => "covergroup sample value",
+                CoverageOp::Message => "covergroup message",
             },
         })
     }

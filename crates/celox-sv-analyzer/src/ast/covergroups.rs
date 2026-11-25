@@ -22,12 +22,17 @@
 use super::*;
 use celox_sv_syntax::{BodyItemKind, CovergroupId, Declarations, TokenRange};
 
+mod compile;
 mod methods;
 mod model;
 
+pub(crate) use compile::Bound;
+pub(super) use compile::{
+    Level, OptionType, coverpoints, option_member, point_name, variable_names,
+};
 pub(super) use methods::{construct, overall, result_type, sample_statement, value};
 pub(crate) use model::is_constructor;
-pub(super) use model::{Covergroup, Formal, build, declare, is_sampler};
+pub(super) use model::{Covergroup, Formal, build, declare, is_sampler, rejected};
 
 /// The start of the reserved class name of every covergroup type.
 const PREFIX: &str = "$covergroup::";

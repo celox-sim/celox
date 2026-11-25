@@ -77,7 +77,8 @@ fn unsupported_constructs_name_their_tracking_issue() {
         // Every construct of a covergroup that is not supported names the
         // issue of clause 19.
         (
-            "module Top(input logic clk, a); covergroup cg; coverpoint a; endgroup cg c; \
+            "module Top(input logic clk, a); covergroup cg; coverpoint a { bins b[] = {0, 1}; } \
+             endgroup cg c; \
              always @(posedge clk) begin if (c == null) c = new; c.sample(); end endmodule",
             4294,
         ),

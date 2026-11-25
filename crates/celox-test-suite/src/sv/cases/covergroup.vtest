@@ -99,3 +99,188 @@ endmodule"#)
  end
 endmodule"#)
  (top Top) (run_until 0) (assert_eq q 7))
+
+; 19.5.1, 19.11: a bin of values and ranges is covered once a sample is in
+; it, and the coverage of an instance with one coverpoint is its covered
+; bins over its bins. `$` is the highest value of the coverpoint.
+(case value_bins_count_samples
+ (source "bins.sv" #"module Top;
+ bit [3:0] v;
+ covergroup cg;
+  coverpoint v {
+   bins zero = {0};
+   bins low = {[1:3], 5};
+   bins high = {[12:$]};
+   bins rest = {4, [6:11]};
+  }
+ endgroup
+ cg c = new;
+ initial begin
+  $display("%0.2f", c.get_inst_coverage());
+  v = 0; c.sample();
+  v = 5; c.sample();
+  $display("%0.2f", c.get_inst_coverage());
+  v = 2; c.sample();
+  $display("%0.2f", c.get_inst_coverage());
+  v = 15; c.sample();
+  v = 7; c.sample();
+  $display("%0.2f", c.get_inst_coverage());
+ end
+endmodule"#)
+ (top Top) (run_until 0)
+ (expect_output "0.00\n50.00\n50.00\n100.00\n"))
+
+; 19.5.3: a coverpoint without bins has a bin for each of its values, up to
+; `option.auto_bin_max` bins that share the values evenly, and for an
+; enumeration a bin for each enumerator.
+(case automatic_bins_of_a_coverpoint
+ (source "automatic.sv" #"module Top;
+ typedef enum bit [1:0] { RED, GREEN, BLUE } color_t;
+ bit [2:0] v;
+ bit [7:0] w;
+ color_t color;
+ covergroup values; coverpoint v; endgroup
+ covergroup halves; coverpoint w { option.auto_bin_max = 2; } endgroup
+ covergroup colors; coverpoint color; endgroup
+ values a = new;
+ halves b = new;
+ colors c = new;
+ initial begin
+  v = 1; a.sample(); v = 6; a.sample(); v = 1; a.sample();
+  $display("values %0.2f", a.get_inst_coverage());
+  w = 8'd10; b.sample(); w = 8'd127; b.sample();
+  $display("halves %0.2f", b.get_inst_coverage());
+  w = 8'd128; b.sample();
+  $display("halves %0.2f", b.get_inst_coverage());
+  color = GREEN; c.sample(); color = RED; c.sample();
+  $display("colors %0.2f", c.get_inst_coverage());
+  color = BLUE; c.sample();
+  $display("colors %0.2f", c.get_inst_coverage());
+ end
+endmodule"#)
+ (top Top) (run_until 0)
+ (expect_output "values 25.00\nhalves 50.00\nhalves 100.00\ncolors 66.67\ncolors 100.00\n"))
+
+; 19.5: a coverpoint whose guard is false at a sample is not sampled.
+(case coverpoint_guard_skips_the_sample
+ (source "guard.sv" #"module Top;
+ bit [1:0] v;
+ bit en;
+ covergroup cg; coverpoint v iff (en); endgroup
+ cg c = new;
+ initial begin
+  v = 1; en = 0; c.sample();
+  $display("%0.2f", c.get_inst_coverage());
+  en = 1; c.sample();
+  $display("%0.2f", c.get_inst_coverage());
+  v = 2; en = 0; c.sample();
+  $display("%0.2f", c.get_inst_coverage());
+ end
+endmodule"#)
+ (top Top) (run_until 0)
+ (expect_output "0.00\n25.00\n25.00\n"))
+
+; 19.8.1: the arguments of the sample method are what the coverpoints and
+; their guards read.
+(case sample_arguments_are_the_sampled_values
+ (source "sample_arguments.sv" #"module Top;
+ covergroup cg with function sample(bit [1:0] v, bit on);
+  coverpoint v iff (on);
+ endgroup
+ cg c = new;
+ initial begin
+  c.sample(2'd1, 1'b1);
+  c.sample(2'd2, 1'b0);
+  $display("%0.2f", c.get_inst_coverage());
+  c.sample(2'd2, 1'b1);
+  $display("%0.2f", c.get_inst_coverage());
+ end
+endmodule"#)
+ (top Top) (run_until 0)
+ (expect_output "25.00\n50.00\n"))
+
+; 19.3, 19.5: the bins of an instance are those its arguments give, so two
+; instances of one covergroup count the same samples in different bins.
+(case constructor_arguments_set_the_bins
+ (source "constructor_arguments.sv" #"module Top;
+ bit [3:0] v;
+ covergroup cg(int lo, int hi);
+  coverpoint v {
+   bins below = {[0:lo]};
+   bins between = {[lo + 1:hi]};
+   bins above = {[hi + 1:$]};
+  }
+ endgroup
+ cg a = new(3, 7);
+ cg b = new(9, 12);
+ initial begin
+  v = 5; a.sample(); b.sample();
+  v = 8; a.sample(); b.sample();
+  $display("%0.2f %0.2f", a.get_inst_coverage(), b.get_inst_coverage());
+ end
+endmodule"#)
+ (top Top) (run_until 0)
+ (expect_output "66.67 33.33\n"))
+
+; 19.7, 19.11: `option.weight` of a coverpoint weighs its coverage in that
+; of the instance, and `option.at_least` is the number of hits that covers
+; a bin.
+(case options_of_a_definition
+ (source "options.sv" #"module Top;
+ bit x, y, z;
+ covergroup weighted;
+  a: coverpoint x { option.weight = 3; }
+  b: coverpoint y { option.weight = 1; }
+ endgroup
+ covergroup twice;
+  option.at_least = 2;
+  coverpoint z;
+ endgroup
+ weighted w = new;
+ twice t = new;
+ initial begin
+  x = 0; y = 0; w.sample();
+  x = 1; w.sample();
+  $display("weighted %0.2f", w.get_inst_coverage());
+  z = 0; t.sample();
+  $display("twice %0.2f", t.get_inst_coverage());
+  t.sample();
+  $display("twice %0.2f", t.get_inst_coverage());
+  z = 1; t.sample(); t.sample();
+  $display("twice %0.2f", t.get_inst_coverage());
+ end
+endmodule"#)
+ (top Top) (run_until 0)
+ (expect_output "weighted 87.50\ntwice 0.00\ntwice 50.00\ntwice 100.00\n"))
+
+; 19.4: the coverpoints of an embedded covergroup read the members of its
+; class, of the object that holds the instance.
+(case embedded_covergroup_reads_its_class
+ (source "embedded_members.sv" #"module Top;
+ class C;
+  bit [1:0] kind;
+  bit on;
+  covergroup cg;
+   coverpoint kind iff (on) { bins low = {0, 1}; bins high = {2, 3}; }
+  endgroup
+  function new(); cg = new; endfunction
+  function void record(bit [1:0] k, bit o);
+   kind = k;
+   on = o;
+   cg.sample();
+  endfunction
+ endclass
+ C a, b;
+ initial begin
+  a = new;
+  b = new;
+  a.record(2'd1, 1'b1);
+  b.record(2'd3, 1'b0);
+  $display("%0.2f %0.2f", a.cg.get_inst_coverage(), b.cg.get_inst_coverage());
+  b.record(2'd2, 1'b1);
+  b.record(2'd0, 1'b1);
+  $display("%0.2f %0.2f", a.cg.get_inst_coverage(), b.cg.get_inst_coverage());
+ end
+endmodule"#)
+ (top Top) (run_until 0)
+ (expect_output "50.00 0.00\n50.00 100.00\n"))
