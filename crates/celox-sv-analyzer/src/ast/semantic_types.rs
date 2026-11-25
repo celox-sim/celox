@@ -830,7 +830,17 @@ impl TyTable {
     /// `id` (7.5, 7.10, 7.8), or of the elements of a fixed-size unpacked
     /// array of them (7.4.2), once a value of it has been converted.
     pub(super) fn container(&self, id: TyId) -> Option<&Arc<super::ContainerType>> {
-        self.containers.get(&self.fixed_element(id))
+        let id = self.fixed_element(id);
+        // Only a dynamically sized array is registered; any other type
+        // needs no lookup.
+        match self.data(id) {
+            TyData::Array {
+                kind: ArrayKind::Fixed(_),
+                ..
+            } => None,
+            TyData::Array { .. } => self.containers.get(&id),
+            _ => None,
+        }
     }
 
     /// The declaration of unpacked structure type `id`, or of the elements

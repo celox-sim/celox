@@ -1106,14 +1106,9 @@ impl Renamer<'_> {
             .into_iter()
             .map(|member| member.with_type(|ty| self.r#type(ty)))
             .collect();
-        shape.container = shape
-            .container
-            .take()
-            .map(|container| self.container(&container));
         // The type keeps its container, renamed.
-        if r#type.kept_container.declaration().is_some() {
-            let container = r#type.container.clone();
-            r#type.keep_container(container);
+        if let Some(container) = r#type.container().cloned() {
+            r#type.keep_container(Some(self.container(&container)));
         }
         r#type
     }

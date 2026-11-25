@@ -497,7 +497,6 @@ pub(super) fn dimensions_from_type(r#type: &Type) -> VariableDimensions {
     VariableDimensions::bound_to(
         VariableShape {
             chandle: r#type.is_chandle(),
-            container: r#type.container().cloned(),
             randomizable: r#type.container().is_none() && !r#type.holds_chandle(),
             real: matches!(r#type.kind(), TypeKind::Real | TypeKind::Shortreal),
             string: matches!(r#type.kind(), TypeKind::String),
@@ -663,7 +662,6 @@ pub(super) fn rename_expr_idents(
 /// The `int` type of a loop variable declared by `foreach`.
 pub(super) fn int_type() -> Type {
     Type::from(TypeShape {
-        container: None,
         kind: TypeKind::Bit,
         is_signed: true,
         packed_ranges: vec![PackedRange::new(

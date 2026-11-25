@@ -571,7 +571,6 @@ fn pattern_items(
                 left.max(right),
                 shape.derived(VariableShape {
                     declared: type_names::Declared::default(),
-                    container: None,
                     chandle: false,
                     real: false,
                     string: false,
@@ -597,7 +596,6 @@ fn pattern_items(
                 left.max(right),
                 shape.derived(VariableShape {
                     declared: type_names::Declared::default(),
-                    container: None,
                     real: false,
                     string: false,
                     packed: rest.to_vec(),
@@ -613,7 +611,6 @@ fn pattern_items(
                 count as i128 - 1,
                 VariableDimensions::new(VariableShape {
                     declared: type_names::Declared::default(),
-                    container: None,
                     chandle: false,
                     randomizable: true,
                     real: false,

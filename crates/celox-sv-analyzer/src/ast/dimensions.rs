@@ -148,7 +148,6 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                 VariableShape {
                     declared: type_names::Declared::new(port.r#type()),
                     chandle: port.r#type().is_chandle(),
-                    container: port.r#type().container().cloned(),
                     randomizable: port.r#type().container().is_none()
                         && !port.r#type().holds_chandle()
                         && port.randomizable,
@@ -195,7 +194,6 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                 VariableShape {
                     declared: type_names::Declared::new(signal.r#type()),
                     chandle: signal.r#type().is_chandle(),
-                    container: signal.r#type().container().cloned(),
                     randomizable: signal.r#type().container().is_none()
                         && !signal.r#type().holds_chandle()
                         && !signal.is_net()
@@ -475,7 +473,6 @@ fn extend_variable_dimensions_from_markers(
         }
         let packed_ranges = ranges.split_off(unpacked);
         let ty = Type::from(TypeShape {
-            container: None,
             kind: TypeKind::Logic,
             is_signed: variable_type_is_signed(const_env, name),
             packed_ranges,
@@ -492,7 +489,6 @@ fn extend_variable_dimensions_from_markers(
         shape.declared = type_names::Declared::default();
         if let Some(existing) = context.get(name) {
             shape.declared = existing.declared.clone();
-            shape.container = existing.container.clone();
             shape.randomizable = existing.randomizable;
             shape.members = existing.members.clone();
             shape.is_2state = existing.is_2state;
@@ -696,7 +692,6 @@ pub(super) fn parameter_packed_dimensions(parameters: &[Parameter]) -> VariableP
                 parameter.name.clone(),
                 VariableDimensions::new(VariableShape {
                     declared: type_names::Declared::default(),
-                    container: None,
                     chandle: false,
                     randomizable: true,
                     real: false,
