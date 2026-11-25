@@ -2099,7 +2099,8 @@
         "class::inherited_methods_of_extended_interface_classes",
         "class::casts_from_interface_class_handles",
         "class::typedefs_of_interface_classes",
-        "class::classes_of_packages"
+        "class::classes_of_packages",
+        "class::module_class_overrides_across_base_layouts"
       ]
     }
   },

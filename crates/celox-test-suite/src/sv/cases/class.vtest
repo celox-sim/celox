@@ -7100,3 +7100,41 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq nulls 2) (assert_eq counts 1) (assert_eq values 75)
   (assert_eq done 1))
+
+; IEEE 1800-2023 8.20: the class of each specialization of a module extends
+; a package class whose property is as wide as the specialization says, so
+; the two specializations lay out their objects' base differently. Package
+; code calls the override through handles of the package class, and each
+; call reads the module instance its object was created in.
+(case module_class_overrides_across_base_layouts
+  (source "module_class_base_layouts.sv" #"
+package p;
+    virtual class B; pure virtual function int f(); endclass
+    B obj[$];
+    virtual class base #(int W = 8) extends B; bit [W-1:0] pad; endclass
+endpackage
+module m #(int W = 1);
+    int k = W;
+    class C extends p::base#(8 * W);
+        virtual function int f(); return k * 10 + $bits(pad) / 8; endfunction
+    endclass
+    initial begin
+        C c = new;
+        p::obj.push_back(c);
+    end
+endmodule
+module Top(output bit done);
+    m #(1) m0 ();
+    m #(2) m1 ();
+    initial begin
+        int a, b;
+        #1;
+        a = p::obj[0].f();
+        b = p::obj[1].f();
+        $display("%0d %0d", a < b ? a : b, a < b ? b : a);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 2) (assert_eq done 1)
+  (expect_output "11 22\n"))
