@@ -81,6 +81,7 @@ fn pattern_value(
         let element = shape.derived(VariableShape {
             declared: type_names::Declared::default(),
             real: false,
+            shortreal: false,
             string: false,
             unpacked: rest.to_vec(),
             ..shape.clone_shape()

@@ -938,3 +938,38 @@ fn typedefs_name_the_declarations_of_their_aggregates() {
     );
     assert_eq!(structure.naming().declaration(), s_t.declaration_name());
 }
+
+#[test]
+fn shapes_of_a_named_aggregate_are_of_its_typedef_without_a_declared_type() {
+    // IEEE 1800-2023 6.22.1: a typedef of a structure is a type of its own,
+    // which matches only itself; an element or member selected from a
+    // variable of it (7.2, 7.4) is of that type, and `$typename` writes its
+    // name (20.6.1). The shape of such a value, made without the declared
+    // type of a variable, is of the typedef too, not of an anonymous
+    // structure declared at the same place.
+    let session = &mut Session::default();
+    let source = "module M;
+        typedef struct {int a;} s_t;
+        typedef struct packed {logic [3:0] a;} p_t;
+        endmodule";
+    let tree =
+        crate::source_tree::parse_scope_fixture(source, Path::new("semantic_types.sv")).unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
+    let env = ConstEnv::default();
+    let aliases = types::type_aliases_from_scope_with_env(&tree, session, &env).unwrap();
+    let mut table = TyTable::default();
+    for name in ["s_t", "p_t"] {
+        let ty = &aliases[name];
+        let id = of_type(&mut table, &tree.functions, ty, &env).unwrap();
+        let shape = crate::ast::procedural::dimensions_from_type(ty);
+        let element = shape.derived(crate::ast::variable_dimensions::VariableShape {
+            declared: crate::ast::type_names::Declared::default(),
+            ..shape.clone_shape()
+        });
+        let element = element
+            .type_id(&mut table, &tree.functions, &env)
+            .unwrap_or_else(|| panic!("a shape of `{name}` has a semantic type"));
+        assert_eq!(element, id, "a shape of `{name}`");
+        assert!(table.matches(element, id));
+    }
+}

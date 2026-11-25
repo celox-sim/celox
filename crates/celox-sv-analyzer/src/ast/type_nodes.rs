@@ -41,7 +41,7 @@ impl Type {
         if (self.enumeration().is_some()
             || !self.members.is_empty()
             || self.unpacked_struct().is_some())
-            && self.spelling.declaration().is_none()
+            && self.declaration_name().is_none()
         {
             let (name, typename) = name();
             let mut enumeration = self.enumeration.binding();
@@ -70,13 +70,7 @@ impl Type {
 
     /// The typedef that names this enumeration, struct or union type.
     pub(super) fn declaration_name(&self) -> Option<&str> {
-        self.spelling.declaration()
-    }
-
-    /// The elaborated scope that declares this enumeration, struct or
-    /// union type, if a module, interface or program does.
-    pub(super) fn declaration_scope(&self) -> Option<&str> {
-        self.spelling.scope()
+        self.naming().0
     }
 
     /// Whether the type is a chandle or an unpacked structure with a

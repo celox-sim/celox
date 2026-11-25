@@ -573,6 +573,7 @@ fn pattern_items(
                     declared: type_names::Declared::default(),
                     chandle: false,
                     real: false,
+                    shortreal: false,
                     string: false,
                     unpacked: rest.to_vec(),
                     ..shape.clone_shape()
@@ -597,6 +598,7 @@ fn pattern_items(
                 shape.derived(VariableShape {
                     declared: type_names::Declared::default(),
                     real: false,
+                    shortreal: false,
                     string: false,
                     packed: rest.to_vec(),
                     ..shape.clone_shape()
@@ -614,6 +616,7 @@ fn pattern_items(
                     chandle: false,
                     randomizable: true,
                     real: false,
+                    shortreal: false,
                     string: false,
                     packed: Vec::new(),
                     unpacked: Vec::new(),
