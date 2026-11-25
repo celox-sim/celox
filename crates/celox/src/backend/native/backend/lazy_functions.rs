@@ -2,10 +2,12 @@
 //!
 //! A program loaded in the process that compiled it keeps its function units
 //! ([`crate::ir::SirProgram::functions`]) out of the image: each one's extern
-//! address table slot first reaches a stub, which compiles the unit with the
-//! pipeline and options the image would have compiled it with, installs the
-//! code, points the slot at it and continues the call. Later calls go
-//! straight to the code, so a unit that is never called is never compiled.
+//! address table slot first reaches a stub, which has the unit compiled with
+//! the pipeline and options the image would have compiled it with, installs
+//! the code, points the slot at it and continues the call. Later calls go
+//! straight to the code. Meanwhile the units the called unit calls compile
+//! too; a unit that neither the simulation nor a called unit calls is never
+//! compiled.
 //!
 //! The image then holds [`LAZY_FUNCTION_OFFSET`] in those slots' kernel
 //! offsets. It cannot be loaded again without the program it came from:
@@ -49,20 +51,22 @@ struct LazyCode {
 /// The function units of a loaded program that compile at their first
 /// call, and the code of those that did.
 ///
-/// One thread compiles them, started at the first call: the caller's stack
-/// may be deep in nested generated calls, and the compile thread has the
-/// stack an eager compile worker has. The caller hands it the unit and waits
-/// for the code.
+/// Compile threads, started at the first call, compile them: the caller's
+/// stack may be deep in nested generated calls, and a compile thread has
+/// the stack an eager compile worker has. The caller hands one the unit and
+/// waits for its code. The other threads meanwhile compile the units the
+/// called unit calls, which its caller is likely to call next; a call of a
+/// unit such a thread is compiling waits for that compile.
 pub(crate) struct LazyFunctions {
     compiler: Arc<Compiler>,
     /// The first extern address table slot of the function units.
     first_slot: usize,
 }
 
-/// What the compile thread shares with the threads that call units.
+/// What the compile threads share with the threads that call units.
 #[expect(
     clippy::disallowed_types,
-    reason = "cross-thread: generated code on any thread, lane workers included, requests units of the compile thread and waits for their code"
+    reason = "cross-thread: generated code on any thread, lane workers included, requests units of the compile threads and waits for their code"
 )]
 struct Compiler {
     program: Arc<LaidOutProgram>,
@@ -71,26 +75,44 @@ struct Compiler {
     native_memory_size: usize,
     units: Box<[OnceLock<Result<LazyCode, String>>]>,
     requests: Mutex<Requests>,
-    /// Signalled when a request arrives or the compile thread is to stop.
+    /// Signalled when a request arrives or the compile threads are to stop.
     requested: Condvar,
+    /// Stops the compiles running when the functions are dropped.
+    cancel: CompileCancel,
     compiled: AtomicU64,
     compile_nanos: AtomicU64,
+    /// How long callers waited for code, in all.
+    wait_nanos: AtomicU64,
     #[cfg(test)]
     fail_compiles: bool,
 }
 
-#[derive(Default)]
 struct Requests {
-    /// The units callers wait for, in the order the thread takes them.
-    units: VecDeque<usize>,
+    /// The units callers wait for, in the order the threads take them.
+    called: VecDeque<usize>,
+    /// The units called units call, the latest at the back, where the
+    /// threads take them: the callees of the latest call are the likeliest
+    /// to be called next.
+    callees: Vec<usize>,
+    /// What a unit's requests were so far.
+    states: Box<[UnitState]>,
     stopped: bool,
-    thread: Option<std::thread::JoinHandle<()>>,
+    threads: Vec<std::thread::JoinHandle<()>>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct UnitState {
+    /// A unit that called it was called.
+    callee: bool,
+    called: bool,
+    /// A compile of the callees took it before it was called.
+    speculative: bool,
 }
 
 impl LazyFunctions {
     #[expect(
         clippy::disallowed_types,
-        reason = "cross-thread: the state of `LazyFunctions`, which threads running generated code share with its compile thread"
+        reason = "cross-thread: the state of `LazyFunctions`, which threads running generated code share with its compile threads"
     )]
     pub(super) fn new(
         program: Arc<LaidOutProgram>,
@@ -98,19 +120,26 @@ impl LazyFunctions {
         native_memory_size: usize,
     ) -> Self {
         let first_slot = program.runtime().runtime_schema.extern_functions.len();
-        let units = (0..program.sir.functions.len())
-            .map(|_| OnceLock::new())
-            .collect();
+        let len = program.sir.functions.len();
+        let units = (0..len).map(|_| OnceLock::new()).collect();
         Self {
             compiler: Arc::new(Compiler {
                 program,
                 options,
                 native_memory_size,
                 units,
-                requests: Mutex::new(Requests::default()),
+                requests: Mutex::new(Requests {
+                    called: VecDeque::new(),
+                    callees: Vec::new(),
+                    states: vec![UnitState::default(); len].into_boxed_slice(),
+                    stopped: false,
+                    threads: Vec::new(),
+                }),
                 requested: Condvar::new(),
+                cancel: CompileCancel::new(),
                 compiled: AtomicU64::new(0),
                 compile_nanos: AtomicU64::new(0),
+                wait_nanos: AtomicU64::new(0),
                 #[cfg(test)]
                 fail_compiles: false,
             }),
@@ -154,13 +183,24 @@ impl LazyFunctions {
         self.compiler.compiled.load(Ordering::Relaxed)
     }
 
-    /// The error of the first unit that failed to compile.
+    /// The number of compile threads started.
+    #[cfg(test)]
+    pub(crate) fn compile_threads(&self) -> usize {
+        self.compiler.lock().threads.len()
+    }
+
+    /// The error of the first called unit that failed to compile. A unit
+    /// compiled for its caller that fails holds its error until it is
+    /// called.
     pub(crate) fn failure(&self) -> Option<String> {
+        let requests = self.compiler.lock();
         self.compiler
             .units
             .iter()
+            .zip(&requests.states)
             .enumerate()
-            .find_map(|(index, unit)| {
+            .filter(|(_, (_, state))| state.called)
+            .find_map(|(index, (unit, _))| {
                 unit.get()?.as_ref().err().map(|error| {
                     format!("native code generation of function[{index}] failed: {error}")
                 })
@@ -196,15 +236,21 @@ impl LazyFunctions {
             .map_err(|source| codegen_err(CodegenError::NativeMemory { source }))
     }
 
-    /// The entry of unit `index`, which the compile thread compiles now
-    /// unless it already did.
+    /// The entry of unit `index`, which a compile thread compiles now unless
+    /// one already did.
     fn entry(&self, index: usize) -> Option<usize> {
         let unit = self.compiler.units.get(index)?;
+        Compiler::call(&self.compiler, index);
         let code = match unit.get() {
             Some(code) => code,
             None => {
-                Compiler::request(&self.compiler, index);
-                unit.wait()
+                let start = Instant::now();
+                let code = unit.wait();
+                self.compiler.wait_nanos.fetch_add(
+                    u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                    Ordering::Relaxed,
+                );
+                code
             }
         };
         code.as_ref().ok().map(|code| code.entry)
@@ -218,49 +264,129 @@ impl Compiler {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Have the compile thread compile unit `index`, starting the thread at
-    /// the first request. The unit holds an error if the thread cannot
-    /// start.
-    fn request(this: &Arc<Self>, index: usize) {
-        let mut requests = this.lock();
-        if requests.thread.is_none() {
-            let compiler = Arc::clone(this);
-            match std::thread::Builder::new()
-                .name("celox-lazy-compile".into())
-                .spawn(move || compiler.work())
-            {
-                Ok(thread) => requests.thread = Some(thread),
-                Err(error) => {
-                    drop(requests);
-                    let _ = this.units[index]
-                        .set(Err(format!("the compile thread did not start: {error}")));
-                    return;
+    /// The units unit `index` calls, each once, in the order of its blocks.
+    fn callees(&self, index: usize) -> Vec<usize> {
+        let unit = &self.program.sir.functions[index].unit;
+        let mut blocks = unit.blocks.iter().collect::<Vec<_>>();
+        blocks.sort_unstable_by_key(|(id, _)| id.0);
+        let mut callees = Vec::new();
+        for (_, block) in blocks {
+            for instruction in &block.instructions {
+                if let celox_sir::SIRInstruction::Call { function, .. } = instruction {
+                    let callee = function.0 as usize;
+                    if callee < self.units.len() && !callees.contains(&callee) {
+                        callees.push(callee);
+                    }
                 }
             }
         }
-        requests.units.push_back(index);
-        drop(requests);
-        this.requested.notify_one();
+        callees
     }
 
-    /// The compile thread: compile requested units until stopped. It keeps
-    /// a copy of the program's layout for the units to place their frame
-    /// slots in.
-    fn work(&self) {
+    /// Record a call of unit `index`: have a compile thread compile it
+    /// unless it is compiled, and the other threads the units it calls. The
+    /// threads start at the first call; the unit holds an error if none
+    /// starts.
+    fn call(this: &Arc<Self>, index: usize) {
+        let mut requests = this.lock();
+        if std::mem::replace(&mut requests.states[index].called, true) {
+            return;
+        }
+        if requests.threads.is_empty() {
+            let threads = this.threads();
+            for speculates in std::iter::once(false).chain((1..threads).map(|_| true)) {
+                let compiler = Arc::clone(this);
+                match std::thread::Builder::new()
+                    .name("celox-lazy-compile".into())
+                    .spawn(move || compiler.work(speculates))
+                {
+                    Ok(thread) => requests.threads.push(thread),
+                    Err(error) if requests.threads.is_empty() => {
+                        drop(requests);
+                        let _ = this.units[index]
+                            .set(Err(format!("no compile thread started: {error}")));
+                        return;
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+        let compiled = this.units[index].get().is_some();
+        if !compiled {
+            requests.called.push_back(index);
+        }
+        if requests.threads.len() > 1 {
+            // The callees of this call before those of earlier ones; its
+            // first callee first.
+            for callee in this.callees(index).into_iter().rev() {
+                let state = &mut requests.states[callee];
+                if !state.callee && !state.called && this.units[callee].get().is_none() {
+                    state.callee = true;
+                    requests.callees.push(callee);
+                }
+            }
+        }
+        drop(requests);
+        this.requested.notify_all();
+    }
+
+    /// How many compile threads to start: those an eager compile of the
+    /// units would use, one of which compiles only called units.
+    fn threads(&self) -> usize {
+        let functions = &self.program.sir.functions;
+        let (blocks, instructions) = functions
+            .iter()
+            .map(|function| {
+                (
+                    function.unit.blocks.len(),
+                    function
+                        .unit
+                        .blocks
+                        .values()
+                        .map(|block| block.instructions.len())
+                        .sum::<usize>(),
+                )
+            })
+            .fold((0, 0), |(blocks, instructions), (b, i)| {
+                (blocks.max(b), instructions.max(i))
+            });
+        super::super::compile_resources::workers_with_state(
+            blocks,
+            instructions,
+            functions.len(),
+            super::super::compile_resources::layout_bytes(self.program.layout()),
+        )
+        .max(1)
+    }
+
+    /// A compile thread: compile requested units until stopped. It keeps a
+    /// copy of the program's layout for the units to place their frame
+    /// slots in. One that `speculates` also compiles the callees of called
+    /// units while no called unit waits.
+    fn work(&self, speculates: bool) {
         let mut layout = None;
-        while let Some(index) = self.next_request() {
+        while let Some(index) = self.next_request(speculates) {
             self.units[index].get_or_init(|| self.compile(index, &mut layout));
         }
     }
 
-    fn next_request(&self) -> Option<usize> {
+    fn next_request(&self, speculates: bool) -> Option<usize> {
         let mut requests = self.lock();
         loop {
             if requests.stopped {
                 return None;
             }
-            if let Some(index) = requests.units.pop_front() {
+            if let Some(index) = requests.called.pop_front() {
                 return Some(index);
+            }
+            if speculates {
+                while let Some(index) = requests.callees.pop() {
+                    let state = &mut requests.states[index];
+                    if !state.called && self.units[index].get().is_none() {
+                        state.speculative = true;
+                        return Some(index);
+                    }
+                }
             }
             requests = self
                 .requested
@@ -269,16 +395,18 @@ impl Compiler {
         }
     }
 
-    /// Stop the compile thread and wait for it.
+    /// Stop the compile threads and wait for them; compiles running stop.
     fn stop(&self) {
-        let thread = {
+        let threads = {
             let mut requests = self.lock();
             requests.stopped = true;
-            requests.units.clear();
-            requests.thread.take()
+            requests.called.clear();
+            requests.callees.clear();
+            std::mem::take(&mut requests.threads)
         };
+        self.cancel.cancel();
         self.requested.notify_all();
-        if let Some(thread) = thread {
+        for thread in threads {
             let _ = thread.join();
         }
     }
@@ -311,8 +439,14 @@ impl Compiler {
             return Err("compile failure injected by a test".into());
         }
         let layout = layout.get_or_insert_with(|| self.program.layout().clone());
-        let compiled = compile_function_unit(&self.program, layout, &self.options, index, None)
-            .map_err(|error| error.to_string())?;
+        let compiled = compile_function_unit(
+            &self.program,
+            layout,
+            &self.options,
+            index,
+            Some(&self.cancel),
+        )
+        .map_err(|error| error.to_string())?;
         if compiled.required_state_size > self.native_memory_size {
             return Err(format!(
                 "the unit needs {} bytes of native state, the image allocates {}",
@@ -342,11 +476,16 @@ impl Drop for LazyFunctions {
     fn drop(&mut self) {
         self.compiler.stop();
         if self.compiler.options.x86_options.diagnostics.phase_timing {
+            let requests = self.compiler.lock();
+            let speculative = requests.states.iter().filter(|state| state.speculative);
+            let unused = speculative.clone().filter(|state| !state.called).count();
             tracing::debug!(
-                "[phase-timing] lazy_function_compile: {}/{} units, {:?}",
+                "[phase-timing] lazy_function_compile: {}/{} units, {:?}, {} for callers before their call ({unused} never called), callers waited {:?}",
                 self.compiled(),
                 self.len(),
-                Duration::from_nanos(self.compiler.compile_nanos.load(Ordering::Relaxed))
+                Duration::from_nanos(self.compiler.compile_nanos.load(Ordering::Relaxed)),
+                speculative.count(),
+                Duration::from_nanos(self.compiler.wait_nanos.load(Ordering::Relaxed)),
             );
         }
     }
