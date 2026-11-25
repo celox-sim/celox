@@ -1,0 +1,1 @@
+Check effective per-instance port connections after slicing distributed actuals and keep source locations for the strict diagnostic (review comment r4699862769).
