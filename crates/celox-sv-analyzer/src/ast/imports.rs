@@ -618,15 +618,18 @@ fn in_ranges(offset: usize, ranges: &[celox_sv_syntax::TokenRange]) -> bool {
     let next = ranges.partition_point(|range| range.start <= offset);
     next > 0 && offset < ranges[next - 1].end
 }
-/// The expressions and types of the formals of the covergroups in the
-/// ranges of a scope, and of their sample methods (IEEE 1800-2023 19.3,
-/// 19.8.1). Nothing else of what follows the name of a covergroup is the
-/// scope's to bind, so the scans of its expressions and types select none
-/// of it (see `Spans::covergroups`); the formals are bound in the scope
-/// that declares the covergroup, so the names their types and defaults
+/// The expressions and types of the covergroups in the ranges of a scope
+/// that the analysis binds: those of their formals and of the formals of
+/// their sample methods (IEEE 1800-2023 19.3, 19.8.1), and of their items
+/// the coverpoint expressions, guards and types, the option values and the
+/// bin operands (see `covergroups::Bound`). Nothing else of what follows
+/// the name of a covergroup is bound, so the scans of the expressions and
+/// types of the scope select none of it (see `Spans::covergroups`). These
+/// are bound in the scope that declares the covergroup, so the names they
 /// read resolve there, through its imports too (26.3). A default is
 /// evaluated in the scope that declares the covergroup (13.5.3), so a name
-/// in it is no formal, also when a formal has the name.
+/// in it is no formal, also when a formal has the name; in an item a name
+/// a formal has is the formal (19.8.1), which names nothing of the scope.
 #[derive(Default)]
 struct CovergroupFormals {
     expressions: Vec<celox_sv_syntax::ExprId>,
@@ -640,34 +643,60 @@ impl CovergroupFormals {
         if native.covergroups.is_empty() {
             return Self::default();
         }
-        let ports: Vec<_> = native
+        let mut found = Self::default();
+        let (expressions, types) = &tree.spans().covergroup_bound;
+        for covergroup in native
             .covergroups
             .iter()
             .filter(|covergroup| in_ranges(covergroup.tokens.start, ranges))
-            .flat_map(super::covergroups::formal_ports)
-            .map(|port| port.tokens)
-            .collect();
-        if ports.is_empty() {
-            return Self::default();
+        {
+            let within = |ranges: &[celox_sv_syntax::TokenRange],
+                          tokens: celox_sv_syntax::TokenRange| {
+                ranges
+                    .iter()
+                    .any(|range| range.start <= tokens.start && tokens.start < range.end)
+            };
+            let ports: Vec<_> = super::covergroups::formal_ports(covergroup)
+                .map(|port| port.tokens)
+                .collect();
+            if !ports.is_empty() {
+                found.expressions.extend(
+                    expressions
+                        .within(&ports)
+                        .into_iter()
+                        .filter(|id| within(&ports, native.expression(*id).tokens)),
+                );
+                found.types.extend(
+                    types
+                        .within(&ports)
+                        .into_iter()
+                        .filter(|id| within(&ports, native.data_type(*id).tokens)),
+                );
+            }
+            let bound = super::covergroups::Bound::of(covergroup).ranges(native);
+            if bound.is_empty() {
+                continue;
+            }
+            let formals: HashSet<String> = super::covergroups::formal_ports(covergroup)
+                .filter_map(|port| port.name.as_ref())
+                .map(|name| normalize_identifier(&name.spelling))
+                .collect();
+            found
+                .expressions
+                .extend(expressions.within(&bound).into_iter().filter(|id| {
+                    let expression = native.expression(*id);
+                    within(&bound, expression.tokens)
+                        && !matches!(&expression.kind, celox_sv_syntax::ExprKind::Name(name)
+                            if formals.contains(&normalize_identifier(&name.spelling)))
+                }));
+            found.types.extend(
+                types
+                    .within(&bound)
+                    .into_iter()
+                    .filter(|id| within(&bound, native.data_type(*id).tokens)),
+            );
         }
-        let within = |tokens: celox_sv_syntax::TokenRange| {
-            ports
-                .iter()
-                .any(|port| port.start <= tokens.start && tokens.start < port.end)
-        };
-        let (expressions, types) = &tree.spans().covergroup_formals;
-        Self {
-            expressions: expressions
-                .within(&ports)
-                .into_iter()
-                .filter(|id| within(native.expression(*id).tokens))
-                .collect(),
-            types: types
-                .within(&ports)
-                .into_iter()
-                .filter(|id| within(native.data_type(*id).tokens))
-                .collect(),
-        }
+        found
     }
 }
 

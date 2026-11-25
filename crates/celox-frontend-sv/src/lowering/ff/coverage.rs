@@ -38,6 +38,210 @@ impl Ff<'_, '_> {
         dst
     }
 
+    /// The 64-bit words of the planes of `expr` as a value of `width` bits,
+    /// from the least significant: the value and, for a value that may hold
+    /// x or z bits, the mask, which is 0 for any other. The expression is
+    /// evaluated once.
+    fn coverage_words(
+        &mut self,
+        expr: &sv::ir::Expr,
+        width: usize,
+        signed: bool,
+    ) -> Result<Vec<(RegisterId, RegisterId)>, sv::AnalyzerError> {
+        let expr = self.hoist(expr)?;
+        let value = self.eval(&expr, Some((width, signed)))?;
+        let four_state = self.m.four_state
+            && matches!(
+                self.b.register(&value),
+                celox_sir::RegisterType::Logic { .. }
+            );
+        let (value, mask) = if four_state {
+            let (value, mask) = self.split_wide_planes(value, width);
+            (value, Some(mask))
+        } else {
+            let known = self.b.alloc_bit(width, false);
+            self.b
+                .emit(SIRInstruction::Unary(known, UnaryOp::ToTwoState, value));
+            (known, None)
+        };
+        let mut words = Vec::new();
+        for first in (0..width).step_by(64) {
+            let bits = (width - first).min(64);
+            let word = |this: &mut Self, plane: RegisterId| {
+                let word = this.b.alloc_bit(bits, false);
+                this.b.emit(SIRInstruction::Slice(word, plane, first, bits));
+                let wide = this.b.alloc_bit(64, false);
+                this.b
+                    .emit(SIRInstruction::Unary(wide, UnaryOp::Ident, word));
+                wide
+            };
+            let value = word(self, value);
+            let mask = match mask {
+                Some(mask) => word(self, mask),
+                None => self.constant64(0),
+            };
+            words.push((value, mask));
+        }
+        Ok(words)
+    }
+
+    /// A coverage operation that hands the heap a value of the design or
+    /// reads one back (see [`CoverageOp`]): the values of a construction
+    /// and of a sample, the arguments an instance keeps, and the text of
+    /// its warnings. An operation that only hands a value over has none.
+    fn coverage_value_call(
+        &mut self,
+        op: &CoverageOp,
+        args: &[Option<sv::ir::Expr>],
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        let arg = |index: usize| {
+            args.get(index)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| unsupported("omitted argument of a coverage operation"))
+        };
+        // Every operand is evaluated before the first call, so that the
+        // calls of a sample follow each other.
+        let done = sv::ir::Expr::Literal("32'd0".into());
+        match op {
+            CoverageOp::Input {
+                index: slot,
+                width,
+                signed,
+            }
+            | CoverageOp::FormalSet {
+                slot,
+                width,
+                signed,
+            }
+            | CoverageOp::Point {
+                item: slot,
+                width,
+                signed,
+            } => {
+                let sub = match op {
+                    CoverageOp::Input { .. } => op::INPUT,
+                    CoverageOp::FormalSet { .. } => op::FORMAL_SET,
+                    _ => op::POINT,
+                };
+                let words = self.coverage_words(arg(1)?, *width as usize, *signed)?;
+                let object = self.handle(arg(0)?)?;
+                for (word, (value, mask)) in words.into_iter().enumerate() {
+                    self.coverage_helper_call(
+                        sub,
+                        u64::from(*slot),
+                        word as u64,
+                        &[object, value, mask],
+                    );
+                }
+                Ok(done)
+            }
+            CoverageOp::InputString { index } => {
+                let string = self.handle(arg(1)?)?;
+                let object = self.handle(arg(0)?)?;
+                self.coverage_helper_call(
+                    op::INPUT_STRING,
+                    u64::from(*index),
+                    0,
+                    &[object, string],
+                );
+                Ok(done)
+            }
+            CoverageOp::Points {
+                first,
+                count,
+                width,
+            } => {
+                let words = self.coverage_words(arg(1)?, *width as usize, false)?;
+                let &[(values, masks)] = words.as_slice() else {
+                    return Err(unsupported(
+                        "coverage operation with coverpoint values of more than 64 bits",
+                    ));
+                };
+                let present = match args.get(2).and_then(Option::as_ref) {
+                    Some(present) => {
+                        Some(self.integer_of_width(present, *count as usize, false)?)
+                    }
+                    None => None,
+                };
+                let object = self.handle(arg(0)?)?;
+                if let Some(present) = present {
+                    self.coverage_helper_call(
+                        op::PRESENT,
+                        u64::from(*first),
+                        u64::from(*count),
+                        &[object, present],
+                    );
+                }
+                self.coverage_helper_call(
+                    op::POINTS,
+                    u64::from(*first),
+                    u64::from(*count),
+                    &[object, values, masks],
+                );
+                Ok(done)
+            }
+            CoverageOp::Formal {
+                slot,
+                width,
+                signed,
+                four_state,
+            } => {
+                let width = *width as usize;
+                let four_state = *four_state && self.m.four_state;
+                let object = self.handle(arg(0)?)?;
+                // The planes of the value, each in words from the least
+                // significant.
+                let planes = if four_state { 2 } else { 1 };
+                let mut read = Vec::new();
+                for plane in 0..planes {
+                    let mut words = Vec::new();
+                    for (word, first) in (0..width).step_by(64).enumerate() {
+                        let bits = (width - first).min(64);
+                        let loaded = self.coverage_helper_call(
+                            op::FORMAL,
+                            u64::from(*slot),
+                            2 * word as u64 + plane,
+                            &[object],
+                        );
+                        let part = self.b.alloc_bit(bits, false);
+                        self.b.emit(SIRInstruction::Slice(part, loaded, 0, bits));
+                        words.push(part);
+                    }
+                    // A concatenation lists the most significant word
+                    // first.
+                    words.reverse();
+                    let value = self.b.alloc_bit(width, false);
+                    self.b.emit(SIRInstruction::Concat(value, words));
+                    read.push(value);
+                }
+                let value = if four_state {
+                    self.join_wide_planes(read[0], read[1], width)
+                } else {
+                    let value = self.b.alloc_bit(width, *signed);
+                    self.b
+                        .emit(SIRInstruction::Unary(value, UnaryOp::Ident, read[0]));
+                    value
+                };
+                let (temp, name) = self.m.temp("coverage", width, *signed, four_state);
+                self.store(temp, SIROffset::Static(0), width, value);
+                Ok(sv::ir::Expr::Ident(name))
+            }
+            CoverageOp::Message => {
+                let object = self.handle(arg(0)?)?;
+                let result = self.coverage_helper_call(op::MESSAGE, 0, 0, &[object]);
+                let width = celox_design::HANDLE_WIDTH;
+                let value = self.b.alloc_bit(width, false);
+                self.b.emit(SIRInstruction::Slice(value, result, 0, width));
+                let (temp, name) = self.m.temp("coverage", width, false, false);
+                self.m.variables.get_mut(&temp).unwrap().value_kind =
+                    celox_design::ValueKind::StrRef;
+                self.store(temp, SIROffset::Static(0), width, value);
+                Ok(sv::ir::Expr::Ident(name))
+            }
+            _ => unreachable!("a coverage operation without a value operand"),
+        }
+    }
+
     /// The value of coverage operation `op`, as a temporary.
     pub(super) fn coverage_call(
         &mut self,
@@ -48,6 +252,18 @@ impl Ff<'_, '_> {
         // (19.11), with no call.
         if matches!(op, CoverageOp::Overall) && self.m.no_covergroups {
             return Ok(sv::ir::Expr::Literal("100.0".into()));
+        }
+        if matches!(
+            op,
+            CoverageOp::Input { .. }
+                | CoverageOp::InputString { .. }
+                | CoverageOp::FormalSet { .. }
+                | CoverageOp::Formal { .. }
+                | CoverageOp::Points { .. }
+                | CoverageOp::Point { .. }
+                | CoverageOp::Message
+        ) {
+            return self.coverage_value_call(op, args);
         }
         // The first operand is the key of a type or the handle of an
         // instance; the second names an item.
@@ -165,6 +381,13 @@ impl Ff<'_, '_> {
                 self.coverage_helper_call(sub, what, 0, &[target, item])
             }
             CoverageOp::Overall => self.coverage_helper_call(op::OVERALL, 0, 0, &[]),
+            CoverageOp::Input { .. }
+            | CoverageOp::InputString { .. }
+            | CoverageOp::FormalSet { .. }
+            | CoverageOp::Formal { .. }
+            | CoverageOp::Points { .. }
+            | CoverageOp::Point { .. }
+            | CoverageOp::Message => unreachable!("handled by coverage_value_call"),
         };
         let (width, signed) = op.result_type();
         let value = self.b.alloc_bit(width, signed);

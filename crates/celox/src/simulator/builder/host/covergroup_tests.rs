@@ -45,8 +45,16 @@ struct Facts {
 fn laid_out(
     builder: crate::SimulatorBuilder<'_, crate::Simulation>,
 ) -> (crate::ir::LaidOutProgram, Facts) {
+    laid_out_in(builder, false)
+}
+
+/// As [`laid_out`], in four-state simulation if `four_state`.
+fn laid_out_in(
+    builder: crate::SimulatorBuilder<'_, crate::Simulation>,
+    four_state: bool,
+) -> (crate::ir::LaidOutProgram, Facts) {
     let (program, ..) = builder
-        .four_state(false)
+        .four_state(four_state)
         .emit_triggers()
         .into_laid_out_program(crate::MemoryLayoutMode::Packed, false, false)
         .unwrap();
@@ -118,15 +126,19 @@ endpackage",
     let import = "    import p::*;";
     let (base_program, base) = laid_out(timed(&rtl(&packages([""; 3]), import)));
     assert_eq!((base.heap_calls, base.coverage_calls), (0, 0));
+    // With coverpoints, bins and options, which are compiled only where
+    // the subroutines of a type are made, and reach a module only with the
+    // subroutines it calls.
     let declared = packages([
-        "covergroup ucg(int a); endgroup",
-        "covergroup pcg; endgroup",
-        "covergroup kcg(string s = \"k\"); endgroup",
+        "covergroup ucg(int a); option.weight = a; coverpoint a { bins b = {[0:a]}; } endgroup",
+        "covergroup pcg with function sample(bit [3:0] s); coverpoint s; endgroup",
+        "covergroup kcg(string s = \"k\"); option.name = s; coverpoint v iff (v > 0); \
+         coverpoint s.len(); endgroup",
     ]);
     let items = format!(
         "{import}
     covergroup cg(int lo, string name = \"n\") @(posedge clk); coverpoint d; endgroup
-    covergroup plain; endgroup"
+    covergroup plain(int hi); coverpoint d {{ bins low = {{[0:hi]}}; }} coverpoint q; endgroup"
     );
     let (program, facts) = laid_out(timed(&rtl(&declared, &items)));
     assert_eq!(facts, base);
@@ -139,12 +151,12 @@ endpackage",
     assert_eq!(plan.incremental, base_plan.incremental);
     // Without a class the design has no handle at all.
     let (_, plain) = laid_out(timed(&rtl(
-        "covergroup ucg(int a); endgroup
+        "covergroup ucg(int a); coverpoint a; endgroup
 package q;
-    covergroup pcg; endgroup
+    covergroup pcg(string s); option.comment = s; coverpoint s.len(); endgroup
 endpackage",
         "    import q::*;
-    covergroup plain(string s); endgroup",
+    covergroup plain(string s); coverpoint d + s.len(); endgroup",
     )));
     let (_, none) = laid_out(timed(&rtl("", "")));
     assert_eq!(plain, none);
@@ -168,8 +180,8 @@ endpackage",
     always @(posedge clk) begin qcount++; ucount++; end";
     let (_, declared) = laid_out(timed(&rtl(
         &variables([
-            "covergroup ucg(string s = \"u\"); endgroup",
-            "covergroup pcg(string s = \"p\"); endgroup",
+            "covergroup ucg(string s = \"u\"); option.name = s; coverpoint s.len(); endgroup",
+            "covergroup pcg(string s = \"p\"); coverpoint s.len() + 1; endgroup",
         ]),
         counting,
     )));
@@ -495,4 +507,320 @@ fn sample_in_always_comb_drops_settle_slicing() {
             .settle_reads,
         None
     );
+}
+
+/// The calls of the coverage helper in `sir`: the operation of each (see
+/// `celox_heap::coverage::op`) with its two immediate operands. A clocked
+/// procedure that takes the body of a subroutine in has its calls in each
+/// of its units, so the calls of one execution are these divided by the
+/// number of times the body is there.
+fn coverage_subs(sir: &SirProgram) -> Vec<(u64, u64, u64)> {
+    units(sir)
+        .flat_map(|unit| {
+            let constants: crate::HashMap<_, _> = instructions(unit)
+                .filter_map(|instruction| match instruction {
+                    SIRInstruction::Imm(register, value) => Some((*register, value)),
+                    _ => None,
+                })
+                .collect();
+            instructions(unit)
+                .filter_map(|instruction| match instruction {
+                    SIRInstruction::ExternCall { func, args, .. }
+                        if *func == COVERAGE_HELPER_ID =>
+                    {
+                        let word = constants
+                            .get(args.first()?)?
+                            .payload
+                            .iter_u64_digits()
+                            .next()
+                            .unwrap_or(0);
+                        Some((
+                            word >> 8 & 0xff,
+                            word >> 16 & 0xff_ffff,
+                            word >> 40 & 0xff_ffff,
+                        ))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// The number of calls of coverage operation `sub` among `calls`.
+fn count(calls: &[(u64, u64, u64)], sub: u64) -> usize {
+    calls.iter().filter(|(called, ..)| *called == sub).count()
+}
+
+/// A sample hands the heap the values of its coverpoints in one call for
+/// each 64 bits of them, and one more for a group of them that has a guard:
+/// 96 coverpoints of one bit are two calls, three with the guards of the
+/// first 64, between the call that asks whether the instance samples and
+/// the one that counts. A coverpoint of more than 64 bits takes a call for
+/// each word of its own.
+#[test]
+fn packed_points_take_a_call_for_each_64_bits() {
+    use coverage::op;
+    let points = |wide: bool| {
+        (0..96)
+            .map(|index| {
+                let guard = if index < 64 && index % 3 == 0 {
+                    " iff (en)"
+                } else {
+                    ""
+                };
+                let value = if wide {
+                    format!("{{64'd0, data[{index}]}}")
+                } else {
+                    format!("data[{index}]")
+                };
+                format!("        p{index}: coverpoint {value}{guard};\n")
+            })
+            .collect::<String>()
+    };
+    let design = |wide: bool| {
+        rtl(
+            "",
+            &format!(
+                "    bit [95:0] data;
+    bit en;
+    covergroup cg;
+{}    endgroup
+    cg c;
+    always @(posedge clk) begin
+        if (c == null) c = new;
+        c.sample();
+    end",
+                points(wide)
+            ),
+        )
+    };
+    let (program, facts) = laid_out(timed(&design(false)));
+    assert_eq!(facts.heap_calls, 0);
+    let calls = coverage_subs(&program.sir);
+    // The body that samples is in the design this many times.
+    let bodies = count(&calls, op::SAMPLING);
+    assert!(bodies > 0);
+    let mut sampling: Vec<_> = calls
+        .iter()
+        .filter(|(sub, ..)| {
+            [
+                op::SAMPLING,
+                op::PRESENT,
+                op::POINTS,
+                op::POINT,
+                op::SAMPLE_END,
+            ]
+            .contains(sub)
+        })
+        .copied()
+        .collect();
+    // The blocks of a unit are in no order.
+    sampling.sort_unstable();
+    let mut expected: Vec<_> = [
+        (op::SAMPLING, 0, 0),
+        (op::PRESENT, 1, 64),
+        (op::POINTS, 1, 64),
+        (op::POINTS, 65, 32),
+        (op::SAMPLE_END, 0, 0),
+    ]
+    .into_iter()
+    .flat_map(|call| std::iter::repeat_n(call, bodies))
+    .collect();
+    expected.sort_unstable();
+    assert_eq!(sampling, expected);
+    // The same values as coverpoints of 65 bits: two words each, and
+    // still no call of the heap helper.
+    let (program, facts) = laid_out(timed(&design(true)));
+    assert_eq!(facts.heap_calls, 0);
+    let calls = coverage_subs(&program.sir);
+    assert_eq!(
+        count(&calls, op::POINT),
+        2 * 96 * count(&calls, op::SAMPLING)
+    );
+    assert_eq!(count(&calls, op::POINTS) + count(&calls, op::PRESENT), 0);
+}
+
+/// A coverpoint, a bin operand and an argument of more than 64 bits are
+/// handed to the heap in words, with coverage operations alone: nothing of
+/// a sample or of a construction is put in a collection of the heap, which
+/// a call of the heap helper would make, in two-state and in four-state
+/// simulation. The covergroup is that of `wide_coverpoint_planes` of the
+/// SystemVerilog tests, with an argument that a coverpoint reads beside
+/// the one that a bin reads.
+#[test]
+fn wide_points_and_operands_make_no_heap_call() {
+    use coverage::op;
+    let design = rtl(
+        "",
+        "    bit [64:0] w65;
+    logic [127:0] w128;
+    bit signed [99:0] s100;
+    bit [1:0] narrow;
+    covergroup cg(bit [127:0] limit, logic [127:0] offset);
+        coverpoint w65 {
+            bins top = {65'h1_0000_0000_0000_0000};
+            bins low = {[0:65'hffff_ffff_ffff_ffff]};
+        }
+        coverpoint narrow;
+        coverpoint w128 iff (narrow != 2) {
+            bins big = {[128'h1_0000_0000_0000_0000_0000_0000:$]};
+            bins bound = {[0:limit]};
+            bins exact = {128'hdead_beef_0000_0000_0000_0000_0000_0001};
+        }
+        coverpoint s100 {
+            bins negative = {[$:-1]};
+            bins positive = {[1:$]};
+        }
+        coverpoint w128 ^ offset;
+    endgroup
+    cg c;
+    always @(posedge clk) begin
+        if (c == null) c = new(128'h1234_0000_0000_0000_0000, 128'd1);
+        w65 = w65 + 65'd1;
+        w128 = {w128[126:0], 1'b1};
+        s100 = s100 - 100'sd3;
+        narrow = narrow + 2'd1;
+        c.sample();
+    end",
+    );
+    for four_state in [false, true] {
+        let (program, facts) = laid_out_in(timed(&design), four_state);
+        assert_eq!(facts.heap_calls, 0, "four_state: {four_state}");
+        let calls = coverage_subs(&program.sir);
+        // The bodies that construct and that sample are in the design
+        // this many times.
+        let (constructing, sampling) = (count(&calls, op::NEW), count(&calls, op::SAMPLING));
+        assert!(constructing > 0 && sampling > 0);
+        // Two words for each of the four coverpoints of more than 64
+        // bits and one call for the one of two bits; the argument a bin
+        // reads is an input of two words, and the one a coverpoint reads
+        // is stored in two words and read in two, with two more for its
+        // x and z bits in four-state simulation.
+        assert_eq!(
+            (
+                count(&calls, op::POINT),
+                count(&calls, op::POINTS),
+                count(&calls, op::PRESENT),
+                count(&calls, op::INPUT),
+                count(&calls, op::FORMAL_SET),
+                count(&calls, op::FORMAL),
+            ),
+            (
+                8 * sampling,
+                sampling,
+                0,
+                2 * constructing,
+                2 * constructing,
+                if four_state { 4 } else { 2 } * sampling,
+            ),
+            "four_state: {four_state}, {constructing} constructing, {sampling} sampling"
+        );
+    }
+}
+
+/// An integral argument of a covergroup that its coverpoints read is kept
+/// in the record of the instance: a construction stores it and a sample
+/// reads it with coverage operations, so that a covergroup of a module
+/// with such arguments makes no call of the heap helper and leaves the plan
+/// of a design that samples it in clocked logic as it is. A string argument
+/// is a property of the object of the instance, read with the heap helper.
+#[test]
+fn integral_formals_are_read_without_object_loads() {
+    use coverage::op;
+    let design = |formals: &str, points: &str, actuals: &str| {
+        rtl(
+            "",
+            &format!(
+                "    covergroup cg({formals});
+{points}
+    endgroup
+    cg c;
+    always @(posedge clk) begin
+        if (c == null) c = new({actuals});
+        c.sample();
+    end"
+            ),
+        )
+    };
+    let integral = design(
+        "int lo, logic [70:0] wide, bit [3:0] unread",
+        "        coverpoint d + lo[7:0];
+        coverpoint wide[70:60] { bins some = {[1:$]}; }
+        coverpoint q { bins low = {[0:unread]}; }",
+        "3, 71'd5, 4'd9",
+    );
+    let (program, facts) = laid_out(timed(&integral));
+    assert_eq!(facts.heap_calls, 0);
+    let calls = coverage_subs(&program.sir);
+    // The bodies that construct and that sample are in the design this
+    // many times.
+    let (constructing, sampling) = (count(&calls, op::NEW), count(&calls, op::SAMPLING));
+    assert!(constructing > 0 && sampling > 0);
+    // The two arguments the coverpoints read: one word, and two words.
+    assert_eq!(count(&calls, op::FORMAL_SET), 3 * constructing);
+    assert_eq!(count(&calls, op::FORMAL), 3 * sampling);
+    // The argument only a bin reads is an input of the construction.
+    assert_eq!(count(&calls, op::INPUT), constructing);
+    let plan = |program| crate::scheduler::plan_for_test(program).unwrap();
+    let (base_program, _) = laid_out(timed(&rtl("", "    always @(posedge clk) edges++;")));
+    let (base, sampled) = (plan(&base_program), plan(&program));
+    assert!(base.settle_reads.is_some());
+    assert_eq!(sampled.settle_reads.is_some(), base.settle_reads.is_some());
+    assert_eq!(sampled.fallback, base.fallback);
+    assert_eq!(sampled.lazy, base.lazy);
+    assert_eq!(sampled.incremental, base.incremental);
+    let string = design("string s", "        coverpoint d + s.len();", "\"ab\"");
+    let (program, facts) = laid_out(timed(&string));
+    assert!(facts.heap_calls > 0);
+    assert_eq!(count(&coverage_subs(&program.sir), op::FORMAL), 0);
+}
+
+/// What the descriptor of a covergroup type costs a design: the function
+/// that registers the type hands the heap its text in calls of eight bytes,
+/// once for the type, whatever constructs and samples it. A bin of a value
+/// is about 20 calls and 22 instructions there.
+#[test]
+fn descriptor_of_a_thousand_bins_is_registered_once() {
+    use coverage::op;
+    let design = |bins: usize| {
+        let bins = (0..bins)
+            .map(|index| format!("            bins b{index} = {{{index}}};\n"))
+            .collect::<String>();
+        rtl(
+            "",
+            &format!(
+                "    bit [15:0] v;
+    covergroup cg;
+        coverpoint v {{
+{bins}        }}
+    endgroup
+    cg c, e;
+    always @(posedge clk) begin
+        if (c == null) begin c = new; e = new; end
+        c.sample();
+        e.sample();
+    end"
+            ),
+        )
+    };
+    let (small_program, small) = laid_out(timed(&design(1)));
+    let (program, facts) = laid_out(timed(&design(1000)));
+    let bytes = |program: &crate::ir::LaidOutProgram| {
+        count(&coverage_subs(&program.sir), op::REGISTER_BYTES)
+    };
+    assert_eq!(count(&coverage_subs(&program.sir), op::REGISTER), 1);
+    // About 161 bytes of text for a bin of one value: 20 calls. A call is
+    // lowered with the words of its operation, of its eight bytes and of
+    // the operand it has not; the optimizer keeps one of each value, and
+    // of the words of the text about one in ten differs from all others.
+    let calls = bytes(&program) - bytes(&small_program);
+    let instructions = facts.instructions - small.instructions;
+    assert!(
+        (20_000..20_200).contains(&calls) && (calls..calls + calls / 8).contains(&instructions),
+        "{instructions} instructions and {calls} calls for 999 bins ({} and {} for the design)",
+        facts.instructions,
+        bytes(&program)
+    );
+    assert_eq!(facts.functions, small.functions);
 }

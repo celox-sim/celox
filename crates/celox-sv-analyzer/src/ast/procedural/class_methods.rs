@@ -596,17 +596,20 @@ pub(super) fn lower_class(
         .iter()
         .filter(|model| model.owner.as_deref() == Some(name))
     {
-        subroutines.extend(covergroup_subroutines::lower(
-            model,
-            tree,
-            session,
-            declaration_env,
-            item_dimensions,
-            literals,
-            state,
-            item,
-            Some(&class),
-        )?);
+        subroutines.extend(
+            covergroup_subroutines::lower(
+                model,
+                tree,
+                session,
+                declaration_env,
+                item_dimensions,
+                literals,
+                state,
+                item,
+                Some(&class),
+            )
+            .map_err(crate::ast::covergroups::rejected)?,
+        );
     }
     Ok(subroutines)
 }

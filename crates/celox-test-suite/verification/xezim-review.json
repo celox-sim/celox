@@ -1098,6 +1098,10 @@
     "sv_shallow_copy_keeps_embedded_covergroup": {
       "title": "A shallow copy keeps the embedded covergroup of the object it copies: after b = new a, b.cg == a.cg, where the handle of the new object is null",
       "standard": "IEEE 1800-2023 8.12"
+    },
+    "sv_enumeration_coverpoint_bins_by_width": {
+      "title": "A coverpoint of an enumeration without bins has an automatic bin for each value of the base type, not for each enumerator: with typedef enum bit [1:0] { RED, GREEN, BLUE } color_t, samples of the three enumerators cover 75% of the coverpoint",
+      "standard": "IEEE 1800-2023 19.5.3"
     }
   },
   "cases": [
@@ -5842,6 +5846,14 @@
       "classification": "xezim_bug",
       "bug": "sv_shallow_copy_keeps_embedded_covergroup",
       "note": "b = new a is a shallow copy of an object with an embedded covergroup. 8.12 does not copy an embedded covergroup: the handle of the new object is null, so q[1] = b.cg == null is 1 and q is 7. xezim 0.11.4 reads 5: the copy holds the handle of the original (a probe displays copy.ecg == null as 0 and copy.ecg == made.ecg as 1). Verilator 5.054 keeps the handle in the copy too."
+    },
+    {
+      "suite": "sv",
+      "name": "covergroup::automatic_bins_of_a_coverpoint",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_enumeration_coverpoint_bins_by_width",
+      "note": "The coverpoint of color, of an enumeration of three enumerators in bit [1:0], declares no bins, so it has an automatic bin for each enumerator: for an enum coverage point N is the cardinality of the enumeration (19.5.3). After GREEN and RED its coverage is two thirds and after BLUE 100, so the case expects the lines colors 66.67 and colors 100.00. xezim 0.11.4 displays colors 50.00 and colors 75.00, the coverage of four bins; a probe of the same coverpoint displays 25.00 after the sample of one enumerator. The lines before these, of the coverpoints of bit [2:0] and of bit [7:0] with option.auto_bin_max = 2, are as the case expects."
     }
   ]
 }

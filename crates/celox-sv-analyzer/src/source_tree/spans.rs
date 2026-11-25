@@ -155,12 +155,15 @@ pub(crate) struct Spans {
     pub covergroups: CovergroupInteriors,
     /// The covergroup declarations by where they are declared.
     pub covergroup_index: crate::ast::CovergroupIndex,
-    /// The expressions and types of the formals of the covergroups and of
-    /// their sample methods (IEEE 1800-2023 19.3, 19.8.1): the part of what
-    /// follows the name of a covergroup whose names the scope that declares
-    /// it resolves, as it binds the formals. `expressions` and `types` have
-    /// none of them.
-    pub covergroup_formals: (Starts<ExprId>, Starts<TypeId>),
+    /// The expressions and types of what the analysis binds of what follows
+    /// the name of each covergroup: its formals and those of its sample
+    /// method (IEEE 1800-2023 19.3, 19.8.1), which the scope that declares
+    /// it binds, and the coverpoint expressions, guards and types, the
+    /// option values and the bin operands, which are bound with the
+    /// subroutines of the type (see `crate::ast::CovergroupBound`). Their
+    /// names resolve in the scope that declares the covergroup, after its
+    /// formals. `expressions` and `types` have none of them.
+    pub covergroup_bound: (Starts<ExprId>, Starts<TypeId>),
     /// The names of the coverage database tasks (IEEE 1800-2023 19.9) the
     /// file calls, in arena order, each with which of
     /// `crate::ast::COVERAGE_DATABASE_TASKS` it is.
@@ -265,14 +268,17 @@ impl Spans {
             classes: crate::ast::ClassIndex::new(native),
             static_references: crate::ast::static_reference_candidates(native),
             covergroup_index: crate::ast::CovergroupIndex::new(native),
-            covergroup_formals: {
-                // A file without covergroup formals pays nothing.
+            covergroup_bound: {
+                // A file without covergroups pays nothing.
                 let formals = Ranges::new(
                     native
                         .covergroups
                         .iter()
                         .flat_map(crate::ast::covergroup_formal_ports)
-                        .map(|port| port.tokens),
+                        .map(|port| port.tokens)
+                        .chain(native.covergroups.iter().flat_map(|covergroup| {
+                            crate::ast::CovergroupBound::of(covergroup).ranges(native)
+                        })),
                 );
                 if formals.is_empty() {
                     (
