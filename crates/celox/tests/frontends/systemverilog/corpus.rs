@@ -94,6 +94,12 @@ fn compiled_scheduler_coverage() {
 /// Without the test switch `force_out_of_line_calls`, every subroutine
 /// stays inlined: no suite case that declares one lowers to a function
 /// unit, so designs keep the SIR, and the code, they had before calls.
+///
+/// A design with a covergroup is left out. The registration of a covergroup
+/// type that is constructed holds the descriptor of the type and is a
+/// function unit whatever is forced
+/// (`coverage_calls_keep_the_plan_of_the_design` in the simulator builder
+/// pins that).
 #[test]
 fn subroutines_stay_inlined_without_the_switch() {
     let (checked, out_of_line) = std::thread::scope(|scope| {
@@ -106,7 +112,11 @@ fn subroutines_stay_inlined_without_the_switch() {
                     let design = case.design();
                     if !design.sources.iter().any(|source| {
                         source.text.contains("function") || source.text.contains("task")
-                    }) {
+                    }) || design
+                        .sources
+                        .iter()
+                        .any(|source| source.text.contains("covergroup"))
+                    {
                         continue;
                     }
                     let sources = design

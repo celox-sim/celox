@@ -6,6 +6,7 @@
     "verilator/concurrent_assertions.json",
     "verilator/container_formals.json",
     "verilator/containers.json",
+    "verilator/covergroup.json",
     "verilator/events.json",
     "verilator/file_io.json",
     "verilator/fork.json",

@@ -1,6 +1,7 @@
 use super::*;
 use crate::ast::ConstEnv;
 
+mod covergroups;
 mod enum_declarations;
 
 fn eval_test_const_expr(expr: &ir::ConstExpr) -> Option<i128> {
@@ -3964,6 +3965,19 @@ fn unsupported_constructs_map_to_their_tracking_issues() {
     assert_eq!(issue("gate primitive instantiation"), 457);
     assert_eq!(issue("duplicate internal signal `t`"), 445);
     assert_eq!(issue("undriven net declaration `n`"), 460);
+    // Every construct of a covergroup is tracked by the issue of clause 19.
+    for construct in [
+        "covergroup coverpoint (IEEE 1800-2023 19.5)",
+        "covergroup declared in an interface (`I`; IEEE 1800-2023 19.3)",
+        "covergroup extends (IEEE 1800-2023 19.4.1)",
+        "covergroup sample call in a sequence match item (IEEE 1800-2023 19.8.1)",
+    ] {
+        assert_eq!(issue(construct), 4294, "{construct}");
+    }
+    assert_eq!(
+        issue("coverage of a covergroup"),
+        SV_FRONTEND_TRACKING_ISSUE
+    );
     assert_eq!(
         issue("combinational expression assigned to `y`"),
         SV_FRONTEND_TRACKING_ISSUE
@@ -7544,23 +7558,41 @@ fn undeclared_class_members_are_errors() {
 #[test]
 fn covergroups_of_classes_are_declared_members() {
     // A covergroup a class declares is a member of it (IEEE 1800-2023
-    // 19.4): a select of it is no undeclared member, whatever the analyzer
-    // makes of it otherwise. The class constructs none, which the analysis
-    // of its package would reject.
+    // 19.4): a property that holds the handle of its instance, so a select
+    // of it reads that property. The class constructs none, and a
+    // coverpoint is not supported yet, which a `sample()` reports and a
+    // read of the property does not. (The read is a comparison: a `void`
+    // cast takes a function call alone, A.6.9.)
     let class = "class C; int x; covergroup cg; coverpoint x; endgroup \
         function new(); endfunction endclass";
-    for access in ["c.cg.sample();", "void'(c.cg);"] {
+    let unsupported_coverpoint =
+        AnalyzerError::Unsupported("covergroup coverpoint (IEEE 1800-2023 19.5)".to_string());
+    let read = "if (c.cg == null) c.x = 1;";
+    let source = format!("module Top; {class} C c; initial begin c = new; {read} end endmodule");
+    analyze_source(&source, Path::new("covergroups.sv"))
+        .unwrap_or_else(|error| panic!("{source}: {error}"));
+    let source =
+        format!("module Top; {class} C c; initial begin c = new; c.cg.sample(); end endmodule");
+    assert_eq!(
+        analyze_source(&source, Path::new("covergroups.sv"))
+            .map(|_| ())
+            .map_err(AnalyzerError::into_error),
+        Err(unsupported_coverpoint.clone())
+    );
+    // Without the coverpoint the covergroup is sampled and compared.
+    let empty = "class C; int x; covergroup cg; endgroup endclass";
+    for access in ["c.cg.sample();", "if (c.cg == null) c.x = 1;"] {
         let source =
-            format!("module Top; {class} C c; initial begin c = new; {access} end endmodule");
-        if let Err(error) = analyze_source(&source, Path::new("covergroups.sv")) {
-            assert!(
-                !matches!(error, AnalyzerError::UnknownClassMember { .. }),
-                "{access}: {error}"
-            );
-        }
+            format!("module Top; {empty} C c; initial begin c = new; {access} end endmodule");
+        analyze_source(&source, Path::new("covergroups.sv"))
+            .unwrap_or_else(|error| panic!("{access}: {error}"));
     }
+    // The same through a package that another source declares.
     let package = format!("package p; {class} endpackage");
-    for access in ["c.cg.sample();", "void'(c.cg);"] {
+    for (access, expected) in [
+        (read, Ok(())),
+        ("c.cg.sample();", Err(unsupported_coverpoint)),
+    ] {
         let packages = analyze_packages(&[(&package, Path::new("covergroups-p.sv"))]).unwrap();
         let result = analyze_source_module_with_packages(
             &format!("module Top; import p::*; C c; initial begin c = new; {access} end endmodule"),
@@ -7570,12 +7602,11 @@ fn covergroups_of_classes_are_declared_members() {
             &packages,
             &mut packages.design(),
         );
-        if let Err(error) = result {
-            assert!(
-                !matches!(error, AnalyzerError::UnknownClassMember { .. }),
-                "{access}: {error}"
-            );
-        }
+        assert_eq!(
+            result.map(|_| ()).map_err(AnalyzerError::into_error),
+            expected,
+            "{access}"
+        );
     }
 }
 
@@ -7583,7 +7614,8 @@ fn covergroups_of_classes_are_declared_members() {
 fn covergroups_that_extend_a_base_covergroup_are_rejected_where_used() {
     // `covergroup extends` (IEEE 1800-2023 19.4.1) is a covergroup of its
     // class like any other: its declaration alone makes no instance and is
-    // accepted, and what uses it is rejected as a covergroup of the class.
+    // accepted, and what constructs or samples it is rejected as the
+    // construct the analysis does not support.
     let classes = |method: &str| {
         format!(
             "class B; int v; covergroup cg; coverpoint v; endgroup endclass \
@@ -7612,7 +7644,7 @@ fn covergroups_that_extend_a_base_covergroup_are_rejected_where_used() {
                 .expect_err(method)
                 .to_string();
             assert!(
-                error.contains("covergroup `cg` of class `D` (IEEE 1800-2023 19.4)"),
+                error.contains("covergroup extends (IEEE 1800-2023 19.4.1)"),
                 "{source}: {error}"
             );
         }
@@ -7742,10 +7774,16 @@ fn unconstructed_covergroups_keep_their_bodies_to_themselves() {
             .unwrap_or_else(|error| panic!("{source}: {error}"));
     }
     // The plan of an interface that declares a covergroup, also in a
-    // class, stays rejected as before.
-    for items in [
-        covergroup.to_string(),
-        format!("class C; {covergroup} endclass"),
+    // class, stays rejected: the covergroup with its own construct name.
+    for (items, construct) in [
+        (
+            covergroup.to_string(),
+            "covergroup declared in an interface (`I`; IEEE 1800-2023 19.3)",
+        ),
+        (
+            format!("class C; {covergroup} endclass"),
+            "task, class, or verification declaration in interface `I`",
+        ),
     ] {
         let source = format!(
             "interface I; logic clk; logic [15:0] s; {items} endinterface \
@@ -7755,10 +7793,7 @@ fn unconstructed_covergroups_keep_their_bodies_to_themselves() {
             Err(error) => error.to_string(),
             Ok(_) => panic!("{source}: a covergroup in an interface"),
         };
-        assert!(
-            error.contains("task, class, or verification declaration in interface `I`"),
-            "{error}"
-        );
+        assert!(error.contains(construct), "{error}");
     }
 }
 

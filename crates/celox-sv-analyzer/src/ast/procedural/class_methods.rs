@@ -589,6 +589,25 @@ pub(super) fn lower_class(
         state,
         item,
     )?);
+    // The covergroups the class itself embeds (IEEE 1800-2023 19.4); a
+    // derived class calls those of its bases.
+    for model in class
+        .covergroups
+        .iter()
+        .filter(|model| model.owner.as_deref() == Some(name))
+    {
+        subroutines.extend(covergroup_subroutines::lower(
+            model,
+            tree,
+            session,
+            declaration_env,
+            item_dimensions,
+            literals,
+            state,
+            item,
+            Some(&class),
+        )?);
+    }
     Ok(subroutines)
 }
 
