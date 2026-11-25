@@ -15,13 +15,7 @@ impl PlanBuilder<'_> {
         let kernel_stores = &self.found.kernel_stores;
         let probed = &self.found.probed;
         let storage = home(shared);
-        let service_function = schema
-            .extern_functions
-            .iter()
-            .position(|function| function.name == crate::simulator::native_io::SYMBOL)
-            .and_then(|index| u32::try_from(index).ok());
-        let ordered_available = cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen")))
-            && service_function.is_some();
+        let service_function = self.found.service_function;
         let nba_processes: HashSet<usize> = model
             .processes
             .iter()
@@ -32,7 +26,7 @@ impl PlanBuilder<'_> {
                     && process.nbas.iter().all(|site| {
                         let target = storage(site.target);
                         site.unit
-                            || ordered_available
+                            || self.found.ordered_available
                             || (site.delay == 0
                                 && (!event_storage.contains_key(&target)
                                     && site.position.is_none()
@@ -76,8 +70,6 @@ impl PlanBuilder<'_> {
                 })
                 .map(|(index, _)| index)
                 .collect();
-        self.found.service_function = service_function;
-        self.found.ordered_available = ordered_available;
         self.found.nba_processes = nba_processes;
         self.found.yielding = yielding;
         self.found.service_processes = service_processes;

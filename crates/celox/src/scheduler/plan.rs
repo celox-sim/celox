@@ -308,6 +308,13 @@ impl Plan {
         // Index their definitions and control dependencies only once per plan,
         // and only if one of these consumers actually needs a slice.
         let mut comb_slicer = Slicer::new(|| CombSlicer::new(&sir.updates.observe, shared.clone()));
+        let service_function = schema
+            .extern_functions
+            .iter()
+            .position(|function| function.name == crate::simulator::native_io::SYMBOL)
+            .and_then(|index| u32::try_from(index).ok());
+        let ordered_available = cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen")))
+            && service_function.is_some();
         let mut builder = PlanBuilder {
             program,
             slots,
@@ -318,7 +325,11 @@ impl Plan {
             sir,
             native_observers,
             shared: &shared,
-            found: Found::default(),
+            found: Found {
+                service_function,
+                ordered_available,
+                ..Found::default()
+            },
         };
         builder.events()?;
         let wait_slicer = builder.observers(&mut comb_slicer);

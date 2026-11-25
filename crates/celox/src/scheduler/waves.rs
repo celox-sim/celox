@@ -628,13 +628,25 @@ impl Plan {
         tracked: &[usize],
         levels: Levels,
     ) -> RegisterId {
+        let current = self.sample_clock_levels(g, tracked);
+        self.edges_between(g, tracked, levels, current)
+    }
+
+    /// Baselines use tracked positions; wave masks use event indices.
+    pub(super) fn edges_between(
+        &self,
+        g: &mut Generator<'_>,
+        tracked: &[usize],
+        levels: Levels,
+        current: Levels,
+    ) -> RegisterId {
         if tracked.len() >= 4 {
-            return self.batched_stable_edges(g, tracked, levels);
+            return self.batched_stable_edges(g, tracked, levels, current);
         }
         let mut edges = g.constant(0, self.event_bits);
         for (position, &index) in tracked.iter().enumerate() {
             let was = g.saved_level(levels, position);
-            let is = g.level(&self.events[index]);
+            let is = g.saved_level(current, position);
             let edge = g.settled_edge(&self.events[index], was, is);
             let bit = g.event_bit(edge, index);
             edges = g.binary(self.event_bits, edges, BinaryOp::Or, bit);
@@ -642,6 +654,87 @@ impl Plan {
         edges
     }
 
+    /// Sample the tracked positions, leaving the unused high lanes at zero.
+    pub(super) fn sample_clock_levels(&self, g: &mut Generator<'_>, tracked: &[usize]) -> Levels {
+        let width = self.event_bits;
+        let mut values = Vec::new();
+        let mut unknowns = Vec::new();
+        let mut rest = tracked;
+        while let Some((&index, tail)) = rest.split_first() {
+            if let Some((value, len)) = self.sample_clock_bytes(g, rest) {
+                values.push(value);
+                rest = &rest[len..];
+            } else {
+                let level = g.level(&self.events[index]);
+                let (value, unknown) = g.level_planes(level);
+                values.push(value);
+                unknowns.extend(unknown);
+                rest = tail;
+            }
+        }
+        let four_state = g.four_state.is_some();
+        let mut pack = |mut parts: Vec<RegisterId>| {
+            if tracked.len() < width {
+                parts.push(g.constant(0, width - tracked.len()));
+            }
+            if parts.len() == 1 {
+                return parts[0];
+            }
+            parts.reverse();
+            let plane = g.b.alloc_bit(width, false);
+            g.b.emit(SIRInstruction::Concat(plane, parts));
+            plane
+        };
+        Levels {
+            values: pack(values),
+            unknown: four_state.then(|| pack(unknowns)),
+        }
+    }
+
+    /// Gather the low bits of consecutive one-bit state bytes into a bit plane.
+    fn sample_clock_bytes(
+        &self,
+        g: &mut Generator<'_>,
+        events: &[usize],
+    ) -> Option<(RegisterId, usize)> {
+        if events.len() < 3 || g.four_state.is_some() || g.outlined.is_none() {
+            return None;
+        }
+        let layout = g.program.layout();
+        let offset = |index: usize| {
+            let event = &self.events[index];
+            if event.width != 1 {
+                return None;
+            }
+            layout.offsets.get(&event.signal).copied()
+        };
+        let base = offset(events[0])?;
+        if base.checked_add(8)? > layout.total_size {
+            return None;
+        }
+        let len = events
+            .iter()
+            .take(8)
+            .enumerate()
+            .take_while(|&(lane, &event)| offset(event) == Some(base + lane))
+            .count();
+        if len < 3 {
+            return None;
+        }
+        let address = g.constant(base as u64, 64);
+        let word = g.native_load(
+            celox_sir::native_memory::NativeMemoryOp::ReadState,
+            vec![address],
+        );
+        let mask = g.constant(0x0101_0101_0101_0101, 64);
+        let bits = g.binary(64, word, BinaryOp::And, mask);
+        // The high byte of the product contains bit 0 of each input byte in address order.
+        let stride = g.constant(0x0102_0408_1020_4080, 64);
+        let product = g.binary(64, bits, BinaryOp::Mul, stride);
+        let lanes = g.b.alloc_bit(len, false);
+        g.b.emit(SIRInstruction::Slice(lanes, product, 56, len));
+        Some((lanes, len))
+    }
     /// Judge independent edges as bit planes, in chunks of at most one word.
     /// Baselines use tracked positions; the result uses event indices, which
     /// need not be contiguous. No level or event is published by this check.
@@ -650,23 +743,16 @@ impl Plan {
         g: &mut Generator<'_>,
         tracked: &[usize],
         levels: Levels,
+        current: Levels,
     ) -> RegisterId {
         let zero = g.constant(0, 1);
         let mut result = vec![zero; self.event_bits];
         for (chunk, events) in tracked.chunks(64).enumerate() {
             let width = events.len();
-            let mut values = Vec::with_capacity(width);
-            let mut unknowns = Vec::with_capacity(width);
             let mut falling = 0u64;
             let mut any_change = 0u64;
             for (bit, &index) in events.iter().enumerate() {
                 let event = &self.events[index];
-                let level = g.level(event);
-                let (value, unknown) = g.level_planes(level);
-                values.push(value);
-                if let Some(unknown) = unknown {
-                    unknowns.push(unknown);
-                }
                 if event.active == 0 {
                     falling |= 1u64 << bit;
                 }
@@ -674,19 +760,13 @@ impl Plan {
                     any_change |= 1u64 << bit;
                 }
             }
-            let pack = |g: &mut Generator<'_>, mut bits: Vec<RegisterId>| {
-                bits.reverse();
-                let result = g.b.alloc_bit(width, false);
-                g.b.emit(SIRInstruction::Concat(result, bits));
-                result
-            };
             let slice = |g: &mut Generator<'_>, source: RegisterId| {
                 let result = g.b.alloc_bit(width, false);
                 g.b.emit(SIRInstruction::Slice(result, source, chunk * 64, width));
                 result
             };
             let was = slice(g, levels.values);
-            let is = pack(g, values);
+            let is = slice(g, current.values);
             // Invert both value planes of falling-edge lanes. Their masks
             // stay unchanged, turning the same edge formula into negedge.
             let falling = g.constant(falling, width);
@@ -695,24 +775,25 @@ impl Plan {
             let all = g.ones(width);
             let not_was = g.binary(width, was, BinaryOp::Xor, all);
             let mut changed = (any_change != 0).then(|| g.binary(width, was, BinaryOp::Xor, is));
-            let edges = if let Some(old_unknown) = levels.unknown {
-                let old_unknown = slice(g, old_unknown);
-                let new_unknown = pack(g, unknowns);
-                if let Some(values) = changed {
-                    let masks = g.binary(width, old_unknown, BinaryOp::Xor, new_unknown);
-                    changed = Some(g.binary(width, values, BinaryOp::Or, masks));
-                }
-                // Table 9-2: leave known zero or reach known one, excluding
-                // all unknown-to-unknown transitions (including X <-> Z).
-                let leaves = g.binary(width, not_was, BinaryOp::Or, old_unknown);
-                let reaches = g.binary(width, is, BinaryOp::Or, new_unknown);
-                let both_unknown = g.binary(width, old_unknown, BinaryOp::And, new_unknown);
-                let some_known = g.binary(width, both_unknown, BinaryOp::Xor, all);
-                let edges = g.binary(width, leaves, BinaryOp::And, reaches);
-                g.binary(width, edges, BinaryOp::And, some_known)
-            } else {
-                g.binary(width, not_was, BinaryOp::And, is)
-            };
+            let edges =
+                if let Some((old_unknown, new_unknown)) = levels.unknown.zip(current.unknown) {
+                    let old_unknown = slice(g, old_unknown);
+                    let new_unknown = slice(g, new_unknown);
+                    if let Some(values) = changed {
+                        let masks = g.binary(width, old_unknown, BinaryOp::Xor, new_unknown);
+                        changed = Some(g.binary(width, values, BinaryOp::Or, masks));
+                    }
+                    // Table 9-2: leave known zero or reach known one, excluding
+                    // all unknown-to-unknown transitions (including X <-> Z).
+                    let leaves = g.binary(width, not_was, BinaryOp::Or, old_unknown);
+                    let reaches = g.binary(width, is, BinaryOp::Or, new_unknown);
+                    let both_unknown = g.binary(width, old_unknown, BinaryOp::And, new_unknown);
+                    let some_known = g.binary(width, both_unknown, BinaryOp::Xor, all);
+                    let edges = g.binary(width, leaves, BinaryOp::And, reaches);
+                    g.binary(width, edges, BinaryOp::And, some_known)
+                } else {
+                    g.binary(width, not_was, BinaryOp::And, is)
+                };
             let edges = if let Some(changed) = changed {
                 let any = g.constant(any_change, width);
                 let ordinary = g.binary(width, any, BinaryOp::Xor, all);

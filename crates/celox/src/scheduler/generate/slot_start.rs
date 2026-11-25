@@ -426,14 +426,19 @@ impl Plan {
         // them: a host clock no clock drives keeps the level the host set.
         let host_entry = host_inputs.then(|| host_inputs::pending(g));
         let host_levels = host_entry.map(|_| g.load_levels());
-        let mut levels = g.no_levels();
-        for (bit, &event) in tracked.iter().enumerate() {
-            if self.clocks.contains(&event) && self.derived.is_empty() {
-                continue;
+        let mut levels = if !self.derived.is_empty() || self.clocks.is_empty() {
+            self.sample_clock_levels(g, tracked)
+        } else {
+            let mut levels = g.no_levels();
+            for (bit, &event) in tracked.iter().enumerate() {
+                if self.clocks.contains(&event) && self.derived.is_empty() {
+                    continue;
+                }
+                let level = g.level(&self.events[event]);
+                levels = g.with_level(levels, level, bit);
             }
-            let level = g.level(&self.events[event]);
-            levels = g.with_level(levels, level, bit);
-        }
+            levels
+        };
         if let (Some(host), Some(prior)) = (host_entry, host_levels) {
             let value = g.b.alloc_bit(self.event_bits, false);
             g.b.emit(SIRInstruction::Mux(

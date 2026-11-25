@@ -85,6 +85,7 @@ impl<'a> PlanBuilder<'a> {
             incremental,
             derived: Vec::new(),
             active: active_commits.iter().copied().collect(),
+            observed_active: Vec::new(),
             gating: Vec::new(),
             event_bits,
         };
@@ -534,16 +535,21 @@ impl<'a> PlanBuilder<'a> {
             needs_ordered = true;
         }
         if needs_ordered {
-            // The topology-based observer pruning above predates orphan
-            // clocks. Ordered waves must preserve every real Active commit,
-            // including writers in a clock cone without a source domain.
-            plan.active = plan
+            let extra = plan
                 .events
                 .iter()
                 .enumerate()
-                .filter(|(_, event)| event.active_commit)
-                .map(|(index, _)| index)
-                .collect();
+                .filter(|(i, event)| event.active_commit && !plan.active.contains(i))
+                .map(|(i, _)| i)
+                .collect::<Vec<_>>();
+            if self.found.effects
+                || plan.observers.is_some()
+                || self.sir.updates.observe.iter().any(fails)
+            {
+                plan.active.extend(extra);
+            } else {
+                plan.observed_active = extra;
+            }
             plan.ordered = Some(ordered::Ordered::new(
                 program,
                 plan.events.len(),

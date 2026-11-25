@@ -1814,7 +1814,8 @@ impl OptimizedSir {
     /// Rank of every state home in the order the per-tick code first
     /// accesses it.
     ///
-    /// The homes the FF units commit come first, in commit order, so that
+    /// Serial designs with many clocks place their sampled levels in event
+    /// order. FF destinations are grouped in commit order so that
     /// the registers an apply unit commits one after the other are
     /// contiguous, and in the same order, in the stable and the working
     /// region ([`crate::settle::instrument_ff_units`] then commits them word by
@@ -1885,6 +1886,17 @@ impl OptimizedSir {
             groups.into_iter().map(|(_, v)| v)
         }
         let mut rank = HashMap::default();
+        // The serial scheduler samples large clock sets together in event order.
+        let events = self
+            .design
+            .events
+            .execution_order(self.sir.updates.events.keys().copied());
+        if self.sir.parallel.is_none() && events.len() >= 8 {
+            for signal in events {
+                let next = u32::try_from(rank.len()).unwrap_or(u32::MAX);
+                rank.entry(signal).or_insert(next);
+            }
+        }
         if let Some(parallel) = &self.sir.parallel {
             let units = parallel
                 .observe

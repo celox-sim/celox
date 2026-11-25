@@ -211,3 +211,55 @@ endmodule"#;
         }
     }
 }
+
+#[test]
+fn independent_clock_lanes_follow_their_own_polarity() {
+    use std::fmt::Write;
+    let patterns = [0x101u16, 0x0aa, 0x155, 0x03c, 0x1c7, 0];
+    let ports = (0..9)
+        .map(|i| format!("output int hits{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut source = format!("`timescale 1ns/1ns\nmodule Top({ports}); bit [8:0] clocks;");
+    for lane in 0..9 {
+        let edge = if lane % 2 == 0 { "posedge" } else { "negedge" };
+        write!(
+            source,
+            "wire c{lane}=clocks[{lane}]; always @({edge} c{lane}) hits{lane} <= hits{lane}+1;"
+        )
+        .unwrap();
+    }
+    source.push_str("initial begin ");
+    for pattern in patterns {
+        write!(source, "#1 clocks=9'h{pattern:x};").unwrap();
+    }
+    source.push_str("end endmodule");
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![(source.as_str(), std::path::Path::new("lanes.sv"))],
+        "Top",
+    )
+    .four_state(false)
+    .build_native()
+    .unwrap();
+    sim.run_until(0).unwrap();
+    let hits: Vec<_> = (0..9).map(|i| sim.signal(&format!("hits{i}"))).collect();
+    let mut expected = [0u32; 9];
+    let mut previous = 0;
+    for (step, pattern) in patterns.into_iter().enumerate() {
+        sim.run_until(step as u64 + 1).unwrap();
+        for (lane, &signal) in hits.iter().enumerate() {
+            let bit = 1 << lane;
+            if (previous ^ pattern) & bit != 0 && (pattern & bit != 0) == (lane % 2 == 0) {
+                expected[lane] += 1;
+            }
+            assert_eq!(
+                sim.get(signal),
+                expected[lane].into(),
+                "time {} lane {lane}",
+                step + 1
+            );
+        }
+        previous = pattern;
+    }
+    assert!(sim.scheduler_stats().compiled_slots > 0);
+}
