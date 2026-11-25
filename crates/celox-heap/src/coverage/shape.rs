@@ -5,17 +5,20 @@
 //! construction hands over, so the instances that are built from equal
 //! values share one.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use num_bigint::{BigInt, BigUint};
 use serde::{Deserialize, Serialize};
 
-use super::MAX_BINS_PER_ITEM;
 use super::descriptor::{
-    BinArray, BinKind, BinValues, Bound, Constant, Operand, PointDescriptor, PointType,
-    RangeDescriptor, TypeDescriptor,
+    BinArray, BinDescriptor, BinFilter, BinKind, BinValues, Bound, Constant, Operand,
+    PointDescriptor, PointType, RangeDescriptor, TypeDescriptor, ValueType,
 };
 use super::value::{
-    Exact, Interval, KeyValue, Matcher, Partition, bias, numeric, ones, value_of_key,
+    Exact, Interval, KeyValue, Matched, Matcher, Partition, Values, Wild, bias, numeric, ones,
+    value_of_key,
 };
+use super::{MAX_BINS_PER_ITEM, MAX_WILDCARD_EXPANSION};
 
 /// An element of a bins range list (19.5.1) with its operands evaluated.
 #[derive(Clone, Copy, Debug)]
@@ -73,6 +76,20 @@ pub fn resolve(ty: &PointType, range: RangeValue<'_>) -> Resolved {
         RangeValue::Range { low, high } => resolve_range(ty, low, high, &mut resolved),
     }
     resolved
+}
+
+/// The warnings that the element `range` of a bin of a coverpoint of type
+/// `ty` gives when an instance is built (19.5.7), where `wildcard` is
+/// whether the declaration of the bin is `wildcard` (19.5.4).
+///
+/// They are those of [`resolve`], but for a single value with x or z bits
+/// in a wildcard bin: such a bit stands for both 0 and 1 before the value
+/// is resolved, so the value warns when some of the values it stands for
+/// take no part, not of the bits.
+pub fn resolve_warnings(ty: &PointType, wildcard: bool, range: RangeValue<'_>) -> Vec<String> {
+    let mut warnings = Vec::new();
+    resolve_into(ty, wildcard, range, &mut Vec::new(), &mut warnings);
+    warnings
 }
 
 /// The bits of the two planes of `constant` in its width.
@@ -150,7 +167,7 @@ fn show(constant: &Constant) -> String {
 
 /// The sized binary literal of the bits `value` with the x and z bits
 /// `mask`.
-fn show_planes(value: &BigUint, mask: &BigUint, width: u32) -> String {
+pub(crate) fn show_planes(value: &BigUint, mask: &BigUint, width: u32) -> String {
     let digits: String = (0..u64::from(width))
         .rev()
         .map(|bit| match (mask.bit(bit), value.bit(bit)) {
@@ -359,6 +376,9 @@ pub(crate) struct Shape {
     pub points: Vec<PointShape>,
     /// The number of hit counters an instance of the shape has.
     pub counters: u32,
+    /// The number of `default` bin arrays, each of which an instance keeps
+    /// the sampled values of.
+    pub arrays: u32,
     /// What building the shape warns of.
     pub warnings: Vec<Warning>,
 }
@@ -372,20 +392,46 @@ pub(crate) struct Warning {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PointShape {
-    /// The bins of scalar declarations and the automatic bins.
+    /// The automatic bins, then the bins of the declarations in their
+    /// order: one of a scalar declaration and of a `default` one, and one
+    /// for each element of an array.
     pub bins: Vec<BinShape>,
     pub matcher: Matcher,
+    /// The `default` bins among `bins` (19.5).
+    pub defaults: Vec<u32>,
+    /// Whether one of them is a `default` bin array.
+    pub default_array: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct BinShape {
     pub id: BinId,
     pub kind: BinKind,
+    pub class: BinClass,
     /// Whether no value is associated with the bin, which then takes no
     /// part in coverage (19.11.1).
     pub empty: bool,
     /// The hit counter of the bin in an instance.
     pub counter: u32,
+    /// The predicate bit of the guard of the declaration: a sample with
+    /// the bit clear does not count in the bin.
+    pub iff: Option<u32>,
+    /// The predicate bit of a filter evaluated at each sample: a value
+    /// with the bit clear is none of the bin.
+    pub filter: Option<u32>,
+}
+
+/// What the values of a bin are.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum BinClass {
+    /// Those of its declaration, or of the partition of automatic bins.
+    Value,
+    /// Those in no other bin (19.5).
+    Default,
+    /// The same, with a bin for each value that is sampled: the array of
+    /// this number among those of the shape. The counter of the bin has the
+    /// hits of all of them.
+    DefaultArray(u32),
 }
 
 /// What names a bin of a coverpoint: the bins of two instances that are
@@ -406,15 +452,45 @@ pub(crate) enum NameTag {
     Auto(KeyValue, KeyValue),
     /// `auto[NAME]`: the automatic bin of the enumerator of this index.
     Member(u32),
+    /// `name[value]`: the bin of this value in an array of a bin for each
+    /// value (19.5.1).
+    Value(ValueKey),
+    /// `name[index]`: the bin of this index in an array of a fixed number
+    /// of bins.
+    Index(u32),
+}
+
+/// A value of a coverpoint as the identity of a bin and of what a `default`
+/// bin array counts. The order is that of the values, those with x or z
+/// bits last.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub(crate) enum ValueKey {
+    /// The value of this key.
+    Known(KeyValue),
+    /// The value of these bits with the x and z bits `mask`.
+    Unknown { value: KeyValue, mask: KeyValue },
+}
+
+impl ValueKey {
+    /// The value as source code writes it in a type of `width` bits.
+    pub(crate) fn show(&self, width: u32, signed: bool) -> String {
+        match self {
+            Self::Known(key) => value_of_key(&key.key(), width, signed).to_string(),
+            Self::Unknown { value, mask } => show_planes(&value.key(), &mask.key(), width),
+        }
+    }
 }
 
 /// The name of bin `id` of coverpoint `point` (19.11.3).
 pub(crate) fn bin_name(point: &PointDescriptor, id: &BinId) -> String {
-    match &id.tag {
-        NameTag::Scalar => point
+    let declared = || {
+        point
             .bins
             .get(id.decl as usize)
-            .map_or_else(String::new, |bin| bin.name.clone()),
+            .map_or("", |bin| bin.name.as_str())
+    };
+    match &id.tag {
+        NameTag::Scalar => declared().to_string(),
         NameTag::Auto(low, high) => {
             let value = |key: &KeyValue| value_of_key(&key.key(), point.ty.width, point.ty.signed);
             if low == high {
@@ -428,6 +504,12 @@ pub(crate) fn bin_name(point: &PointDescriptor, id: &BinId) -> String {
             .members
             .get(*index as usize)
             .map_or_else(String::new, |(name, _)| format!("auto[{name}]")),
+        NameTag::Value(value) => format!(
+            "{}[{}]",
+            declared(),
+            value.show(point.ty.width, point.ty.signed)
+        ),
+        NameTag::Index(index) => format!("{}[{index}]", declared()),
     }
 }
 
@@ -443,26 +525,543 @@ fn key(ty: &PointType, value: &BigInt) -> BigUint {
     BigUint::try_from(value + BigInt::from(bias(ty.width, ty.signed))).unwrap_or_default()
 }
 
-/// Build the shape of an instance of `descriptor` from the integral
-/// `inputs` of its construction, by input index, and the options of each
-/// coverpoint. An error is a limit that the construction exceeds.
+/// Values of a bin in the order its declaration lists them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum Item {
+    /// The values of the keys `low..=high`.
+    Range { low: BigUint, high: BigUint },
+    /// One value with x or z bits, as the bits of its two planes.
+    Exact { value: BigUint, mask: BigUint },
+    /// The values whose bits are those of `value` where `care` has a bit
+    /// set: a wildcard value of more than [`MAX_WILDCARD_EXPANSION`] ranges
+    /// of values.
+    Wild { value: BigUint, care: BigUint },
+}
+
+impl Item {
+    /// The number of values, which a wildcard pattern does not tell.
+    pub(crate) fn count(&self) -> BigUint {
+        match self {
+            Self::Range { low, high } => high - low + 1u8,
+            Self::Exact { .. } => BigUint::from(1u8),
+            Self::Wild { .. } => BigUint::ZERO,
+        }
+    }
+
+    /// The bits of the two planes of value `offset` of the item in a type
+    /// of `width` bits and signedness `signed`.
+    pub(crate) fn planes(&self, offset: u64, width: u32, signed: bool) -> (BigUint, BigUint) {
+        match self {
+            Self::Range { low, .. } => ((low + offset) ^ bias(width, signed), BigUint::ZERO),
+            Self::Exact { value, mask } => (value.clone(), mask.clone()),
+            Self::Wild { .. } => (BigUint::ZERO, BigUint::ZERO),
+        }
+    }
+}
+
+/// The elements of an array that a construction hands over (19.5.1.2): a
+/// value word and a mask word for each 64 bits of each element.
+#[derive(Clone, Copy)]
+pub(crate) struct SetInput<'a> {
+    pub ty: ValueType,
+    pub words: &'a [u64],
+}
+
+impl SetInput<'_> {
+    fn elements(&self) -> impl Iterator<Item = Constant> + '_ {
+        let size = self.ty.width.div_ceil(64) as usize * 2;
+        self.words.chunks_exact(size.max(2)).map(|words| Constant {
+            ty: self.ty,
+            value: super::big(words.iter().copied().step_by(2)),
+            mask: super::big(words.iter().copied().skip(1).step_by(2)),
+        })
+    }
+}
+
+/// What a construction hands over to build a shape from.
+pub(crate) struct Construction<'a> {
+    /// The integral inputs by input index.
+    pub inputs: &'a [Option<Constant>],
+    pub sets: &'a [SetInput<'a>],
+    /// By filter index, which of the values the filter was asked about it
+    /// keeps: a bit for each, in their order.
+    pub keeps: &'a [Vec<u64>],
+    /// The options of each coverpoint.
+    pub options: &'a [PointOptions],
+    /// `type_option.distribute_first`: a filter is applied to the values
+    /// of a bin array once they are distributed (19.5.1.1).
+    pub distribute_first: bool,
+}
+
+/// The values of the declaration `bin` of `point` in their order, before any
+/// filter, with the warnings of their resolution (19.5.7).
+pub(crate) fn value_items(
+    point: &PointDescriptor,
+    bin: &BinDescriptor,
+    inputs: &[Option<Constant>],
+    sets: &[SetInput<'_>],
+) -> Result<(Vec<Item>, Vec<String>), String> {
+    let mut items = Vec::new();
+    let mut warnings = Vec::new();
+    match &bin.values {
+        BinValues::Ranges { ranges, .. } => {
+            for range in ranges {
+                let range = evaluate(range, inputs)?;
+                resolve_into(&point.ty, bin.wildcard, range, &mut items, &mut warnings);
+            }
+        }
+        BinValues::Set(index) => {
+            let set = sets
+                .get(*index as usize)
+                .ok_or_else(|| format!("set {index} was not handed over"))?;
+            // A set may have many elements that take no part for the same
+            // reason: the first of them is reported.
+            let mut first = None;
+            let mut more = 0u64;
+            let mut found = Vec::new();
+            for element in set.elements() {
+                let element = RangeValue::Value(&element);
+                resolve_into(&point.ty, bin.wildcard, element, &mut items, &mut found);
+                for text in found.drain(..) {
+                    if first.is_none() {
+                        first = Some(text);
+                    } else {
+                        more += 1;
+                    }
+                }
+            }
+            match first {
+                Some(first) if more != 0 => {
+                    warnings.push(format!("{first}; so do {more} more of its elements"))
+                }
+                Some(first) => warnings.push(first),
+                None => {}
+            }
+        }
+        BinValues::Default => {}
+    }
+    Ok((items, warnings))
+}
+
+/// The lowest value that the bound `b` of a range of a wildcard bin stands
+/// for, or with `highest` the highest: an x or z bit stands for 0 and for 1
+/// (19.5.4). `signed` is whether the range reads the bound as a signed
+/// value, which it does not beside an unsigned bound (see
+/// [`resolve_range`]).
+fn wildcard_bound(b: &Constant, highest: bool, signed: bool) -> Constant {
+    let (value, mask) = planes(b);
+    let mut bits = if highest {
+        &value | &mask
+    } else {
+        &value & (ones(b.ty.width) ^ &mask)
+    };
+    // The sign of a value that is read as signed.
+    if let Some(top) = b.ty.width.checked_sub(1).map(u64::from)
+        && signed
+        && mask.bit(top)
+    {
+        bits.set_bit(top, !highest);
+    }
+    Constant {
+        ty: b.ty,
+        value: bits,
+        mask: BigUint::ZERO,
+    }
+}
+
+/// Add the values of the element `range` of a bin of a coverpoint of type
+/// `ty` to `items`.
+///
+/// In a wildcard bin the x and z bits of a value are "treated as all
+/// possible 0 and 1 values prior to applying these rules" (19.5.7). For a
+/// single value those are the values it stands for. A range each of whose
+/// bounds stands for several values holds what the ranges of all of them
+/// hold: the values from its lowest low bound to its highest high bound,
+/// lowest and highest as the range compares its bounds, in their common
+/// type (11.8.1).
+fn resolve_into(
+    ty: &PointType,
+    wildcard: bool,
+    range: RangeValue<'_>,
+    items: &mut Vec<Item>,
+    warnings: &mut Vec<String>,
+) {
+    let bounds;
+    let range = match range {
+        RangeValue::Value(value) if wildcard && planes(value).1.bits() != 0 => {
+            wildcard_items(ty, value, items, warnings);
+            return;
+        }
+        RangeValue::Range { low, high }
+            if wildcard
+                && [low, high]
+                    .into_iter()
+                    .flatten()
+                    .any(|bound| planes(bound).1.bits() != 0) =>
+        {
+            let signed = [low, high]
+                .into_iter()
+                .flatten()
+                .all(|bound| bound.ty.signed);
+            bounds = (
+                low.map(|low| wildcard_bound(low, false, signed)),
+                high.map(|high| wildcard_bound(high, true, signed)),
+            );
+            RangeValue::Range {
+                low: bounds.0.as_ref(),
+                high: bounds.1.as_ref(),
+            }
+        }
+        range => range,
+    };
+    let resolved = resolve(ty, range);
+    warnings.extend(resolved.warnings);
+    for item in resolved.items {
+        match item {
+            ResolvedItem::Range { low, high } => push_range(items, key(ty, &low), key(ty, &high)),
+            ResolvedItem::Exact { value, mask } => items.push(Item::Exact { value, mask }),
+        }
+    }
+}
+
+/// Add the values of the keys `low..=high` to `items`: values that follow
+/// those of the last item are values of it.
+fn push_range(items: &mut Vec<Item>, low: BigUint, high: BigUint) {
+    if let Some(Item::Range { high: last, .. }) = items.last_mut()
+        && &*last + 1u8 == low
+    {
+        *last = high;
+    } else {
+        items.push(Item::Range { low, high });
+    }
+}
+
+/// The values that the wildcard value `b` stands for in a bin of a
+/// coverpoint of type `ty`, as patterns of the bits of the type: the bits
+/// to have and which bits those are. An x or z bit of `b` stands for 0 and
+/// for 1 (19.5.4) before the value is resolved (19.5.7), so of the values
+/// `b` stands for those take part that a value without such bits would.
+/// With the patterns comes whether some do not.
+fn wildcard_patterns(ty: &PointType, b: &Constant) -> (Vec<(BigUint, BigUint)>, bool) {
+    let (from, to) = (b.ty.width, ty.width);
+    let (value, mask) = planes(b);
+    let care = ones(from) ^ mask;
+    let value = value & &care;
+    let (Some(top), true) = (from.checked_sub(1).map(u64::from), to != 0) else {
+        return (Vec::new(), true);
+    };
+    let sign = BigUint::from(1u8) << top;
+    // A signed `b` is extended by its sign, so the values of either sign
+    // are a pattern of their own.
+    let alternatives = if b.ty.signed && !care.bit(top) {
+        vec![
+            (value.clone(), &care | &sign),
+            (&value | &sign, &care | &sign),
+        ]
+    } else {
+        vec![(value, care)]
+    };
+    let mut patterns = Vec::new();
+    let mut dropped = false;
+    for (value, care) in alternatives {
+        let negative = b.ty.signed && value.bit(top);
+        if negative && !ty.signed {
+            // Signed and negative on an unsigned type (19.5.7 b) 1).
+            dropped = true;
+            continue;
+        }
+        if from > to {
+            // The bits that the cast drops are those the value is
+            // extended by when it is compared with `b` (19.5.7 b) 2):
+            // the sign of the cast value where both are signed, else 0.
+            let mut fixed = ones(from) ^ ones(to);
+            if b.ty.signed && ty.signed {
+                fixed |= BigUint::from(1u8) << (to - 1);
+            }
+            let fill = if negative {
+                fixed.clone()
+            } else {
+                BigUint::ZERO
+            };
+            if ((&value ^ &fill) & &care & &fixed).bits() != 0 {
+                dropped = true;
+                continue;
+            }
+            if (&fixed & (ones(from) ^ &care)).bits() != 0 {
+                dropped = true;
+            }
+            let care = (care | &fixed) & ones(to);
+            patterns.push(((value | fill) & &care, care));
+        } else {
+            let extension = ones(to) ^ ones(from);
+            let value = if negative { value | &extension } else { value };
+            patterns.push((value, care | extension));
+        }
+    }
+    (patterns, dropped)
+}
+
+/// The number of bits of a pattern of a type of `width` bits that are free
+/// above the lowest bit that `care` has set: each choice of them is a range
+/// of values. Without a bit to have, every value is one range.
+fn free_bits(care: &BigUint, width: u32) -> Vec<u64> {
+    let Some(lowest) = care.trailing_zeros() else {
+        return Vec::new();
+    };
+    (lowest..u64::from(width))
+        .filter(|&bit| !care.bit(bit))
+        .collect()
+}
+
+/// Add the values the wildcard value `b` stands for to `items` (19.5.4): as
+/// ranges of values in their order, or where those are more than
+/// [`MAX_WILDCARD_EXPANSION`] as patterns.
+fn wildcard_items(ty: &PointType, b: &Constant, items: &mut Vec<Item>, warnings: &mut Vec<String>) {
+    let (patterns, dropped) = wildcard_patterns(ty, b);
+    if patterns.is_empty() {
+        warnings.push(format!(
+            "wildcard value {} stands for no value of the coverpoint type and does not take part \
+             {CLAUSE}",
+            show(b)
+        ));
+        return;
+    }
+    if dropped {
+        warnings.push(format!(
+            "wildcard value {} is limited to the values of the coverpoint type {CLAUSE}",
+            show(b)
+        ));
+    }
+    let free: Vec<Vec<u64>> = patterns
+        .iter()
+        .map(|(_, care)| free_bits(care, ty.width))
+        .collect();
+    let ranges: u64 = free
+        .iter()
+        .map(|free| 1u64.checked_shl(free.len() as u32).unwrap_or(u64::MAX))
+        .fold(0, u64::saturating_add);
+    if ranges > MAX_WILDCARD_EXPANSION as u64 {
+        items.extend(
+            patterns
+                .into_iter()
+                .map(|(value, care)| Item::Wild { value, care }),
+        );
+        return;
+    }
+    let sign = bias(ty.width, ty.signed);
+    let mut expanded: Vec<(BigUint, BigUint)> = Vec::with_capacity(ranges as usize);
+    for ((value, care), free) in patterns.iter().zip(&free) {
+        // The bits below the lowest bit to have are free in a range.
+        let low_bits = match care.trailing_zeros() {
+            Some(lowest) => ones(lowest as u32),
+            None => ones(ty.width),
+        };
+        for choice in 0..1u64 << free.len() {
+            let mut bits = value.clone();
+            for (index, &bit) in free.iter().enumerate() {
+                bits.set_bit(bit, choice >> index & 1 != 0);
+            }
+            // The sign bit is the same in all values of a range unless
+            // the range is every value.
+            let (low, high) = if care.bits() == 0 {
+                (BigUint::ZERO, ones(ty.width))
+            } else {
+                (&bits ^ &sign, (&bits | &low_bits) ^ &sign)
+            };
+            expanded.push((low, high));
+        }
+    }
+    expanded.sort_unstable();
+    for (low, high) in expanded {
+        push_range(items, low, high);
+    }
+}
+
+/// The items of `items` that the filter whose answers are the bits of
+/// `keeps` keeps, where the first value of `items` is the value number
+/// `position` that the filter was asked about.
+fn kept(items: &[Item], mut position: u64, keeps: &[u64]) -> Vec<Item> {
+    let keep = |position: u64| {
+        keeps
+            .get((position / 64) as usize)
+            .is_some_and(|word| word >> (position % 64) & 1 != 0)
+    };
+    // No value beyond the answers is kept.
+    let end = keeps.len() as u64 * 64;
+    let mut out = Vec::new();
+    for item in items {
+        match item {
+            Item::Range { low, high } => {
+                let count = u64::try_from(high - low + 1u8).unwrap_or(u64::MAX);
+                let mut run: Option<(u64, u64)> = None;
+                let mut flush = |run: &mut Option<(u64, u64)>| {
+                    if let Some((first, last)) = run.take() {
+                        out.push(Item::Range {
+                            low: low + first,
+                            high: low + last,
+                        });
+                    }
+                };
+                for offset in 0..count.min(end.saturating_sub(position)) {
+                    if keep(position + offset) {
+                        run = Some((run.map_or(offset, |(first, _)| first), offset));
+                    } else {
+                        flush(&mut run);
+                    }
+                }
+                flush(&mut run);
+                position = position.saturating_add(count);
+            }
+            Item::Exact { .. } => {
+                if keep(position) {
+                    out.push(item.clone());
+                }
+                position = position.saturating_add(1);
+            }
+            Item::Wild { .. } => {}
+        }
+    }
+    out
+}
+
+/// Takes the values of items in their order.
+struct Cursor<'a> {
+    items: &'a [Item],
+    item: usize,
+    /// The values of the item that are taken.
+    offset: BigUint,
+    /// The number of values that are taken.
+    position: BigUint,
+}
+
+impl Cursor<'_> {
+    /// The next `count` values, or what is left of them: without a count
+    /// all that is left. With them comes the number of values before them.
+    fn take(&mut self, count: Option<&BigUint>) -> (Vec<Item>, BigUint) {
+        let start = self.position.clone();
+        let mut left = count.cloned();
+        let mut out = Vec::new();
+        while let Some(item) = self.items.get(self.item) {
+            if left.as_ref().is_some_and(|left| left.bits() == 0) {
+                break;
+            }
+            match item {
+                Item::Range { low, high } => {
+                    let available = high - low + 1u8 - &self.offset;
+                    let take = match &left {
+                        Some(left) => available.clone().min(left.clone()),
+                        None => available.clone(),
+                    };
+                    let from = low + &self.offset;
+                    out.push(Item::Range {
+                        high: &from + &take - 1u8,
+                        low: from,
+                    });
+                    if let Some(left) = &mut left {
+                        *left -= &take;
+                    }
+                    self.position += &take;
+                    if take == available {
+                        self.item += 1;
+                        self.offset = BigUint::ZERO;
+                    } else {
+                        self.offset += take;
+                    }
+                }
+                Item::Exact { .. } | Item::Wild { .. } => {
+                    out.push(item.clone());
+                    if let Some(left) = &mut left {
+                        *left -= 1u8;
+                    }
+                    self.position += 1u8;
+                    self.item += 1;
+                }
+            }
+        }
+        (out, start)
+    }
+}
+
+/// The values of keys that were seen, as disjoint ranges by their low key,
+/// and those with x or z bits.
+#[derive(Default)]
+struct Seen {
+    ranges: BTreeMap<BigUint, BigUint>,
+    exact: BTreeSet<(BigUint, BigUint)>,
+}
+
+impl Seen {
+    /// See the values of the keys `low..=high`: those that were not seen
+    /// yet, in their order.
+    fn fresh(&mut self, low: &BigUint, high: &BigUint) -> Vec<(BigUint, BigUint)> {
+        // The ranges that meet `low..=high`, in order.
+        let mut meeting: Vec<(BigUint, BigUint)> = Vec::new();
+        if let Some((start, end)) = self.ranges.range(..low).next_back()
+            && end >= low
+        {
+            meeting.push((start.clone(), end.clone()));
+        }
+        meeting.extend(
+            self.ranges
+                .range(low..=high)
+                .map(|(start, end)| (start.clone(), end.clone())),
+        );
+        let mut fresh = Vec::new();
+        // The first key that no range before is known to hold.
+        let mut at = Some(low.clone());
+        for (start, end) in &meeting {
+            let Some(from) = at.take() else {
+                break;
+            };
+            if *start > from {
+                fresh.push((from, start - 1u8));
+            }
+            if end < high {
+                at = Some(end + 1u8);
+            }
+        }
+        if let Some(from) = at {
+            fresh.push((from, high.clone()));
+        }
+        let start = meeting.first().map_or(low, |(start, _)| start.min(low));
+        let end = meeting.last().map_or(high, |(_, end)| end.max(high));
+        let (start, end) = (start.clone(), end.clone());
+        for (start, _) in &meeting {
+            self.ranges.remove(start);
+        }
+        self.ranges.insert(start, end);
+        fresh
+    }
+
+    fn holds(&self, key: &BigUint) -> bool {
+        self.ranges
+            .range(..=key)
+            .next_back()
+            .is_some_and(|(_, end)| end >= key)
+    }
+}
+
+/// Build the shape of an instance of `descriptor` from what its
+/// construction hands over. An error is a limit that the construction
+/// exceeds or a value it may not have.
 pub(crate) fn build(
     descriptor: &TypeDescriptor,
-    inputs: &[Option<Constant>],
-    options: &[PointOptions],
+    construction: &Construction<'_>,
 ) -> Result<Shape, String> {
     let mut shape = Shape {
         points: Vec::with_capacity(descriptor.points.len()),
         counters: 0,
+        arrays: 0,
         warnings: Vec::new(),
     };
-    for (point, options) in descriptor.points.iter().zip(options) {
+    for (point, options) in descriptor.points.iter().zip(construction.options) {
         let mut builder = PointBuilder {
             point,
             bins: Vec::new(),
-            intervals: Vec::new(),
-            exact: Vec::new(),
-            partition: None,
+            values: Values::default(),
+            defaults: Vec::new(),
+            default_array: false,
+            arrays: &mut shape.arrays,
             counters: &mut shape.counters,
             warnings: &mut shape.warnings,
         };
@@ -470,30 +1069,43 @@ pub(crate) fn build(
             builder.automatic(options.auto_bin_max)?;
         }
         for (decl, bin) in point.bins.iter().enumerate() {
-            match (bin.kind, &bin.values, bin.array) {
-                (BinKind::Bins, BinValues::Ranges { ranges }, BinArray::Scalar) => {
-                    builder.scalar(decl as u32, &bin.name, ranges, inputs)?;
+            match &bin.values {
+                BinValues::Default => builder.default(decl as u32, bin)?,
+                BinValues::Ranges { .. } | BinValues::Set(_) => {
+                    builder.declared(decl as u32, bin, construction, options)?
                 }
             }
         }
         let PointBuilder {
-            bins,
-            intervals,
-            exact,
-            partition,
+            mut bins,
+            values,
+            defaults,
+            default_array,
             ..
         } = builder;
-        let (matcher, overlaps) = Matcher::new(
+        let removes: Vec<bool> = bins.iter().map(|bin| bin.kind != BinKind::Bins).collect();
+        let Matched {
+            matcher,
+            holds,
+            overlaps,
+        } = Matcher::build(
             point.ty.width,
-            intervals,
-            exact,
-            partition,
+            point.ty.signed,
+            bins.len(),
+            values,
+            &|bin| removes[bin as usize],
             options.detect_overlap,
         );
-        for (first, second) in overlaps {
+        for (bin, holds) in bins.iter_mut().zip(holds) {
+            if bin.class == BinClass::Value {
+                bin.empty = !holds;
+            }
+        }
+        let subject = || format!("coverpoint `{}`", point.name);
+        for (first, second) in overlaps.pairs {
             let name = |bin: u32| bin_name(point, &bins[bin as usize].id);
             shape.warnings.push(Warning {
-                subject: format!("coverpoint `{}`", point.name),
+                subject: subject(),
                 text: format!(
                     "bins `{}` and `{}` overlap (option.detect_overlap)",
                     name(first),
@@ -501,7 +1113,18 @@ pub(crate) fn build(
                 ),
             });
         }
-        shape.points.push(PointShape { bins, matcher });
+        if overlaps.more {
+            shape.warnings.push(Warning {
+                subject: subject(),
+                text: "more bins overlap (option.detect_overlap)".into(),
+            });
+        }
+        shape.points.push(PointShape {
+            bins,
+            matcher,
+            defaults,
+            default_array,
+        });
     }
     Ok(shape)
 }
@@ -509,24 +1132,64 @@ pub(crate) fn build(
 struct PointBuilder<'a> {
     point: &'a PointDescriptor,
     bins: Vec<BinShape>,
-    intervals: Vec<Interval>,
-    exact: Vec<Exact>,
-    partition: Option<Partition>,
+    values: Values,
+    defaults: Vec<u32>,
+    default_array: bool,
+    arrays: &'a mut u32,
     counters: &'a mut u32,
     warnings: &'a mut Vec<Warning>,
 }
 
+/// The number of bins of the bin array `name[count]`, which is positive
+/// (19.5.1).
+fn array_size(count: &Constant) -> Result<u32, String> {
+    let (value, mask) = planes(count);
+    if mask.bits() != 0 {
+        return Err(format!("has the size {}", show(count)));
+    }
+    let size = numeric(&value, count.ty.width, count.ty.signed);
+    if size <= BigInt::ZERO {
+        return Err(format!("has the size {size}"));
+    }
+    u32::try_from(&size)
+        .ok()
+        .filter(|&size| size as usize <= MAX_BINS_PER_ITEM)
+        .ok_or_else(|| format!("has more than {MAX_BINS_PER_ITEM} bins"))
+}
+
 impl PointBuilder<'_> {
-    fn bin(&mut self, id: BinId, empty: bool) -> u32 {
+    /// A bin of declaration `bin`, or an automatic bin without one.
+    fn bin(
+        &mut self,
+        id: BinId,
+        class: BinClass,
+        bin: Option<&BinDescriptor>,
+    ) -> Result<u32, String> {
+        if self.bins.len() >= MAX_BINS_PER_ITEM {
+            return Err(format!(
+                "coverpoint `{}` has more than {MAX_BINS_PER_ITEM} bins",
+                self.point.name
+            ));
+        }
         let counter = *self.counters;
         *self.counters += 1;
+        let filter = match bin.map(|bin| &bin.values) {
+            Some(BinValues::Ranges {
+                filter: Some(BinFilter::Predicate(bit)),
+                ..
+            }) => Some(*bit),
+            _ => None,
+        };
         self.bins.push(BinShape {
             id,
-            kind: BinKind::Bins,
-            empty,
+            kind: bin.map_or(BinKind::Bins, |bin| bin.kind),
+            class,
+            empty: class == BinClass::Value,
             counter,
+            iff: bin.and_then(|bin| bin.iff),
+            filter,
         });
-        self.bins.len() as u32 - 1
+        Ok(self.bins.len() as u32 - 1)
     }
 
     /// The automatic bins (19.5.3): one for each enumerator of an
@@ -539,20 +1202,20 @@ impl PointBuilder<'_> {
         let ty = &point.ty;
         if !ty.members.is_empty() {
             for (index, (_, value)) in ty.members.iter().enumerate() {
-                // Automatic bins hold no value with x or z bits, so the bin
-                // of such an enumerator has no value and takes no part in
-                // coverage (19.11.1).
-                let unknown = (&value.mask & ones(ty.width)).bits() != 0;
                 let bin = self.bin(
                     BinId {
                         decl: 0,
                         tag: NameTag::Member(index as u32),
                     },
-                    unknown,
-                );
-                if !unknown {
+                    BinClass::Value,
+                    None,
+                )?;
+                // Automatic bins hold no value with x or z bits, so the bin
+                // of such an enumerator has no value and takes no part in
+                // coverage (19.11.1).
+                if (&value.mask & ones(ty.width)).bits() == 0 {
                     let key = (&value.value & ones(ty.width)) ^ bias(ty.width, ty.signed);
-                    self.intervals.push(Interval {
+                    self.values.intervals.push(Interval {
                         low: key.clone(),
                         high: key,
                         bin,
@@ -595,10 +1258,11 @@ impl PointBuilder<'_> {
                     decl: 0,
                     tag: NameTag::Auto(KeyValue::new(&low), KeyValue::new(&high)),
                 },
-                false,
-            );
+                BinClass::Value,
+                None,
+            )?;
         }
-        self.partition = Some(Partition {
+        self.values.partition = Some(Partition {
             per,
             bins,
             first: 0,
@@ -606,41 +1270,262 @@ impl PointBuilder<'_> {
         Ok(())
     }
 
-    /// The bin of the scalar declaration `decl`, of the values of `ranges`
-    /// that take part (19.5.7).
-    fn scalar(
+    /// The bin of the `default` declaration `decl` (19.5).
+    fn default(&mut self, decl: u32, bin: &BinDescriptor) -> Result<(), String> {
+        let class = if bin.array == BinArray::Scalar {
+            BinClass::Default
+        } else {
+            self.default_array = true;
+            *self.arrays += 1;
+            BinClass::DefaultArray(*self.arrays - 1)
+        };
+        let id = BinId {
+            decl,
+            tag: NameTag::Scalar,
+        };
+        let index = self.bin(id, class, Some(bin))?;
+        self.defaults.push(index);
+        Ok(())
+    }
+
+    /// Give bin `bin` the values `items`.
+    fn hold(&mut self, bin: u32, items: Vec<Item>) {
+        for item in items {
+            match item {
+                Item::Range { low, high } => {
+                    self.values.intervals.push(Interval { low, high, bin })
+                }
+                Item::Exact { value, mask } => self.values.exact.push(Exact { value, mask, bin }),
+                Item::Wild { value, care } => self.values.wild.push(Wild { value, care, bin }),
+            }
+        }
+    }
+
+    /// The bins of the declaration `decl` of a range list or a set: its
+    /// values that take part (19.5.7) and that its filter keeps (19.5.1.1),
+    /// in one bin, in a bin for each value or distributed among a number of
+    /// bins (19.5.1). What ignore and illegal bins take from them is taken
+    /// once all bins have their values (19.5.5, 19.5.6).
+    fn declared(
         &mut self,
         decl: u32,
-        name: &str,
-        ranges: &[RangeDescriptor],
-        inputs: &[Option<Constant>],
+        bin: &BinDescriptor,
+        construction: &Construction<'_>,
+        options: &PointOptions,
     ) -> Result<(), String> {
-        let bin = self.bin(
-            BinId {
-                decl,
-                tag: NameTag::Scalar,
-            },
-            true,
-        );
         let point = self.point;
-        let ty = &point.ty;
-        for range in ranges {
-            let resolved = resolve(ty, evaluate(range, inputs)?);
-            self.warnings
-                .extend(resolved.warnings.into_iter().map(|text| Warning {
-                    subject: format!("bins `{name}` of coverpoint `{}`", point.name),
-                    text,
-                }));
-            for item in resolved.items {
-                self.bins[bin as usize].empty = false;
-                match item {
-                    ResolvedItem::Range { low, high } => self.intervals.push(Interval {
-                        low: key(ty, &low),
-                        high: key(ty, &high),
-                        bin,
-                    }),
-                    ResolvedItem::Exact { value, mask } => {
-                        self.exact.push(Exact { value, mask, bin })
+        let subject = format!(
+            "{} `{}` of coverpoint `{}`",
+            bin.kind.keyword(),
+            bin.name,
+            point.name
+        );
+        let (items, warnings) = value_items(point, bin, construction.inputs, construction.sets)?;
+        self.warnings
+            .extend(warnings.into_iter().map(|text| Warning {
+                subject: subject.clone(),
+                text,
+            }));
+        let keeps = match &bin.values {
+            BinValues::Ranges {
+                filter: Some(BinFilter::Enumerate(filter)),
+                ..
+            } => Some(
+                construction
+                    .keeps
+                    .get(*filter as usize)
+                    .ok_or_else(|| format!("filter {filter} was not asked"))?
+                    .as_slice(),
+            ),
+            _ => None,
+        };
+        if items.iter().any(|item| matches!(item, Item::Wild { .. })) {
+            if bin.array != BinArray::Scalar || keeps.is_some() {
+                return Err(format!(
+                    "{subject} has a wildcard value of more than {MAX_WILDCARD_EXPANSION} ranges \
+                     of values, which only a bin that is no array and has no `with` filter may \
+                     have"
+                ));
+            }
+            // The values of such a value are not known here.
+            let removing = point
+                .bins
+                .iter()
+                .any(|other| other.kind != BinKind::Bins && other.values != BinValues::Default);
+            let text = match bin.kind {
+                BinKind::Bins if removing || options.detect_overlap => Some(
+                    "is matched as a pattern: `ignore_bins`, `illegal_bins` and \
+                     option.detect_overlap do not see its values",
+                ),
+                BinKind::Bins => None,
+                BinKind::Ignore | BinKind::Illegal => Some(
+                    "is matched as a pattern: its values are in no bin when they are sampled, \
+                     but still count as values of the bins they are taken from (IEEE 1800-2023 \
+                     19.11.1)",
+                ),
+            };
+            if let Some(text) = text {
+                self.warnings.push(Warning {
+                    subject: subject.clone(),
+                    text: format!(
+                        "a wildcard value of more than {MAX_WILDCARD_EXPANSION} ranges of values \
+                         {text}"
+                    ),
+                });
+            }
+        }
+        // A filter is applied before the values are distributed, or to
+        // what each bin of an array got (19.5.1.1).
+        let (items, after) = match keeps {
+            Some(keeps) if bin.array == BinArray::Scalar || !construction.distribute_first => {
+                (kept(&items, 0, keeps), None)
+            }
+            keeps => (items, keeps),
+        };
+        match &bin.array {
+            BinArray::Scalar => {
+                let id = BinId {
+                    decl,
+                    tag: NameTag::Scalar,
+                };
+                let index = self.bin(id, BinClass::Value, Some(bin))?;
+                self.hold(index, items);
+            }
+            BinArray::Fixed(count) => {
+                let count = match count {
+                    Operand::Constant(constant) => constant,
+                    Operand::Input(index) => construction
+                        .inputs
+                        .get(*index as usize)
+                        .and_then(Option::as_ref)
+                        .ok_or_else(|| format!("input {index} is not an integral input"))?,
+                };
+                let size = array_size(count).map_err(|reason| format!("{subject} {reason}"))?;
+                // "B is defined as the total number of values divided by
+                // the number of bins, rounded down, but not less than 1."
+                let total: BigUint = items.iter().map(Item::count).sum();
+                let per = (total / size).max(BigUint::from(1u8));
+                let mut cursor = Cursor {
+                    items: &items,
+                    item: 0,
+                    offset: BigUint::ZERO,
+                    position: BigUint::ZERO,
+                };
+                for index in 0..size {
+                    let id = BinId {
+                        decl,
+                        tag: NameTag::Index(index),
+                    };
+                    let bin_index = self.bin(id, BinClass::Value, Some(bin))?;
+                    // "the last bin will include the remaining values".
+                    let (values, position) = cursor.take((index + 1 != size).then_some(&per));
+                    let values = match after {
+                        Some(keeps) => {
+                            kept(&values, u64::try_from(&position).unwrap_or(u64::MAX), keeps)
+                        }
+                        None => values,
+                    };
+                    self.hold(bin_index, values);
+                }
+            }
+            BinArray::Open => {
+                // A bin for each value, in the order the values first
+                // appear: "each value is assigned one bin, including values
+                // that are specified more than once".
+                let mut seen = Seen::default();
+                let mut fresh = Vec::new();
+                let mut bins = BigUint::ZERO;
+                for item in &items {
+                    match item {
+                        Item::Range { low, high } => {
+                            for (low, high) in seen.fresh(low, high) {
+                                let item = Item::Range { low, high };
+                                bins += item.count();
+                                fresh.push(item);
+                            }
+                        }
+                        Item::Exact { value, mask } => {
+                            if seen.exact.insert((value.clone(), mask.clone())) {
+                                bins += 1u8;
+                                fresh.push(item.clone());
+                            }
+                        }
+                        Item::Wild { .. } => {}
+                    }
+                }
+                if bin.wildcard && bins > BigUint::from(MAX_WILDCARD_EXPANSION) {
+                    return Err(format!(
+                        "{subject} has more than {MAX_WILDCARD_EXPANSION} bins"
+                    ));
+                }
+                if bins > BigUint::from(MAX_BINS_PER_ITEM.saturating_sub(self.bins.len())) {
+                    return Err(format!(
+                        "coverpoint `{}` has more than {MAX_BINS_PER_ITEM} bins",
+                        point.name
+                    ));
+                }
+                // The values that a filter applied to the bins keeps.
+                let surviving = after.map(|keeps| {
+                    let mut seen = Seen::default();
+                    for item in kept(&items, 0, keeps) {
+                        match item {
+                            Item::Range { low, high } => {
+                                seen.fresh(&low, &high);
+                            }
+                            Item::Exact { value, mask } => {
+                                seen.exact.insert((value, mask));
+                            }
+                            Item::Wild { .. } => {}
+                        }
+                    }
+                    seen
+                });
+                for item in fresh {
+                    match item {
+                        Item::Range { low, high } => {
+                            let mut key = low;
+                            loop {
+                                let id = BinId {
+                                    decl,
+                                    tag: NameTag::Value(ValueKey::Known(KeyValue::new(&key))),
+                                };
+                                let index = self.bin(id, BinClass::Value, Some(bin))?;
+                                if surviving.as_ref().is_none_or(|kept| kept.holds(&key)) {
+                                    self.values.intervals.push(Interval {
+                                        low: key.clone(),
+                                        high: key.clone(),
+                                        bin: index,
+                                    });
+                                }
+                                if key == high {
+                                    break;
+                                }
+                                key += 1u8;
+                            }
+                        }
+                        Item::Exact { value, mask } => {
+                            let id = BinId {
+                                decl,
+                                tag: NameTag::Value(ValueKey::Unknown {
+                                    value: KeyValue::new(&value),
+                                    mask: KeyValue::new(&mask),
+                                }),
+                            };
+                            let index = self.bin(id, BinClass::Value, Some(bin))?;
+                            let pattern = (value, mask);
+                            if surviving
+                                .as_ref()
+                                .is_none_or(|kept| kept.exact.contains(&pattern))
+                            {
+                                let (value, mask) = pattern;
+                                self.values.exact.push(Exact {
+                                    value,
+                                    mask,
+                                    bin: index,
+                                });
+                            }
+                        }
+                        Item::Wild { .. } => {}
                     }
                 }
             }

@@ -779,7 +779,7 @@ fn integral_formals_are_read_without_object_loads() {
 /// What the descriptor of a covergroup type costs a design: the function
 /// that registers the type hands the heap its text in calls of eight bytes,
 /// once for the type, whatever constructs and samples it. A bin of a value
-/// is about 20 calls and 22 instructions there.
+/// is about 25 calls and 27 instructions there.
 #[test]
 fn descriptor_of_a_thousand_bins_is_registered_once() {
     use coverage::op;
@@ -810,14 +810,14 @@ fn descriptor_of_a_thousand_bins_is_registered_once() {
         count(&coverage_subs(&program.sir), op::REGISTER_BYTES)
     };
     assert_eq!(count(&coverage_subs(&program.sir), op::REGISTER), 1);
-    // About 161 bytes of text for a bin of one value: 20 calls. A call is
+    // About 203 bytes of text for a bin of one value: 25 calls. A call is
     // lowered with the words of its operation, of its eight bytes and of
     // the operand it has not; the optimizer keeps one of each value, and
     // of the words of the text about one in ten differs from all others.
     let calls = bytes(&program) - bytes(&small_program);
     let instructions = facts.instructions - small.instructions;
     assert!(
-        (20_000..20_200).contains(&calls) && (calls..calls + calls / 8).contains(&instructions),
+        (25_200..25_450).contains(&calls) && (calls..calls + calls / 8).contains(&instructions),
         "{instructions} instructions and {calls} calls for 999 bins ({} and {} for the design)",
         facts.instructions,
         bytes(&program)

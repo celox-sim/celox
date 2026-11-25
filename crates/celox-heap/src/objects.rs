@@ -137,7 +137,9 @@ pub enum Fault {
     InvalidRandomState,
     /// A covergroup operation that cannot be performed (IEEE 1800-2023
     /// clause 19), such as a construction that needs more bins than
-    /// [`crate::coverage::MAX_BINS_PER_ITEM`] or a negative weight.
+    /// [`crate::coverage::MAX_BINS_PER_ITEM`], a `with` filter of more
+    /// values than [`crate::coverage::MAX_FILTER_CANDIDATES`] or a negative
+    /// weight.
     Coverage(String),
 }
 
