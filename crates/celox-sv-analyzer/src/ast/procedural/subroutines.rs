@@ -1330,7 +1330,7 @@ pub(in crate::ast) fn lower_subroutine(
                 tree,
                 builder.session,
                 &builder.dims.const_env,
-                builder.state.locals,
+                &builder.state.locals[first_local..],
                 &subroutine,
                 builder.state.subroutine_directions,
             )
@@ -1361,7 +1361,7 @@ pub(in crate::ast) fn lower_subroutine(
                         builder.session,
                         &subroutine,
                         &builder.dims.const_env,
-                        builder.state.locals,
+                        &builder.state.locals[first_local..],
                         &std::iter::once((*name).clone()).collect(),
                         builder.state.subroutine_directions,
                     )
