@@ -10,13 +10,13 @@
   "groups": {
     "cores": {
       "2state": {
-        "passed": 0,
-        "failed": 16,
+        "passed": 7,
+        "failed": 9,
         "skipped": 5,
         "executed": 16,
         "upstream_input_issues": 1,
-        "pass_percent": 0.0,
-        "tags_passed": 0,
+        "pass_percent": 43.75,
+        "tags_passed": 3,
         "tags_tested": 8,
         "skipped_by_tag": {
           "ibex": 1,
@@ -25,7 +25,7 @@
         },
         "by_tag": {
           "RgGen": {
-            "passed": 0,
+            "passed": 1,
             "executed": 1
           },
           "TNoC": {
@@ -37,7 +37,7 @@
             "executed": 5
           },
           "black-parrot": {
-            "passed": 0,
+            "passed": 4,
             "executed": 6
           },
           "cva6": {
@@ -45,7 +45,7 @@
             "executed": 5
           },
           "fx68k": {
-            "passed": 0,
+            "passed": 1,
             "executed": 1
           },
           "rsd": {
@@ -53,30 +53,30 @@
             "executed": 1
           },
           "scr1": {
-            "passed": 0,
+            "passed": 1,
             "executed": 1
           }
         },
         "by_execution_mode": {
           "elaboration": {
-            "fail": 16
+            "fail": 9,
+            "pass": 7
           }
         },
         "by_failure_category": {
           "input_issue": 1,
-          "timeout": 1,
-          "unclassified": 1,
-          "unsupported": 13
+          "timeout": 2,
+          "unsupported": 6
         }
       },
       "4state": {
-        "passed": 0,
-        "failed": 16,
+        "passed": 3,
+        "failed": 13,
         "skipped": 5,
         "executed": 16,
         "upstream_input_issues": 1,
-        "pass_percent": 0.0,
-        "tags_passed": 0,
+        "pass_percent": 18.75,
+        "tags_passed": 3,
         "tags_tested": 8,
         "skipped_by_tag": {
           "ibex": 1,
@@ -85,7 +85,7 @@
         },
         "by_tag": {
           "RgGen": {
-            "passed": 0,
+            "passed": 1,
             "executed": 1
           },
           "TNoC": {
@@ -105,7 +105,7 @@
             "executed": 5
           },
           "fx68k": {
-            "passed": 0,
+            "passed": 1,
             "executed": 1
           },
           "rsd": {
@@ -113,19 +113,20 @@
             "executed": 1
           },
           "scr1": {
-            "passed": 0,
+            "passed": 1,
             "executed": 1
           }
         },
         "by_execution_mode": {
           "elaboration": {
-            "fail": 16
+            "fail": 13,
+            "pass": 3
           }
         },
         "by_failure_category": {
           "input_issue": 1,
-          "unclassified": 2,
-          "unsupported": 13
+          "unclassified": 6,
+          "unsupported": 6
         }
       }
     }
@@ -234,11 +235,11 @@
     {
       "test": "generated/black-parrot/bp_default.sv",
       "state_mode": "2state",
-      "result": "fail",
+      "result": "pass",
       "mode": "elaboration",
       "tags": "black-parrot",
-      "failure_category": "unsupported",
-      "diagnostic": "unsupported_construct",
+      "failure_category": "",
+      "diagnostic": "",
       "input_issue": ""
     },
     {
@@ -247,18 +248,18 @@
       "result": "fail",
       "mode": "elaboration",
       "tags": "black-parrot",
-      "failure_category": "unsupported",
-      "diagnostic": "unsupported_construct",
+      "failure_category": "unclassified",
+      "diagnostic": "unrecognized_diagnostic",
       "input_issue": ""
     },
     {
       "test": "generated/black-parrot/bp_multicore_1.sv",
       "state_mode": "2state",
-      "result": "fail",
+      "result": "pass",
       "mode": "elaboration",
       "tags": "black-parrot",
-      "failure_category": "unsupported",
-      "diagnostic": "unsupported_construct",
+      "failure_category": "",
+      "diagnostic": "",
       "input_issue": ""
     },
     {
@@ -267,18 +268,18 @@
       "result": "fail",
       "mode": "elaboration",
       "tags": "black-parrot",
-      "failure_category": "unsupported",
-      "diagnostic": "unsupported_construct",
+      "failure_category": "unclassified",
+      "diagnostic": "unrecognized_diagnostic",
       "input_issue": ""
     },
     {
       "test": "generated/black-parrot/bp_multicore_1_cce_ucode.sv",
       "state_mode": "2state",
-      "result": "fail",
+      "result": "pass",
       "mode": "elaboration",
       "tags": "black-parrot",
-      "failure_category": "unsupported",
-      "diagnostic": "unsupported_construct",
+      "failure_category": "",
+      "diagnostic": "",
       "input_issue": ""
     },
     {
@@ -287,8 +288,8 @@
       "result": "fail",
       "mode": "elaboration",
       "tags": "black-parrot",
-      "failure_category": "unsupported",
-      "diagnostic": "unsupported_construct",
+      "failure_category": "unclassified",
+      "diagnostic": "unrecognized_diagnostic",
       "input_issue": ""
     },
     {
@@ -297,198 +298,198 @@
       "result": "fail",
       "mode": "elaboration",
       "tags": "black-parrot",
-      "failure_category": "unsupported",
-      "diagnostic": "unsupported_construct",
-      "input_issue": ""
-    },
-    {
-      "test": "generated/black-parrot/bp_multicore_4.sv",
-      "state_mode": "4state",
-      "result": "fail",
-      "mode": "elaboration",
-      "tags": "black-parrot",
-      "failure_category": "unsupported",
-      "diagnostic": "unsupported_construct",
-      "input_issue": ""
-    },
-    {
-      "test": "generated/black-parrot/bp_multicore_4_cce_ucode_cfg.sv",
-      "state_mode": "2state",
-      "result": "fail",
-      "mode": "elaboration",
-      "tags": "black-parrot",
-      "failure_category": "unsupported",
-      "diagnostic": "unsupported_construct",
-      "input_issue": ""
-    },
-    {
-      "test": "generated/black-parrot/bp_multicore_4_cce_ucode_cfg.sv",
-      "state_mode": "4state",
-      "result": "fail",
-      "mode": "elaboration",
-      "tags": "black-parrot",
-      "failure_category": "unsupported",
-      "diagnostic": "unsupported_construct",
-      "input_issue": ""
-    },
-    {
-      "test": "generated/black-parrot/bp_unicore.sv",
-      "state_mode": "2state",
-      "result": "fail",
-      "mode": "elaboration",
-      "tags": "black-parrot",
-      "failure_category": "unsupported",
-      "diagnostic": "unsupported_construct",
-      "input_issue": ""
-    },
-    {
-      "test": "generated/black-parrot/bp_unicore.sv",
-      "state_mode": "4state",
-      "result": "fail",
-      "mode": "elaboration",
-      "tags": "black-parrot",
-      "failure_category": "unsupported",
-      "diagnostic": "unsupported_construct",
-      "input_issue": ""
-    },
-    {
-      "test": "generated/fusesoc/ibex-sim.sv",
-      "state_mode": "2state",
-      "result": "skip",
-      "mode": "",
-      "tags": "ibex",
-      "failure_category": "",
-      "diagnostic": "",
-      "input_issue": ""
-    },
-    {
-      "test": "generated/fusesoc/ibex-sim.sv",
-      "state_mode": "4state",
-      "result": "skip",
-      "mode": "",
-      "tags": "ibex",
-      "failure_category": "",
-      "diagnostic": "",
-      "input_issue": ""
-    },
-    {
-      "test": "generated/fusesoc/veer-eh1-sim.sv",
-      "state_mode": "2state",
-      "result": "skip",
-      "mode": "",
-      "tags": "veer-eh1",
-      "failure_category": "",
-      "diagnostic": "",
-      "input_issue": ""
-    },
-    {
-      "test": "generated/fusesoc/veer-eh1-sim.sv",
-      "state_mode": "4state",
-      "result": "skip",
-      "mode": "",
-      "tags": "veer-eh1",
-      "failure_category": "",
-      "diagnostic": "",
-      "input_issue": ""
-    },
-    {
-      "test": "generated/fusesoc/veer-eh1-synth.sv",
-      "state_mode": "2state",
-      "result": "skip",
-      "mode": "",
-      "tags": "veer-eh1",
-      "failure_category": "",
-      "diagnostic": "",
-      "input_issue": ""
-    },
-    {
-      "test": "generated/fusesoc/veer-eh1-synth.sv",
-      "state_mode": "4state",
-      "result": "skip",
-      "mode": "",
-      "tags": "veer-eh1",
-      "failure_category": "",
-      "diagnostic": "",
-      "input_issue": ""
-    },
-    {
-      "test": "generated/fx68k/fx68k.sv",
-      "state_mode": "2state",
-      "result": "fail",
-      "mode": "elaboration",
-      "tags": "fx68k",
-      "failure_category": "unclassified",
-      "diagnostic": "unrecognized_diagnostic",
-      "input_issue": ""
-    },
-    {
-      "test": "generated/fx68k/fx68k.sv",
-      "state_mode": "4state",
-      "result": "fail",
-      "mode": "elaboration",
-      "tags": "fx68k",
-      "failure_category": "unclassified",
-      "diagnostic": "unrecognized_diagnostic",
-      "input_issue": ""
-    },
-    {
-      "test": "generated/rggen/rggen.sv",
-      "state_mode": "2state",
-      "result": "fail",
-      "mode": "elaboration",
-      "tags": "RgGen",
-      "failure_category": "unsupported",
-      "diagnostic": "unsupported_construct",
-      "input_issue": ""
-    },
-    {
-      "test": "generated/rggen/rggen.sv",
-      "state_mode": "4state",
-      "result": "fail",
-      "mode": "elaboration",
-      "tags": "RgGen",
-      "failure_category": "unsupported",
-      "diagnostic": "unsupported_construct",
-      "input_issue": ""
-    },
-    {
-      "test": "generated/rsd/rsd.sv",
-      "state_mode": "2state",
-      "result": "fail",
-      "mode": "elaboration",
-      "tags": "rsd",
-      "failure_category": "unsupported",
-      "diagnostic": "unsupported_construct",
-      "input_issue": ""
-    },
-    {
-      "test": "generated/rsd/rsd.sv",
-      "state_mode": "4state",
-      "result": "fail",
-      "mode": "elaboration",
-      "tags": "rsd",
-      "failure_category": "unsupported",
-      "diagnostic": "unsupported_construct",
-      "input_issue": ""
-    },
-    {
-      "test": "generated/scr1/scr1.sv",
-      "state_mode": "2state",
-      "result": "fail",
-      "mode": "elaboration",
-      "tags": "scr1",
       "failure_category": "timeout",
       "diagnostic": "runner_timeout",
       "input_issue": ""
     },
     {
-      "test": "generated/scr1/scr1.sv",
+      "test": "generated/black-parrot/bp_multicore_4.sv",
       "state_mode": "4state",
       "result": "fail",
       "mode": "elaboration",
-      "tags": "scr1",
+      "tags": "black-parrot",
       "failure_category": "unclassified",
       "diagnostic": "unrecognized_diagnostic",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/black-parrot/bp_multicore_4_cce_ucode_cfg.sv",
+      "state_mode": "2state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "black-parrot",
+      "failure_category": "timeout",
+      "diagnostic": "runner_timeout",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/black-parrot/bp_multicore_4_cce_ucode_cfg.sv",
+      "state_mode": "4state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "black-parrot",
+      "failure_category": "unclassified",
+      "diagnostic": "unrecognized_diagnostic",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/black-parrot/bp_unicore.sv",
+      "state_mode": "2state",
+      "result": "pass",
+      "mode": "elaboration",
+      "tags": "black-parrot",
+      "failure_category": "",
+      "diagnostic": "",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/black-parrot/bp_unicore.sv",
+      "state_mode": "4state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "black-parrot",
+      "failure_category": "unclassified",
+      "diagnostic": "unrecognized_diagnostic",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/fusesoc/ibex-sim.sv",
+      "state_mode": "2state",
+      "result": "skip",
+      "mode": "",
+      "tags": "ibex",
+      "failure_category": "",
+      "diagnostic": "",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/fusesoc/ibex-sim.sv",
+      "state_mode": "4state",
+      "result": "skip",
+      "mode": "",
+      "tags": "ibex",
+      "failure_category": "",
+      "diagnostic": "",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/fusesoc/veer-eh1-sim.sv",
+      "state_mode": "2state",
+      "result": "skip",
+      "mode": "",
+      "tags": "veer-eh1",
+      "failure_category": "",
+      "diagnostic": "",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/fusesoc/veer-eh1-sim.sv",
+      "state_mode": "4state",
+      "result": "skip",
+      "mode": "",
+      "tags": "veer-eh1",
+      "failure_category": "",
+      "diagnostic": "",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/fusesoc/veer-eh1-synth.sv",
+      "state_mode": "2state",
+      "result": "skip",
+      "mode": "",
+      "tags": "veer-eh1",
+      "failure_category": "",
+      "diagnostic": "",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/fusesoc/veer-eh1-synth.sv",
+      "state_mode": "4state",
+      "result": "skip",
+      "mode": "",
+      "tags": "veer-eh1",
+      "failure_category": "",
+      "diagnostic": "",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/fx68k/fx68k.sv",
+      "state_mode": "2state",
+      "result": "pass",
+      "mode": "elaboration",
+      "tags": "fx68k",
+      "failure_category": "",
+      "diagnostic": "",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/fx68k/fx68k.sv",
+      "state_mode": "4state",
+      "result": "pass",
+      "mode": "elaboration",
+      "tags": "fx68k",
+      "failure_category": "",
+      "diagnostic": "",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/rggen/rggen.sv",
+      "state_mode": "2state",
+      "result": "pass",
+      "mode": "elaboration",
+      "tags": "RgGen",
+      "failure_category": "",
+      "diagnostic": "",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/rggen/rggen.sv",
+      "state_mode": "4state",
+      "result": "pass",
+      "mode": "elaboration",
+      "tags": "RgGen",
+      "failure_category": "",
+      "diagnostic": "",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/rsd/rsd.sv",
+      "state_mode": "2state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "rsd",
+      "failure_category": "unsupported",
+      "diagnostic": "unsupported_construct",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/rsd/rsd.sv",
+      "state_mode": "4state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "rsd",
+      "failure_category": "unsupported",
+      "diagnostic": "unsupported_construct",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/scr1/scr1.sv",
+      "state_mode": "2state",
+      "result": "pass",
+      "mode": "elaboration",
+      "tags": "scr1",
+      "failure_category": "",
+      "diagnostic": "",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/scr1/scr1.sv",
+      "state_mode": "4state",
+      "result": "pass",
+      "mode": "elaboration",
+      "tags": "scr1",
+      "failure_category": "",
+      "diagnostic": "",
       "input_issue": ""
     },
     {
@@ -553,7 +554,7 @@
     }
   ],
   "driver_profile": "release",
-  "measured_at": "2026-11-14T11:58:06.823764+00:00",
-  "celox_revision": "9b77af5124c181037c4dc56ba93531dbf3906931",
-  "run_url": "https://github.com/celox-sim/celox/actions/runs/43590871832"
+  "measured_at": "2026-11-25T19:49:52.530764+00:00",
+  "celox_revision": "69dc14eed91be7ea39908eefa39e0848a9e9b53e",
+  "run_url": "https://github.com/celox-sim/celox/actions/runs/45681793043"
 }

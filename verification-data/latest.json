@@ -10,18 +10,18 @@
   "groups": {
     "imported": {
       "2state": {
-        "passed": 2791,
-        "failed": 651,
+        "passed": 3081,
+        "failed": 361,
         "skipped": 0,
         "executed": 3442,
         "upstream_input_issues": 0,
-        "pass_percent": 81.09,
+        "pass_percent": 89.51,
         "tags_passed": 4,
         "tags_tested": 8,
         "skipped_by_tag": {},
         "by_tag": {
           "basejump": {
-            "passed": 350,
+            "passed": 355,
             "executed": 360
           },
           "hdlconv": {
@@ -33,11 +33,11 @@
             "executed": 20
           },
           "hdlconv_std2017": {
-            "passed": 136,
+            "passed": 138,
             "executed": 144
           },
           "ivtest": {
-            "passed": 1944,
+            "passed": 2218,
             "executed": 2546
           },
           "projf-explore": {
@@ -49,45 +49,45 @@
             "executed": 127
           },
           "yosys": {
-            "passed": 185,
+            "passed": 194,
             "executed": 216
           }
         },
         "by_execution_mode": {
           "elaboration": {
-            "pass": 535,
-            "fail": 41
+            "pass": 549,
+            "fail": 27
           },
           "parsing": {
-            "pass": 312,
-            "fail": 8
+            "pass": 314,
+            "fail": 6
           },
           "simulation": {
-            "fail": 602,
-            "pass": 1944
+            "pass": 2218,
+            "fail": 328
           }
         },
         "by_failure_category": {
-          "compile_error": 76,
-          "timeout": 1,
-          "unclassified": 46,
-          "unexpected_success": 70,
-          "unsupported": 458
+          "compile_error": 28,
+          "runtime_error": 14,
+          "unclassified": 23,
+          "unexpected_success": 18,
+          "unsupported": 278
         }
       },
       "4state": {
-        "passed": 2792,
-        "failed": 650,
+        "passed": 3081,
+        "failed": 361,
         "skipped": 0,
         "executed": 3442,
         "upstream_input_issues": 0,
-        "pass_percent": 81.12,
+        "pass_percent": 89.51,
         "tags_passed": 4,
         "tags_tested": 8,
         "skipped_by_tag": {},
         "by_tag": {
           "basejump": {
-            "passed": 350,
+            "passed": 355,
             "executed": 360
           },
           "hdlconv": {
@@ -99,11 +99,11 @@
             "executed": 20
           },
           "hdlconv_std2017": {
-            "passed": 136,
+            "passed": 138,
             "executed": 144
           },
           "ivtest": {
-            "passed": 1945,
+            "passed": 2218,
             "executed": 2546
           },
           "projf-explore": {
@@ -115,37 +115,38 @@
             "executed": 127
           },
           "yosys": {
-            "passed": 185,
+            "passed": 194,
             "executed": 216
           }
         },
         "by_execution_mode": {
           "elaboration": {
-            "pass": 535,
-            "fail": 41
+            "pass": 549,
+            "fail": 27
           },
           "parsing": {
-            "pass": 312,
-            "fail": 8
+            "pass": 314,
+            "fail": 6
           },
           "simulation": {
-            "fail": 601,
-            "pass": 1945
+            "pass": 2218,
+            "fail": 328
           }
         },
         "by_failure_category": {
-          "compile_error": 76,
-          "timeout": 1,
-          "unclassified": 46,
-          "unexpected_success": 70,
-          "unsupported": 457
+          "compile_error": 28,
+          "runtime_error": 14,
+          "timeout": 2,
+          "unclassified": 23,
+          "unexpected_success": 18,
+          "unsupported": 276
         }
       }
     }
   },
   "cases": [],
   "driver_profile": "release",
-  "measured_at": "2026-11-14T12:03:00.938190+00:00",
-  "celox_revision": "9b77af5124c181037c4dc56ba93531dbf3906931",
-  "run_url": "https://github.com/celox-sim/celox/actions/runs/43590871832"
+  "measured_at": "2026-11-25T19:29:28.116238+00:00",
+  "celox_revision": "69dc14eed91be7ea39908eefa39e0848a9e9b53e",
+  "run_url": "https://github.com/celox-sim/celox/actions/runs/45681793043"
 }
