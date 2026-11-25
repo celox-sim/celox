@@ -502,8 +502,8 @@ fn rename_and_collect_queries(
     work: &mut HomeVerifyWork,
 ) -> Result<Vec<PendingQuery>, HomeVerifyError> {
     let mut children = vec![Vec::<usize>::new(); func.blocks.len()];
-    for block in 1..func.blocks.len() {
-        let Some(parent) = cfg.idom[block] else {
+    for (block, &parent) in cfg.idom.iter().enumerate().take(func.blocks.len()).skip(1) {
+        let Some(parent) = parent else {
             return Err(structural_error(
                 "HOME.DOMINATOR_TREE",
                 "non-entry block has no immediate dominator",

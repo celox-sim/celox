@@ -338,15 +338,12 @@ pub(super) fn uses_signal_representation(
         return Ok(false);
     }
     let name = instances::normalize_identifier(&parameter.name.spelling);
-    if !parameter.local
+    let scalar_override = !parameter.local
         && tree.parameter_overrides.contains_key(&name)
         && matches!(&parameter.kind, celox_sv_syntax::ParameterKind::Value { dimensions, .. } if dimensions.is_empty())
         && declared_type(parameter, tree, session, const_env, aliases)?
-            .is_some_and(|ty| ty.unpacked_ranges.is_empty())
-    {
-        return Ok(false);
-    }
-    Ok(true)
+            .is_some_and(|ty| ty.unpacked_ranges.is_empty());
+    Ok(!scalar_override)
 }
 
 /// The value of a parameter of packed type that is given by an assignment
