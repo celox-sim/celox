@@ -86,15 +86,7 @@ impl Ff<'_, '_> {
     ) -> Result<KernelUnit, sv::AnalyzerError> {
         self.sites.process = process;
         let monitored;
-        let no_body: &[sv::ir::Stmt] = &[];
-        // Dropping the monitor cannot strand sampled or `$past` readers
-        // elsewhere: each process that reads a history declares and
-        // advances its own chain (`declare_history` is per process), and
-        // sampled copies are refreshed from the module's sample shadows
-        // for as long as any unit reads them.
-        let body = if !self.m.four_state && vacuous_two_state_monitor(body) {
-            no_body
-        } else if let Some(clock) = concurrent_monitor_clock(body) {
+        let body = if let Some(clock) = concurrent_monitor_clock(body) {
             self.assertions.inferred_clock = Some(clock);
             self.declare_history(body)?;
             if self.assertions.history.is_empty() {
