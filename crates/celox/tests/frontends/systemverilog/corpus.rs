@@ -92,8 +92,10 @@ fn compiled_scheduler_coverage() {
 }
 
 /// Without the test switch `force_out_of_line_calls`, every subroutine
-/// stays inlined: no suite case that declares one lowers to a function
-/// unit, so designs keep the SIR, and the code, they had before calls.
+/// stays inlined in a design without classes: no suite case that declares
+/// one and no class lowers to a function unit, so such designs keep the
+/// SIR, and the code, they had before calls. (Members of classes go out of
+/// line over a few statements.)
 ///
 /// A design with a covergroup is left out. The registration of a covergroup
 /// type that is constructed holds the descriptor of the type and is a
@@ -112,11 +114,9 @@ fn subroutines_stay_inlined_without_the_switch() {
                     let design = case.design();
                     if !design.sources.iter().any(|source| {
                         source.text.contains("function") || source.text.contains("task")
-                    }) || design
-                        .sources
-                        .iter()
-                        .any(|source| source.text.contains("covergroup"))
-                    {
+                    }) || design.sources.iter().any(|source| {
+                        source.text.contains("covergroup") || source.text.contains("endclass")
+                    }) {
                         continue;
                     }
                     let sources = design

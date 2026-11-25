@@ -257,6 +257,7 @@ pub(super) fn lower(
             return_var,
             body,
             sensitivity_body: Vec::new(),
+            class_member: false,
         };
         for stmt in &mut subroutine.body {
             qualify_stmt(item, stmt);

@@ -404,6 +404,14 @@ pub(crate) struct OutOfLine {
 /// of line (see [`ProcModule::out_of_line_policy`]).
 pub(super) const OUT_OF_LINE_STATEMENTS: u64 = 256;
 
+/// The fully inlined size, in statements, above which a member of a class
+/// goes out of line (see [`ProcModule::out_of_line_policy`]). A method runs
+/// on objects, through handles and virtual dispatch, not on the module's
+/// signals, so inlining it rarely folds anything; the calls of a class
+/// library are many, and inlining a callee of any size at each of them
+/// multiplies its size by the number of its call paths.
+pub(super) const CLASS_MEMBER_STATEMENTS: u64 = 4;
+
 impl OutOfLine {
     /// No functions yet, forced to take every subroutine out of line or
     /// not.

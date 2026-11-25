@@ -219,5 +219,6 @@ fn wrapper(
         return_var,
         body: vec![call, pass_on],
         sensitivity_body: Vec::new(),
+        class_member: false,
     })
 }

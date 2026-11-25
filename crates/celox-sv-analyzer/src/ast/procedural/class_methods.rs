@@ -564,6 +564,7 @@ pub(super) fn lower_class(
             return_var: Some(result),
             body,
             sensitivity_body: Vec::new(),
+            class_member: true,
         };
         for stmt in &mut subroutine.body {
             qualify_stmt(item, stmt);
@@ -716,6 +717,7 @@ pub(super) fn lower_cast(
             default: Some(vec![assign(&result, Expr::Literal("0".into()))]),
         }],
         sensitivity_body: Vec::new(),
+        class_member: true,
     };
     for stmt in &mut subroutine.body {
         qualify_stmt(item, stmt);

@@ -996,6 +996,10 @@ pub struct SubroutineBase<E, L, T> {
     pub body: Vec<StmtBase<E, L>>,
     /// Non-executable source retained for syntactic implicit sensitivity.
     pub sensitivity_body: Vec<StmtBase<E, L>>,
+    /// Whether it belongs to a class: a method, static or not, a
+    /// constructor, or a subroutine the analysis makes for one, such as a
+    /// dispatcher of a virtual method, a `$cast` helper or `randomize`.
+    pub class_member: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1047,6 +1051,7 @@ impl<E, L, T> SubroutineBase<E, L, T> {
                 .into_iter()
                 .map(|stmt| stmt.map(fe, fl))
                 .collect(),
+            class_member: self.class_member,
         }
     }
 }

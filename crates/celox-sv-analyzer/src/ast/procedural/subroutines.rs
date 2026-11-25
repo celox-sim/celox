@@ -1279,6 +1279,7 @@ pub(in crate::ast) fn lower_subroutine(
         return_var,
         body,
         sensitivity_body: std::mem::take(&mut builder.sensitivity_body),
+        class_member: class.is_some(),
     };
     for stmt in subroutine
         .body

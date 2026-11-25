@@ -1087,6 +1087,7 @@ mod tests {
                 assign("s%fedcba9876543210@3", "v@8"),
             ],
             sensitivity_body: Vec::new(),
+            class_member: true,
         };
         let locals = [
             local("v@8", "v", false),

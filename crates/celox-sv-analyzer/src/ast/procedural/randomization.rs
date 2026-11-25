@@ -946,6 +946,7 @@ fn lower_methods(
             return_var,
             body,
             sensitivity_body: Vec::new(),
+            class_member: true,
         });
     }
     Ok(result)
