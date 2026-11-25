@@ -1,0 +1,6 @@
+Revision history for #4595:
+
+rev 2 (content) 2026-11-24 10:56 UTC — Address PR #4595 review: exclude synthetic nested struct aggregates, validate declared struct ref aggregates, and count distinct writing processes for same-instance ref aliases
+rev 1 (initial) 2026-11-24 10:56 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":4595,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"c5779fac53eef0ddc6ce549eb72e085106511eb6","timestamp_iso":"2026-11-24T10:56:53Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"c5779fac53eef0ddc6ce549eb72e085106511eb6","new_sha":"560bf2dbd7e1c722a28cf703d831ef977e244bf2","timestamp_iso":"2026-11-24T10:56:53Z","reason":"Address PR #4595 review: exclude synthetic nested struct aggregates, validate declared struct ref aggregates, and count distinct writing processes for same-instance ref aliases","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/c5779fac53eef0ddc6ce549eb72e085106511eb6...560bf2dbd7e1c722a28cf703d831ef977e244bf2"}]} -->

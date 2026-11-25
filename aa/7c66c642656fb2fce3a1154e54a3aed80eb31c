@@ -1,0 +1,6 @@
+Revision history for #4594:
+
+rev 2 (content) 2026-11-24 10:56 UTC — Address PR #4594 review: trace nested container receivers for const ref ports and check queue bounds recursively
+rev 1 (initial) 2026-11-24 10:56 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":4594,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"dccc451361735fababd0074dd2833b3f9b160f84","timestamp_iso":"2026-11-24T10:56:53Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"dccc451361735fababd0074dd2833b3f9b160f84","new_sha":"6714968d8a41c5f5ac2a9140d688e2d2e5ec1818","timestamp_iso":"2026-11-24T10:56:53Z","reason":"Address PR #4594 review: trace nested container receivers for const ref ports and check queue bounds recursively","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/dccc451361735fababd0074dd2833b3f9b160f84...6714968d8a41c5f5ac2a9140d688e2d2e5ec1818"}]} -->
