@@ -15,46 +15,7 @@ pub(super) fn dispatch_body(
     result: Option<&str>,
 ) -> Stmt {
     let this = Expr::Ident(params[0].name.clone());
-    let args = params
-        .iter()
-        .map(|param| {
-            Some(
-                if param.direction.is_reference() && !param.leaves.is_empty() {
-                    Expr::Concat(param.leaves.iter().cloned().map(Expr::Ident).collect())
-                } else {
-                    Expr::Ident(param.name.clone())
-                },
-            )
-        })
-        .collect::<Vec<_>>();
-    let items = targets
-        .iter()
-        .map(|(target, classes)| {
-            let call = match result {
-                Some(result) => Stmt::Assign {
-                    lhs: LValue::Ident(result.to_owned()),
-                    rhs: Expr::Call {
-                        callee: Callee::Subroutine(target.clone()),
-                        args: args.clone(),
-                        arg_order: Vec::new(),
-                    },
-                    nonblocking: false,
-                },
-                None => Stmt::Call {
-                    name: target.clone(),
-                    args: args.clone(),
-                    arg_order: Vec::new(),
-                },
-            };
-            CaseItemBase {
-                labels: classes
-                    .iter()
-                    .map(|id| CaseLabel::Value(Expr::Literal(format!("32'd{id}"))))
-                    .collect(),
-                body: vec![call],
-            }
-        })
-        .collect();
+    let items = dispatch_items(targets, params, result);
     let null_dereference = classes::object_call(
         system_functions::ObjectOp::Load(system_functions::ObjectField {
             offset: 0,
@@ -100,6 +61,82 @@ pub(super) fn dispatch_body(
             then_body: vec![Stmt::Eval(null_dereference)],
             else_body: vec![unknown_class],
         }]),
+    }
+}
+
+/// The arms of a dispatcher with formals `params` and result `result`: each
+/// calls one of `targets` for the objects of its classes.
+fn dispatch_items(
+    targets: &[(String, Vec<u32>)],
+    params: &[SubroutineParam],
+    result: Option<&str>,
+) -> Vec<CaseItemBase<Expr, LValue>> {
+    let args = params
+        .iter()
+        .map(|param| {
+            Some(
+                if param.direction.is_reference() && !param.leaves.is_empty() {
+                    Expr::Concat(param.leaves.iter().cloned().map(Expr::Ident).collect())
+                } else {
+                    Expr::Ident(param.name.clone())
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    targets
+        .iter()
+        .map(|(target, classes)| {
+            let call = match result {
+                Some(result) => Stmt::Assign {
+                    lhs: LValue::Ident(result.to_owned()),
+                    rhs: Expr::Call {
+                        callee: Callee::Subroutine(target.clone()),
+                        args: args.clone(),
+                        arg_order: Vec::new(),
+                    },
+                    nonblocking: false,
+                },
+                None => Stmt::Call {
+                    name: target.clone(),
+                    args: args.clone(),
+                    arg_order: Vec::new(),
+                },
+            };
+            CaseItemBase {
+                labels: class_labels(classes),
+                body: vec![call],
+            }
+        })
+        .collect()
+}
+
+fn class_labels(classes: &[u32]) -> Vec<CaseLabel<Expr>> {
+    classes
+        .iter()
+        .map(|id| CaseLabel::Value(Expr::Literal(format!("32'd{id}"))))
+        .collect()
+}
+
+/// Add to `dispatcher`, a dispatcher [`dispatch_body`] lowered, the arms
+/// calling each of `targets` for the objects of its classes.
+pub(in crate::ast) fn extend_dispatch(dispatcher: &mut Subroutine, targets: &[(String, Vec<u32>)]) {
+    let items = dispatch_items(
+        targets,
+        &dispatcher.params,
+        dispatcher.return_var.as_deref(),
+    );
+    if let Some(Stmt::Case { items: known, .. }) = dispatcher.body.first_mut() {
+        known.extend(items);
+    }
+}
+
+/// Add to `cast`, the `$cast` helper of a class, the classes `ids` whose
+/// objects it assigns (IEEE 1800-2023 8.16).
+pub(in crate::ast) fn extend_cast(cast: &mut Subroutine, ids: &[u32]) {
+    if let Some(Stmt::Case { items, .. }) = cast.body.first_mut()
+        && let Some(item) = items.first_mut()
+    {
+        item.labels.extend(class_labels(ids));
     }
 }
 

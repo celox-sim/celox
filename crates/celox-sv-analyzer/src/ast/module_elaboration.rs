@@ -5,6 +5,7 @@ use super::*;
 mod bodies;
 mod constants;
 mod declarations;
+mod design_dispatch;
 mod finish;
 mod implicit_nets;
 mod reachable_imports;
@@ -287,6 +288,7 @@ impl Module {
             scope.validate_bodies()?;
             let assignments = scope.assignments();
             let symbols = scope.symbols(syntax_tree, session, inline_randomizations);
+            scope.complete_dispatchers();
             let imported_parameters = scope.lower_imported();
             scope.prune_symbolic_functions(syntax_tree);
             Ok(scope.finish(
