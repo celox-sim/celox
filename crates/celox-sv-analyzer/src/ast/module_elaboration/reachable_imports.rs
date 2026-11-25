@@ -141,7 +141,7 @@ fn stmt_calls<'a>(stmts: &'a [Stmt], calls: &mut Vec<&'a str>) {
 
 /// The names of the subroutines a subroutine calls, in its body, in the
 /// statements that describe its reads and in the defaults of its formals.
-fn subroutine_calls<'a>(subroutine: &'a Subroutine, calls: &mut Vec<&'a str>) {
+pub(super) fn subroutine_calls<'a>(subroutine: &'a Subroutine, calls: &mut Vec<&'a str>) {
     stmt_calls(&subroutine.body, calls);
     stmt_calls(&subroutine.sensitivity_body, calls);
     for param in &subroutine.params {
@@ -156,6 +156,12 @@ impl ScopeElaboration<'_> {
     /// The names of the subroutines the scope's own processes, subroutines,
     /// instances and declarations call.
     fn own_calls(&self) -> Vec<&str> {
+        self.own_calls_except(|_| false)
+    }
+
+    /// [`Self::own_calls`], but those of the own subroutines `skip` is true
+    /// of left out.
+    pub(super) fn own_calls_except(&self, skip: impl Fn(&Subroutine) -> bool) -> Vec<&str> {
         let mut calls = Vec::new();
         for process in &self.comb_processes {
             process
@@ -180,7 +186,11 @@ impl ScopeElaboration<'_> {
             stmt_calls(&process.body, &mut calls);
             stmt_calls(&process.validation_body, &mut calls);
         }
-        for subroutine in &self.subroutines {
+        for subroutine in self
+            .subroutines
+            .iter()
+            .filter(|subroutine| !skip(subroutine))
+        {
             subroutine_calls(subroutine, &mut calls);
         }
         for instance in &self.instances {

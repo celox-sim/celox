@@ -713,7 +713,7 @@ fn interface_type(
     super::super::ir_type(session, &tree.functions, ty, &item.env)
 }
 
-pub(super) fn case_ids(body: &[Stmt]) -> HashSet<u32> {
+pub(in crate::ast) fn case_ids(body: &[Stmt]) -> HashSet<u32> {
     let Some(Stmt::Case { items, .. }) = body.first() else {
         return HashSet::default();
     };
