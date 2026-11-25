@@ -26,6 +26,9 @@ pub(in crate::ast) struct UnpackedStruct {
     /// Nominal identity (IEEE 1800-2023 6.22.1): the declaration.
     owner: Arc<str>,
     members: Vec<Member>,
+    /// The typedef that names the type and the scope that declares it,
+    /// which do not tell types apart.
+    naming: type_names::Naming,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -71,6 +74,19 @@ impl UnpackedStruct {
     /// The nominal identity of the type: its declaration.
     pub(in crate::ast) fn identity(&self) -> &str {
         &self.owner
+    }
+
+    /// The typedef that names the type and the scope that declares it.
+    pub(in crate::ast) fn naming(&self) -> &type_names::Naming {
+        &self.naming
+    }
+
+    /// The type named `naming`.
+    pub(in crate::ast) fn named(&self, naming: type_names::Naming) -> Self {
+        Self {
+            naming,
+            ..self.clone()
+        }
     }
 
     pub(in crate::ast) fn same_type(&self, other: &Self) -> bool {
@@ -227,6 +243,7 @@ pub(in crate::ast) fn member_default(
 pub(in crate::ast) fn native_type(
     functions: &const_functions::ConstantFunctions,
     owner: Arc<str>,
+    scope: Option<Arc<str>>,
     fields: Vec<(String, Type, Option<Expr>)>,
     env: &ConstEnv,
 ) -> Option<Type> {
@@ -313,7 +330,11 @@ pub(in crate::ast) fn native_type(
     let width = members
         .iter()
         .try_fold(0usize, |width, member| width.checked_add(member.width))?;
-    let aggregate = UnpackedStruct { owner, members };
+    let aggregate = UnpackedStruct {
+        owner,
+        members,
+        naming: type_names::Naming::declared_in(scope),
+    };
     let four_state = aggregate.leaves().iter().any(|leaf| {
         matches!(
             leaf.r#type.kind,
@@ -385,6 +406,11 @@ pub(in crate::ast) fn array_storage(ty: Type) -> Converted<Type> {
                 let count = aggregate.members().len();
                 let children = values.split_off(values.len() - count);
                 let mut offset = aggregate.width();
+                // The storage is named as the structure is.
+                let declaration = Arc::new(
+                    packed_structs::AggregateDeclaration::new(aggregate.owner.clone(), None, None)
+                        .named(aggregate.naming.clone()),
+                );
                 let members = aggregate
                     .members()
                     .iter()
@@ -392,7 +418,7 @@ pub(in crate::ast) fn array_storage(ty: Type) -> Converted<Type> {
                     .map(|(member, child)| {
                         offset -= member.width;
                         packed_structs::PackedMember::storage_member(
-                            aggregate.owner.clone(),
+                            declaration.clone(),
                             member.name.clone(),
                             offset,
                             child,
@@ -986,6 +1012,7 @@ mod shape_struct_tests {
     fn one_bit(default: Option<Expr>) -> Arc<UnpackedStruct> {
         Arc::new(UnpackedStruct {
             owner: "S".into(),
+            naming: type_names::Naming::default(),
             members: vec![Member {
                 name: "a".into(),
                 r#type: Type::new(TypeKind::Bit),
@@ -1103,6 +1130,7 @@ mod shape_struct_tests {
         ty.unpacked_ranges_mut().push(symbolic_range());
         ty.keep_structure(Some(Arc::new(UnpackedStruct {
             owner: "S".into(),
+            naming: type_names::Naming::default(),
             members: vec![Member {
                 name: "a".into(),
                 r#type: Type::new(TypeKind::Bit),

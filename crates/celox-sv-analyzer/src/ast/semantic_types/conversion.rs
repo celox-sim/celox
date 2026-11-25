@@ -341,6 +341,7 @@ impl Parts<'_> {
                 table,
                 aggregate.identity(),
                 members,
+                (aggregate.naming(), None),
             )));
         }
         if self.chandle {
@@ -362,6 +363,7 @@ impl Parts<'_> {
             enumeration.element(table, self.packed.len())
         } else if let Some(member) = self.members.first() {
             let owner = member.owner().clone();
+            let declaration = member.declaration().clone();
             let members = self
                 .members
                 .iter()
@@ -372,7 +374,12 @@ impl Parts<'_> {
                     ))
                 })
                 .collect::<Option<Arc<[_]>>>()?;
-            PackedElement::Aggregate(self.aggregate_decl(table, &owner, members))
+            PackedElement::Aggregate(self.aggregate_decl(
+                table,
+                &owner,
+                members,
+                (declaration.naming(), declaration.keyword()),
+            ))
         } else {
             PackedElement::Bits
         };
@@ -404,7 +411,30 @@ impl Parts<'_> {
         table: &mut TyTable,
         owner: &str,
         members: Arc<[(Arc<str>, TyId)]>,
+        (naming, keyword): (&type_names::Naming, Option<&'static str>),
     ) -> Decl {
+        // The declaration keeps the spelling that names it. A type may keep
+        // the declaration of its members without their spelling, such as a
+        // type rebuilt from a shape.
+        debug_assert!(
+            (self.declaration.is_none()
+                && self.typename.is_none()
+                && self.scope.is_none()
+                && self.aggregate.is_none())
+                || (self.declaration == naming.declaration()
+                    && self.typename == naming.name_of()
+                    && self.scope == naming.scope()
+                    && self.aggregate == keyword),
+            "the declaration {owner} is named {:?} {:?} {:?} {:?}, but spelled {:?} {:?} {:?} {:?}",
+            naming.declaration(),
+            naming.name_of(),
+            naming.scope(),
+            keyword,
+            self.declaration,
+            self.typename,
+            self.scope,
+            self.aggregate,
+        );
         let decl = table.declare(self.declaration.unwrap_or(owner), self.scope);
         let typename = self.declaration.and(self.typename);
         table.record_spelling(decl, typename, self.aggregate);

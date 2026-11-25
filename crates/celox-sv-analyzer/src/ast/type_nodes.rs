@@ -46,10 +46,25 @@ impl Type {
             let (name, typename) = name();
             let mut enumeration = self.enumeration.binding();
             enumeration.name(&name, scope.as_ref(), &typename);
+            // The declaration of a structure or union keeps the typedef
+            // that names it.
+            let naming = type_names::Naming::named(
+                name.as_str().into(),
+                Some(typename.clone()),
+                scope.clone(),
+            );
+            let structure = self
+                .structure
+                .declaration()
+                .map(|structure| Arc::new(structure.named(naming.clone())));
             self.reshape_keeping_declarations(|shape| {
                 shape.spelling.name(name.into(), typename, scope);
+                packed_structs::name_members(&mut shape.members, &naming);
             });
             self.keep_enumeration(enumeration);
+            if structure.is_some() {
+                self.keep_structure(structure);
+            }
         }
     }
 

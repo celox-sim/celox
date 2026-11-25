@@ -18,10 +18,71 @@ pub(super) use selects::{
     select_member_element_member, whole_member,
 };
 
+/// The declaration of a packed structure or union type (IEEE 1800-2023
+/// 7.2.1, 7.3.1) that each of its members keeps: its nominal identity
+/// (6.22.1), retained through aliases, and how `$typename` names it. Two
+/// declarations are the same if their identities are.
+#[derive(Debug, Clone)]
+pub(in crate::ast) struct AggregateDeclaration {
+    owner: Arc<str>,
+    /// `struct` or `union` of an aggregate other than a soft or tagged
+    /// union, which `$typename` writes (20.6.1).
+    keyword: Option<&'static str>,
+    naming: type_names::Naming,
+}
+
+impl AggregateDeclaration {
+    /// The declaration `owner`, written with `keyword`, which elaborated
+    /// scope `scope` declares.
+    pub(in crate::ast) fn new(
+        owner: Arc<str>,
+        keyword: Option<&'static str>,
+        scope: Option<Arc<str>>,
+    ) -> Self {
+        Self {
+            owner,
+            keyword,
+            naming: type_names::Naming::declared_in(scope),
+        }
+    }
+
+    /// `struct` or `union`, as `$typename` writes the aggregate.
+    pub(in crate::ast) fn keyword(&self) -> Option<&'static str> {
+        self.keyword
+    }
+
+    /// The typedef that names the aggregate and the scope that declares it.
+    pub(in crate::ast) fn naming(&self) -> &type_names::Naming {
+        &self.naming
+    }
+
+    /// The declaration named `naming`.
+    pub(in crate::ast) fn named(&self, naming: type_names::Naming) -> Self {
+        Self {
+            naming,
+            ..self.clone()
+        }
+    }
+}
+
+impl PartialEq for AggregateDeclaration {
+    fn eq(&self, other: &Self) -> bool {
+        self.owner == other.owner
+    }
+}
+
+impl Eq for AggregateDeclaration {}
+
+impl std::hash::Hash for AggregateDeclaration {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.owner.hash(state);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct PackedMember {
-    /// Nominal aggregate identity (IEEE 1800-2023 6.22.1), retained through aliases.
-    owner: Arc<str>,
+    /// The declaration of the aggregate that has the member.
+    owner: Arc<AggregateDeclaration>,
     name: String,
     offset: usize,
     tag: Option<TaggedMember>,
@@ -50,7 +111,7 @@ impl generate::CallSites for PackedMember {
 impl PackedMember {
     /// A bit window in the flat storage of an unpacked structure array.
     pub(in crate::ast) fn storage_member(
-        owner: Arc<str>,
+        owner: Arc<AggregateDeclaration>,
         name: String,
         offset: usize,
         r#type: Type,
@@ -84,8 +145,12 @@ impl PackedMember {
     pub(in crate::ast) fn in_union(&self) -> bool {
         self.in_union
     }
-    /// The declaration of the aggregate that has the member.
+    /// The identity of the aggregate that has the member.
     pub(in crate::ast) fn owner(&self) -> &Arc<str> {
+        &self.owner.owner
+    }
+    /// The declaration of the aggregate that has the member.
+    pub(in crate::ast) fn declaration(&self) -> &Arc<AggregateDeclaration> {
         &self.owner
     }
     pub(in crate::ast) fn same_owner(&self, other: &Self) -> bool {
@@ -107,6 +172,18 @@ impl PackedMember {
 
     pub(in crate::ast) fn r#type(&self) -> &Type {
         &self.r#type
+    }
+}
+
+/// Name the aggregate that has `members` as `naming` tells.
+pub(in crate::ast) fn name_members(members: &mut [PackedMember], naming: &type_names::Naming) {
+    let Some(first) = members.first() else {
+        return;
+    };
+    let named = Arc::new(first.owner.named(naming.clone()));
+    for member in members {
+        debug_assert!(*member.owner == *named);
+        member.owner = named.clone();
     }
 }
 
