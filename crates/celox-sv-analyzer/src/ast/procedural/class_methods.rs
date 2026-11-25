@@ -459,6 +459,9 @@ pub(super) fn lower_class(
     };
     let mut subroutines = Vec::new();
     let mut constructor = false;
+    // The methods share the work of entering the class's scope.
+    let class_scope = ClassScope::new(tree, session, item_dimensions, state, &class);
+    let class_scope = Some(&class_scope);
     let mut methods = classes::declared_methods(tree, session, name)?;
     // A method whose statics the file names is lowered before the others,
     // which may name them (see `static_references`).
@@ -485,6 +488,7 @@ pub(super) fn lower_class(
             item,
             Some(&class),
             None,
+            class_scope,
         )?);
     }
     // The dispatchers, the constructor, `$cast` and the randomization
@@ -513,6 +517,7 @@ pub(super) fn lower_class(
             item,
             Some(&class),
             Some(&targets),
+            class_scope,
         )?);
     }
     if !constructor && !class.is_interface {

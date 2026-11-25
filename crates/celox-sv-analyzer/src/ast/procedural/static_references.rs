@@ -90,6 +90,32 @@ pub(in crate::ast) fn named(tree: &AnalysisContext<'_>, name: &str) -> bool {
         .any(|candidate| candidate.subroutine == name)
 }
 
+/// Whether binding the `f.v` names of the file of `tree` binds none in a
+/// body of a method of `class` (see [`BodyBuilder::bind_static_references`]):
+/// neither the subroutine `f` of the design element nor the method `f` of
+/// the class, which hides it, has declared a static variable `v` yet.
+pub(in crate::ast) fn bind_none(
+    tree: &AnalysisContext<'_>,
+    state: &BodyState<'_>,
+    class: &classes::Class,
+) -> bool {
+    let declares = |owner: &str, variable: &str| {
+        state
+            .subroutine_statics
+            .get(owner)
+            .is_some_and(|statics| statics.contains_key(variable))
+    };
+    file_candidates(tree).iter().all(|candidate| {
+        !declares(&candidate.subroutine, &candidate.variable)
+            && class.method(&candidate.subroutine).is_none_or(|method| {
+                !declares(
+                    &classes::Class::subroutine_name(&method.owner, &candidate.subroutine),
+                    &candidate.variable,
+                )
+            })
+    })
+}
+
 impl BodyBuilder<'_, '_, '_> {
     /// Bind each `f.v` of the file that names a static variable `v` of the
     /// subroutine `f` denotes in the body (see the module documentation).
