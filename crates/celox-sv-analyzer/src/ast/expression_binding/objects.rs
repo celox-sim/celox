@@ -71,7 +71,7 @@ fn class_of(
         // A shape whose dimensions are not formed still holds handles of
         // the class of its element type.
         return shape
-            .container
+            .container()
             .is_none()
             .then(|| shape.class_in(table))
             .flatten()

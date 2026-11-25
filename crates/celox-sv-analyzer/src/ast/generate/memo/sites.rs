@@ -155,7 +155,6 @@ impl CallSites for Type {
             unpacked_ranges,
             members,
             signed_element_depth: _,
-            container: _,
             spelling: _,
         } = &**self;
         packed_ranges.call_sites(visit);
@@ -185,7 +184,6 @@ impl CallSites for VariableDimensions {
     fn call_sites(&self, visit: &mut dyn FnMut(usize)) {
         let VariableShape {
             declared: _,
-            container: _,
             randomizable: _,
             real: _,
             string: _,

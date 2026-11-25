@@ -26,14 +26,10 @@ pub(super) fn with_dimensions(
         &context.const_env,
     );
     // A reader that has the container alone takes the binding from it.
-    let binding = ty.binding.clone();
-    if let Some(container) = &mut ty.shape_keeping_binding().container {
-        Arc::make_mut(container).binding = binding;
-    }
-    // The type keeps its container, with the binding.
-    if ty.kept_container.declaration().is_some() {
-        let container = ty.container.clone();
-        ty.keep_container(container);
+    if let Some(container) = ty.container() {
+        let mut container = (**container).clone();
+        container.binding = ty.binding.clone();
+        ty.keep_container(Some(Arc::new(container)));
     }
     Ok(ty)
 }
@@ -2532,7 +2528,6 @@ mod tests {
         let queue = symbolic_queue();
         let handle = VariableDimensions::new(VariableShape {
             declared: type_names::Declared::default(),
-            container: None,
             ..queue.clone_shape()
         });
         let handle = handle.type_id(&mut table, &functions, &env);

@@ -719,7 +719,7 @@ fn a_container_alone_has_the_type_of_its_declaration() {
             .unwrap();
     let ty = &class.properties[0].r#type;
     let declared = of_type(&mut session.types, &tree.functions, ty, &declaring).unwrap();
-    let container = ty.container.as_deref().unwrap().clone();
+    let container = ty.container().map(|c| &**c).unwrap().clone();
     let alone = crate::ast::containers::of(container);
     let unbound = session.types.unbound_reads;
     assert_eq!(
