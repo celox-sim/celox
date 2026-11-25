@@ -100,10 +100,17 @@ fn function_units(source: &str, forced: bool) -> usize {
 /// gives on every backend, in both state modes, what it gives inlined: the
 /// same outputs and the same runtime events.
 fn same_as_inlined(source: &str, units: usize, until: u64, names: &[&str]) {
+    same_as_default(source, 0, units, until, names);
+}
+
+/// [`same_as_inlined`] for a design that lowers to `default_units` function
+/// units without the switch, members of classes over the size of a call
+/// that inlines them: with the switch it gives what it gives without.
+fn same_as_default(source: &str, default_units: usize, units: usize, until: u64, names: &[&str]) {
     assert_eq!(
         function_units(source, false),
-        0,
-        "inlined without the switch"
+        default_units,
+        "function units without the switch"
     );
     assert_eq!(function_units(source, true), units, "function units");
     for four_state in [false, true] {
@@ -281,10 +288,11 @@ fn class_methods_and_virtual_dispatch() {
 endmodule
 "#;
     // The constructors draw on the process RNG and stay inlined; the
-    // methods and the dispatcher go out of line.
+    // methods and the dispatcher go out of line, the dispatcher and the
+    // methods it reaches also without the switch.
     let units = function_units(source, true);
     assert!(units >= 3, "{units} function units");
-    same_as_inlined(source, units, 0, &["a", "b", "c"]);
+    same_as_default(source, 3, units, 0, &["a", "b", "c"]);
 }
 
 #[test]
@@ -1912,7 +1920,7 @@ module Top(output int a, output int b, output int c, output int d, output int e,
     end
 endmodule
 "#;
-    same_as_inlined(source, 9, 4, &["a", "b", "c", "d", "e", "t"]);
+    same_as_default(source, 1, 9, 4, &["a", "b", "c", "d", "e", "t"]);
 }
 
 #[test]
@@ -2254,7 +2262,7 @@ fn functions_write_static_class_properties_and_module_variables() {
     end
 endmodule
 "#;
-    same_as_inlined(source, 5, 0, &["a", "b", "c", "d", "f"]);
+    same_as_default(source, 2, 5, 0, &["a", "b", "c", "d", "f"]);
 }
 
 #[test]
@@ -4866,7 +4874,20 @@ endmodule
 /// The time each of `names` holds at `until`, inlined and out of line in
 /// both state modes, which must be the same everywhere.
 fn waits_end_at(source: &str, units: usize, until: u64, names: &[&str], expected: &[u64]) {
-    same_as_inlined(source, units, until, names);
+    waits_end_at_by_default(source, 0, units, until, names, expected);
+}
+
+/// [`waits_end_at`] for a design that lowers to `default_units` function
+/// units without the switch (see [`same_as_default`]).
+fn waits_end_at_by_default(
+    source: &str,
+    default_units: usize,
+    units: usize,
+    until: u64,
+    names: &[&str],
+    expected: &[u64],
+) {
+    same_as_default(source, default_units, units, until, names);
     for four_state in [false, true] {
         assert_eq!(
             simulate(source, four_state, true, "interpreter", until, names),
@@ -4899,7 +4920,7 @@ module Top(output int at, output int ok);
     end
 endmodule
 "#;
-    waits_end_at(source, 3, 10, &["at", "ok"], &[3, 1]);
+    waits_end_at_by_default(source, 1, 3, 10, &["at", "ok"], &[3, 1]);
 }
 
 #[test]
