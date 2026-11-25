@@ -1,15 +1,19 @@
 //! `N::$sample` of a covergroup type (IEEE 1800-2023 19.5, 19.8).
 //!
 //! In declaration order it evaluates the guard and then the value of each
-//! coverpoint into a variable. Only then it hands the values to the heap,
-//! in calls that nothing of the design runs between, so that a function of
-//! a coverpoint expression may sample too (19.5).
+//! coverpoint into a variable, and with the value the guards of its bins
+//! and the `with` filters that a sample evaluates (19.5.1, 19.5.1.1). Only
+//! then it hands the values to the heap, in calls that nothing of the
+//! design runs between, so that a function of a coverpoint expression may
+//! sample too (19.5). A sample that hits an illegal bin is reported as an
+//! error (19.5.6).
 
 use super::*;
-use celox_sv_syntax::Coverpoint;
+use celox_sv_syntax::{Coverpoint, CoverpointItem};
 
-/// The names of the formals `formals` that the coverpoint expressions,
-/// guards and types of `bound` use.
+/// The names of the formals `formals` that the coverpoint expressions, the
+/// guards of the coverpoints and of their bins, and the coverpoint types
+/// of `bound` use.
 fn names_read(site: &Site<'_>, bound: &covergroups::Bound, formals: &[Formal]) -> HashSet<String> {
     let native = site.tree.declarations();
     let mut read = HashSet::default();
@@ -77,34 +81,47 @@ fn instance(
     Ok(instance)
 }
 
-/// The arguments of the covergroup that its coverpoints read: instance
-/// `cg` kept them at its construction (19.3), and `sampling` reads them
-/// back into variables of their names. These are declared with the
-/// arguments of `sample`, so that a name finds them before the members of
-/// the class and the names of the scope (19.8.1).
+/// The arguments of the covergroup that an instance keeps for its samples
+/// (19.3), as `N::$sample` reads them back.
+#[derive(Default)]
+struct Kept {
+    stored: Vec<(usize, Stored)>,
+    /// The next slot of the record of the instance and the next offset in
+    /// its object.
+    slot: u32,
+    offset: u32,
+}
+
+/// Keep the arguments of the covergroup named in `read` that `kept` has not
+/// yet: instance `cg` keeps them at its construction (19.3), and `loads`
+/// reads them back into variables of their names. These are declared with
+/// the arguments of `sample`, so that a name finds them before the members
+/// of the class and the names of the scope (19.8.1).
 fn stored_formals(
     site: &Site<'_>,
     builder: &mut BodyBuilder<'_, '_, '_>,
     cg: &Expr,
-    sampling: &mut Vec<Stmt>,
-) -> Converted<Vec<(usize, Stored)>> {
+    read: &HashSet<String>,
+    kept: &mut Kept,
+    loads: &mut Vec<Stmt>,
+) -> Converted<()> {
     let model = site.model;
-    let bound = covergroups::Bound::of(site.declaration());
-    let read = names_read(site, &bound, &model.new_formals);
-    let mut stored = Vec::new();
-    let (mut slot, mut offset) = (0, 0);
     for (index, formal) in model.new_formals.iter().enumerate() {
-        if !read.contains(&formal.name) {
+        if !read.contains(&formal.name) || kept.stored.iter().any(|(stored, _)| *stored == index) {
             continue;
         }
         let ty = &formal.r#type;
         let local = builder.declare(&formal.name, ty.clone());
-        let kept = match ty.kind() {
+        let stored = match ty.kind() {
             TypeKind::String | TypeKind::Object => {
-                let field =
-                    classes::field(&builder.tree.functions, ty, &builder.dims.const_env, offset)?;
-                offset = field.offset + field.bytes().next_multiple_of(8);
-                sampling.push(assign(
+                let field = classes::field(
+                    &builder.tree.functions,
+                    ty,
+                    &builder.dims.const_env,
+                    kept.offset,
+                )?;
+                kept.offset = field.offset + field.bytes().next_multiple_of(8);
+                loads.push(assign(
                     &local,
                     classes::object_call(ObjectOp::Load(field), vec![cg.clone()]),
                 ));
@@ -119,7 +136,9 @@ fn stored_formals(
                 .ok_or_else(|| unsupported("covergroup argument type"))?;
                 let (width, signed) = (shape.width as u32, shape.signed);
                 let four_state = ty.kind() != TypeKind::Bit;
-                sampling.push(assign(
+                let slot = kept.slot;
+                kept.slot += 1;
+                loads.push(assign(
                     &local,
                     coverage(
                         CoverageOp::Formal {
@@ -131,9 +150,8 @@ fn stored_formals(
                         vec![cg.clone()],
                     ),
                 ));
-                slot += 1;
                 Stored::Slot {
-                    slot: slot - 1,
+                    slot,
                     width,
                     signed,
                 }
@@ -145,18 +163,20 @@ fn stored_formals(
                 )));
             }
         };
-        stored.push((index, kept));
+        kept.stored.push((index, stored));
     }
-    Ok(stored)
+    Ok(())
 }
 
 /// A coverpoint in `N::$sample`: the variable of its value, the variable
-/// that tells whether its guard held, if it has one, and its type.
+/// that tells whether its guard held, if it has one, its type, and the
+/// variables of its predicate bits, the lowest first.
 struct Point {
     value: String,
     guard: Option<String>,
     width: u32,
     signed: bool,
+    predicates: Vec<String>,
 }
 
 /// The type of coverpoint `coverpoint`, named `name`: the type it declares,
@@ -259,64 +279,162 @@ fn point_type(
     ))
 }
 
-/// Coverpoint `coverpoint`, item `item` of the type: `sampling` evaluates
-/// its guard and, where that holds, its expression. The expression of a
-/// coverpoint whose guard is false is not evaluated.
-fn point(
+/// What `N::$sample` knows of a coverpoint before it evaluates it.
+struct Typed<'x> {
+    coverpoint: &'x Coverpoint,
+    descriptor: heap::PointDescriptor,
+    /// The type the coverpoint declares.
+    declared: Option<Type>,
+    /// The predicate bits of its bin declarations.
+    bits: Vec<BinBits>,
+}
+
+impl Typed<'_> {
+    /// The type of the variable of the value.
+    fn local(&self) -> Type {
+        let ty = &self.descriptor.ty;
+        self.declared
+            .clone()
+            .unwrap_or_else(|| packed_type(ty.width, ty.signed, ty.four_state))
+    }
+
+    fn bins(&self) -> impl Iterator<Item = &Bins> {
+        self.coverpoint.items.iter().filter_map(|item| match item {
+            CoverpointItem::Bins(bins) => Some(bins),
+            CoverpointItem::Option(_) => None,
+        })
+    }
+}
+
+/// Coverpoint `coverpoint`, item `item` of the type, with its name, its
+/// type and the predicate bits of its bins: a bit for each guard of a bin
+/// (19.5.1) and for each `with` filter that a sample evaluates (19.5.1.1),
+/// in declaration order.
+fn typed<'x>(
     site: &Site<'_>,
     builder: &mut BodyBuilder<'_, '_, '_>,
-    coverpoint: &Coverpoint,
+    coverpoint: &'x Coverpoint,
     item: usize,
-    sampling: &mut Vec<Stmt>,
-) -> Converted<(Point, heap::PointDescriptor)> {
+) -> Converted<Typed<'x>> {
     let native = site.tree.declarations();
     let (name, generated) = covergroups::point_name(native, coverpoint, item);
     let (ty, declared) = point_type(site, builder, coverpoint, &name)?;
+    let mut descriptor = heap::PointDescriptor::new(name, ty);
+    descriptor.generated_name = generated;
+    let mut point = Typed {
+        coverpoint,
+        descriptor,
+        declared,
+        bits: Vec::new(),
+    };
+    let mut next = 0;
+    let mut bit = || {
+        next += 1;
+        next - 1
+    };
+    let bits = point
+        .bins()
+        .map(|bins| BinBits {
+            iff: bins.iff.map(|_| bit()),
+            filter: filtered_at_each_sample(site, builder, bins, &point.descriptor.ty)
+                .then(&mut bit),
+        })
+        .collect();
+    point.bits = bits;
+    point.descriptor.predicates = next;
+    Ok(point)
+}
+
+/// Whether `condition` holds, in the variable `predicate`: an x or z is
+/// not true (12.4).
+fn holds(predicate: &str, condition: Expr) -> Stmt {
+    Stmt::If {
+        condition,
+        then_body: vec![assign(predicate, Expr::Literal("1'b1".into()))],
+        else_body: vec![assign(predicate, Expr::Literal("1'b0".into()))],
+    }
+}
+
+/// Coverpoint `typed`, item `item` of the type: `sampling` evaluates its
+/// guard and, where that holds, its expression and with it the predicates
+/// of its bins. Nothing of a coverpoint whose guard is false is evaluated.
+fn point(
+    builder: &mut BodyBuilder<'_, '_, '_>,
+    typed: &Typed<'_>,
+    item: usize,
+    sampling: &mut Vec<Stmt>,
+) -> Converted<Point> {
+    let coverpoint = typed.coverpoint;
+    let ty = &typed.descriptor.ty;
     let guard = coverpoint
         .iff
         .map(|iff| builder.native_value(iff))
         .transpose()?;
-    let mut value = builder.covergroup_value(coverpoint.expression, declared.as_ref())?;
+    let mut value = builder.covergroup_value(coverpoint.expression, typed.declared.as_ref())?;
     builder.rename_expr(&mut value);
-    let local = builder.declare(
-        &format!("$point{item}"),
-        declared.unwrap_or_else(|| packed_type(ty.width, ty.signed, ty.four_state)),
-    );
+    let local = builder.declare(&format!("$point{item}"), typed.local());
+    let mut evaluate = vec![assign(&local, value)];
+    let mut predicates = Vec::new();
+    let mut predicate =
+        |builder: &mut BodyBuilder<'_, '_, '_>, evaluate: &mut Vec<Stmt>, condition: Expr| {
+            let predicate = builder.declare(
+                &format!("$predicate{item}_{}", predicates.len()),
+                packed_type(1, false, false),
+            );
+            evaluate.push(holds(&predicate, condition));
+            predicates.push(predicate);
+        };
+    for (bins, bits) in typed.bins().zip(&typed.bits) {
+        if let Some(iff) = bins.iff {
+            let condition = builder.native_value(iff)?;
+            predicate(builder, &mut evaluate, condition);
+        }
+        if bits.filter.is_some()
+            && let Some(with) = covergroups::filter(bins)
+        {
+            // `item` is the sampled value in the expression (19.5.1.1),
+            // and names nothing outside it.
+            builder.push_scope();
+            let named = builder.declare(covergroups::ITEM, typed.local());
+            let condition = builder.native_value(with);
+            builder.pop_scope();
+            evaluate.push(assign(&named, Expr::Ident(local.clone())));
+            predicate(builder, &mut evaluate, condition?);
+        }
+    }
     let guard = match guard {
         Some(condition) => {
             let guard = builder.declare(&format!("$guard{item}"), packed_type(1, false, false));
             sampling.push(assign(&guard, Expr::Literal("1'b0".into())));
+            let mut then_body = vec![assign(&guard, Expr::Literal("1'b1".into()))];
+            then_body.extend(evaluate);
             sampling.push(Stmt::If {
                 condition,
-                then_body: vec![
-                    assign(&guard, Expr::Literal("1'b1".into())),
-                    assign(&local, value),
-                ],
+                then_body,
                 else_body: Vec::new(),
             });
             Some(guard)
         }
         None => {
-            sampling.push(assign(&local, value));
+            sampling.extend(evaluate);
             None
         }
     };
-    let point = Point {
+    Ok(Point {
         value: local,
         guard,
         width: ty.width,
         signed: ty.signed,
-    };
-    let mut descriptor = heap::PointDescriptor::new(name, ty);
-    descriptor.generated_name = generated;
-    Ok((point, descriptor))
+        predicates,
+    })
 }
 
 /// The calls that hand the values of `points` of instance `cg` to the
 /// heap. Coverpoints that follow each other share a call while their values
 /// fit 64 bits, with a bit for each that tells whether its guard held where
 /// one of them has a guard; a coverpoint of more than 64 bits has a call of
-/// its own.
+/// its own. The predicate bits of a coverpoint follow in a call of its
+/// own, which a coverpoint whose guard is false does not make.
 fn hand_over(points: &[Point], cg: &Expr) -> Vec<Stmt> {
     // A concatenation lists the highest bits first.
     let concat = |mut parts: Vec<Expr>| {
@@ -385,6 +503,35 @@ fn hand_over(points: &[Point], cg: &Expr) -> Vec<Stmt> {
             args,
         )));
     }
+    for (index, point) in points.iter().enumerate() {
+        if point.predicates.is_empty() {
+            continue;
+        }
+        let call = Stmt::Eval(coverage(
+            CoverageOp::Predicates {
+                item: index as u32 + 1,
+                count: point.predicates.len() as u32,
+            },
+            vec![
+                cg.clone(),
+                concat(
+                    point
+                        .predicates
+                        .iter()
+                        .map(|predicate| Expr::Ident(predicate.clone()))
+                        .collect(),
+                ),
+            ],
+        ));
+        calls.push(match &point.guard {
+            Some(guard) => Stmt::If {
+                condition: Expr::Ident(guard.clone()),
+                then_body: vec![call],
+                else_body: Vec::new(),
+            },
+            None => call,
+        });
+    }
     calls
 }
 
@@ -396,23 +543,66 @@ pub(super) fn body(
     first: String,
     handle: &Type,
 ) -> Converted<(Vec<Stmt>, Sampled)> {
+    let model = site.model;
+    let native = site.tree.declarations();
     let mut body = Vec::new();
     let cg = Expr::Ident(instance(site, builder, first, handle, &mut body)?);
-    // What runs when the instance samples.
-    let mut sampling = Vec::new();
-    let stored = stored_formals(site, builder, &cg, &mut sampling)?;
-    let mut points = Vec::new();
-    let mut descriptors = Vec::new();
+    // What runs when the instance samples: it reads the arguments it kept,
+    // evaluates the coverpoints and hands their values over.
+    let mut loads = Vec::new();
+    let mut kept = Kept::default();
+    let bound = covergroups::Bound::of(site.declaration());
+    let read = names_read(site, &bound, &model.new_formals);
+    stored_formals(site, builder, &cg, &read, &mut kept, &mut loads)?;
+    let mut typed_points = Vec::new();
     for (index, coverpoint) in covergroups::coverpoints(site.declaration()).enumerate() {
-        let (point, descriptor) = point(site, builder, coverpoint, index + 1, &mut sampling)?;
-        points.push(point);
-        descriptors.push(descriptor);
+        typed_points.push(typed(site, builder, coverpoint, index + 1)?);
+    }
+    // A `with` filter that a sample evaluates reads the arguments too.
+    let mut read = HashSet::default();
+    for point in &typed_points {
+        for (bins, bits) in point.bins().zip(&point.bits) {
+            if bits.filter.is_some()
+                && let Some(with) = covergroups::filter(bins)
+            {
+                read.extend(
+                    covergroups::variable_names(native, with)
+                        .into_iter()
+                        .map(|(name, _)| name)
+                        .filter(|name| name != covergroups::ITEM),
+                );
+            }
+        }
+    }
+    stored_formals(site, builder, &cg, &read, &mut kept, &mut loads)?;
+    let mut sampling = loads;
+    let mut points = Vec::new();
+    for (index, typed) in typed_points.iter().enumerate() {
+        points.push(point(builder, typed, index + 1, &mut sampling)?);
     }
     sampling.extend(hand_over(&points, &cg));
-    sampling.push(Stmt::Eval(coverage(
-        CoverageOp::SampleEnd,
-        vec![cg.clone()],
-    )));
+    // A sample of an illegal value is an error (19.5.6): the heap tells
+    // how many illegal bins the sample hit and has a line for each. Only a
+    // type with such a bin has the code.
+    let illegal = typed_points
+        .iter()
+        .flat_map(Typed::bins)
+        .any(|bins| bins.kind == BinsKind::IllegalBins);
+    if illegal {
+        sampling.extend(reported(
+            site,
+            builder,
+            &cg,
+            CoverageOp::SampleEnd,
+            system_functions::Severity::Error,
+            "$illegal",
+        ));
+    } else {
+        sampling.push(Stmt::Eval(coverage(
+            CoverageOp::SampleEnd,
+            vec![cg.clone()],
+        )));
+    }
     // An instance that is not built or was stopped, and a `null` handle,
     // sample nothing and evaluate nothing (19.4, 19.8).
     body.push(Stmt::If {
@@ -420,11 +610,16 @@ pub(super) fn body(
         then_body: sampling,
         else_body: Vec::new(),
     });
-    Ok((
-        body,
-        Sampled {
-            stored,
-            points: descriptors,
-        },
-    ))
+    let mut sampled = Sampled {
+        stored: kept.stored,
+        points: Vec::new(),
+        items: Vec::new(),
+        bins: Vec::new(),
+    };
+    for typed in typed_points {
+        sampled.items.push(typed.local());
+        sampled.bins.push(typed.bits);
+        sampled.points.push(typed.descriptor);
+    }
+    Ok((body, sampled))
 }

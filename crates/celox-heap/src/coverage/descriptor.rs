@@ -220,7 +220,9 @@ impl TypeDescriptor {
 pub enum InputDescriptor {
     /// An integral value of this type, in 64-bit words of its two planes.
     Integral(ValueType),
-    /// A string, whose bytes the instance copies.
+    /// A string, whose bytes the instance copies: the value of an option,
+    /// or else a value that the `with` filters of the type read, which
+    /// decides the bins of the construction with the integral inputs.
     String,
 }
 
@@ -400,6 +402,26 @@ pub struct FilterDescriptor {
     /// The types of the values a candidate is of: for the filter of a
     /// coverpoint bin the type of the coverpoint, as `item` has it.
     pub components: Vec<ValueType>,
+    /// Whether what the filter keeps is decided by what a construction
+    /// hands over: its integral inputs, the string inputs that no option
+    /// takes, and its sets. A construction that hands over what an earlier
+    /// one of the type did then takes its bins and is not asked (19.5.1.1
+    /// allows "caching of previously calculated results"). With a filter
+    /// that is not, such as one that calls a method of an object, every
+    /// construction of the type is asked about every filter and has bins
+    /// of its own.
+    pub shared: bool,
+}
+
+impl FilterDescriptor {
+    /// A filter whose values are of the types `components` and that keeps
+    /// what the values a construction hands over decide.
+    pub fn new(components: Vec<ValueType>) -> Self {
+        Self {
+            components,
+            shared: true,
+        }
+    }
 }
 
 /// How many bins a declaration makes.

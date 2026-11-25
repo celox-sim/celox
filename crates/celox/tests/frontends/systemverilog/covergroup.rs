@@ -2490,3 +2490,1322 @@ endmodule
         assert_eq!(of(1, "low"), hits(&[("auto[3]", 1)]));
     }
 }
+
+/// The bins of item `item` of instance `instance` of covergroup type `name`
+/// that are no `bins` bins of values, each with its kind and its hits.
+fn other_bins(
+    report: &celox::CoverageReport,
+    name: &str,
+    instance: usize,
+    item_name: &str,
+) -> Vec<(String, celox::BinReportKind, u64)> {
+    item(report, name, instance, item_name)
+        .bins
+        .iter()
+        .filter(|bin| bin.kind != celox::BinReportKind::Bins)
+        .map(|bin| (bin.name.clone(), bin.kind, bin.hits))
+        .collect()
+}
+
+/// The covered and all bins of item `item` of instance `instance` of
+/// covergroup type `name`, as its coverage counts them (19.11.1).
+fn counted(
+    report: &celox::CoverageReport,
+    name: &str,
+    instance: usize,
+    item_name: &str,
+) -> (u64, u64) {
+    let item = item(report, name, instance, item_name);
+    (item.covered, item.total)
+}
+
+/// Whether `value` is `expected` but for the rounding of the arithmetic
+/// that gives it.
+fn close(value: f64, expected: f64) -> bool {
+    (value - expected).abs() < 1e-9
+}
+
+sv_backends! {
+    /// 19.5.1: `name[]` is a bin for each value and `name[N]` distributes
+    /// the values among N bins; these are the examples of the clause. N may
+    /// be an argument of the covergroup.
+    fn array_bins(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done, output longint unsigned inst);
+    bit [9:0] v_a;
+    bit [3:0] f;
+    covergroup cg(int n);
+        coverpoint v_a {
+            bins a   = { [0:63],65 };
+            bins b[] = { [127:150],[148:191] };
+            bins c[] = { 200,201,202 };
+            bins d   = { [1000:$] };
+            bins others[] = default;
+        }
+        coverpoint f { bins fixed [4] = {[1:10], 1, 4, 7}; }
+        g: coverpoint f { bins fixed [5] = {1, 4, 7}; }
+        h: coverpoint f { bins sized [n] = {[0:7]}; }
+    endgroup
+    cg c = new(3);
+    initial begin
+        v_a = 65; f = 1; c.sample();
+        v_a = 148; f = 4; c.sample();
+        v_a = 201; f = 10; c.sample();
+        v_a = 1023; f = 7; c.sample();
+        v_a = 500; f = 0; c.sample();
+        c.sample();
+        v_a = 64; c.sample();
+        inst = $realtobits(c.get_inst_coverage());
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        let report = sim.coverage();
+        // `a`, the 65 bins `b[127]` to `b[191]`, the three of `c` and `d`:
+        // 70 bins, and the bins of `others` are none of the coverage.
+        let v_a = item(&report, "Top.cg", 0, "v_a");
+        assert_eq!(
+            v_a.bins
+                .iter()
+                .filter(|bin| bin.kind == celox::BinReportKind::Bins)
+                .count(),
+            70
+        );
+        assert_eq!(v_a.bins[1].name, "b[127]");
+        assert_eq!(v_a.bins[65].name, "b[191]");
+        assert_eq!(counted(&report, "Top.cg", 0, "v_a"), (4, 70));
+        let mut others = other_bins(&report, "Top.cg", 0, "v_a");
+        others.sort_by(|first, second| first.0.cmp(&second.0));
+        assert_eq!(
+            others,
+            [
+                ("others[500]".to_string(), celox::BinReportKind::Default, 2),
+                ("others[64]".to_string(), celox::BinReportKind::Default, 1),
+            ]
+        );
+        assert_eq!(
+            hit(bins(&report, "Top.cg", 0, "v_a"))
+                .into_iter()
+                .filter(|(name, _)| !name.starts_with("others"))
+                .collect::<Vec<_>>(),
+            hits(&[("a", 1), ("b[148]", 1), ("c[201]", 1), ("d", 1)])
+        );
+        // <1,2,3>, <4,5,6>, <7,8,9>, <10,1,4,7>.
+        assert_eq!(
+            bins(&report, "Top.cg", 0, "f"),
+            hits(&[("fixed[0]", 1), ("fixed[1]", 1), ("fixed[2]", 1), ("fixed[3]", 4)])
+        );
+        // <1>, <4>, <7>, < >, < >: the two bins without a value are none.
+        assert_eq!(
+            bins(&report, "Top.cg", 0, "g"),
+            hits(&[("fixed[0]", 1), ("fixed[1]", 1), ("fixed[2]", 1)])
+        );
+        // Three bins of eight values: <0,1>, <2,3>, <4,5,6,7>.
+        assert_eq!(
+            bins(&report, "Top.cg", 0, "h"),
+            hits(&[("sized[0]", 4), ("sized[1]", 0), ("sized[2]", 2)])
+        );
+        assert!(close(
+            real(&mut sim, "inst"),
+            (4.0 / 70.0 + 1.0 + 1.0 + 2.0 / 3.0) / 4.0 * 100.0
+        ));
+    }
+
+    /// 19.5: a `default` bin counts the samples that are in no other bin of
+    /// its coverpoint, `default[]` in a bin for each value. It is no bin of
+    /// the coverage, and a coverpoint with it has no automatic bins.
+    fn default_bins(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done, output longint unsigned inst);
+    bit [2:0] v;
+    bit en;
+    covergroup cg;
+        coverpoint v { bins low = {[0:1]}; bins rest = default; }
+        each: coverpoint v { bins low = {[0:1]}; bins rest[] = default; }
+        guarded: coverpoint v { bins low = {[0:1]}; bins rest = default iff (en); }
+        only: coverpoint v { bins rest = default; }
+    endgroup
+    cg c = new;
+    initial begin
+        v = 0; en = 1; c.sample();
+        v = 5; c.sample();
+        en = 0; c.sample();
+        v = 7; c.sample();
+        inst = $realtobits(c.get_inst_coverage());
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        let report = sim.coverage();
+        let default = celox::BinReportKind::Default;
+        assert_eq!(bins(&report, "Top.cg", 0, "v"), hits(&[("low", 1), ("rest", 3)]));
+        assert_eq!(
+            other_bins(&report, "Top.cg", 0, "v"),
+            [("rest".to_string(), default, 3)]
+        );
+        assert_eq!(counted(&report, "Top.cg", 0, "v"), (1, 1));
+        assert_eq!(
+            other_bins(&report, "Top.cg", 0, "each"),
+            [
+                ("rest[5]".to_string(), default, 2),
+                ("rest[7]".to_string(), default, 1),
+            ]
+        );
+        // The guard of the bin held for one of the three samples.
+        assert_eq!(
+            other_bins(&report, "Top.cg", 0, "guarded"),
+            [("rest".to_string(), default, 1)]
+        );
+        // No bin of `only` counts for its coverage (19.11.1): it has none
+        // to cover and takes no part in that of the covergroup.
+        assert_eq!(
+            other_bins(&report, "Top.cg", 0, "only"),
+            [("rest".to_string(), default, 4)]
+        );
+        assert_eq!(counted(&report, "Top.cg", 0, "only"), (0, 0));
+        assert_eq!(real(&mut sim, "inst"), 100.0);
+    }
+
+    /// 19.5.5, 19.5.6, 19.11.1: the values of `ignore_bins` and
+    /// `illegal_bins` are values of no other bin, taken once the values
+    /// are distributed, and a bin that is left without a value counts on
+    /// neither side of the coverage. The first coverpoint is the example
+    /// of 19.11.1: of four automatic bins three are left.
+    fn ignore_and_illegal_bins(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done, output longint unsigned inst);
+    bit [2:0] a, b;
+    bit [3:0] w;
+    covergroup ct;
+        coverpoint b {
+            option.auto_bin_max = 4;
+            ignore_bins ig = {[0:1], [5:6]};
+        }
+        coverpoint a {
+            bins low[] = {[0:3]};
+            bins high = {[4:7]};
+            ignore_bins skip = {1, [6:7]};
+            illegal_bins bad = {3};
+        }
+        coverpoint w {
+            bins all[4] = {[0:15]};
+            ignore_bins quarter = {[4:7]};
+            ignore_bins part = {0};
+        }
+    endgroup
+    ct c = new;
+    initial begin
+        a = 0; b = 2; w = 0; c.sample();
+        a = 1; b = 0; w = 5; c.sample();
+        a = 4; b = 4; w = 9; c.sample();
+        a = 7; b = 7; w = 1; c.sample();
+        inst = $realtobits(c.get_inst_coverage());
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        // No sample is of an illegal value.
+        assert_eq!(reports(sim.drain_runtime_events()), []);
+        let report = sim.coverage();
+        let (ignore, illegal) = (celox::BinReportKind::Ignore, celox::BinReportKind::Illegal);
+        let counting = |item: &str| -> Vec<(String, u64)> {
+            let other = other_bins(&report, "Top.ct", 0, item);
+            bins(&report, "Top.ct", 0, item)
+                .into_iter()
+                .filter(|(name, _)| other.iter().all(|(other, ..)| other != name))
+                .collect()
+        };
+        // auto[0:1] has no value left; auto[4:5] is 4 and auto[6:7] is 7.
+        assert_eq!(
+            counting("b"),
+            hits(&[("auto[2:3]", 1), ("auto[4:5]", 1), ("auto[6:7]", 1)])
+        );
+        assert_eq!(
+            other_bins(&report, "Top.ct", 0, "b"),
+            [("ig".to_string(), ignore, 1)]
+        );
+        assert_eq!(counted(&report, "Top.ct", 0, "b"), (3, 3));
+        // low[1] and low[3] have no value left, and `high` is 4 and 5.
+        assert_eq!(counting("a"), hits(&[("low[0]", 1), ("low[2]", 0), ("high", 1)]));
+        assert_eq!(
+            other_bins(&report, "Top.ct", 0, "a"),
+            [
+                ("skip".to_string(), ignore, 2),
+                ("bad".to_string(), illegal, 0),
+            ]
+        );
+        assert_eq!(counted(&report, "Top.ct", 0, "a"), (2, 3));
+        // The values are distributed first: <0..3>, <4..7>, <8..11>,
+        // <12..15>, and then all[1] has none left.
+        assert_eq!(counting("w"), hits(&[("all[0]", 1), ("all[2]", 1), ("all[3]", 0)]));
+        assert_eq!(counted(&report, "Top.ct", 0, "w"), (2, 3));
+        assert!(close(
+            real(&mut sim, "inst"),
+            (1.0 + 2.0 / 3.0 + 2.0 / 3.0) / 3.0 * 100.0
+        ));
+    }
+
+    /// 19.5.6: a sample of an illegal value is a run-time error, which
+    /// names the bin and the value, and counts in no `bins` bin that lists
+    /// the value too. The simulation goes on. An illegal bin whose guard is
+    /// false is no error.
+    fn illegal_bin_hit_reports_an_error(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done);
+    bit [3:0] v;
+    bit en;
+    covergroup cg;
+        cp_a: coverpoint v {
+            bins ok = {[0:9]};
+            bins all = {[0:15]};
+            illegal_bins ill = {15, [10:11]};
+            illegal_bins off = {12} iff (en);
+        }
+    endgroup
+    cg c = new;
+    initial begin
+        v = 3; c.sample();
+        v = 15; c.sample();
+        v = 12; en = 0; c.sample();
+        v = 12; en = 1; c.sample();
+        #1 v = 10; c.sample();
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(0).unwrap();
+        let errors = reports(sim.drain_runtime_events());
+        let text = |bin: &str, value: u32| {
+            format!(
+                "illegal_bins `{bin}` of coverpoint `cp_a` of covergroup `Top.cg` (instance \
+                 `Top.cg#0`): value {value}"
+            )
+        };
+        assert_eq!(
+            errors,
+            [
+                (celox::Severity::Error, text("ill", 15)),
+                (celox::Severity::Error, text("off", 12)),
+            ]
+        );
+        sim.run_until(2).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        assert_eq!(
+            reports(sim.drain_runtime_events()),
+            [(celox::Severity::Error, text("ill", 10))]
+        );
+        let report = sim.coverage();
+        assert_eq!(samples(&report, "Top.cg"), [5]);
+        // `all` has the values 0 to 9, 13 and 14: the illegal values are
+        // none of it, 12 neither while the guard of `off` is false.
+        assert_eq!(
+            bins(&report, "Top.cg", 0, "cp_a"),
+            hits(&[("ok", 1), ("all", 1), ("ill", 2), ("off", 1)])
+        );
+    }
+
+    /// 19.5.4: in a `wildcard` bin an x, z or `?` bit of a value stands for
+    /// 0 and for 1; the examples of the clause. A sample with an x or z bit
+    /// is in no wildcard bin.
+    fn wildcard_bins(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done);
+    logic [3:0] v;
+    covergroup cg;
+        coverpoint v {
+            wildcard bins g12_15 = { 4'b11?? };
+            wildcard bins g12_15_array[] = { 4'b11?? };
+            wildcard bins odd = { 4'bxxx1 };
+            wildcard ignore_bins seven = { 4'b0111 };
+            wildcard bins low_or_top = { 4'b0z0z, [4'b111x:4'b1111] };
+            bins exact = { 4'b0000 };
+        }
+    endgroup
+    cg c = new;
+    initial begin
+        v = 12; c.sample();
+        v = 13; c.sample();
+        v = 15; c.sample();
+        v = 7; c.sample();
+        v = 4'b11x1; c.sample();
+        v = 0; c.sample();
+        v = 5; c.sample();
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(true);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        let report = sim.coverage();
+        // `odd` is 1, 3, 5, 9, 11, 13 and 15 without the ignored 7;
+        // `low_or_top` is 0, 1, 4, 5 and the range 14 to 15.
+        assert_eq!(
+            bins(&report, "Top.cg", 0, "v"),
+            hits(&[
+                ("g12_15", 3),
+                ("g12_15_array[12]", 1),
+                ("g12_15_array[13]", 1),
+                ("g12_15_array[14]", 0),
+                ("g12_15_array[15]", 1),
+                ("odd", 3),
+                ("seven", 1),
+                ("low_or_top", 3),
+                ("exact", 1),
+            ])
+        );
+        assert_eq!(counted(&report, "Top.cg", 0, "v"), (7, 8));
+    }
+
+    /// 19.5.1: a bin with a guard counts a sample only where the guard
+    /// holds. The guard is evaluated at the sample, and reads the
+    /// arguments of the covergroup and of its sample method.
+    fn bins_iff(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done);
+    bit [1:0] v;
+    bit en;
+    int unsigned gate;
+    covergroup cg(int unsigned lim) with function sample(bit ok);
+        coverpoint v {
+            bins zero = {0} iff (en);
+            bins one[] = {1, 2} iff (gate < lim);
+            bins three = {3} iff (ok);
+            bins any = {[0:3]};
+        }
+        guarded: coverpoint v iff (ok) {
+            bins zero = {0} iff (en);
+        }
+    endgroup
+    cg c = new(3);
+    initial begin
+        v = 0; c.sample(1);
+        en = 1; c.sample(1);
+        c.sample(0);
+        v = 1; gate = 5; c.sample(1);
+        v = 2; gate = 1; c.sample(1);
+        v = 3; c.sample(0);
+        c.sample(1);
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        let report = sim.coverage();
+        assert_eq!(
+            bins(&report, "Top.cg", 0, "v"),
+            hits(&[("zero", 2), ("one[1]", 0), ("one[2]", 1), ("three", 1), ("any", 7)])
+        );
+        // The guard of the coverpoint and that of the bin both hold once.
+        assert_eq!(bins(&report, "Top.cg", 0, "guarded"), hits(&[("zero", 1)]));
+    }
+
+    /// 19.5.1.1: a bin has the values of its range list for which its
+    /// `with` expression holds, where `item` is the value; the name of the
+    /// coverpoint stands for all its values. These are the two examples of
+    /// the clause, then filters on one bin, on `ignore_bins` and on
+    /// `illegal_bins`, one that reads an argument of the covergroup, and
+    /// one over the values of a 64-bit coverpoint, which is evaluated for
+    /// the sampled value.
+    fn with_filters(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done, output longint unsigned inst);
+    bit [7:0] x, b;
+    bit [3:0] s;
+    longint unsigned big;
+    function automatic bit myfunc(bit [7:0] v);
+        return v[7] && v[0];
+    endfunction
+    covergroup cg(int lim);
+        a: coverpoint x {
+            bins mod3[] = {[0:255]} with (item % 3 == 0);
+        }
+        coverpoint b {
+            bins func[] = b with (myfunc(item));
+        }
+        coverpoint s {
+            bins low = {[0:15]} with (item < lim);
+            bins ev[] = {[0:7]};
+            ignore_bins odd = {[0:7]} with (item % 2);
+            illegal_bins top = {[8:15]} with (item > 13);
+        }
+        under: coverpoint s {
+            bins u[] = {[0:15]} with (item < lim);
+        }
+        coverpoint big {
+            bins even = big with (item % 2 == 0 && item > lim);
+            bins few = {[0:9]};
+        }
+    endgroup
+    cg c, d, e;
+    initial begin
+        c = new(4);
+        d = new(1);
+        e = new(4);
+        x = 9; b = 129; s = 2; big = 6; c.sample();
+        x = 10; b = 128; s = 3; big = 7; c.sample();
+        x = 255; b = 255; s = 6; big = 64'h100_0000_0000; c.sample();
+        s = 14; big = 2; c.sample();
+        s = 0; d.sample(); e.sample();
+        s = 2; d.sample(); e.sample();
+        inst = $realtobits(c.get_inst_coverage());
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        assert_eq!(
+            reports(sim.drain_runtime_events()),
+            [(
+                celox::Severity::Error,
+                "illegal_bins `top` of coverpoint `s` of covergroup `Top.cg` (instance \
+                 `Top.cg#0`): value 14"
+                    .to_string()
+            )]
+        );
+        let report = sim.coverage();
+        // The 86 multiples of 3 below 256, and the 64 odd values from 129.
+        assert_eq!(counted(&report, "Top.cg", 0, "a"), (2, 86));
+        assert_eq!(
+            hit(bins(&report, "Top.cg", 0, "a")),
+            hits(&[("mod3[9]", 1), ("mod3[255]", 2)])
+        );
+        assert_eq!(counted(&report, "Top.cg", 0, "b"), (2, 64));
+        assert_eq!(
+            hit(bins(&report, "Top.cg", 0, "b")),
+            hits(&[("func[129]", 1), ("func[255]", 2)])
+        );
+        // `low` is 0 and 2 of the values below 4, the odd ones being
+        // ignored; `ev` has the four even values; `top` is 14 and 15.
+        assert_eq!(
+            bins(&report, "Top.cg", 0, "s"),
+            hits(&[
+                ("low", 1),
+                ("ev[0]", 0),
+                ("ev[2]", 1),
+                ("ev[4]", 0),
+                ("ev[6]", 1),
+                ("odd", 1),
+                ("top", 1),
+            ])
+        );
+        assert_eq!(counted(&report, "Top.cg", 0, "s"), (3, 5));
+        // 6 and 2^40 are even and above 4; 2 is not above 4.
+        assert_eq!(
+            bins(&report, "Top.cg", 0, "big"),
+            hits(&[("even", 2), ("few", 3)])
+        );
+        // The values below the limit 4, of which 2 and 3 were sampled.
+        assert_eq!(
+            bins(&report, "Top.cg", 0, "under"),
+            hits(&[("u[0]", 0), ("u[1]", 0), ("u[2]", 1), ("u[3]", 1)])
+        );
+        assert!(close(
+            real(&mut sim, "inst"),
+            (2.0 / 86.0 + 2.0 / 64.0 + 3.0 / 5.0 + 2.0 / 4.0 + 1.0) / 5.0 * 100.0
+        ));
+        // The second instance has the bins of the limit 1: `u` is the bin
+        // of 0, and `low` is 0 alone, so the sample of 2 is not in it. The
+        // third, constructed with the arguments of the first after the
+        // second, has the bins of the limit 4 again, where `low` has 2.
+        assert_eq!(bins(&report, "Top.cg", 1, "under"), hits(&[("u[0]", 1)]));
+        assert_eq!(
+            bins(&report, "Top.cg", 2, "under"),
+            hits(&[("u[0]", 1), ("u[1]", 0), ("u[2]", 1), ("u[3]", 0)])
+        );
+        let s = |low: u64| {
+            hits(&[
+                ("low", low),
+                ("ev[0]", 1),
+                ("ev[2]", 1),
+                ("ev[4]", 0),
+                ("ev[6]", 0),
+                ("odd", 0),
+                ("top", 0),
+            ])
+        };
+        assert_eq!(bins(&report, "Top.cg", 1, "s"), s(1));
+        assert_eq!(bins(&report, "Top.cg", 2, "s"), s(2));
+        assert_eq!(counted(&report, "Top.cg", 1, "s"), (3, 5));
+    }
+
+    /// 19.5.1.1 beside 19.8.1: in a `with` expression `item` is the value
+    /// the filter is asked about, also where the sample method has an
+    /// argument `item`, which the coverpoint expression reads.
+    fn with_filter_item_beside_a_sample_argument_named_item(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done);
+    covergroup cg with function sample(int item);
+        cp: coverpoint item { bins b[] = {[0:3]} with (item > 1); }
+    endgroup
+    cg c;
+    initial begin
+        c = new;
+        c.sample(0);
+        c.sample(2);
+        c.sample(3);
+        c.sample(3);
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        let report = sim.coverage();
+        assert_eq!(
+            bins(&report, "Top.cg", 0, "cp"),
+            hits(&[("b[2]", 1), ("b[3]", 2)])
+        );
+    }
+
+    /// 19.5.1.1: what a `with` expression reads decides the bins of each
+    /// instance, a string argument as an integral one. Instances that are
+    /// constructed with the same arguments have the same bins, in whatever
+    /// order they are constructed.
+    fn filters_read_string_arguments(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done);
+    bit [2:0] v;
+    covergroup cg(string s, string mode);
+        option.name = {mode, "/", s};
+        a: coverpoint v {
+            bins b[] = {[0:5]} with (s == "x" ? item < 2 : item < 4);
+        }
+        i: coverpoint v {
+            bins e[] = {[0:3]};
+            ignore_bins skip = {[0:3]} with (mode == "odd" ? item % 2 : 0);
+        }
+        l: coverpoint v {
+            bins n[] = {[0:7]} with (s.len() > item);
+        }
+    endgroup
+    cg c1, c2, c3, c4;
+    initial begin
+        c1 = new("x", "odd");
+        c2 = new("yy", "all");
+        c3 = new("x", "odd");
+        c4 = new("yy", "odd");
+        v = 1; c1.sample(); c2.sample(); c3.sample(); c4.sample();
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        assert_eq!(reports(sim.drain_runtime_events()), []);
+        let report = sim.coverage();
+        let of = |instance: usize, item: &str| bins(&report, "Top.cg", instance, item);
+        // "x": the values below 2, and one character; else those below 4,
+        // and two. "odd": 1 and 3 are ignored, which the sample of 1 hits.
+        let (two, four) = (
+            hits(&[("b[0]", 0), ("b[1]", 1)]),
+            hits(&[("b[0]", 0), ("b[1]", 1), ("b[2]", 0), ("b[3]", 0)]),
+        );
+        let (odd, all) = (
+            hits(&[("e[0]", 0), ("e[2]", 0), ("skip", 1)]),
+            hits(&[("e[0]", 0), ("e[1]", 1), ("e[2]", 0), ("e[3]", 0)]),
+        );
+        let (one, both) = (hits(&[("n[0]", 0)]), hits(&[("n[0]", 0), ("n[1]", 1)]));
+        for (instance, a, i, l) in [
+            (0, &two, &odd, &one),
+            (1, &four, &all, &both),
+            (2, &two, &odd, &one),
+            (3, &four, &odd, &both),
+        ] {
+            assert_eq!(&of(instance, "a"), a, "instance {instance}");
+            assert_eq!(&of(instance, "i"), i, "instance {instance}");
+            assert_eq!(&of(instance, "l"), l, "instance {instance}");
+        }
+        let names: Vec<_> = group(&report, "Top.cg")
+            .instances
+            .iter()
+            .map(|instance| instance.name.as_str())
+            .collect();
+        assert_eq!(names, ["odd/x", "all/yy", "odd/x", "odd/yy"]);
+    }
+
+    /// 19.5, 19.5.1.1: a function of a `with` expression may read the
+    /// constants of the object it is a method of, so the filter of an
+    /// embedded covergroup that calls a method of its class keeps what the
+    /// object gives: each instance is asked, also one that is constructed
+    /// as an earlier one was.
+    fn filters_that_call_methods_of_the_class_are_asked_by_each_object(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done);
+    class C;
+        const int limit;
+        int v;
+        covergroup cg;
+            coverpoint v { bins b[] = {[0:7]} with (ok(item)); }
+        endgroup
+        function bit ok(int x);
+            return x < limit;
+        endfunction
+        function new(int l);
+            limit = l;
+            cg = new;
+        endfunction
+    endclass
+    C a, b, c;
+    initial begin
+        a = new(2);
+        b = new(6);
+        c = new(2);
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        let report = sim.coverage();
+        assert_eq!(
+            [0, 1, 2].map(|instance| bins(&report, "C::cg", instance, "v").len()),
+            [2, 6, 2]
+        );
+    }
+
+    /// 19.5.1.1: a filter with a handle among its operands, the object a
+    /// method is called of or one whose member is read, keeps what the
+    /// object gives when the instance is constructed: an instance that is
+    /// constructed with the handle of an earlier one is asked again.
+    fn filters_that_read_objects_are_asked_by_each_construction(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done);
+    class K;
+        int top;
+        function new(int t);
+            top = t;
+        endfunction
+        function bit below(int x);
+            return x < top;
+        endfunction
+    endclass
+    bit [2:0] w;
+    covergroup by_handle(K h);
+        coverpoint w { bins b[] = {[0:7]} with (h.below(item)); }
+        m: coverpoint w { bins b[] = {[0:7]} with (item < h.top); }
+    endgroup
+    K k2, k5;
+    by_handle g2, g5, again;
+    initial begin
+        k2 = new(2);
+        k5 = new(5);
+        g2 = new(k2);
+        g5 = new(k5);
+        k2.top = 3;
+        again = new(k2);
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        let report = sim.coverage();
+        // The third is constructed with the handle of the first, whose
+        // object has changed.
+        for item in ["w", "m"] {
+            assert_eq!(
+                [0, 1, 2].map(|instance| bins(&report, "Top.by_handle", instance, item).len()),
+                [2, 5, 3],
+                "{item}"
+            );
+        }
+    }
+
+    /// 19.5.1.1, 19.5.3: the name of a coverpoint before `with` stands for
+    /// all its values, which for a coverpoint of an enumeration are its
+    /// named values, as its automatic bins are.
+    fn coverpoint_name_of_an_enumeration_is_its_named_values(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done);
+    typedef enum { RED, GREEN = 5, BLUE } color_t;
+    color_t color;
+    covergroup cg;
+        coverpoint color { bins not_green[] = color with (item != GREEN); }
+        one: coverpoint color { bins late = one with (item > RED); }
+        ig: coverpoint color { ignore_bins first = ig with (item == RED); }
+    endgroup
+    cg c = new;
+    initial begin
+        color = BLUE; c.sample();
+        color = GREEN; c.sample();
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        let report = sim.coverage();
+        assert_eq!(
+            bins(&report, "Top.cg", 0, "color"),
+            hits(&[("not_green[0]", 0), ("not_green[6]", 1)])
+        );
+        assert_eq!(bins(&report, "Top.cg", 0, "one"), hits(&[("late", 2)]));
+        // The automatic bins of the two enumerators that are not ignored.
+        assert_eq!(
+            other_bins(&report, "Top.cg", 0, "ig"),
+            [("first".to_string(), celox::BinReportKind::Ignore, 0)]
+        );
+        assert_eq!(
+            bins(&report, "Top.cg", 0, "ig")
+                .into_iter()
+                .filter(|(name, _)| name != "first")
+                .collect::<Vec<_>>(),
+            hits(&[("auto[GREEN]", 1), ("auto[BLUE]", 1)])
+        );
+    }
+
+    /// 11.4.13: the operands of a tolerance range keep their own
+    /// signedness. `[A +/- B]` is `[A - type(A)'(B) : A + type(A)'(B)]` and
+    /// `[A +%- B]` has `type(A)'(A*B/100.0)` in place of `type(A)'(B)`: an
+    /// unsigned center above the middle of its type, an unsigned tolerance
+    /// with its top bit set and a negative center, as arguments of the
+    /// covergroup and as constants.
+    fn tolerance_ranges_keep_the_signedness_of_their_operands(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done);
+    bit [7:0] v;
+    int w;
+    bit signed [7:0] s;
+    covergroup byarg(bit [7:0] p, bit [7:0] ub, int a, int na, int nb, bit signed [7:0] m);
+        u: coverpoint v {
+            bins rel[] = {[p +%- 10]};
+            bins both[] = {[p +/- 2], [p +%- 1]};
+        }
+        i: coverpoint w {
+            bins rel[] = {[a +%- ub]};
+            bins abs[] = {[a +/- ub]};
+            bins neg[] = {[na +%- nb]};
+            bins nabs[] = {[na +/- 3]};
+        }
+        s8: coverpoint s { bins rel[] = {[m +%- 20]}; }
+    endgroup
+    covergroup consts;
+        u: coverpoint v {
+            bins rel[] = {[8'd129 +%- 10]};
+            bins high[] = {[8'd200 +%- 10]};
+            bins both[] = {[8'd129 +/- 2], [8'd129 +%- 1]};
+        }
+        i: coverpoint w {
+            bins rel[] = {[50 +%- 8'd200]};
+            bins abs[] = {[50 +/- 8'd200]};
+            bins neg[] = {[-40 +%- 25]};
+            bins nabs[] = {[-40 +/- 3]};
+        }
+        s8: coverpoint s { bins rel[] = {[-8'sd100 +%- 20]}; }
+    endgroup
+    byarg x = new(8'd129, 8'd200, 50, -40, 25, -8'sd100);
+    byarg y = new(8'd200, 8'd200, 50, -40, 25, -8'sd100);
+    consts k = new;
+    initial done = 1;
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        assert_eq!(reports(sim.drain_runtime_events()), []);
+        let report = sim.coverage();
+        // The bins of array `bin` of `item`: how many, the first and the
+        // last, which are named by their values in rising order.
+        let span = |name: &str, instance: usize, item: &str, bin: &str| {
+            let prefix = format!("{bin}[");
+            let listed: Vec<String> = bins(&report, name, instance, item)
+                .into_iter()
+                .map(|(name, _)| name)
+                .filter(|name| name.starts_with(&prefix))
+                .collect();
+            (
+                listed.len(),
+                listed.first().cloned().unwrap_or_default(),
+                listed.last().cloned().unwrap_or_default(),
+            )
+        };
+        let expect = |count: usize, bin: &str, low: i32, high: i32| {
+            (count, format!("{bin}[{low}]"), format!("{bin}[{high}]"))
+        };
+        for (name, instance) in [("Top.byarg", 0), ("Top.consts", 0)] {
+            // 10 percent of 129 is 12.9, cut to 12; 1 percent is 1.
+            assert_eq!(span(name, instance, "u", "rel"), expect(25, "rel", 117, 141), "{name}");
+            assert_eq!(span(name, instance, "u", "both"), expect(5, "both", 127, 131), "{name}");
+            // 200 percent of 50 is 100, and int'(8'd200) is 200.
+            assert_eq!(span(name, instance, "i", "rel"), expect(201, "rel", -50, 150), "{name}");
+            assert_eq!(span(name, instance, "i", "abs"), expect(401, "abs", -150, 250), "{name}");
+            // 25 percent of -40 is -10: -30 and -50, put in order.
+            assert_eq!(span(name, instance, "i", "neg"), expect(21, "neg", -50, -30), "{name}");
+            assert_eq!(span(name, instance, "i", "nabs"), expect(7, "nabs", -43, -37), "{name}");
+            // 20 percent of -100 is -20: -80 and -120.
+            assert_eq!(span(name, instance, "s8", "rel"), expect(41, "rel", -120, -80), "{name}");
+        }
+        // 10 percent of 200 is 20, and 1 percent is 2.
+        assert_eq!(span("Top.byarg", 1, "u", "rel"), expect(41, "rel", 180, 220));
+        assert_eq!(span("Top.byarg", 1, "u", "both"), expect(5, "both", 198, 202));
+        assert_eq!(span("Top.consts", 0, "u", "high"), expect(41, "high", 180, 220));
+    }
+
+    /// 19.5.1.2: the values of a bin may be the elements of an array: a
+    /// fixed-size array of constants, also of a package, and a queue that a
+    /// function makes of an argument of the covergroup. The elements are
+    /// taken in their order.
+    fn set_expression_bins(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+package p;
+    localparam int unsigned PS [4] = '{5, 1, 9, 3};
+endpackage
+module Top(output int done);
+    typedef int q_t[$];
+    localparam bit [3:0] S [3] = '{2, 4, 6};
+    bit [3:0] v;
+    function automatic q_t doubles(int n);
+        q_t q;
+        for (int i = 0; i < n; i++) q.push_back(i * 2);
+        return q;
+    endfunction
+    covergroup cg(int n);
+        coverpoint v {
+            bins s[] = S;
+            bins two[2] = p::PS;
+            bins q[] = doubles(n);
+            ignore_bins none = S iff (0);
+        }
+    endgroup
+    cg c = new(3);
+    initial begin
+        v = 2; c.sample();
+        v = 5; c.sample();
+        v = 1; c.sample();
+        v = 4; c.sample();
+        v = 0; c.sample();
+        v = 7; c.sample();
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        assert_eq!(reports(sim.drain_runtime_events()), []);
+        let report = sim.coverage();
+        // The ignored 2, 4 and 6 leave `s` without a bin and `q` with the
+        // bin of 0. The two bins of `two` are <5,1> and <9,3>, the first
+        // element first: 5 and 1 are both in the first.
+        assert_eq!(
+            bins(&report, "Top.cg", 0, "v"),
+            hits(&[("two[0]", 2), ("two[1]", 0), ("q[0]", 1), ("none", 0)])
+        );
+        assert_eq!(counted(&report, "Top.cg", 0, "v"), (2, 3));
+    }
+
+    /// 11.4.13, 19.5.1: `[A +/- B]` is the values from A - B to A + B and
+    /// `[A +%- B]` those within B percent of A, the tolerance cut to an
+    /// integer: 25 percent of 7 is 1, so the range is 6 to 8, and of -7 it
+    /// is -8 to -6, as the clause says. The bounds are put in order, and
+    /// may be arguments of the covergroup.
+    fn tolerance_ranges(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done);
+    bit signed [7:0] v;
+    covergroup cg(int center, int tol);
+        coverpoint v {
+            bins near = {[10 +/- 2]};
+            bins pct = {[7 +%- 25]};
+            bins neg = {[-7 +%- 25]};
+            bins swapped = {[-20 +/- -3]};
+            bins arg[] = {[center +/- tol]};
+            bins rel = {[center +%- tol]};
+        }
+    endgroup
+    cg c = new(40, 5);
+    initial begin
+        take(8); take(12); take(13); take(5);
+        take(6); take(-6); take(-8); take(-9);
+        take(-23); take(-17); take(-16);
+        take(35); take(38); take(42); take(45);
+        take(46);
+        done = 1;
+    end
+    task automatic take(int value);
+        v = value[7:0];
+        c.sample();
+    endtask
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        assert_eq!(reports(sim.drain_runtime_events()), []);
+        let report = sim.coverage();
+        // 5 percent of 40 is 2: `rel` is 38 to 42, and `arg` the eleven
+        // values 35 to 45.
+        assert_eq!(
+            hit(bins(&report, "Top.cg", 0, "v")),
+            hits(&[
+                ("near", 2),
+                ("pct", 2),
+                ("neg", 2),
+                ("swapped", 2),
+                ("arg[35]", 1),
+                ("arg[38]", 1),
+                ("arg[42]", 1),
+                ("arg[45]", 1),
+                ("rel", 2),
+            ])
+        );
+        assert_eq!(counted(&report, "Top.cg", 0, "v"), (9, 16));
+    }
+
+    /// 19.5, 19.5.4: a sample with an x or z bit that no bin lists with
+    /// those bits is in no bin of values, so a `default` bin counts it, a
+    /// `default[]` in a bin of that value, and an `illegal_bins` that is
+    /// `default` reports it.
+    fn unknown_samples_reach_default_bins(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done);
+    logic [3:0] v;
+    covergroup cg;
+        coverpoint v {
+            bins xz = {4'b1x0z};
+            bins known = {[0:15]};
+            bins other = default;
+        }
+        each: coverpoint v {
+            bins known = {[0:15]};
+            bins other[] = default;
+        }
+        ill: coverpoint v {
+            bins known = {[0:15]};
+            illegal_bins unknown = default;
+        }
+    endgroup
+    cg c = new;
+    initial begin
+        v = 4'b1x0z; c.sample();
+        v = 4'b1000; c.sample();
+        #1 v = 4'bxxxx; c.sample();
+        c.sample();
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(true);
+        sim.run_until(0).unwrap();
+        let unknown = |value: &str| {
+            (
+                celox::Severity::Error,
+                format!(
+                    "illegal_bins `unknown` of coverpoint `ill` of covergroup `Top.cg` \
+                     (instance `Top.cg#0`): value {value}"
+                ),
+            )
+        };
+        assert_eq!(reports(sim.drain_runtime_events()), [unknown("4'b1x0z")]);
+        sim.run_until(2).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        assert_eq!(
+            reports(sim.drain_runtime_events()),
+            [unknown("4'bxxxx"), unknown("4'bxxxx")]
+        );
+        let report = sim.coverage();
+        assert_eq!(
+            bins(&report, "Top.cg", 0, "v"),
+            hits(&[("xz", 1), ("known", 1), ("other", 2)])
+        );
+        assert_eq!(
+            bins(&report, "Top.cg", 0, "each"),
+            hits(&[("known", 1), ("other[4'b1x0z]", 1), ("other[4'bxxxx]", 2)])
+        );
+        assert_eq!(bins(&report, "Top.cg", 0, "ill"), hits(&[("known", 1), ("unknown", 3)]));
+    }
+}
+
+/// 19.5.4: the x and z bits of a bin value are told apart, and in a bin
+/// that is not `wildcard` a sample is in the bin only with exactly those
+/// bits. Two-state simulation has no such sample: the value is then one of
+/// the bins of known values, and of the `default` bin if there is none.
+#[test]
+fn four_state_planes_reach_bins() {
+    let source = r#"`timescale 1ns/1ns
+module Top(output int done);
+    logic [3:0] v;
+    covergroup cg;
+        coverpoint v {
+            bins xz = {4'b1x0z};
+            bins zx = {4'b1z0x};
+            wildcard bins wild = {4'b1x0z};
+            bins nine = {9};
+            bins other = default;
+        }
+    endgroup
+    cg c = new;
+    initial begin
+        v = 4'b1x0z; c.sample();
+        v = 4'b1z0x; c.sample();
+        c.sample();
+        v = 4'b1100; c.sample();
+        v = 4'bz00z; c.sample();
+        done = 1;
+    end
+endmodule
+"#;
+    for (four_state, expected) in [
+        (
+            true,
+            [("xz", 1), ("zx", 2), ("wild", 1), ("nine", 0), ("other", 1)],
+        ),
+        // 4'b1000 three times, 4'b1100 and 4'b0000: `wild` is 8, 9, 12
+        // and 13.
+        (
+            false,
+            [("xz", 0), ("zx", 0), ("wild", 4), ("nine", 0), ("other", 1)],
+        ),
+    ] {
+        let mut sim = simulation(source)
+            .four_state(four_state)
+            .build_native()
+            .unwrap();
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        let report = sim.coverage();
+        assert_eq!(
+            bins(&report, "Top.cg", 0, "v"),
+            hits(&expected),
+            "four_state={four_state}"
+        );
+    }
+}
+
+sv_backends! {
+    /// 19.4, 19.5: the bins of an embedded covergroup read the constants of
+    /// the object that holds it, and call the methods of its class: two
+    /// objects with different constants have different bins. A guard of a
+    /// bin reads the members of the object at each sample.
+    fn embedded_covergroup_bin_kinds(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done);
+    class C;
+        const int limit;
+        const int allowed [3] = '{7, 1, 12};
+        bit [3:0] v;
+        bit en;
+        covergroup cg;
+            coverpoint v {
+                bins low[] = {[0:7]} with (item < limit && keep(item));
+                bins high = {[8:14]} iff (en);
+                bins part[2] = {[limit +/- 1]};
+                illegal_bins bad = {15};
+            }
+            listed: coverpoint v { bins of[2] = allowed; }
+        endgroup
+        function new(int l);
+            limit = l;
+            cg = new;
+        endfunction
+        function bit keep(bit [3:0] x);
+            return !x[0];
+        endfunction
+        function void take(bit [3:0] value, bit on);
+            v = value;
+            en = on;
+            cg.sample();
+        endfunction
+    endclass
+    C a, b;
+    initial begin
+        a = new(5);
+        b = new(3);
+        a.take(2, 0); a.take(9, 0); a.take(9, 1); a.take(6, 1); a.take(12, 0);
+        b.take(2, 1); b.take(4, 0); b.take(7, 0);
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        assert_eq!(reports(sim.drain_runtime_events()), []);
+        let report = sim.coverage();
+        // The even values below 5, and <4>, <5,6> of 4 to 6.
+        assert_eq!(
+            bins(&report, "C::cg", 0, "v"),
+            hits(&[
+                ("low[0]", 0),
+                ("low[2]", 1),
+                ("low[4]", 0),
+                ("high", 1),
+                ("part[0]", 0),
+                ("part[1]", 1),
+                ("bad", 0),
+            ])
+        );
+        // <7>, <1,12> of the array of the object.
+        assert_eq!(
+            bins(&report, "C::cg", 0, "listed"),
+            hits(&[("of[0]", 0), ("of[1]", 1)])
+        );
+        assert_eq!(
+            bins(&report, "C::cg", 1, "listed"),
+            hits(&[("of[0]", 1), ("of[1]", 0)])
+        );
+        // The even values below 3, and <2>, <3,4> of 2 to 4.
+        assert_eq!(
+            bins(&report, "C::cg", 1, "v"),
+            hits(&[
+                ("low[0]", 0),
+                ("low[2]", 1),
+                ("high", 0),
+                ("part[0]", 1),
+                ("part[1]", 1),
+                ("bad", 0),
+            ])
+        );
+    }
+}
+
+/// The bins of 19.5.1 to 19.5.6 under the untimed `Simulator`, which
+/// constructs the covergroup in the clocked procedure that samples it: the
+/// constructor answers the filter in a loop there. At every optimization
+/// level and in both state modes.
+#[test]
+fn bin_kinds_in_clocked_logic_under_simulator() {
+    let source = r#"module Top(input bit clk, input logic [3:0] d, output bit [7:0] q);
+    covergroup cg;
+        coverpoint d {
+            bins even[] = {[0:15]} with (item % 2 == 0);
+            bins low = {[0:7]} iff (q[0]);
+            ignore_bins ig = {2};
+            illegal_bins bad = {15};
+            bins rest = default;
+        }
+    endgroup
+    cg c;
+    always_ff @(posedge clk) q <= q + 8'd1;
+    always @(posedge clk) begin
+        if (c == null) c = new;
+        c.sample();
+    end
+endmodule
+"#;
+    for level in [
+        celox::OptLevel::O0,
+        celox::OptLevel::O1,
+        celox::OptLevel::O2,
+    ] {
+        for four_state in [false, true] {
+            let mut sim =
+                Simulator::from_sv_sources(vec![(source, Path::new("covergroup_ff.sv"))], "Top")
+                    .four_state(four_state)
+                    .opt_level(level)
+                    .build()
+                    .unwrap();
+            let clk = sim.event("clk");
+            let d = sim.signal("d");
+            // `q` is the number of edges before the one that samples.
+            for value in [4u8, 4, 2, 3, 9, 15] {
+                sim.modify(|io| io.set(d, value)).unwrap();
+                sim.tick(clk).unwrap();
+            }
+            let context = format!("{level:?} four_state={four_state}");
+            assert_eq!(
+                reports(sim.drain_runtime_events()),
+                [(
+                    celox::Severity::Error,
+                    "illegal_bins `bad` of coverpoint `d` of covergroup `Top.cg` (instance \
+                     `Top.cg#0`): value 15"
+                        .to_string()
+                )],
+                "{context}"
+            );
+            let report = sim.coverage();
+            assert_eq!(samples(&report, "Top.cg"), [6], "{context}");
+            // 2 is ignored, so `even[2]` has no value; 4 is sampled with
+            // `q` 0 and 1, 3 with `q` 3.
+            assert_eq!(
+                bins(&report, "Top.cg", 0, "d"),
+                hits(&[
+                    ("even[0]", 0),
+                    ("even[4]", 2),
+                    ("even[6]", 0),
+                    ("even[8]", 0),
+                    ("even[10]", 0),
+                    ("even[12]", 0),
+                    ("even[14]", 0),
+                    ("low", 2),
+                    ("ig", 1),
+                    ("bad", 1),
+                    ("rest", 1),
+                ]),
+                "{context}"
+            );
+        }
+    }
+}

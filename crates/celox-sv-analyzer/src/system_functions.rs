@@ -1570,6 +1570,33 @@ pub enum CoverageOp {
     /// illegal bins of the last [`CoverageOp::SampleEnd`] of the instance
     /// in the argument, as a string.
     Message,
+    /// Hand the construction of the instance in the first argument the
+    /// value in the second, of `width` bits, as the next element of set
+    /// `set` of the descriptor: an element of the array that is the values
+    /// of a bin (19.5.1.2).
+    SetPush { set: u32, width: u32, signed: bool },
+    /// Go to the next value that `with` filter `filter` of the descriptor
+    /// is to be asked about in the construction of the instance in the
+    /// first argument (19.5.1.1): whether there is one. The second argument
+    /// is whether the filter keeps the value it was at, which the first
+    /// call of a construction does not read.
+    FilterNext { filter: u32 },
+    /// The value that filter `filter` is at in the construction of the
+    /// instance in the argument, of `width` bits: what `item` names in the
+    /// `with` expression. `four_state` tells a value that may hold x or z
+    /// bits.
+    FilterItem {
+        filter: u32,
+        width: u32,
+        signed: bool,
+        four_state: bool,
+    },
+    /// Note the predicate bits of coverpoint item `item` for the sample in
+    /// progress of the instance in the first argument: the guards of its
+    /// bins (19.5.1) and the `with` filters that are evaluated for the
+    /// sampled value. The second argument is their concatenation, `count`
+    /// bits with predicate 0 in the lowest.
+    Predicates { item: u32, count: u32 },
 }
 
 /// Which result of a coverage query (IEEE 1800-2023 19.8).
@@ -1587,7 +1614,7 @@ impl CoverageOp {
     /// The width and signedness of the result.
     pub fn result_type(&self) -> (usize, bool) {
         match self {
-            Self::Registered | Self::Sampling => (1, false),
+            Self::Registered | Self::Sampling | Self::FilterNext { .. } => (1, false),
             Self::Register(_)
             | Self::New { .. }
             | Self::Build
@@ -1597,8 +1624,12 @@ impl CoverageOp {
             | Self::FormalSet { .. }
             | Self::Points { .. }
             | Self::Point { .. }
-            | Self::Message => (32, false),
-            Self::Formal { width, signed, .. } => (*width as usize, *signed),
+            | Self::Message
+            | Self::SetPush { .. }
+            | Self::Predicates { .. } => (32, false),
+            Self::Formal { width, signed, .. } | Self::FilterItem { width, signed, .. } => {
+                (*width as usize, *signed)
+            }
             Self::InstCoverage { what } | Self::TypeCoverage { what } => match what {
                 CoverageQuery::Real => (64, false),
                 CoverageQuery::Covered | CoverageQuery::Total => (32, true),
@@ -1867,6 +1898,11 @@ impl fmt::Display for ObjectOp {
                 CoverageOp::Formal { .. } => "covergroup argument read",
                 CoverageOp::Points { .. } | CoverageOp::Point { .. } => "covergroup sample value",
                 CoverageOp::Message => "covergroup message",
+                CoverageOp::SetPush { .. } => "covergroup construction value",
+                CoverageOp::FilterNext { .. } | CoverageOp::FilterItem { .. } => {
+                    "covergroup bin filter"
+                }
+                CoverageOp::Predicates { .. } => "covergroup sample value",
             },
         })
     }

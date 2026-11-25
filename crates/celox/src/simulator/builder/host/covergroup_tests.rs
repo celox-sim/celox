@@ -641,6 +641,159 @@ fn packed_points_take_a_call_for_each_64_bits() {
     assert_eq!(count(&calls, op::POINTS) + count(&calls, op::PRESENT), 0);
 }
 
+/// What the bins of 19.5.1 to 19.5.6 add to a sample and to a construction.
+/// A bin array, a `default` bin, `ignore_bins` and a wildcard bin add
+/// nothing: the heap makes them of the descriptor. The guards of the bins
+/// of a coverpoint are one more call of a sample for each 64 of them, and a
+/// `with` filter is two calls of a construction for each value it is asked
+/// about, the call that goes to the next value and the one that reads it,
+/// in a loop of the constructor. None is a call of the heap helper, so a
+/// design that samples such a covergroup in clocked logic keeps its plan.
+/// A type with an illegal bin has the report of a hit in its sample: the
+/// call that reads the text, which only a hit makes, and a string handle
+/// for it in the state of the procedure that samples.
+#[test]
+fn bin_kinds_add_the_calls_of_their_predicates_and_filters() {
+    use coverage::op;
+    let design = |bins: &str| {
+        rtl(
+            "",
+            &format!(
+                "    bit [3:0] v;
+    bit en;
+    covergroup cg;
+        coverpoint v {{
+{bins}
+        }}
+        coverpoint q;
+    endgroup
+    cg c;
+    always @(posedge clk) begin
+        if (c == null) c = new;
+        c.sample();
+    end"
+            ),
+        )
+    };
+    // What the plan decides for the design, as far as a call of the heap
+    // helper in its clocked logic would change it.
+    let plan = |source: &str| {
+        let (program, facts) = laid_out(timed(source));
+        let calls = coverage_subs(&program.sir);
+        let plan = crate::scheduler::plan_for_test(&program).unwrap();
+        (
+            (
+                plan.settle_reads.is_some(),
+                plan.fallback,
+                plan.lazy,
+                plan.incremental,
+                plan.active,
+            ),
+            facts,
+            calls,
+        )
+    };
+    // The calls of one execution of the body that samples.
+    let of_a_sample = |calls: &[(u64, u64, u64)]| {
+        let bodies = count(calls, op::SAMPLING);
+        assert!(bodies > 0);
+        [
+            op::SAMPLING,
+            op::PRESENT,
+            op::POINTS,
+            op::POINT,
+            op::PREDICATES,
+            op::SAMPLE_END,
+            op::MESSAGE,
+        ]
+        .map(|sub| {
+            // `MESSAGE` is also the call of a constructor that warns.
+            let calls = count(calls, sub);
+            assert_eq!(calls % bodies, 0);
+            calls / bodies
+        })
+    };
+    let (base, base_facts, base_calls) = plan(&design("            bins low = {[0:3]};"));
+    assert!(base.0 && base.2.is_some());
+    assert_eq!(base_facts.heap_calls, 0);
+    assert_eq!(of_a_sample(&base_calls), [1, 0, 1, 0, 0, 1, 0]);
+    // Arrays, a `default` bin, an ignore bin and a wildcard bin: the calls
+    // of the design with one bin, in the sample and in the constructor.
+    let (kinds, facts, calls) = plan(&design(
+        "            bins low[] = {[0:3]};
+            bins some[2] = {[4:11]};
+            wildcard bins w = {4'b11??};
+            ignore_bins ig = {5};
+            bins rest[] = default;",
+    ));
+    assert_eq!(facts.heap_calls, 0);
+    assert_eq!(of_a_sample(&calls), [1, 0, 1, 0, 0, 1, 0]);
+    let constructing = |calls: &[(u64, u64, u64)]| {
+        [
+            op::NEW,
+            op::INPUT,
+            op::SET_PUSH,
+            op::FILTER_NEXT,
+            op::FILTER_ITEM,
+            op::BUILD,
+        ]
+        .map(|sub| count(calls, sub))
+    };
+    assert_eq!(constructing(&calls), constructing(&base_calls));
+    assert_eq!(constructing(&calls)[2..5], [0, 0, 0]);
+    assert_eq!(kinds, base);
+    // Guards of bins: one call for the predicate bits of the coverpoint.
+    let (guarded, facts, calls) = plan(&design(
+        "            bins low[] = {[0:3]} iff (en);
+            bins high = {[4:15]} iff (!en);",
+    ));
+    assert_eq!(facts.heap_calls, 0);
+    assert_eq!(of_a_sample(&calls), [1, 0, 1, 0, 1, 1, 0]);
+    assert!(calls.contains(&(op::PREDICATES, 1, 0)));
+    assert_eq!(guarded, base);
+    // A filter: the constructor has the call before its loop and the two
+    // of the loop, which run once for each of the sixteen values.
+    let (filtered, facts, calls) = plan(&design(
+        "            bins even[] = {[0:15]} with (item % 2 == 0);",
+    ));
+    assert_eq!(facts.heap_calls, 0);
+    assert_eq!(of_a_sample(&calls), [1, 0, 1, 0, 0, 1, 0]);
+    let news = count(&calls, op::NEW);
+    assert_eq!(constructing(&calls)[2..5], [0, 2 * news, news], "{calls:?}");
+    assert_eq!(filtered, base);
+    // An illegal bin: the sample reads the text of a hit and reports it.
+    let (illegal, facts, calls) = plan(&design(
+        "            bins low = {[0:3]};
+            illegal_bins bad = {15};",
+    ));
+    assert_eq!(of_a_sample(&calls), [1, 0, 1, 0, 0, 1, 1]);
+    // The report is no call of the heap helper, and the plan is that of
+    // the design without the bin. The text is a string the procedure
+    // holds: one more handle in the state of the design.
+    assert_eq!(facts.heap_calls, 0);
+    assert_eq!(illegal, base);
+    assert_eq!(facts.handles, base_facts.handles + 1);
+    // Declared and never constructed, such a covergroup is free as any.
+    let array = "    localparam int S [2] = '{1, 2};";
+    let (_, declared) = laid_out(timed(&rtl(
+        "",
+        &format!(
+            "{array}
+    covergroup cg(int n);
+        coverpoint d {{
+            bins a[] = {{[0:7]}} with (item < n);
+            bins s[n] = S;
+            wildcard ignore_bins w = {{8'b1???_???1}};
+            illegal_bins bad = {{[9 +/- 1]}} iff (q[0]);
+            bins rest = default;
+        }}
+    endgroup"
+        ),
+    )));
+    let (_, none) = laid_out(timed(&rtl("", array)));
+    assert_eq!(declared, none);
+}
+
 /// A coverpoint, a bin operand and an argument of more than 64 bits are
 /// handed to the heap in words, with coverage operations alone: nothing of
 /// a sample or of a construction is put in a collection of the heap, which

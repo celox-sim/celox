@@ -60,7 +60,7 @@ pub use report::{
     BinReport, BinReportKind, CoverItemKind, CoverItemReport, CoverageReport,
     CovergroupInstanceReport, CovergroupReport,
 };
-pub use shape::{RangeValue, Resolved, ResolvedItem, resolve, resolve_warnings};
+pub use shape::{RangeValue, Resolved, ResolvedItem, resolve, resolve_warnings, value_count};
 
 use descriptor::OptionKind;
 use shape::{BinClass, Item, PointOptions, PointShape, SetInput, Shape, ValueKey, bin_name};
@@ -259,6 +259,7 @@ struct TypeEntry {
     options: TypeOptions,
     shapes: Vec<Arc<Shape>>,
     /// The shape of each construction that was built, by what decided it.
+    /// Empty for a type whose constructions share no shape.
     shape_index: FxHashMap<ShapeInputs, u32>,
     /// The instances of the type, in creation order.
     instances: Vec<u32>,
@@ -271,6 +272,23 @@ struct TypeEntry {
     filter_bins: Vec<(u32, u32)>,
 }
 
+impl TypeEntry {
+    /// Whether the constructions of the type that hand over the same
+    /// values have the same bins: every `with` filter of it keeps what
+    /// those values decide (see [`FilterDescriptor::shared`]).
+    fn shares_shapes(&self) -> bool {
+        self.descriptor.filters.iter().all(|filter| filter.shared)
+    }
+
+    /// The shape of an earlier construction with the key `key`, which a
+    /// construction with that key takes.
+    fn shared_shape(&self, key: &ShapeInputs) -> Option<u32> {
+        self.shares_shapes()
+            .then(|| self.shape_index.get(key).copied())
+            .flatten()
+    }
+}
+
 /// Everything that building a shape reads, but for the answers of the
 /// `with` filters: those are a function of the rest (19.5.1.1 allows
 /// "caching of previously calculated results").
@@ -278,6 +296,9 @@ struct TypeEntry {
 struct ShapeInputs {
     /// The words of the integral inputs.
     words: Vec<u64>,
+    /// The bytes of the string inputs that no option takes: those are what
+    /// the `with` filters read (see [`InputDescriptor::String`]).
+    strings: Vec<Vec<u8>>,
     /// The words of the elements of each set.
     sets: Vec<Vec<u64>>,
     points: Vec<PointOptions>,
@@ -990,8 +1011,24 @@ impl Registry {
             };
             instance.options.set(init.item, init.option, value)?;
         }
+        let named = |input: u32| {
+            descriptor
+                .options
+                .iter()
+                .any(|init| init.value == OptionValue::StringInput(input))
+        };
         let key = ShapeInputs {
             words: building.words.clone(),
+            strings: descriptor
+                .inputs
+                .iter()
+                .zip(&building.strings)
+                .enumerate()
+                .filter(|(index, (input, _))| {
+                    **input == InputDescriptor::String && !named(*index as u32)
+                })
+                .map(|(_, (_, bytes))| bytes.clone())
+                .collect(),
             sets: std::mem::take(&mut building.sets),
             points: (0..descriptor.points.len())
                 .map(|point| instance.options.point_options(point))
@@ -999,7 +1036,7 @@ impl Registry {
             distribute_first: entry.options.distribute_first,
         };
         building.prepared = Some(Prepared {
-            shape: entry.shape_index.get(&key).copied(),
+            shape: entry.shared_shape(&key),
             key,
             filters: vec![Filter::default(); descriptor.filters.len()],
         });
@@ -1149,8 +1186,8 @@ impl Registry {
         };
         // A construction that a filter of this one ran may have built
         // the shape meanwhile.
-        let shape = match entry.shape_index.get(&key) {
-            Some(&shape) => shape,
+        let shape = match entry.shared_shape(&key) {
+            Some(shape) => shape,
             None => {
                 if let Some(filter) = filters
                     .iter()
@@ -1175,7 +1212,9 @@ impl Registry {
                 )?;
                 let shape = entry.shapes.len() as u32;
                 entry.shapes.push(Arc::new(built));
-                entry.shape_index.insert(key, shape);
+                if entry.shares_shapes() {
+                    entry.shape_index.insert(key, shape);
+                }
                 shape
             }
         };

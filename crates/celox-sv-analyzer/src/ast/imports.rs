@@ -673,7 +673,8 @@ impl CovergroupFormals {
                         .filter(|id| within(&ports, native.data_type(*id).tokens)),
                 );
             }
-            let bound = super::covergroups::Bound::of(covergroup).ranges(native);
+            let items = super::covergroups::Bound::of(covergroup);
+            let bound = items.ranges(native);
             if bound.is_empty() {
                 continue;
             }
@@ -685,9 +686,17 @@ impl CovergroupFormals {
                 .expressions
                 .extend(expressions.within(&bound).into_iter().filter(|id| {
                     let expression = native.expression(*id);
+                    // A name that a formal has is the formal, and `item`
+                    // in a `with` expression the value the filter is asked
+                    // about (19.5.1.1): neither names anything of the scope.
                     within(&bound, expression.tokens)
                         && !matches!(&expression.kind, celox_sv_syntax::ExprKind::Name(name)
-                            if formals.contains(&normalize_identifier(&name.spelling)))
+                        if formals.contains(&normalize_identifier(&name.spelling))
+                            || items.names_item(
+                                native,
+                                &normalize_identifier(&name.spelling),
+                                expression.tokens,
+                            ))
                 }));
             found.types.extend(
                 types

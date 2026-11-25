@@ -1275,6 +1275,67 @@ fn covergroup_items_the_standard_excludes_are_errors() {
              coverpoint x { bins b = {[0:v]}; } endgroup",
             "argument `v` of the sample method of covergroup `Top.cg` is used in a bin",
         ),
+        (
+            "bit [3:0] x; covergroup cg with function sample(int v); \
+             coverpoint x { bins b[v] = {[0:3]}; } endgroup",
+            "argument `v` of the sample method of covergroup `Top.cg` is used in a bin",
+        ),
+        (
+            "bit [3:0] x; covergroup cg with function sample(int v); \
+             coverpoint x { bins b = {[0:7]} with (item < v); } endgroup",
+            "argument `v` of the sample method of covergroup `Top.cg` is used in a bin",
+        ),
+        (
+            "bit [3:0] x; covergroup cg with function sample(int v); \
+             coverpoint x { bins b = {[4 +/- v]}; } endgroup",
+            "argument `v` of the sample method of covergroup `Top.cg` is used in a bin",
+        ),
+        // In a `with` expression `item` is the value of the filter
+        // (19.5.1.1), but another argument of `sample` stays an error, and
+        // `item` outside the `with` expression is the argument.
+        (
+            "covergroup cg with function sample(int item, int v); \
+             coverpoint item { bins b[] = {[0:3]} with (item > v); } endgroup",
+            "argument `v` of the sample method of covergroup `Top.cg` is used in a bin",
+        ),
+        (
+            "covergroup cg with function sample(int item); \
+             coverpoint item { bins b[item] = {[0:3]}; } endgroup",
+            "argument `item` of the sample method of covergroup `Top.cg` is used in a bin",
+        ),
+        (
+            "covergroup cg with function sample(int item); \
+             coverpoint item { bins b = {[0:item]} with (item > 1); } endgroup",
+            "argument `item` of the sample method of covergroup `Top.cg` is used in a bin",
+        ),
+        // 19.5: a coverpoint is a scope, which names each of its bins
+        // once.
+        (
+            "bit [3:0] x; covergroup cg; coverpoint x { bins a[] = {[0:3]}; ignore_bins a = {2}; } \
+             endgroup",
+            "coverpoint `x` of covergroup `Top.cg` has two bins named `a`",
+        ),
+        (
+            "bit [3:0] x; covergroup cg; coverpoint x { bins a = {1}; bins a = {2}; } endgroup",
+            "coverpoint `x` of covergroup `Top.cg` has two bins named `a`",
+        ),
+        // 19.5: "A default bin cannot be explicitly ignored".
+        (
+            "bit [3:0] x; covergroup cg; coverpoint x { bins b = {1}; ignore_bins rest = default; } \
+             endgroup",
+            "`ignore_bins rest` of coverpoint `x` of covergroup `Top.cg` is a default bin",
+        ),
+        // 19.5.1.1: before `with`, only the name of the coverpoint of the
+        // bin stands for all its values.
+        (
+            "bit [3:0] x, y; covergroup cg; coverpoint x; \
+             coverpoint y { bins b = x with (item > 2); } endgroup",
+            "bin `b` of coverpoint `y` of covergroup `Top.cg` takes the values of `x`",
+        ),
+        (
+            "bit [3:0] x; covergroup cg; a: coverpoint x { bins b = x with (item > 2); } endgroup",
+            "bin `b` of coverpoint `a` of covergroup `Top.cg` takes the values of `x`",
+        ),
     ] {
         for used in ["", "cg c; initial c = new;"] {
             let error = rejected("", &format!("{declaration} {used}"));
@@ -1302,6 +1363,14 @@ fn covergroup_items_the_standard_excludes_are_errors() {
         analyze(&format!("module Top; {declaration} cg c; endmodule"))
             .unwrap_or_else(|error| panic!("{declaration}: {error}"));
     }
+    // 19.5.1.1 beside 19.8.1: `item` of a `with` expression is the value of
+    // the filter, also where `sample` has an argument of that name.
+    analyze(
+        "module Top; covergroup cg with function sample(int item); \
+         cp: coverpoint item { bins b[] = {[0:3]} with (item > 1); } endgroup \
+         cg c; initial begin c = new; c.sample(2); end endmodule",
+    )
+    .unwrap();
 }
 
 #[test]
@@ -1469,51 +1538,50 @@ fn unsupported_coverpoint_constructs_are_rejected_where_used() {
     // the tracking issue of covergroups; the declaration alone analyzes.
     let constructs = [
         (
-            "bit [3:0] x; covergroup cg; coverpoint x { bins b[] = {[0:3]}; } endgroup",
-            "covergroup bin array (IEEE 1800-2023 19.5.1)",
-        ),
-        (
-            "bit [3:0] x; covergroup cg; coverpoint x { bins b[2] = {[0:3]}; } endgroup",
-            "covergroup bin array (IEEE 1800-2023 19.5.1)",
-        ),
-        (
-            "bit [3:0] x; covergroup cg; coverpoint x { bins b = {1}; bins others = default; } \
+            "bit [3:0] x; covergroup cg; coverpoint x { bins b = {1}; bins others[2] = default; } \
              endgroup",
-            "covergroup default bins (IEEE 1800-2023 19.5)",
+            "covergroup default bin array with a size (IEEE 1800-2023 19.5)",
+        ),
+        // A construction is asked about no more than 1,048,576 values of
+        // a bin; only the filter of one `bins` bin is evaluated at each
+        // sample instead.
+        (
+            "int x; covergroup cg; coverpoint x { ignore_bins b = {[0:2000000]} with (item % 2 \
+             == 0); } endgroup",
+            "covergroup with filter over more than 1048576 candidate values on a bin array, \
+             `ignore_bins` or `illegal_bins`, or over a wildcard value of more than 65536 ranges \
+             of values (IEEE 1800-2023 19.5.1.1)",
         ),
         (
-            "bit [3:0] x; covergroup cg; coverpoint x { ignore_bins b = {1}; } endgroup",
-            "covergroup ignore_bins (IEEE 1800-2023 19.5.5)",
+            "int x; covergroup cg; coverpoint x { illegal_bins b = x with (item < 0); } endgroup",
+            "covergroup with filter over more than 1048576 candidate values on a bin array, \
+             `ignore_bins` or `illegal_bins`, or over a wildcard value of more than 65536 ranges \
+             of values (IEEE 1800-2023 19.5.1.1)",
         ),
         (
-            "bit [3:0] x; covergroup cg; coverpoint x { illegal_bins b = {1}; } endgroup",
-            "covergroup illegal_bins (IEEE 1800-2023 19.5.6)",
+            "int x; covergroup cg; coverpoint x { bins b[] = x with (item < 4); } endgroup",
+            "covergroup with filter over more than 1048576 candidate values on a bin array, \
+             `ignore_bins` or `illegal_bins`, or over a wildcard value of more than 65536 ranges \
+             of values (IEEE 1800-2023 19.5.1.1)",
+        ),
+        // A wildcard value of more ranges of values than are listed is
+        // matched as a pattern, which only one bin may have.
+        (
+            "longint x; covergroup cg; coverpoint x { wildcard bins b[] = \
+             {64'h???????????????1}; } endgroup",
+            "covergroup wildcard value of more than 65536 ranges of values in a bin array or a \
+             bin with a filter (IEEE 1800-2023 19.5.4)",
         ),
         (
-            "bit [3:0] x; covergroup cg; coverpoint x { wildcard bins b = {4'b1??0}; } endgroup",
-            "covergroup wildcard bins (IEEE 1800-2023 19.5.4)",
+            "bit [3:0] x; covergroup cg; coverpoint x { bins b = {[4 +/- 0.5]}; } endgroup",
+            "covergroup bin range with a tolerance that is not integral (IEEE 1800-2023 19.5.1, \
+             11.4.13)",
         ),
         (
-            "bit [3:0] x; bit en; covergroup cg; coverpoint x { bins b = {1} iff (en); } endgroup",
-            "covergroup bins with a guard (IEEE 1800-2023 19.5.1)",
-        ),
-        (
-            "bit [3:0] x; covergroup cg; coverpoint x { bins b = {[0:7]} with (item % 2 == 0); } \
-             endgroup",
-            "covergroup bins with a filter (IEEE 1800-2023 19.5.1.1)",
-        ),
-        (
-            "bit [3:0] x; covergroup cg; coverpoint x { bins b = x with (item > 2); } endgroup",
-            "covergroup bins with a filter (IEEE 1800-2023 19.5.1.1)",
-        ),
-        (
-            "bit [3:0] x; localparam int S [2] = '{1, 2}; \
-             covergroup cg; coverpoint x { bins b = S; } endgroup",
-            "covergroup bins of a set expression (IEEE 1800-2023 19.5.1.2)",
-        ),
-        (
-            "bit [3:0] x; covergroup cg; coverpoint x { bins b = {[4 +/- 1]}; } endgroup",
-            "covergroup bin range with a tolerance (IEEE 1800-2023 19.5.1, 11.4.13)",
+            "bit [3:0] x; covergroup cg; coverpoint x { bins b = '{1, 2}; } endgroup",
+            "covergroup bins of a set expression that is neither a dynamic array, a queue or an \
+             array of an object with integral elements of at most 64 bits nor an array parameter \
+             with integral elements (IEEE 1800-2023 19.5.1.2)",
         ),
         (
             "bit [3:0] x; covergroup cg; coverpoint x { bins b = (1 => 2); } endgroup",
@@ -1687,4 +1755,509 @@ fn covergroup_items_resolve_imported_names() {
          cg c; initial c = new(2); endmodule",
     )
     .unwrap();
+}
+
+/// The bin of `point` named `name`.
+fn bin<'a>(
+    point: &'a celox_heap::coverage::PointDescriptor,
+    name: &str,
+) -> &'a celox_heap::coverage::BinDescriptor {
+    point
+        .bins
+        .iter()
+        .find(|bin| bin.name == name)
+        .unwrap_or_else(|| panic!("no bin `{name}` of `{}`", point.name))
+}
+
+/// The range list of `bin` as the values and bounds of its constants, with
+/// `$` for an open bound, and its filter.
+fn constant_ranges(
+    bin: &celox_heap::coverage::BinDescriptor,
+) -> (Vec<String>, Option<celox_heap::coverage::BinFilter>) {
+    use celox_heap::coverage::{BinValues, Bound, Operand, RangeDescriptor};
+    let BinValues::Ranges { ranges, filter } = &bin.values else {
+        panic!("bin `{}` is no bin of ranges: {:?}", bin.name, bin.values);
+    };
+    let operand = |operand: &Operand| match operand {
+        Operand::Constant(constant) if constant.mask.bits() != 0 => {
+            format!("{:b}/{:b}", constant.value, constant.mask)
+        }
+        // A signed constant reads as its two's complement.
+        Operand::Constant(constant)
+            if constant.ty.signed && constant.value.bit(u64::from(constant.ty.width) - 1) =>
+        {
+            let modulus = num_bigint::BigInt::from(1) << constant.ty.width;
+            (num_bigint::BigInt::from(constant.value.clone()) - modulus).to_string()
+        }
+        Operand::Constant(constant) => constant.value.to_string(),
+        Operand::Input(index) => format!("input{index}"),
+    };
+    let bound = |bound: &Bound| match bound {
+        Bound::Open => "$".to_string(),
+        Bound::Operand(value) => operand(value),
+    };
+    (
+        ranges
+            .iter()
+            .map(|range| match range {
+                RangeDescriptor::Value(value) => operand(value),
+                RangeDescriptor::Range { low, high } => format!("[{}:{}]", bound(low), bound(high)),
+            })
+            .collect(),
+        *filter,
+    )
+}
+
+#[test]
+fn bin_kinds_compile_to_the_descriptor_of_the_type() {
+    use celox_heap::coverage::{
+        BinArray, BinFilter, BinKind, BinValues, InputDescriptor, Operand, ValueType,
+    };
+    // 19.5.1 to 19.5.6: the arrays, kinds, guards, filters and values of
+    // the bins of a definition, and what a construction and a sample do
+    // for them.
+    let ir = analyze(
+        "module Top; logic [3:0] a; bit [7:0] b; bit en; longint big; \
+         localparam int S [3] = '{5, 1, 9}; typedef int q_t[$]; \
+         function automatic bit keep(bit [7:0] v); return v[0]; endfunction \
+         function automatic q_t made(int n); q_t q; q.push_back(n); return q; endfunction \
+         covergroup cg(int n, int lim); \
+         coverpoint a { \
+           bins one[] = {[0:3]}; \
+           bins some[n] = {[4:11]}; \
+           bins two[2] = {12, 13} iff (en); \
+           wildcard bins w = {4'b1?0?}; \
+           ignore_bins ig = {14}; \
+           illegal_bins bad = {15} iff (!en); \
+           bins rest[] = default; \
+         } \
+         coverpoint b { \
+           bins mod3[] = {[0:255]} with (item % 3 == 0); \
+           bins f = b with (keep(item) && item < lim); \
+           bins set[] = S; \
+           bins q = made(n); \
+           bins tol = {[100 +/- 5], [50 +%- 10]}; \
+           bins near = {[lim +/- 1]}; \
+           illegal_bins other = default; \
+         } \
+         coverpoint big { \
+           bins even = big with (item % 2 == 0 && item > lim) iff (en); \
+           bins low = {[0:9]}; \
+           bins neg = {[-7 +%- 25], [-20 +/- -3]}; \
+         } \
+         endgroup \
+         cg c; initial begin c = new(2, 100); c.sample(); end endmodule",
+    )
+    .unwrap();
+    let top = module(&ir, "Top");
+    let descriptor = descriptor(top, "Top.cg");
+    let [a, b, big] = descriptor.points.as_slice() else {
+        panic!("{:?}", descriptor.points);
+    };
+    // The bins of `a`: their arrays, kinds and guards.
+    let shape = |point, name| {
+        let bin = bin(point, name);
+        (bin.kind, bin.array.clone(), bin.wildcard, bin.iff)
+    };
+    assert_eq!(
+        shape(a, "one"),
+        (BinKind::Bins, BinArray::Open, false, None)
+    );
+    assert_eq!(
+        shape(a, "some"),
+        (
+            BinKind::Bins,
+            BinArray::Fixed(Operand::Input(0)),
+            false,
+            None
+        )
+    );
+    assert!(matches!(
+        shape(a, "two"),
+        (BinKind::Bins, BinArray::Fixed(Operand::Constant(size)), false, Some(0))
+            if size.value == 2u8.into()
+    ));
+    assert_eq!(shape(a, "w"), (BinKind::Bins, BinArray::Scalar, true, None));
+    // `?` is z: the bits 2 and 0 of the mask, none of the value.
+    assert_eq!(constant_ranges(bin(a, "w")).0, ["1000/101"]);
+    assert_eq!(
+        shape(a, "ig"),
+        (BinKind::Ignore, BinArray::Scalar, false, None)
+    );
+    assert_eq!(
+        shape(a, "bad"),
+        (BinKind::Illegal, BinArray::Scalar, false, Some(1))
+    );
+    assert_eq!(
+        shape(a, "rest"),
+        (BinKind::Bins, BinArray::Open, false, None)
+    );
+    assert_eq!(bin(a, "rest").values, BinValues::Default);
+    assert_eq!(a.predicates, 2);
+    // The filters of `b` are asked when an instance is constructed, in
+    // the order of the declarations; `b with` is every value of `b`.
+    assert_eq!(
+        constant_ranges(bin(b, "mod3")),
+        (vec!["[0:255]".to_string()], Some(BinFilter::Enumerate(0)))
+    );
+    assert_eq!(
+        constant_ranges(bin(b, "f")),
+        (vec!["[$:$]".to_string()], Some(BinFilter::Enumerate(1)))
+    );
+    let byte = ValueType {
+        width: 8,
+        signed: false,
+    };
+    assert_eq!(
+        descriptor
+            .filters
+            .iter()
+            .map(|filter| filter.components.clone())
+            .collect::<Vec<_>>(),
+        [vec![byte], vec![byte]]
+    );
+    // What the filters keep is decided by `item` and by `lim`, which is
+    // handed over: constructions share their bins.
+    assert!(descriptor.filters.iter().all(|filter| filter.shared));
+    // The elements of a constant array are the values of the bin; those
+    // of the queue a function returns are handed over.
+    assert_eq!(
+        constant_ranges(bin(b, "set")),
+        (vec!["5".to_string(), "1".into(), "9".into()], None)
+    );
+    assert_eq!(bin(b, "set").array, BinArray::Open);
+    assert_eq!(bin(b, "q").values, BinValues::Set(0));
+    let int = ValueType {
+        width: 32,
+        signed: true,
+    };
+    assert_eq!(descriptor.sets, [int]);
+    // 11.4.13: 95 to 105, and 10 percent of 50 is 5. 25 percent of -7 is
+    // -1, and the bounds -6 and -8 are put in order, as are -17 and -23.
+    assert_eq!(constant_ranges(bin(b, "tol")).0, ["[95:105]", "[45:55]"]);
+    assert_eq!(constant_ranges(bin(big, "neg")).0, ["[-8:-6]", "[-23:-17]"]);
+    assert_eq!(bin(b, "other").kind, BinKind::Illegal);
+    assert_eq!(bin(b, "other").values, BinValues::Default);
+    assert_eq!(b.predicates, 0);
+    // A construction is not asked about the 2^64 values of `big`: the
+    // filter is a predicate of each sample, after the guard of the bin.
+    assert_eq!(
+        constant_ranges(bin(big, "even")),
+        (vec!["[$:$]".to_string()], Some(BinFilter::Predicate(1)))
+    );
+    assert_eq!(bin(big, "even").iff, Some(0));
+    assert_eq!(big.predicates, 2);
+    // The inputs: the size of `some`, `lim` as what the filter of `f`
+    // reads, and the two bounds of `near`. The sample-time filter of
+    // `even` reads `lim` as an argument the instance keeps.
+    assert_eq!(
+        descriptor.inputs,
+        [
+            InputDescriptor::Integral(int),
+            InputDescriptor::Integral(int),
+            InputDescriptor::Integral(int),
+            InputDescriptor::Integral(int),
+        ]
+    );
+    assert_eq!(constant_ranges(bin(b, "near")).0, ["[input2:input3]"]);
+    assert_eq!(descriptor.formals, [int]);
+    // `N::$new` hands over the inputs and the elements of the queue, then
+    // asks each filter about its values, then builds.
+    use crate::ir::CoverageOp;
+    let name = |op: &CoverageOp| match op {
+        CoverageOp::New { .. } => "new".to_string(),
+        CoverageOp::FormalSet { slot, .. } => format!("formal_set{slot}"),
+        CoverageOp::Input { index, .. } => format!("input{index}"),
+        CoverageOp::SetPush { set, .. } => format!("set_push{set}"),
+        CoverageOp::FilterNext { filter } => format!("filter_next{filter}"),
+        CoverageOp::FilterItem { filter, .. } => format!("filter_item{filter}"),
+        CoverageOp::Build => "build".to_string(),
+        CoverageOp::Message => "message".to_string(),
+        CoverageOp::Sampling => "sampling".to_string(),
+        CoverageOp::Formal { slot, .. } => format!("formal{slot}"),
+        CoverageOp::Points { first, count, .. } => format!("points{first}+{count}"),
+        CoverageOp::Predicates { item, count } => format!("predicates{item}:{count}"),
+        CoverageOp::SampleEnd => "sample_end".to_string(),
+        other => panic!("{other:?}"),
+    };
+    let ops = |suffix: &str| {
+        coverage_ops(top, suffix)
+            .iter()
+            .map(name)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        ops("cg::$new"),
+        [
+            "new",
+            "formal_set0",
+            "input0",
+            "input1",
+            "set_push0",
+            "input2",
+            "input3",
+            "filter_next0",
+            "filter_item0",
+            "filter_next0",
+            "filter_next1",
+            "filter_item1",
+            "filter_next1",
+            "build",
+            "message",
+        ]
+    );
+    // `N::$sample` evaluates the predicates with the values and hands
+    // them over after them; the type has illegal bins, so a sample
+    // reports what it hit.
+    assert_eq!(
+        ops("cg::$sample"),
+        [
+            "sampling",
+            "formal0",
+            "points1+2",
+            "points3+1",
+            "predicates1:2",
+            "predicates3:2",
+            "sample_end",
+            "message",
+        ]
+    );
+    // A type without an illegal bin has no such report, and one whose
+    // bins are all constants no warning of a construction.
+    let ir = analyze(
+        "module Top; bit [3:0] a; covergroup cg; \
+         coverpoint a { bins b[] = {[0:3]}; ignore_bins ig = {2}; bins rest = default; } \
+         endgroup cg c; initial begin c = new; c.sample(); end endmodule",
+    )
+    .unwrap();
+    let top = module(&ir, "Top");
+    assert!(
+        !coverage_ops(top, "cg::$sample")
+            .iter()
+            .chain(&coverage_ops(top, "cg::$new"))
+            .any(|op| matches!(op, CoverageOp::Message | CoverageOp::Predicates { .. }))
+    );
+}
+
+#[test]
+fn bin_expressions_the_standard_excludes_are_errors() {
+    // What needs the names of the scope and the values of the bins is an
+    // error where the type is used.
+    for (declaration, rule) in [
+        // 19.5.1: the number of bins of an array is positive.
+        (
+            "bit [3:0] x; covergroup cg; coverpoint x { bins b[0] = {[0:3]}; } endgroup",
+            "the number of bins of bin `b` of coverpoint `x` of covergroup `Top.cg` is not positive \
+             (IEEE 1800-2023 19.5.1)",
+        ),
+        (
+            "bit [3:0] x; localparam int N = -2; \
+             covergroup cg; coverpoint x { bins b[N] = {[0:3]}; } endgroup",
+            "the number of bins of bin `b` of coverpoint `x` of covergroup `Top.cg` is not positive \
+             (IEEE 1800-2023 19.5.1)",
+        ),
+        (
+            "bit [3:0] x; covergroup cg; coverpoint x { bins b[2.0] = {[0:3]}; } endgroup",
+            "the number of bins of bin `b` of coverpoint `x` of covergroup `Top.cg` is not an \
+             integral expression (IEEE 1800-2023 19.5.1)",
+        ),
+        // 19.5.1.2: a set expression is "an expression yielding an array of
+        // values".
+        (
+            "bit [3:0] x; localparam int K = 3; \
+             covergroup cg; coverpoint x { bins b = K; } endgroup",
+            "the values of bin `b` of coverpoint `x` of covergroup `Top.cg` are no array (IEEE \
+             1800-2023 19.5.1.2)",
+        ),
+        // 19.5: a `with` expression and a set expression name constants
+        // and arguments only, beside `item` in the first.
+        (
+            "bit [3:0] x; int limit; \
+             covergroup cg; coverpoint x { bins b = {[0:7]} with (item < limit); } endgroup",
+            "`limit` in bin `b` of coverpoint `x` of covergroup `Top.cg` is neither a constant nor \
+             an argument of the covergroup (IEEE 1800-2023 19.5)",
+        ),
+        (
+            "bit [3:0] x; int q [$]; covergroup cg; coverpoint x { bins b = q; } endgroup",
+            "`q` in bin `b` of coverpoint `x` of covergroup `Top.cg` is neither a constant nor an \
+             argument of the covergroup (IEEE 1800-2023 19.5)",
+        ),
+        (
+            "bit [3:0] x; \
+             function automatic bit f(output int o, input int v); o = v; return 1; endfunction \
+             covergroup cg; coverpoint x { bins b = {[0:7]} with (f(item, item)); } endgroup",
+            "the function called in bin `b` of coverpoint `x` of covergroup `Top.cg` has an \
+             output, inout or ref argument (IEEE 1800-2023 19.5)",
+        ),
+        // A.2.11, footnote 31: the `with` expression gives a value that an
+        // integral type takes.
+        (
+            "bit [3:0] x; covergroup cg(string s); \
+             coverpoint x { bins b = {[0:7]} with (s); } endgroup",
+            "the `with` expression of bin `b` of coverpoint `x` of covergroup `Top.cg` is not of a \
+             type that is assignment compatible with an integral type (IEEE 1800-2023 19.5.1.1)",
+        ),
+        // 19.5.1.2: no associative array.
+        (
+            "bit [3:0] x; typedef int a_t [int]; \
+             function automatic a_t made(); a_t a; a[1] = 2; return a; endfunction \
+             covergroup cg; coverpoint x { bins b = made(); } endgroup",
+            "the values of bin `b` of coverpoint `x` of covergroup `Top.cg` are an associative \
+             array (IEEE 1800-2023 19.5.1.2)",
+        ),
+    ] {
+        analyze(&format!("module Top; {declaration} cg c; endmodule"))
+            .unwrap_or_else(|error| panic!("{declaration}: {error}"));
+        let arguments = if declaration.contains("cg(string s)") {
+            "(\"s\")"
+        } else {
+            ""
+        };
+        let error = rejected(
+            "",
+            &format!("{declaration} cg c; initial c = new{arguments};"),
+        );
+        let AnalyzerError::InvalidCovergroup(text) = &error else {
+            panic!("{declaration}: {error}");
+        };
+        let rule = rule.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(*text, rule, "{declaration}");
+    }
+    // `item` is the value a filter is asked about, whatever else has the
+    // name: an argument of the covergroup, a variable or a `let` of the
+    // scope, or a name a wildcard import would bring.
+    for declaration in [
+        "bit [3:0] x; covergroup cg(int item); \
+         coverpoint x { bins b = {[0:7]} with (item < 4); } endgroup \
+         cg c; initial c = new(9);",
+        "bit [3:0] x; int item; let twice(v) = v + v; \
+         covergroup cg; coverpoint x { bins b[] = x with (item[0]); } endgroup \
+         cg c; initial c = new;",
+        "bit [3:0] x; let item = 1; \
+         covergroup cg; coverpoint x { ignore_bins b = {[0:7]} with (item > 5); } endgroup \
+         cg c; initial c = new;",
+    ] {
+        analyze(&format!("module Top; {declaration} endmodule"))
+            .unwrap_or_else(|error| panic!("{declaration}: {error}"));
+    }
+    let ir = analyze(
+        "package p; localparam int item = 3; localparam int top = 5; endpackage \
+         module Top; import p::*; bit [3:0] x; \
+         covergroup cg; coverpoint x { bins b[] = {[0:top]} with (item != 3); } endgroup \
+         cg c; initial c = new; localparam int item = 7; endmodule",
+    );
+    // The import of `top` is taken; `item` of the package is not named, so
+    // the declaration of `item` after it is none of an imported name
+    // (26.3).
+    ir.unwrap();
+    // A wildcard value warns of what it stands for, not of its bits.
+    let ir = analyze(
+        "module Top; bit [3:0] x; covergroup g1; coverpoint x { \
+         wildcard bins some = {4'b1??1}; \
+         wildcard bins wide = {5'b1??1?}; \
+         bins plain = {4'b1??1}; } endgroup \
+         g1 c; initial c = new; endmodule",
+    )
+    .unwrap();
+    let warned = bin_warnings(&ir);
+    assert_eq!(warned.len(), 2, "{warned:?}");
+    assert_eq!((warned[0].0.as_str(), warned[0].1.as_str()), ("x", "wide"));
+    assert_eq!((warned[1].0.as_str(), warned[1].1.as_str()), ("x", "plain"));
+    // The elements of an array parameter are constants of the bin: those
+    // the coverpoint type has not are warned of once, and take no part.
+    let ir = analyze(
+        "module Top; bit [3:0] x; localparam int S [4] = '{1, 300, 5, -2}; \
+         covergroup g1; coverpoint x { bins s[] = S; } endgroup \
+         g1 c; initial c = new; endmodule",
+    )
+    .unwrap();
+    let warned = bin_warnings(&ir);
+    assert_eq!(warned.len(), 1, "{warned:?}");
+    assert_eq!((warned[0].0.as_str(), warned[0].1.as_str()), ("x", "s"));
+    assert!(
+        warned[0].2.contains("300") && warned[0].2.contains("so do other elements"),
+        "{}",
+        warned[0].2
+    );
+    assert_eq!(
+        constant_ranges(bin(
+            &descriptor(module(&ir, "Top"), "Top.g1").points[0],
+            "s"
+        ))
+        .0,
+        ["1", "5"]
+    );
+}
+
+#[test]
+fn filters_share_bins_by_what_they_read() {
+    use celox_heap::coverage::InputDescriptor;
+    // 19.5.1.1: what a `with` expression reads beside `item` and constants
+    // is handed to each construction, an integral value and a string, and
+    // decides its bins with them. A filter that reads an object, whose
+    // state is not handed over, shares no bins: a method of the class of
+    // an embedded covergroup, which reads the object, and a handle among
+    // its operands.
+    let shared = |source: &str, display: &str| {
+        let ir = analyze(source).unwrap_or_else(|error| panic!("{source}: {error}"));
+        let descriptor = descriptor(module(&ir, "Top"), display);
+        (
+            descriptor
+                .filters
+                .iter()
+                .map(|filter| filter.shared)
+                .collect::<Vec<_>>(),
+            descriptor.inputs.clone(),
+        )
+    };
+    let int = InputDescriptor::Integral(celox_heap::coverage::ValueType {
+        width: 32,
+        signed: true,
+    });
+    assert_eq!(
+        shared(
+            "module Top; bit [3:0] x; \
+             function automatic bit f(int v, int l); return v < l; endfunction \
+             covergroup cg(int lim, string s); coverpoint x { \
+             bins a[] = {[0:7]} with (item < lim); \
+             bins b[] = {[0:7]} with (s == \"x\" ? item < 2 : f(item, lim)); \
+             bins c[] = {[0:7]} with (s.len() > item); } endgroup \
+             cg c; initial c = new(3, \"x\"); endmodule",
+            "Top.cg",
+        ),
+        (
+            vec![true, true, true],
+            vec![int.clone(), InputDescriptor::String]
+        )
+    );
+    assert_eq!(
+        shared(
+            "module Top; class C; const int limit; bit [3:0] v; \
+             covergroup cg; coverpoint v { \
+             bins a[] = {[0:7]} with (ok(item)); \
+             bins b[] = {[0:7]} with (item < limit); } endgroup \
+             function bit ok(int x); return x < limit; endfunction \
+             function new(int l); limit = l; cg = new; endfunction endclass \
+             C c; initial c = new(2); endmodule",
+            "C::cg",
+        ),
+        // The second filter reads the constant by its name: it is handed
+        // over. The type shares no bins while the first is of it.
+        (vec![false, true], vec![int.clone()])
+    );
+    assert_eq!(
+        shared(
+            "module Top; bit [3:0] x; \
+             class K; int top; function bit below(int v); return v < top; endfunction endclass \
+             function automatic bit under(K k, int v); return v < k.top; endfunction \
+             covergroup cg(K h); coverpoint x { \
+             bins a[] = {[0:7]} with (h.below(item)); \
+             bins b[] = {[0:7]} with (item < h.top); \
+             bins c[] = {[0:7]} with (under(h, item)); \
+             bins d[] = {[0:7]} with (h != null && item < 2); } endgroup \
+             cg c; initial c = new(null); endmodule",
+            "Top.cg",
+        ),
+        (vec![false, false, false, false], vec![])
+    );
 }
