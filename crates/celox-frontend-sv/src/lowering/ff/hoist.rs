@@ -679,7 +679,9 @@ impl Ff<'_, '_> {
                 };
                 self.m.variables.get_mut(&temp).unwrap().value_kind = match r#type.kind() {
                     sv::ir::TypeKind::String => celox_design::ValueKind::StrRef,
-                    sv::ir::TypeKind::Object => celox_design::ValueKind::ObjRef,
+                    sv::ir::TypeKind::Object | sv::ir::TypeKind::Process => {
+                        celox_design::ValueKind::ObjRef
+                    }
                     _ => celox_design::ValueKind::Bits,
                 };
                 let Some(result) = result else {
