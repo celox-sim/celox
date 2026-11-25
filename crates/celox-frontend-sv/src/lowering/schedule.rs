@@ -710,9 +710,12 @@ fn schedule_sources_collecting(
     }
     // A forced specialization is analyzed again with its forced names, also
     // when its own hierarchical names were analyzed above.
+    let mut forced_discovery = HashMap::default();
     for (&module_id, names) in &mut forced {
         names.sort();
-        discovery_analyses.remove(&module_id);
+        if let Some(ir) = discovery_analyses.remove(&module_id) {
+            forced_discovery.insert(module_id, ir);
+        }
         if analyses.remove(&module_id).is_none() {
             continue;
         }
@@ -799,7 +802,6 @@ fn schedule_sources_collecting(
             )
         });
     let port_homes = virtual_interfaces::port_homes(root_id, &module_ids, &elaborated);
-    drop(elaborated);
     let virtual_ids = virtual_instances
         .as_ref()
         .map(|instances| instances.ids())
@@ -862,6 +864,28 @@ fn schedule_sources_collecting(
         }
     }
     drop(virtual_sources);
+    let ref_ports::RefPortAnalysis {
+        targets: ref_port_targets,
+        same_instance_aliased,
+        same_instance_alias_groups,
+        same_instance_alias_partitions,
+    } = ref_ports::analyze(
+        root_id,
+        &keys,
+        &module_ids,
+        &elaborated,
+        &analyses,
+        &discovery_analyses,
+        &forced_discovery,
+        &references,
+        &virtual_references,
+        &design,
+        &forced,
+        &mut foreign_writes,
+        &mut foreign_references,
+    )?;
+    drop(forced_discovery);
+    drop(elaborated);
     checkpoint!("hierarchy");
 
     // A store of a class property that a level wait reads, in any module,
@@ -956,6 +980,12 @@ fn schedule_sources_collecting(
                             .unwrap_or(&no_foreign_references),
                         no_covergroups,
                     },
+                    same_instance_aliased: same_instance_aliased
+                        .get(&module_id)
+                        .unwrap_or(&no_foreign_references),
+                    same_instance_alias_groups: same_instance_alias_groups
+                        .get(&module_id)
+                        .map_or(&[], Vec::as_slice),
                 },
                 discovery_analysis,
             )?)
@@ -1075,6 +1105,12 @@ fn schedule_sources_collecting(
                     .insert(target.clone());
             }
         }
+        for (module, targets) in &ref_port_targets {
+            hierarchical_targets
+                .entry(*module)
+                .or_default()
+                .extend(targets.iter().cloned());
+        }
         let no_targets = HashSet::default();
         let mut instance_values = Vec::new();
         let mut modules = HashMap::default();
@@ -1130,6 +1166,13 @@ fn schedule_sources_collecting(
                         | celox_design::DeadStorePolicy::PreserveAllPorts
                 ),
                 hierarchical_targets.get(&module_id).unwrap_or(&no_targets),
+                same_instance_aliased.get(&module_id).unwrap_or(&no_targets),
+                same_instance_alias_groups
+                    .get(&module_id)
+                    .map_or(&[][..], Vec::as_slice),
+                same_instance_alias_partitions
+                    .get(&module_id)
+                    .map_or(&[][..], Vec::as_slice),
                 warnings,
                 calls.as_mut(),
                 &mut design,

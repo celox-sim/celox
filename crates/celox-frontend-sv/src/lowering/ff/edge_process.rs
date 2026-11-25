@@ -12,13 +12,78 @@ impl Ff<'_, '_> {
         self.declare_history(body)?;
         let mut visited = HashSet::default();
         self.scan(body, &mut visited);
+        let direct_blocking = self.writes.working.clone();
+        // Propagate blocking working/shared classification across sibling `ref`
+        // ports that alias the same parent variable in at least one instance, so
+        // reads through one sibling observe preceding blocking writes to another.
+        loop {
+            let mut changed = false;
+            for group in &self.writes.alias_groups {
+                let has_shared = group.iter().any(|id| self.writes.shared.contains(id));
+                let has_nonblocking = group.iter().any(|id| self.writes.nonblocking.contains(id));
+                if has_shared && !has_nonblocking {
+                    for &id in group {
+                        changed |= self.writes.shared.insert(id);
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let mut aliased_working = Vec::new();
+        loop {
+            let mut changed = false;
+            for group in &self.writes.alias_groups {
+                let has_working = group.iter().any(|id| self.writes.working.contains(id));
+                let has_shared = group.iter().any(|id| self.writes.shared.contains(id));
+                if has_working && !has_shared {
+                    for &id in group {
+                        changed |= self.writes.working.insert(id);
+                        aliased_working.push(id);
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        aliased_working.sort_by_key(|id| id.0);
+        aliased_working.dedup();
+        for set in [
+            &mut self.writes.sparse_memories,
+            &mut self.writes.window_writes,
+        ] {
+            loop {
+                let mut changed = false;
+                for group in &self.writes.alias_groups {
+                    if group.iter().any(|id| set.contains(id)) {
+                        for &id in group {
+                            changed |= set.insert(id);
+                        }
+                    }
+                }
+                if !changed {
+                    break;
+                }
+            }
+        }
         // A variable only this process's nonblocking assignments write here,
         // and that a process kernel may write before they are published,
         // takes only the bits they wrote: the kernel's write stays in the
         // others, even when no assignment executed (IEEE 1800-2023 10.4.2).
         // Staging rewrites the assignments of the body; a variable a called
         // subroutine assigns keeps its whole next state.
-        let called = self.subroutine_assignments(body);
+        let (called, called_nonblocking) = self.subroutine_assignments(body);
+        let mut called_nonblocking_aliased = HashSet::default();
+        for group in &self.writes.alias_groups {
+            if group
+                .iter()
+                .any(|id| self.writes.nonblocking.contains(id) && called.contains(id))
+            {
+                called_nonblocking_aliased.extend(group.iter().copied());
+            }
+        }
         let exact: HashSet<SourceVarId> = self
             .writes
             .nonblocking
@@ -27,6 +92,7 @@ impl Ff<'_, '_> {
             .filter(|id| {
                 self.writes.window_writes.contains(id)
                     && !called.contains(id)
+                    && !called_nonblocking_aliased.contains(id)
                     && !self.writes.working.contains(id)
                     && !self.m.is_hidden(*id)
                     && !self.writes.sparse_memories.contains(id)
@@ -37,6 +103,12 @@ impl Ff<'_, '_> {
         // committing all of it on every edge. The element stores keep
         // statement order, so the last write to an element wins, and reads
         // see stable state (IEEE 1800-2023 4.6, 10.4.2).
+        let aliased_any: HashSet<SourceVarId> = self
+            .writes
+            .alias_groups
+            .iter()
+            .flat_map(|group| group.iter().copied())
+            .collect();
         let sparse: Vec<_> = self
             .writes
             .sparse_candidates
@@ -47,6 +119,7 @@ impl Ff<'_, '_> {
                     && !exact.contains(id)
                     && !self.writes.working.contains(id)
                     && !self.writes.other_writes.contains(id)
+                    && !aliased_any.contains(id)
                     && !self.m.is_hidden(*id)
                     // A forced array commits through the force controls.
                     && !self.m.procedurally_forced.contains(id)
@@ -116,10 +189,15 @@ impl Ff<'_, '_> {
             .nonblocking
             .intersection(&self.writes.working)
             .copied()
-            .filter(|&id| !self.m.is_hidden(id) && self.m.var(id).array_dims.is_empty())
+            .filter(|&id| {
+                !self.m.is_hidden(id)
+                    && (self.m.var(id).array_dims.is_empty()
+                        || unpacked_element_width(self.m.var(id)).is_some())
+            })
             .chain(exact.iter().copied())
             .collect();
         mixed.sort_by_key(|id| id.0);
+        mixed.dedup();
         // The intra-assignment delays of this body's delayed nonblocking
         // assignments (IEEE 1800-2023 9.4.5): each distinct delay of a
         // variable gets a staging pair of its own, so an update is
@@ -179,7 +257,7 @@ impl Ff<'_, '_> {
             delayed.entry(target).or_default().push(delay);
         }
         // Variables an ordinary (undelayed) nonblocking assignment writes.
-        let mut plain: HashSet<SourceVarId> = HashSet::default();
+        let mut plain = called_nonblocking.clone();
         for stmt in body {
             stmt.walk(&mut |stmt| {
                 if delayed_assignments.contains(&(std::ptr::from_ref(stmt) as usize)) {
@@ -272,7 +350,10 @@ impl Ff<'_, '_> {
         let mut staged = staged;
         if self.kernel.is_none() && !self.direct {
             for stage in &mut staged {
-                if stage.delay > 0 || self.m.var(stage.id).array_dims.is_empty() {
+                if stage.delay > 0
+                    || self.m.var(stage.id).array_dims.is_empty()
+                    || called_nonblocking.contains(&stage.id)
+                {
                     continue;
                 }
                 let Some(bounds) = array_nba_site_bounds(body, stage.id, self.m) else {
@@ -306,24 +387,76 @@ impl Ff<'_, '_> {
         let body = if staged.is_empty() {
             body.to_vec()
         } else {
+            self.staged_nbas = staged
+                .iter()
+                .filter(|stage| stage.delay == 0)
+                .map(|stage| {
+                    (
+                        stage.id,
+                        (stage.value_name.clone(), stage.mask_name.clone()),
+                    )
+                })
+                .collect();
             stage_nonblocking(body, &staged, self.m, &mut HashMap::default(), &stmt_delays)
         };
         // A variable staged for an exact publication has no next state of
         // its own: only its merge publishes it. A shared variable is written
-        // in stable state.
+        // in stable state. A variable staged only for a sibling alias's reads
+        // (never directly written blocking in this process) publishes solely
+        // via its NBA stage merge.
+        let staged_ids: HashSet<SourceVarId> = staged.iter().map(|stage| stage.id).collect();
         let published: Vec<_> = targets
             .iter()
             .copied()
             .filter(|target| {
-                !exact.contains(&target.id) && !self.writes.shared.contains(&target.id)
+                !exact.contains(&target.id)
+                    && !self.writes.shared.contains(&target.id)
+                    && (direct_blocking.contains(&target.id) || !staged_ids.contains(&target.id))
             })
             .collect();
+        let aliased_seed_targets: Vec<_> = aliased_working
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.m.var(*id).width > 0
+                    && !exact.contains(id)
+                    && !self.writes.shared.contains(id)
+                    && !self.writes.sparse_memories.contains(id)
+            })
+            .collect();
+        let mut alias_work_pairs = Vec::with_capacity(aliased_seed_targets.len());
+        for &id in &aliased_seed_targets {
+            let (work_id, _) = self.m.shadow(id, "alias_work", false);
+            self.m
+                .variables
+                .get_mut(&work_id)
+                .expect("a new alias work shadow")
+                .activation_scratch = true;
+            if let Some(element_width) = self.element_widths.get(&working(id)).copied() {
+                self.element_widths.insert(stable(work_id), element_width);
+                self.element_widths.insert(working(work_id), element_width);
+            }
+            self.writes.alias_work.insert(id, work_id);
+            alias_work_pairs.push((id, work_id));
+        }
         let ordinary_targets: Vec<_> = published
             .iter()
             .copied()
-            .filter(|target| !self.writes.sparse_memories.contains(&target.id))
+            .filter(|target| {
+                !self.writes.sparse_memories.contains(&target.id)
+                    && !self.writes.alias_work.contains_key(&target.id)
+            })
             .collect();
         emit_ff_seeds(&mut self.b, &ordinary_targets);
+        for &(id, work_id) in &alias_work_pairs {
+            self.b.emit(SIRInstruction::Commit(
+                stable(id),
+                working(work_id),
+                SIROffset::Static(0),
+                self.m.var(id).width,
+                Vec::new(),
+            ));
+        }
         for stage in &staged {
             let width = self.m.var(stage.mask).width;
             if self.m.var(stage.id).array_dims.is_empty() {
@@ -377,15 +510,40 @@ impl Ff<'_, '_> {
             .copied()
             .partition(|target| self.writes.working.contains(&target.id));
         let mut apply = SIRBuilder::new();
-        emit_sparse_memory_commits(&mut apply, &published, &self.writes.sparse_memories, self.m);
+        emit_sparse_memory_commits(
+            &mut apply,
+            &published,
+            &self.writes.sparse_memories,
+            &self.writes.alias_work,
+            self.m,
+        );
         emit_nba_merges(&mut apply, &staged, self.m);
         emit_delayed_publications(&mut apply, &staged, self.m);
         let mut active = SIRBuilder::new();
-        emit_ff_commits(&mut active, &active_targets, self.m);
+        emit_ff_commits(
+            &mut active,
+            &active_targets,
+            &self.writes.alias_work,
+            self.m,
+        );
         let mut nba = SIRBuilder::new();
-        emit_sparse_memory_commits(&mut nba, &nba_targets, &self.writes.sparse_memories, self.m);
+        emit_sparse_memory_commits(
+            &mut nba,
+            &nba_targets,
+            &self.writes.sparse_memories,
+            &self.writes.alias_work,
+            self.m,
+        );
         emit_nba_merges(&mut nba, &staged, self.m);
         emit_delayed_publications(&mut nba, &staged, self.m);
+        let staged_bindings = if staged.len() > 1 {
+            staged
+                .iter()
+                .map(|stage| (stage.delay, stage.id, stage.value, stage.mask))
+                .collect()
+        } else {
+            Vec::new()
+        };
         Ok(FfProcessUnits {
             eval,
             apply: seal_builder(apply),
@@ -396,6 +554,8 @@ impl Ff<'_, '_> {
                 .iter()
                 .map(|stage| (stage.id, stage.value, stage.mask))
                 .collect(),
+            staged_bindings,
+            alias_work: alias_work_pairs,
             delayed_sites: staged
                 .iter()
                 .filter(|stage| stage.delay > 0)
@@ -423,6 +583,7 @@ pub(in crate::lowering) fn emit_sparse_memory_commits(
     builder: &mut SIRBuilder<Addr>,
     targets: &[VarAtomBase<SourceVarId>],
     sparse: &HashSet<SourceVarId>,
+    alias_work: &HashMap<SourceVarId, SourceVarId>,
     pm: &ProcModule<'_>,
 ) {
     let mut committed = HashSet::default();
@@ -446,7 +607,7 @@ pub(in crate::lowering) fn emit_sparse_memory_commits(
                 Vec::new(),
             ));
         } else {
-            emit_ff_commits(builder, std::slice::from_ref(target), pm);
+            emit_ff_commits(builder, std::slice::from_ref(target), alias_work, pm);
         }
     }
 }
@@ -462,6 +623,11 @@ pub(in crate::lowering) struct FfProcessUnits {
     pub targets: Vec<VarAtomBase<SourceVarId>>,
     /// The staged variables, as (variable, staging value, staging mask).
     pub staged: Vec<(SourceVarId, SourceVarId, SourceVarId)>,
+    /// Staged nonblocking `(delay, target, value, mask)` tuples when more than
+    /// one stage exists in the process, for per-instance alias resolution.
+    pub staged_bindings: Vec<(u64, SourceVarId, SourceVarId, SourceVarId)>,
+    /// Per-process `(target, shadow)` pairs for aliased `WORKING` state.
+    pub alias_work: Vec<(SourceVarId, SourceVarId)>,
     /// Timed nonblocking sites of the delayed assignments, grouped later
     /// under a synthetic publication process.
     pub delayed_sites: Vec<NbaSite<SourceVarId>>,

@@ -119,5 +119,13 @@ pub(super) fn relocate_timing(
                 .map(|switch| switch.map(|&var| locate(var))),
         );
     }
+    let mut seen_counters = HashSet::default();
+    metadata
+        .counter_slots
+        .retain(|slots| seen_counters.insert(slots.signal));
+    let mut seen_pending = HashSet::default();
+    metadata
+        .pending_slots
+        .retain(|slots| seen_pending.insert((slots.signal, slots.write)));
     metadata
 }

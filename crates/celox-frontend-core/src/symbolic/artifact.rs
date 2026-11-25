@@ -211,6 +211,13 @@ pub struct SimModule {
     /// Child instance `ref` ports that alias variables of this module (IEEE
     /// 1800-2023 23.3.3.2).
     pub ref_port_bindings: Vec<RefPortBinding>,
+    /// Staged nonblocking `(value, mask)` shadow pairs keyed by `(process, delay, target)`,
+    /// allowing assembly to merge aliased sibling `ref` stages per instance in
+    /// executed statement order.
+    pub staged_nba_bindings: Vec<StagedNbaBinding>,
+    /// Per-process working shadows for aliased `ref` port variables; see
+    /// [`AliasWorkingBinding`].
+    pub alias_working_bindings: Vec<AliasWorkingBinding>,
     /// Counter objects of the signals that a unit of the module may store
     /// twice between two runtime checks (see
     /// `crate::watch::multi_store_candidates`). Assembly counts a signal's
@@ -348,6 +355,27 @@ pub struct RefPortBinding {
     pub parent_var: SourceVarId,
 }
 
+/// One process's staged nonblocking `(value, mask)` shadow pair for `target`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StagedNbaBinding {
+    pub process: usize,
+    pub delay: u64,
+    pub target: SourceVarId,
+    pub value: SourceVarId,
+    pub mask: SourceVarId,
+}
+
+/// One process's private working shadow for an aliased `ref` port variable,
+/// allowing assembly to merge sibling shadows per `(instance, process)`
+/// when their targets collide without disturbing other processes' `WORKING`
+/// state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AliasWorkingBinding {
+    pub process: usize,
+    pub target: SourceVarId,
+    pub shadow: SourceVarId,
+}
+
 impl SimModule {
     /// The hierarchy index of element `position` of instance `name`.
     pub fn instance_index(&self, name: &str, position: usize) -> usize {
@@ -443,6 +471,8 @@ impl fmt::Debug for SimModule {
             .field("package_bindings", &self.package_bindings)
             .field("hierarchical_bindings", &self.hierarchical_bindings)
             .field("ref_port_bindings", &self.ref_port_bindings)
+            .field("staged_nba_bindings", &self.staged_nba_bindings)
+            .field("alias_working_bindings", &self.alias_working_bindings)
             .finish()
     }
 }

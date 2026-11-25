@@ -162,22 +162,8 @@ fn collect_array_nba_site_bounds<'a>(
     Some(())
 }
 
-/// `stmts` with every nonblocking assignment to a staged variable writing
-/// its staging value instead, and marking the written bits in its mask.
-pub(super) fn stage_nonblocking(
-    stmts: &[sv::ir::Stmt],
-    staged: &[NbaStage],
-    pm: &ProcModule<'_>,
-    next_site: &mut HashMap<SourceVarId, usize>,
-    stmt_delays: &HashMap<usize, u64>,
-) -> Vec<sv::ir::Stmt> {
-    let stage_of_delay = |lvalue: &sv::ir::LValue, delay: u64| {
-        staged
-            .iter()
-            .find(|stage| stage.delay == delay && pm.id(lvalue.name()) == Some(stage.id))
-    };
-    let stage_of = |lvalue: &sv::ir::LValue| stage_of_delay(lvalue, 0);
-    let renamed = |lvalue: &sv::ir::LValue, name: &str| match lvalue {
+fn rename_lvalue_target(lvalue: &sv::ir::LValue, name: &str) -> sv::ir::LValue {
+    match lvalue {
         sv::ir::LValue::Ident(_) => sv::ir::LValue::Ident(name.to_string()),
         sv::ir::LValue::Select {
             msb,
@@ -194,9 +180,139 @@ pub(super) fn stage_nonblocking(
             array_slice_reversed: *array_slice_reversed,
             window: window.clone(),
         },
+    }
+}
+
+/// `stmts` (from an inlined subroutine body) with every delay-0 nonblocking
+/// assignment to a staged variable writing its staging value and mask instead.
+pub(super) fn stage_inlined_nonblocking(
+    stmts: &[sv::ir::Stmt],
+    staged: &HashMap<SourceVarId, (String, String)>,
+    pm: &ProcModule<'_>,
+) -> Vec<sv::ir::Stmt> {
+    let stage_of = |lvalue: &sv::ir::LValue| {
+        pm.id(lvalue.name())
+            .and_then(|id| staged.get(&id))
+            .map(|(value_name, mask_name)| (value_name.as_str(), mask_name.as_str()))
     };
+    let mark = |lvalue: &sv::ir::LValue, mask_name: &str| sv::ir::Stmt::Assign {
+        lhs: rename_lvalue_target(lvalue, mask_name),
+        rhs: sv::ir::Expr::Literal("'1".to_string()),
+        nonblocking: true,
+    };
+    let mut out = Vec::with_capacity(stmts.len());
+    for stmt in stmts {
+        match stmt {
+            sv::ir::Stmt::Assign {
+                lhs,
+                rhs,
+                nonblocking: true,
+            } if stage_of(lhs).is_some() => {
+                let (value_name, mask_name) = stage_of(lhs).unwrap();
+                out.push(sv::ir::Stmt::Assign {
+                    lhs: rename_lvalue_target(lhs, value_name),
+                    rhs: rhs.clone(),
+                    nonblocking: true,
+                });
+                out.push(mark(lhs, mask_name));
+            }
+            sv::ir::Stmt::AssignConcat {
+                parts,
+                rhs,
+                nonblocking: true,
+            } if parts.iter().any(|part| stage_of(part).is_some()) => {
+                out.push(sv::ir::Stmt::AssignConcat {
+                    parts: parts
+                        .iter()
+                        .map(|part| match stage_of(part) {
+                            Some((value_name, _)) => rename_lvalue_target(part, value_name),
+                            None => part.clone(),
+                        })
+                        .collect(),
+                    rhs: rhs.clone(),
+                    nonblocking: true,
+                });
+                for part in parts {
+                    if let Some((_, mask_name)) = stage_of(part) {
+                        out.push(mark(part, mask_name));
+                    }
+                }
+            }
+            sv::ir::Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => out.push(sv::ir::Stmt::If {
+                condition: condition.clone(),
+                then_body: stage_inlined_nonblocking(then_body, staged, pm),
+                else_body: stage_inlined_nonblocking(else_body, staged, pm),
+            }),
+            sv::ir::Stmt::Case {
+                kind,
+                selector,
+                items,
+                default,
+            } => out.push(sv::ir::Stmt::Case {
+                kind: *kind,
+                selector: selector.clone(),
+                items: items
+                    .iter()
+                    .map(|item| sv::ir::CaseItem {
+                        labels: item.labels.clone(),
+                        body: stage_inlined_nonblocking(&item.body, staged, pm),
+                    })
+                    .collect(),
+                default: default
+                    .as_ref()
+                    .map(|body| stage_inlined_nonblocking(body, staged, pm)),
+            }),
+            sv::ir::Stmt::Loop {
+                kind,
+                init,
+                condition,
+                step,
+                body,
+            } => out.push(sv::ir::Stmt::Loop {
+                kind: kind.clone(),
+                init: init.clone(),
+                condition: condition.clone(),
+                step: step.clone(),
+                body: stage_inlined_nonblocking(body, staged, pm),
+            }),
+            sv::ir::Stmt::Fork { join, branches } => out.push(sv::ir::Stmt::Fork {
+                join: *join,
+                branches: branches
+                    .iter()
+                    .map(|branch| stage_inlined_nonblocking(branch, staged, pm))
+                    .collect(),
+            }),
+            sv::ir::Stmt::Block { id, body } => out.push(sv::ir::Stmt::Block {
+                id: *id,
+                body: stage_inlined_nonblocking(body, staged, pm),
+            }),
+            other => out.push(other.clone()),
+        }
+    }
+    out
+}
+
+/// `stmts` with every nonblocking assignment to a staged variable writing
+/// its staging value instead, and marking the written bits in its mask.
+pub(super) fn stage_nonblocking(
+    stmts: &[sv::ir::Stmt],
+    staged: &[NbaStage],
+    pm: &ProcModule<'_>,
+    next_site: &mut HashMap<SourceVarId, usize>,
+    stmt_delays: &HashMap<usize, u64>,
+) -> Vec<sv::ir::Stmt> {
+    let stage_of_delay = |lvalue: &sv::ir::LValue, delay: u64| {
+        staged
+            .iter()
+            .find(|stage| stage.delay == delay && pm.id(lvalue.name()) == Some(stage.id))
+    };
+    let stage_of = |lvalue: &sv::ir::LValue| stage_of_delay(lvalue, 0);
     let mark = |lvalue: &sv::ir::LValue, stage: &NbaStage| sv::ir::Stmt::Assign {
-        lhs: renamed(lvalue, &stage.mask_name),
+        lhs: rename_lvalue_target(lvalue, &stage.mask_name),
         rhs: sv::ir::Expr::Literal("'1".to_string()),
         nonblocking: true,
     };
@@ -226,7 +342,7 @@ pub(super) fn stage_nonblocking(
                     ));
                 }
                 out.push(sv::ir::Stmt::Assign {
-                    lhs: renamed(lhs, &stage.value_name),
+                    lhs: rename_lvalue_target(lhs, &stage.value_name),
                     rhs: rhs.clone(),
                     nonblocking: true,
                 });
@@ -241,7 +357,7 @@ pub(super) fn stage_nonblocking(
                     parts: parts
                         .iter()
                         .map(|part| match stage_of(part) {
-                            Some(stage) => renamed(part, &stage.value_name),
+                            Some(stage) => rename_lvalue_target(part, &stage.value_name),
                             None => part.clone(),
                         })
                         .collect(),
@@ -266,7 +382,7 @@ pub(super) fn stage_nonblocking(
                     } if stage_of_delay(lhs, delay).is_some() => {
                         let stage = stage_of_delay(lhs, delay).unwrap();
                         out.push(sv::ir::Stmt::Assign {
-                            lhs: renamed(lhs, &stage.value_name),
+                            lhs: rename_lvalue_target(lhs, &stage.value_name),
                             rhs: rhs.clone(),
                             nonblocking: true,
                         });
@@ -284,7 +400,10 @@ pub(super) fn stage_nonblocking(
                             parts: parts
                                 .iter()
                                 .map(|part| {
-                                    renamed(part, &stage_of_delay(part, delay).unwrap().value_name)
+                                    rename_lvalue_target(
+                                        part,
+                                        &stage_of_delay(part, delay).unwrap().value_name,
+                                    )
                                 })
                                 .collect(),
                             rhs: rhs.clone(),

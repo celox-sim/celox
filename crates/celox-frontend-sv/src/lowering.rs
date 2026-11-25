@@ -18,8 +18,8 @@ use celox_design::{
 };
 use celox_frontend_core::process::PROCESS_RESUME_WIDTH;
 use celox_frontend_core::symbolic::artifact::{
-    CombAlternative, ExternalHierarchy, ExternalModule, NbaSwitch, PackageBinding, SimModule,
-    SymbolicProcess, SymbolicRtl, SymbolicVariable,
+    CombAlternative, ExternalHierarchy, ExternalModule, NbaSwitch, PackageBinding, RefPortBinding,
+    SimModule, SymbolicProcess, SymbolicRtl, SymbolicVariable,
 };
 use celox_frontend_core::{
     FrontendTrace, FrontendTraceOptions, LoweringPhase, ParserError, ScheduledRtlOutput,
@@ -65,6 +65,7 @@ mod out_of_line;
 mod packages;
 mod procedural;
 mod recursion;
+mod ref_ports;
 mod schedule;
 mod select;
 mod shared_variables;
@@ -449,6 +450,13 @@ struct HierarchicalNames<'a> {
     forced: &'a [String],
     /// How `always @*` blocks that write a common variable run.
     shared: SharedAlways<'a>,
+    /// Variables that multiple `ref` ports of this specialization alias within
+    /// the same instance, whose non-continuous combinational and edge processes
+    /// must run imperatively so sibling-port writes share storage cleanly.
+    same_instance_aliased: &'a HashSet<String>,
+    /// Groups of `ref` port names within the same specialization that alias
+    /// the same parent variable in at least one instance.
+    same_instance_alias_groups: &'a [Vec<String>],
     /// The analysis of the module with `signals`, if it is done already.
     analyzed: Option<&'a sv::Ir>,
     /// Where to append the module's recursive call cycles, if anywhere.
@@ -511,12 +519,16 @@ impl<'a> HierarchicalNames<'a> {
     fn with_instances(instances: Instances<'a>) -> Self {
         static EMPTY: std::sync::LazyLock<HashMap<String, hierarchy::ForeignWrites>> =
             std::sync::LazyLock::new(HashMap::default);
+        static NO_ALIASED: std::sync::LazyLock<HashSet<String>> =
+            std::sync::LazyLock::new(HashSet::default);
         static NO_PROPERTIES: BTreeSet<u32> = BTreeSet::new();
         Self {
             signals: &[],
             foreign_writes: &EMPTY,
             forced: &[],
             shared: SharedAlways::default(),
+            same_instance_aliased: &NO_ALIASED,
+            same_instance_alias_groups: &[],
             analyzed: None,
             recursion_report: None,
             force_out_of_line: false,

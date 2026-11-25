@@ -68,7 +68,7 @@ pub(super) fn publication(
                 false_block: (next, vec![]),
             });
             b.switch_to_block(write);
-            ff::emit_sparse_memory_commits(&mut b, run, memories, pm);
+            ff::emit_sparse_memory_commits(&mut b, run, memories, &HashMap::default(), pm);
             if run.last().unwrap().id == last_target[&slot] {
                 let zero = b.alloc_bit(1, false);
                 b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u64)));
@@ -84,7 +84,7 @@ pub(super) fn publication(
             b.seal_block(SIRTerminator::Jump(next, vec![]));
             b.switch_to_block(next);
         } else {
-            ff::emit_sparse_memory_commits(&mut b, run, memories, pm);
+            ff::emit_sparse_memory_commits(&mut b, run, memories, &HashMap::default(), pm);
         }
     }
     seal_builder(b)

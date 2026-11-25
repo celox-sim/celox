@@ -57,6 +57,8 @@ type SvFfBlocks = (
     celox_frontend_core::symbolic::artifact::NextStateForms,
     SLTNodeArena<SourceVarId>,
     ff_graph::EdgeSchedule,
+    Vec<celox_frontend_core::symbolic::artifact::StagedNbaBinding>,
+    Vec<celox_frontend_core::symbolic::artifact::AliasWorkingBinding>,
 );
 
 /// The variables `always_ff` event controls are sensed on.
@@ -139,18 +141,24 @@ impl FfEventVars {
     }
 }
 
-/// A signal a flip-flop evaluation writes and, for nonblocking writes staged
-/// apart from blocking ones, its staging value; see
-/// `celox_frontend_core::watch::PendingSlots`.
-pub(super) type FfWriteStream = (SourceVarId, Option<SourceVarId>);
+/// A signal a flip-flop evaluation writes and where its repeated writes go;
+/// see `celox_frontend_core::watch::PendingSlots`.
+pub(super) type FfWriteStream = (
+    SourceVarId,
+    celox_frontend_core::watch::PendingWrite<SourceVarId>,
+);
 
 /// The write streams one execution of the flip-flop evaluation `eval` may
 /// write twice. `staged` lists its staged variables as (variable, value,
-/// mask).
+/// mask); `alias_work` lists `(target, shadow)` pairs for per-process aliased
+/// `WORKING` storage.
 pub(super) fn repeated_ff_writes(
     eval: &ExecutionUnit<RegionedVarAddr>,
     staged: &[(SourceVarId, SourceVarId, SourceVarId)],
+    alias_work: &[(SourceVarId, SourceVarId)],
 ) -> Vec<FfWriteStream> {
+    use celox_frontend_core::watch::PendingWrite;
+
     // A seed commits the stable state into the next state; only the stores
     // of the body are writes. Every nonblocking write of a staged variable
     // marks its mask, so the value alone tells a repeated write.
@@ -161,13 +169,17 @@ pub(super) fn repeated_ff_writes(
         _ => None,
     })
     .into_iter()
-    .filter_map(
-        |id| match staged.iter().find(|&&(_, value, _)| value == id) {
-            Some(&(signal, value, _)) => Some((signal, Some(value))),
-            None if staged.iter().any(|&(_, _, mask)| mask == id) => None,
-            None => Some((id, None)),
-        },
-    )
+    .filter_map(|id| {
+        if let Some(&(signal, value, _)) = staged.iter().find(|&&(_, value, _)| value == id) {
+            Some((signal, PendingWrite::StagedNba(value)))
+        } else if staged.iter().any(|&(_, _, mask)| mask == id) {
+            None
+        } else if let Some(&(signal, work_id)) = alias_work.iter().find(|&&(_, work)| work == id) {
+            Some((signal, PendingWrite::WorkingShadow(work_id)))
+        } else {
+            Some((id, PendingWrite::NextState))
+        }
+    })
     .collect()
 }
 
@@ -181,6 +193,8 @@ pub(super) fn lower_ff_processes(
     shared_memories: &HashSet<String>,
     foreign_writes: &HashMap<String, hierarchy::ForeignWrites>,
     shared_variables: &HashSet<String>,
+    same_instance_aliased: &HashSet<String>,
+    same_instance_alias_groups: &[Vec<String>],
     repeated_writes: &mut Vec<FfWriteStream>,
 ) -> Result<SvFfBlocks, sv::AnalyzerError> {
     let mut parallel_ff_parts = HashMap::<_, Vec<_>>::default();
@@ -189,6 +203,8 @@ pub(super) fn lower_ff_processes(
     let mut nba_ff_blocks: HashMap<_, ExecutionUnit<RegionedVarAddr>> = HashMap::default();
     let mut reset_clock_map = HashMap::default();
     let mut all_delayed_sites: Vec<celox_design::NbaSite<SourceVarId>> = Vec::new();
+    let mut staged_nba_bindings = Vec::new();
+    let mut alias_working_bindings = Vec::new();
 
     // Every event of every process, as (signal, domain kind): the clock, then
     // the resets.
@@ -250,13 +266,21 @@ pub(super) fn lower_ff_processes(
             Ok((id, role.kind))
         })
         .collect::<Result<Vec<_>, sv::AnalyzerError>>()?;
-    // A hierarchical name denotes another instance's object, whose own
+    // A hierarchical name or ref port denotes another object whose own
     // declaration decides how it is sensed there: sense it on copies here.
     let hierarchical: HashSet<SourceVarId> = module
         .signals()
         .iter()
         .filter(|signal| signal.hierarchical().is_some())
-        .filter_map(|signal| pm.id(signal.name()))
+        .map(sv::ir::Signal::name)
+        .chain(
+            module
+                .ports()
+                .iter()
+                .filter(|port| port.direction() == sv::ir::PortDirection::Ref)
+                .map(sv::ir::Port::name),
+        )
+        .filter_map(|name| pm.id(name))
         .collect();
     let mut event_vars = FfEventVars::new(
         global_events
@@ -287,6 +311,7 @@ pub(super) fn lower_ff_processes(
     let mut excluded_graph_targets = HashSet::default();
     if graph_first {
         excluded_graph_targets.extend(window_writes.union(shared_variables).cloned());
+        excluded_graph_targets.extend(same_instance_aliased.iter().cloned());
         // The graph publishes private, single-writer memories with the same
         // dirty-element protocol as procedural edge updates.
         excluded_graph_targets.extend(
@@ -339,6 +364,7 @@ pub(super) fn lower_ff_processes(
             let units = ff::Ff::new(pm, random_seeds[&(0, index)])
                 .with_sparse_memories(shared_memories)
                 .with_shared_variables(shared_variables)
+                .with_alias_groups(same_instance_alias_groups)
                 .with_sparse_candidates(&edge_memories)
                 .with_window_writes(&window_writes)
                 .with_inferred_clock(clock)
@@ -397,10 +423,95 @@ pub(super) fn lower_ff_processes(
             nba,
             targets,
             staged,
+            staged_bindings,
+            alias_work,
             delayed_sites,
         } = lower_procedural(pm, body)?;
         all_delayed_sites.extend(delayed_sites);
-        repeated_writes.extend(repeated_ff_writes(&eval_only, &staged));
+        repeated_writes.extend(repeated_ff_writes(&eval_only, &staged, &alias_work));
+        let work_to_target: HashMap<SourceVarId, SourceVarId> = alias_work
+            .iter()
+            .map(|&(target, work)| (work, target))
+            .collect();
+        let target_to_work: HashMap<SourceVarId, SourceVarId> =
+            alias_work.iter().copied().collect();
+        for group in same_instance_alias_groups {
+            let group_ids: HashSet<SourceVarId> =
+                group.iter().filter_map(|name| pm.id(name)).collect();
+            let staged_members: Vec<_> = staged
+                .iter()
+                .filter(|&&(id, _, _)| group_ids.contains(&id))
+                .collect();
+            let staged_ids: HashSet<SourceVarId> =
+                staged_members.iter().map(|&&(id, _, _)| id).collect();
+            if staged_ids.len() > 1 {
+                for &(id, value, _) in staged_members {
+                    repeated_writes.push((
+                        id,
+                        celox_frontend_core::watch::PendingWrite::StagedNba(value),
+                    ));
+                }
+            }
+            let mut unstaged_ids: Vec<SourceVarId> = eval_only
+                .blocks
+                .values()
+                .flat_map(|block| &block.instructions)
+                .filter_map(|instruction| match instruction {
+                    SIRInstruction::Store(address, ..) if address.region == WORKING_REGION => {
+                        let var = work_to_target
+                            .get(&address.var_id)
+                            .copied()
+                            .unwrap_or(address.var_id);
+                        group_ids.contains(&var).then_some(var)
+                    }
+                    _ => None,
+                })
+                .collect();
+            unstaged_ids.sort_unstable();
+            unstaged_ids.dedup();
+            if unstaged_ids.len() > 1
+                && !celox_frontend_core::watch::multi_store_only_candidates(&eval_only, |address| {
+                    if address.region == WORKING_REGION {
+                        let var = work_to_target
+                            .get(&address.var_id)
+                            .copied()
+                            .unwrap_or(address.var_id);
+                        group_ids.contains(&var).then_some(())
+                    } else {
+                        None
+                    }
+                })
+                .is_empty()
+            {
+                for id in unstaged_ids {
+                    let write = match target_to_work.get(&id).copied() {
+                        Some(work_id) => {
+                            celox_frontend_core::watch::PendingWrite::WorkingShadow(work_id)
+                        }
+                        None => celox_frontend_core::watch::PendingWrite::NextState,
+                    };
+                    repeated_writes.push((id, write));
+                }
+            }
+        }
+        staged_nba_bindings.extend(staged_bindings.into_iter().map(
+            |(delay, target, value, mask)| {
+                celox_frontend_core::symbolic::artifact::StagedNbaBinding {
+                    process: index,
+                    delay,
+                    target,
+                    value,
+                    mask,
+                }
+            },
+        ));
+        alias_working_bindings.extend(alias_work.into_iter().map(|(target, shadow)| {
+            celox_frontend_core::symbolic::artifact::AliasWorkingBinding {
+                process: index,
+                target,
+                shadow,
+            }
+        }));
         // A process without writes still runs for what it hands to the host:
         // its runtime events and its extern calls, those of the heap among
         // them, such as a method call that updates a property.
@@ -467,6 +578,8 @@ pub(super) fn lower_ff_processes(
         next_state_forms,
         arena,
         graph.schedule,
+        staged_nba_bindings,
+        alias_working_bindings,
     ))
 }
 
@@ -552,20 +665,28 @@ pub(super) fn runs_as_process(
             .and_then(|r#type| signal_type_from_sv(r#type, constants, parameter_types).ok())
             .is_some_and(|type_info| type_info.width != 1)
     };
-    // A blocking write through a hierarchical name updates the other
-    // instance's object at once, outside that instance's flip-flop commit.
+    // A blocking write through a hierarchical name or ref port updates the
+    // other instance's object at once, outside that instance's flip-flop commit.
     let writes_other_instance = || {
-        let mut hierarchical = module
+        let mut external = module
             .signals()
             .iter()
             .filter(|signal| signal.hierarchical().is_some())
+            .map(sv::ir::Signal::name)
+            .chain(
+                module
+                    .ports()
+                    .iter()
+                    .filter(|port| port.direction() == sv::ir::PortDirection::Ref)
+                    .map(sv::ir::Port::name),
+            )
             .peekable();
-        if hierarchical.peek().is_none() {
+        if external.peek().is_none() {
             return false;
         }
         let mut written = HashSet::default();
         procedural::written_names_with_calls(module, process.body(), &mut written);
-        hierarchical.any(|signal| written.contains(signal.name()))
+        external.any(|name| written.contains(name))
     };
     ineligible_delayed_nonblocking(module, process)
         || (!process.is_always_ff()
@@ -668,6 +789,7 @@ pub(super) fn always_star_processes_sharing_edge_variables(
     module: &sv::ir::Module,
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
+    foreign_writes: &HashMap<String, hierarchy::ForeignWrites>,
 ) -> HashSet<usize> {
     let comb = module.comb_processes();
     let ff = module.ff_processes();
@@ -689,7 +811,10 @@ pub(super) fn always_star_processes_sharing_edge_variables(
         }
     };
     let drivers = ModuleDrivers::new(module, constants, parameter_types);
-    for writes in drivers.writes.values() {
+    for (name, writes) in &drivers.writes {
+        let foreign_non_exclusive = foreign_writes
+            .get(name)
+            .is_some_and(|fw| fw.overlapping_non_exclusive && !fw.exclusive);
         let writers = writes
             .iter()
             .filter_map(|write| Some((write.local?, write.range.or(write.element))))
@@ -698,11 +823,13 @@ pub(super) fn always_star_processes_sharing_edge_variables(
             if !always_star(left) {
                 continue;
             }
-            if writers.iter().any(|&(right, right_range)| {
-                right != left
-                    && ordinary_edge(right)
-                    && net_driver_ranges_overlap(left_range, right_range)
-            }) {
+            if foreign_non_exclusive
+                || writers.iter().any(|&(right, right_range)| {
+                    right != left
+                        && ordinary_edge(right)
+                        && net_driver_ranges_overlap(left_range, right_range)
+                })
+            {
                 sharing.insert(left);
             }
         }
@@ -1038,9 +1165,11 @@ pub(super) fn emit_ff_seeds(
 pub(super) fn emit_ff_commits(
     builder: &mut SIRBuilder<RegionedVarAddr>,
     targets: &[VarAtomBase<SourceVarId>],
+    alias_work: &HashMap<SourceVarId, SourceVarId>,
     pm: &procedural::ProcModule<'_>,
 ) {
     for target in targets {
+        let working_id = alias_work.get(&target.id).copied().unwrap_or(target.id);
         if let Some((enabled, forced)) = pm.force_controls(target.id)
             && pm.procedurally_forced.contains(&target.id)
         {
@@ -1058,7 +1187,7 @@ pub(super) fn emit_ff_commits(
                 next,
                 RegionedVarAddrBase {
                     region: WORKING_REGION,
-                    var_id: target.id,
+                    var_id: working_id,
                 },
                 offset.clone(),
                 width,
@@ -1082,7 +1211,7 @@ pub(super) fn emit_ff_commits(
         builder.emit(SIRInstruction::Commit(
             RegionedVarAddrBase {
                 region: WORKING_REGION,
-                var_id: target.id,
+                var_id: working_id,
             },
             RegionedVarAddrBase {
                 region: STABLE_REGION,

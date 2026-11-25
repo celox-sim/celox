@@ -391,8 +391,8 @@ pub(super) fn instrument_counted_signals<'u>(
         .filter_map(|slots| {
             Some(crate::watch::PendingCode {
                 watch: watch(slots.signal)?,
-                write: working(slots.staged.unwrap_or(slots.signal)),
-                staged: slots.staged.is_some(),
+                write: working(slots.write.write_addr(slots.signal)),
+                staged: slots.write.is_staged_nba(),
                 value: stable(slots.value),
                 covered: stable(slots.covered),
                 first: stable(slots.first),
@@ -405,23 +405,23 @@ pub(super) fn instrument_counted_signals<'u>(
             })
         })
         .collect();
-    let held = |staged: bool| -> HashSet<AbsoluteAddr> {
-        timing
-            .pending_slots
-            .iter()
-            .filter(|slots| slots.staged.is_some() == staged)
-            .map(|slots| slots.signal)
-            .collect()
-    };
-    let (held_next, held_staged) = (held(false), held(true));
+    let mut held_commit = HashSet::default();
+    let mut held_staged = HashSet::default();
+    for slots in &timing.pending_slots {
+        if slots.write.is_staged_nba() {
+            held_staged.insert(slots.signal);
+        } else {
+            held_commit.insert((slots.write.write_addr(slots.signal), slots.signal));
+        }
+    }
     for unit in ff_units {
         crate::watch::instrument_writes(unit, |instruction| match instruction {
             // The commit of the next state; a seed copies the other way.
             SIRInstruction::Commit(source, destination, ..)
                 if source.region == WORKING_REGION
                     && destination.region == STABLE_REGION
-                    && source.absolute_addr() == destination.absolute_addr()
-                    && !held_next.contains(&destination.absolute_addr()) =>
+                    && !held_commit
+                        .contains(&(source.absolute_addr(), destination.absolute_addr())) =>
             {
                 watch(destination.absolute_addr())
             }

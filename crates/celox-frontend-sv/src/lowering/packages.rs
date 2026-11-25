@@ -128,6 +128,8 @@ pub(super) fn lower_package_states(
                 &HashMap::default(),
                 &HashMap::default(),
                 SharedAlways::default(),
+                &HashSet::default(),
+                &[],
                 calls.as_mut(),
             );
             if let (Some(graph), Some(path), Some(module)) =

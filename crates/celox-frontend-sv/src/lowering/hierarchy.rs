@@ -1239,6 +1239,9 @@ pub(super) struct ForeignWrites {
     /// The number of module specializations whose processes that run
     /// repeatedly (all but `initial` ones) write the signal.
     pub repeating: usize,
+    /// Overlapping foreign repeating writers for whole-variable validation of
+    /// hierarchical and virtual-interface drivers.
+    pub overlapping_repeating: usize,
     /// Whether an `always_ff` process writes it.
     pub always_ff: bool,
     /// Whether a process that is the only writer of what it writes does: an
@@ -1250,6 +1253,11 @@ pub(super) struct ForeignWrites {
     /// Whether a continuous assignment or a combinational process drives
     /// it, which excludes every other writer.
     pub combinational: bool,
+    /// Whether any foreign write range overlaps a local driver of the signal.
+    pub overlapping: bool,
+    /// Whether a non-exclusive foreign writer (`always` / `initial`) overlaps
+    /// a local driver of the signal.
+    pub overlapping_non_exclusive: bool,
 }
 
 /// Add the signals that the hierarchical names of `module` (`module_id`),
@@ -1307,9 +1315,12 @@ pub(super) fn collect_foreign_writes(
                 .entry(target.clone())
                 .or_default();
             entry.repeating += usize::from(repeating);
+            entry.overlapping_repeating += usize::from(repeating);
             entry.always_ff |= by_always_ff;
             entry.exclusive |= by_exclusive;
             entry.combinational |= combinational.contains(name);
+            entry.overlapping = true;
+            entry.overlapping_non_exclusive |= !by_exclusive;
         }
     }
 }
@@ -1333,9 +1344,12 @@ pub(super) fn collect_virtual_writes(
                 .entry(target)
                 .or_default();
             entry.repeating += foreign.repeating.min(1);
+            entry.overlapping_repeating += foreign.overlapping_repeating.min(1);
             entry.always_ff |= foreign.always_ff;
             entry.exclusive |= foreign.exclusive;
             entry.combinational |= foreign.combinational;
+            entry.overlapping |= foreign.overlapping;
+            entry.overlapping_non_exclusive |= foreign.overlapping_non_exclusive;
         }
     }
 }

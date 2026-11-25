@@ -1,0 +1,191 @@
+(group ref_ports (category hierarchy))
+
+; IEEE 1800-2023 23.2.2, 23.3.3.2: ANSI and non-ANSI ref and const ref ports
+; alias parent variables so reads and writes are visible across module boundaries.
+(case ansi_and_non_ansi_ref_and_const_ref_aliasing
+ (source "ansi_non_ansi_ref.sv" #"module Writer(ref logic [7:0] r, input logic [7:0] v);
+ initial begin #1 r = v + 8'd1; end
+endmodule
+module Reader(a, o);
+ const ref logic [7:0] a;
+ output logic [7:0] o;
+ assign o = a + 8'd10;
+endmodule
+module Top(output logic [7:0] out_v, output logic [7:0] out_r);
+ logic [7:0] v = 8'd5;
+ Writer w(.r(v), .v(8'd20));
+ Reader r(.a(v), .o(out_r));
+ assign out_v = v;
+endmodule"#)
+ (top Top)
+ (run_until 0) (assert_eq out_v 5) (assert_eq out_r 15)
+ (run_until 1) (assert_eq out_v 21) (assert_eq out_r 31))
+
+; IEEE 1800-2023 23.3.3.2: chained multi-level ref and const ref ports resolve to
+; the canonical backing variable.
+(case chained_ref_and_const_ref_ports
+ (source "chained_ref.sv" #"module LeafWrite(ref int x);
+ initial begin #2 x = x + 100; end
+endmodule
+module LeafRead(const ref int x, output int y);
+ assign y = x * 2;
+endmodule
+module Mid(ref int rw, const ref int ro, output int seen);
+ LeafWrite w(.x(rw));
+ LeafRead r(.x(ro), .y(seen));
+endmodule
+module Top(output int v_out, output int mid_seen);
+ int val = 7;
+ Mid u(.rw(val), .ro(val), .seen(mid_seen));
+ assign v_out = val;
+endmodule"#)
+ (top Top)
+ (run_until 0) (assert_eq v_out 7) (assert_eq mid_seen 14)
+ (run_until 2) (assert_eq v_out 107) (assert_eq mid_seen 214))
+
+; Independent instances aliased to separate variables do not share state or drivers,
+; while multiple const ref ports may fan out from one shared variable.
+(case separate_instances_and_const_ref_fanout
+ (source "fanout_ref.sv" #"module Incr(ref int x, input int delta);
+ always_comb x = delta + 1;
+endmodule
+module Obs(const ref int x, output int y, input int bias);
+ assign y = x + bias;
+endmodule
+module Top(output int y1, output int y2, output int o1, output int o2);
+ int a, b;
+ Incr u1(.x(a), .delta(10));
+ Incr u2(.x(b), .delta(20));
+ Obs r1(.x(a), .y(o1), .bias(100));
+ Obs r2(.x(a), .y(o2), .bias(200));
+ assign y1 = a;
+ assign y2 = b;
+endmodule"#)
+ (top Top)
+ (run_until 0)
+ (assert_eq y1 11)
+ (assert_eq y2 21)
+ (assert_eq o1 111)
+ (assert_eq o2 211))
+
+; A variable with a declaration initializer may be driven by a child always_ff
+; through a ref port, with the clock itself passed by const ref.
+(case always_ff_with_const_ref_clock_and_initializer
+ (source "ff_ref_clk.sv" #"module Counter(const ref logic clk, ref logic [7:0] cnt, input logic [7:0] step);
+ always_ff @(posedge clk) cnt <= cnt + step;
+endmodule
+module Top(input var logic clk, input logic [7:0] step, output logic [7:0] out_cnt);
+ logic [7:0] cnt = 8'h10;
+ Counter u(.clk(clk), .cnt(cnt), .step(step));
+ assign out_cnt = cnt;
+endmodule"#)
+ (top Top)
+ (modify (set step 3))
+ (assert_eq out_cnt 16)
+ (tick clk)
+ (assert_eq out_cnt 19)
+ (tick clk)
+ (assert_eq out_cnt 22))
+
+; Signed int and typedef'd unpacked array types passed through ref ports.
+(case packed_and_unpacked_array_ref_ports
+ (source "array_ref.sv" #"package p;
+ typedef int arr4_t[0:3];
+endpackage
+module Flip(ref int v, ref p::arr4_t a);
+ initial begin
+  #1;
+  v = -v;
+  a[0] = a[0] + 10;
+  a[3] = a[3] + 20;
+ end
+endmodule
+module Top(output int v_out, output int a0, output int a3);
+ int v;
+ p::arr4_t arr;
+ initial begin
+  v = 42;
+  arr[0] = 1;
+  arr[3] = 5;
+ end
+ Flip u(.v(v), .a(arr));
+ always_comb begin
+  v_out = v;
+  a0 = arr[0];
+  a3 = arr[3];
+ end
+endmodule"#)
+ (top Top)
+ (run_until 0) (assert_eq v_out 42) (assert_eq a0 1) (assert_eq a3 5)
+ (run_until 1) (assert_eq v_out (trunc 32 -42)) (assert_eq a0 11) (assert_eq a3 25))
+
+; Unpacked structs passed by ref and const ref across modules.
+(case unpacked_struct_ref_ports
+ (source "struct_ref.sv" #"package p;
+ typedef struct { int a; bit [7:0] b; } pair_t;
+endpackage
+module BumpPair(ref p::pair_t s);
+ initial begin
+  s.a = 10;
+  s.b = 8'd5;
+  #1;
+  s.a = s.a + 30;
+ end
+endmodule
+module SumPair(const ref p::pair_t s, output int total);
+ assign total = s.a + int'(s.b);
+endmodule
+module Top(output int sum_out, output int a_out);
+ p::pair_t s;
+ BumpPair bp(.s(s));
+ SumPair sp(.s(s), .total(sum_out));
+ assign a_out = s.a;
+endmodule"#)
+ (top Top)
+ (run_until 0) (assert_eq a_out 10) (assert_eq sum_out 15)
+ (run_until 1) (assert_eq a_out 40) (assert_eq sum_out 45))
+
+; Package variables passed through ref ports share canonical storage.
+(case package_variable_through_ref_port
+ (source "pkg_ref.sv" #"package p;
+ int shared_v = 12;
+endpackage
+module Sub(ref int r);
+ initial begin #1 r = r + 8; end
+endmodule
+module Top(output int out_v);
+ Sub u(.r(p::shared_v));
+ assign out_v = p::shared_v;
+endmodule"#)
+ (top Top)
+ (run_until 0) (assert_eq out_v 12)
+ (run_until 1) (assert_eq out_v 20))
+
+; Named events, strings, and queues aliased via ref ports.
+(case string_queue_and_event_via_ref_ports
+ (source "str_q_ev_ref.sv" #"module Worker(ref event ev, ref string msg, ref int q[$]);
+ initial begin
+  #1;
+  msg = "hi";
+  q.push_back(77);
+  -> ev;
+ end
+endmodule
+module Top(output int done, output int q_len, output int q_back, output int str_ok);
+ event e;
+ string s;
+ int items[$];
+ Worker w(.ev(e), .msg(s), .q(items));
+ initial begin
+  s = "init";
+  items.push_back(11);
+  @e;
+  done = 1;
+  q_len = items.size();
+  q_back = items[1];
+  str_ok = (s == "hi");
+ end
+endmodule"#)
+ (top Top)
+ (run_until 0) (assert_eq done 0)
+ (run_until 1) (assert_eq done 1) (assert_eq q_len 2) (assert_eq q_back 77) (assert_eq str_ok 1))
