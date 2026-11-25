@@ -625,6 +625,59 @@ pub(super) fn returns_status(unit: &Unit, status: AbsoluteAddr, wanted: ProcessS
     })
 }
 
+/// Local output definitions at each returning block. A merged exit, partial
+/// write or opaque call yields an unknown word.
+pub(super) fn returned_words(
+    unit: &Unit,
+    status: AbsoluteAddr,
+    delay: AbsoluteAddr,
+) -> Vec<(Option<u64>, Option<u64>)> {
+    let constants = unit_constants(unit);
+    let word = |block: &celox_sir::BasicBlock<RegionedAbsoluteAddr>, address, width| {
+        let target = stable(address);
+        let last = block
+            .instructions
+            .iter()
+            .rev()
+            .find(|inst| inst.state_writes().touches(&target))?;
+        match last {
+            SIRInstruction::Store(to, SIROffset::Static(0), bits, reg, ..)
+                if *to == target && *bits == width =>
+            {
+                constants.get(reg).copied()
+            }
+            _ => None,
+        }
+    };
+    unit.blocks
+        .values()
+        .filter(|b| matches!(b.terminator, SIRTerminator::Return))
+        .map(|b| {
+            (
+                word(b, status, celox_design::PROCESS_STATUS_WIDTH),
+                word(b, delay, celox_design::PROCESS_DELAY_WIDTH),
+            )
+        })
+        .collect()
+}
+
+pub(super) fn is_delay_code(code: u64) -> bool {
+    code == u64::from(ProcessStatus::Delay.code())
+        || code == u64::from(ProcessStatus::InactiveDelay.code())
+}
+
+/// Given the frontend guarantee that steady-state delays are positive,
+/// a kernel that can only return a zero delay only delays at startup.
+pub(super) fn only_zero_delay_exits(
+    unit: &Unit,
+    status: AbsoluteAddr,
+    delay: AbsoluteAddr,
+) -> bool {
+    returned_words(unit, status, delay)
+        .into_iter()
+        .all(|(code, amount)| code.is_some_and(|c| !is_delay_code(c) || amount == Some(0)))
+}
+
 /// Whether every status `unit` stores into `status` is a constant among
 /// `allowed`.
 pub(super) fn statuses_only(unit: &Unit, status: AbsoluteAddr, allowed: &[ProcessStatus]) -> bool {
