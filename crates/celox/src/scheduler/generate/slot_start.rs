@@ -45,6 +45,16 @@ impl Plan {
             let bit = g.bit(waiting, ordinals[index]);
             timed = g.binary(g.ready_bits, timed, BinaryOp::Or, bit);
         }
+        if !cx.deferred.is_empty() && g.has_deferred_hint() {
+            // Host or reference execution may have left a deferred rearm.
+            let pending = g.constant(1, SCHEDULER_FLAG_WIDTH);
+            g.store_at(
+                slots.defer_limit_settle,
+                DEFERRED_ACTIVE_BIT,
+                SCHEDULER_FLAG_WIDTH,
+                pending,
+            );
+        }
         g.store(slots.timed, g.ready_bits, timed);
         g.b.seal_block(SIRTerminator::Jump(header, Vec::new()));
 
@@ -215,6 +225,9 @@ impl Plan {
         } = cx;
         // The kernels due now are ready.
         g.b.switch_to_block(run);
+        if guards.is_some() {
+            ordered::Guards::begin_slot(g, time);
+        }
         if !self.service_processes.is_empty() {
             if guards.is_some() {
                 ordered::Guards::process_phase(g);

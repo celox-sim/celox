@@ -151,6 +151,16 @@ impl Plan {
             let ready = g.load(slots.ready, g.ready_bits);
             let zero = g.constant(0, g.ready_bits);
             let idle = g.binary(1, ready, BinaryOp::Eq, zero);
+            let idle = if g.has_deferred_hint() {
+                let pending = g.load_at(
+                    slots.defer_limit_settle,
+                    DEFERRED_ACTIVE_BIT,
+                    SCHEDULER_FLAG_WIDTH,
+                );
+                g.binary(1, idle, BinaryOp::And, pending)
+            } else {
+                idle
+            };
             let promote = g.b.new_block();
             let promoted = g.b.new_block();
             g.b.seal_block(SIRTerminator::Branch {
@@ -159,6 +169,15 @@ impl Plan {
                 false_block: (promoted, Vec::new()),
             });
             g.b.switch_to_block(promote);
+            if g.has_deferred_hint() {
+                let clear = g.constant(0, SCHEDULER_FLAG_WIDTH);
+                g.store_at(
+                    slots.defer_limit_settle,
+                    DEFERRED_ACTIVE_BIT,
+                    SCHEDULER_FLAG_WIDTH,
+                    clear,
+                );
+            }
             let ready = g.status_ready(deferred, ordinals, schema, ProcessStatus::DeferActive);
             g.store(slots.ready, g.ready_bits, ready);
             g.b.seal_block(SIRTerminator::Jump(promoted, Vec::new()));

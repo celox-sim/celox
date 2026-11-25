@@ -211,6 +211,11 @@ impl Generator<'_> {
         self.binary(1, flag, BinaryOp::Ne, zero)
     }
 
+    pub(super) fn has_deferred_hint(&self) -> bool {
+        self.program.layout().widths[&self.slots.defer_limit_settle]
+            >= DEFERRED_ACTIVE_BIT + SCHEDULER_FLAG_WIDTH
+    }
+
     /// Older laid-out designs have just the low timed plane.
     pub(super) fn has_inactive_mask(&self) -> bool {
         self.program.layout().widths[&self.slots.timed] >= 2 * self.ready_bits

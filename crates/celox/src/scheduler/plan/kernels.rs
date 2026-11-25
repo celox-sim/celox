@@ -375,6 +375,9 @@ impl PlanBuilder<'_> {
                         }).collect::<Vec<_>>(), "unsupported native wait statuses");
                     return Err("the process suspends other than for an edge or a delay");
                 }
+                let delays = delays
+                    && !(slots.const_delays
+                        && only_zero_delay_exits(unit, slots.status, slots.delay));
                 let writes = &kernel_stores[index];
                 if !written(unit).is_empty() && !ordered_available {
                     return Err("the process drives an event signal");

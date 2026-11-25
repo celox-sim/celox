@@ -168,6 +168,8 @@ const SITE_BITS: usize = 8;
 // Bytes in the private scheduler control word, after the assertion phase.
 const GATES_JUDGED_BIT: usize = 24;
 const GATE_SOURCE_EDGED_BIT: usize = 32;
+/// A kernel may need promotion into the next Active batch.
+const DEFERRED_ACTIVE_BIT: usize = 40;
 
 const ACTIVE_COMMIT: &str = "the process drives or waits for a clock whose domain commits blocking results in the active region";
 
