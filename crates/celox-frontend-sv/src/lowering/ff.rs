@@ -67,6 +67,7 @@ use assign::*;
 pub(super) use edge_process::*;
 use events::*;
 use inline_calls::*;
+pub(super) use monitors::vacuous_two_state_monitor;
 use monitors::*;
 use nba_stage::*;
 pub(super) use rewrite::*;

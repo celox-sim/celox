@@ -125,6 +125,36 @@ pub(super) fn delayed_publication_process(
     }
 }
 
+fn waits_after_startup(body: &[sv::ir::Stmt], subroutines: &[sv::ir::Subroutine]) -> bool {
+    use sv::ir::{Expr, LoopKind, Stmt};
+    let [
+        Stmt::Delay {
+            amount: Expr::Literal(zero),
+            ..
+        },
+        Stmt::Loop {
+            kind: LoopKind::Forever,
+            init,
+            condition: None,
+            step,
+            body,
+        },
+    ] = body
+    else {
+        return false;
+    };
+    let Some((Stmt::WaitEvent(_) | Stmt::WaitImplicit { .. }, statements)) = body.split_last()
+    else {
+        return false;
+    };
+    zero == "0"
+        && init.is_empty()
+        && step.is_empty()
+        && statements
+            .iter()
+            .all(|stmt| !stmt_may_suspend(subroutines, stmt))
+}
+
 fn process_origin(process: &sv::ir::InitialProcess) -> celox_design::ProcessOrigin {
     let construct = match process.site() {
         Some(site) => site.construct,
@@ -211,6 +241,11 @@ pub(super) fn lower_initial_processes(
             if condition == 0 {
                 continue;
             }
+        }
+        // Each live reader advances its own sampled history. A monitor that
+        // cannot fire needs neither a kernel nor a slot in the ready mask.
+        if !four_state && ff::vacuous_two_state_monitor(process.body()) {
+            continue;
         }
         let random_seed = random_seeds
             .get(&(1, index))
@@ -395,10 +430,9 @@ pub(super) fn lower_initial_processes(
                 None => process.body(),
             };
             let startup_inactive = !four_state
-                && process.level_sensitive().is_some_and(|(_, body)| {
-                    body.iter()
-                        .all(|stmt| !stmt_may_suspend(module.subroutines(), stmt))
-                });
+                && process.repeats()
+                && !module.is_program()
+                && waits_after_startup(body, module.subroutines());
             let mut kernel = ff::Ff::new(&mut pm, random_seed).lower_initial_kernel(
                 body,
                 slots,
