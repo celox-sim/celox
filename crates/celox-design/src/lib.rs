@@ -899,6 +899,12 @@ pub enum ProcessOp {
     /// `m.try_peek(message)`: like `try_get` without removing the message
     /// (15.4.8).
     MailboxTryPeek,
+    /// The calling process's handle for a compiler-owned variable, as a
+    /// `disable` of a named block records in one: it may control the
+    /// process (kill it) but never reaches user code, and the variable
+    /// releases it when the block ends, so its activation is reused
+    /// once it finishes.
+    SelfHandleInternal,
 }
 impl ProcessOp {
     /// Whether it is an operation on a mailbox.
@@ -945,6 +951,7 @@ impl ProcessOp {
             24 => Self::MailboxTryGet,
             25 => Self::MailboxPeek,
             26 => Self::MailboxTryPeek,
+            27 => Self::SelfHandleInternal,
             _ => return None,
         })
     }

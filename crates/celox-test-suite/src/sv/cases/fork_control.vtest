@@ -773,3 +773,87 @@ program Consumer(output int checks, ended_state);
 endprogram"#)
  (top Top) (run_until 9)
  (assert_eq late 0) (assert_eq checks 3) (assert_eq ended_state 0))
+
+; IEEE 1800-2023 9.6.2: a `disable` from another process ends the named
+; block it names; the process of the block continues after it, and an
+; `always` procedure starts again.
+(case disable_ends_named_blocks_of_other_processes
+  (source "external_disable.sv" #"
+module Top(output int count, output int resumed, output int hits);
+  initial begin
+    begin : work
+      forever begin
+        #2 count++;
+        // A loop of the block's own may end early.
+        for (int k = 0; k < 4; k++) if (k == 1) break;
+      end
+    end
+    resumed = count + 100;
+  end
+  initial #5 disable work;
+  always begin : again
+    #4 hits++;
+  end
+  initial #2 disable again;
+endmodule
+"#)
+  (top Top)
+  (run_until 9)
+  (assert_eq count 2) (assert_eq resumed 102) (assert_eq hits 1))
+
+; A `disable` in an unselected generate branch elaborates to nothing, so
+; the block it names runs in its own process as if it were not there.
+(case disable_in_unselected_generate_branch_changes_nothing
+  (source "inactive_disable.sv" #"
+module Top(output int seen, output int x);
+  initial begin
+    x = 0;
+    fork begin seen = x; end join_none
+    begin : work x = 1; end
+    wait fork;
+  end
+  if (0) begin initial disable work; end
+endmodule
+"#)
+  (top Top)
+  (run_until 2)
+  (assert_eq seen 1) (assert_eq x 1))
+
+; Naming a fork branch that already ran to its end ends nothing, whoever
+; now runs in the activation it used.
+(case disable_of_completed_fork_branch_names_nothing
+  (source "completed_branch.sv" #"
+module Top(output int late, output int joined);
+  initial begin
+    fork
+      begin : a #1; end
+      begin #2; fork begin #10; late = 1; end join_none #1; disable a; end
+    join
+    joined = 1;
+  end
+endmodule
+"#)
+  (top Top)
+  (run_until 15)
+  (assert_eq late 1) (assert_eq joined 1))
+
+; Killing a block cancels the blocks inside it; naming one of those
+; afterwards ends nothing, whoever now runs in its place.
+(case disable_after_outer_block_killed_names_nothing
+  (source "nested_disable.sv" #"
+module Top(output int late, output int resumed);
+  initial begin
+    begin : outer
+      begin : inner #10 late = 1; end
+      late = 2;
+    end
+    resumed = 1;
+  end
+  initial begin #3 fork begin #5 late = 100; end join_none end
+  initial #2 disable outer;
+  initial #4 disable inner;
+endmodule
+"#)
+  (top Top)
+  (run_until 12)
+  (assert_eq late 100) (assert_eq resumed 1))

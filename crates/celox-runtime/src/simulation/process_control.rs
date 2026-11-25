@@ -177,7 +177,7 @@ impl<B: SimBackend> SimulationState<B> {
             return self.mailbox_request(executor, current, op, request);
         }
         let count = match op {
-            ProcessOp::SelfHandle | ProcessOp::Observe => 0,
+            ProcessOp::SelfHandle | ProcessOp::SelfHandleInternal | ProcessOp::Observe => 0,
             ProcessOp::Srandom | ProcessOp::SetRandstate => 2,
             _ => 1,
         };
@@ -191,7 +191,7 @@ impl<B: SimBackend> SimulationState<B> {
             return Ok(true);
         }
         let final_identity = self.finalizing.and_then(|_| self.final_process_identity());
-        let target = if op == ProcessOp::SelfHandle {
+        let target = if matches!(op, ProcessOp::SelfHandle | ProcessOp::SelfHandleInternal) {
             final_identity.unwrap_or(current)
         } else {
             let handle: u32 = executor.backend().get_as(request.args[0].id);
@@ -215,8 +215,11 @@ impl<B: SimBackend> SimulationState<B> {
         }
         let mut value = 0u32;
         match op {
-            ProcessOp::SelfHandle => {
+            ProcessOp::SelfHandle | ProcessOp::SelfHandleInternal => {
                 value = self.process_handle(executor.backend_mut().heap_mut(), target);
+                if op == ProcessOp::SelfHandleInternal {
+                    self.process_state.activations[target].control.internal = true;
+                }
             }
             ProcessOp::Status => {
                 let activation = &self.process_state.activations[target];

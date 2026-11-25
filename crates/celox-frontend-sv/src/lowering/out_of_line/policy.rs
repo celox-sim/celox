@@ -773,6 +773,7 @@ impl ProcModule<'_> {
                             // process, and some park it.
                             SystemFunction::Process(
                                 celox_design::ProcessOp::SelfHandle
+                                | celox_design::ProcessOp::SelfHandleInternal
                                 | celox_design::ProcessOp::Srandom
                                 | celox_design::ProcessOp::GetRandstate
                                 | celox_design::ProcessOp::SetRandstate

@@ -26,6 +26,7 @@ impl ScopeElaboration<'_> {
             static_initializers: Vec::new(),
             constant_evaluation: false,
             assertion_callees: Vec::new(),
+            disables: Default::default(),
         };
         (
             self.subroutines,
@@ -97,6 +98,109 @@ impl ScopeElaboration<'_> {
             )?);
             (subroutines, comb_processes, ff_processes, initial_processes)
         };
+        // The blocks a `disable` ends from outside them keep their process
+        // in variables of the scope (IEEE 1800-2023 9.6.2); a `disable` of
+        // any other name outside its block stays unsupported.
+        let mut disables = std::mem::take(&mut body_state.disables);
+        // A `disable` in an unselected generate branch elaborates to
+        // nothing: take the branch off a block only it names.
+        procedural::external_disables::unwrap_without_elaborated_target(
+            &mut disables,
+            self.comb_processes
+                .iter_mut()
+                .map(|process| &mut process.body)
+                .chain(
+                    self.ff_processes
+                        .iter_mut()
+                        .map(|process| &mut process.body),
+                )
+                .chain(
+                    self.initial_processes
+                        .iter_mut()
+                        .map(|process| &mut process.body),
+                ),
+        );
+        // A subroutine a branch calls may need the process that runs the
+        // block, which only the lowered subroutines show (9.6.1, 9.6.3).
+        let (needs_their_process, spawns_detached, randomizes) =
+            procedural::external_disables::subroutine_process_effects(
+                self.subroutines.iter().chain(
+                    self.imported
+                        .subroutines
+                        .iter()
+                        .map(|subroutine| &**subroutine),
+                ),
+            );
+        if disables
+            .targets
+            .iter()
+            .any(|target| disables.ambiguous.contains(target) || !disables.blocks.contains(target))
+            || procedural::external_disables::calls_subroutine_that_needs_its_process(
+                &disables,
+                &needs_their_process,
+            )
+            || procedural::external_disables::pending_children_may_precede(
+                &disables,
+                self.comb_processes
+                    .iter()
+                    .map(|process| process.body.as_slice())
+                    .chain(
+                        self.ff_processes
+                            .iter()
+                            .map(|process| process.body.as_slice()),
+                    )
+                    .chain(
+                        self.initial_processes
+                            .iter()
+                            .map(|process| process.body.as_slice()),
+                    ),
+                &spawns_detached,
+            )
+            || procedural::external_disables::own_process_may_be_named(
+                &disables,
+                self.comb_processes
+                    .iter()
+                    .map(|process| process.body.as_slice())
+                    .chain(
+                        self.ff_processes
+                            .iter()
+                            .map(|process| process.body.as_slice()),
+                    )
+                    .chain(
+                        self.initial_processes
+                            .iter()
+                            .map(|process| process.body.as_slice()),
+                    ),
+                &needs_their_process,
+            )
+            || procedural::external_disables::random_state_may_change(
+                &disables,
+                self.comb_processes
+                    .iter()
+                    .map(|process| process.body.as_slice())
+                    .chain(
+                        self.ff_processes
+                            .iter()
+                            .map(|process| process.body.as_slice()),
+                    )
+                    .chain(
+                        self.initial_processes
+                            .iter()
+                            .map(|process| process.body.as_slice()),
+                    ),
+                &randomizes,
+            )
+        {
+            return Err(unsupported("disable statement"));
+        }
+        let mut blocks: Vec<_> = disables.blocks.into_iter().collect();
+        blocks.sort_unstable();
+        for label in blocks {
+            self.signals.extend(procedural::external_disables::signals(
+                &label,
+                &mut session.types,
+            ));
+        }
         net_delays::lower(
             syntax_tree,
             &session.types,

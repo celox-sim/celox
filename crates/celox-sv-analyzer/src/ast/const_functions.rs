@@ -564,6 +564,7 @@ fn collect_module_constant_functions(
         static_initializers: Vec::new(),
         constant_evaluation: true,
         assertion_callees: Vec::new(),
+        disables: Default::default(),
     };
     let mut rejected = HashMap::default();
     let subroutines = match procedural::subroutines_with_symbolic_parameters(
