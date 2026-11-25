@@ -539,7 +539,6 @@ pub struct Type {
 /// What a [`Type`] is made of.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TypeShape {
-    container: Option<Arc<ContainerType>>,
     kind: TypeKind,
     is_signed: bool,
     packed_ranges: Vec<PackedRange>,
@@ -567,6 +566,7 @@ impl PartialEq for Type {
             && self.element.identity() == other.element.identity()
             && self.enumeration.declaration() == other.enumeration.declaration()
             && self.structure.identity() == other.structure.identity()
+            && self.kept_container.declaration() == other.kept_container.declaration()
     }
 }
 
@@ -578,6 +578,7 @@ impl std::hash::Hash for Type {
         self.element.identity().hash(state);
         self.enumeration.declaration().hash(state);
         self.structure.identity().hash(state);
+        self.kept_container.declaration().hash(state);
     }
 }
 
@@ -664,8 +665,8 @@ impl Type {
         // The type's own container, whose bounds its scope names, or else
         // the one registered for the semantic type or that of its elements.
         match self
-            .container
-            .clone()
+            .kept_container
+            .binding()
             .or_else(|| table.container(id).cloned())
         {
             Some(container) => self.keep_container(Some(container)),

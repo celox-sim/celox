@@ -282,7 +282,6 @@ impl BoundPattern {
                 .map_err(|_| unsupported("assignment pattern target size"))?;
             let mut element = shape.derived(VariableShape {
                 declared: type_names::Declared::default(),
-                container: None,
                 real: false,
                 string: false,
                 unpacked: rest.to_vec(),
@@ -313,7 +312,6 @@ impl BoundPattern {
             shapes = vec![
                 shape.derived(VariableShape {
                     declared: type_names::Declared::default(),
-                    container: None,
                     real: false,
                     string: false,
                     packed: rest.to_vec(),
@@ -373,7 +371,6 @@ impl BoundPattern {
             shapes = vec![
                 VariableDimensions::new(VariableShape {
                     declared: type_names::Declared::default(),
-                    container: None,
                     real: false,
                     string: false,
                     packed: Vec::new(),

@@ -227,7 +227,6 @@ fn select<'a>(
         let (left, right, count) = dimension_bounds(functions, &dim.left, &dim.right, dims)?;
         let sub = Shape::Owned(Rc::new(VariableDimensions::new(VariableShape {
             declared: type_names::Declared::default(),
-            container: None,
             chandle: false,
             randomizable: true,
             real: false,
@@ -367,7 +366,6 @@ fn select<'a>(
         .ok_or_else(|| unsupported("assignment pattern target width"))?;
     let bit = Shape::Owned(Rc::new(VariableDimensions::new(VariableShape {
         declared: type_names::Declared::default(),
-        container: None,
         chandle: false,
         randomizable: true,
         real: false,

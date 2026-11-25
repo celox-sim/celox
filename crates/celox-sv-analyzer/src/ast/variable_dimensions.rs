@@ -68,7 +68,6 @@ impl VariableDimensions {
     /// identity and the class of a handle element.
     pub(super) fn unpacked_element(&self, table: &semantic_types::TyTable) -> VariableDimensions {
         let mut element = self.derived(VariableShape {
-            container: None,
             real: false,
             unpacked: self.shape.unpacked[1..].to_vec(),
             ..self.clone_shape()
@@ -87,7 +86,6 @@ impl VariableDimensions {
     /// varying dimensions `unpacked` (7.4.6), which has its element type.
     pub(super) fn subarray(&self, unpacked: Vec<UnpackedDimension>) -> VariableDimensions {
         let mut subarray = self.derived(VariableShape {
-            container: None,
             unpacked,
             ..self.clone_shape()
         });
@@ -166,9 +164,8 @@ impl VariableDimensions {
         // The shape's own container, whose bounds its scope names, or else
         // the one registered for the semantic type or that of its elements.
         match self
-            .shape
-            .container
-            .clone()
+            .kept_container
+            .binding()
             .or_else(|| table.container(id).cloned())
         {
             Some(container) => self.keep_container(Some(container)),
@@ -198,13 +195,7 @@ impl VariableDimensions {
     /// [`Self::container_declaration`], checked against the field in debug
     /// builds.
     pub(in crate::ast) fn container(&self) -> Option<&Arc<ContainerType>> {
-        let kept = self.kept_container.declaration();
-        debug_assert_eq!(
-            kept.map(|container| &**container),
-            self.shape.container.as_deref(),
-            "the container a shape keeps is not that of its field: {self:?}"
-        );
-        kept
+        self.kept_container.declaration()
     }
 
     /// The declaration of the unpacked structure type the variable is, or
@@ -241,7 +232,7 @@ impl VariableDimensions {
     /// This shape with the bits of its type but no enumeration: the place
     /// a member of a union is, which takes any value of them (6.19.3).
     pub(super) fn without_enum(&self) -> VariableDimensions {
-        self.derived(VariableShape {
+        self.derived_keeping_container(VariableShape {
             declared: type_names::Declared::default(),
             ..self.clone_shape()
         })
@@ -423,14 +414,9 @@ impl VariableDimensions {
             .into_iter()
             .map(|member| member.with_type(|ty| renamer.r#type(ty)))
             .collect();
-        self.shape.container = self
-            .shape
-            .container
-            .map(|container| renamer.container(&container));
         // The shape keeps its container, renamed.
-        if self.kept_container.declaration().is_some() {
-            let container = self.shape.container.clone();
-            self.keep_container(container);
+        if let Some(container) = self.container().cloned() {
+            self.keep_container(Some(renamer.container(&container)));
         }
         self
     }
@@ -450,6 +436,7 @@ impl PartialEq for VariableDimensions {
                     .and_then(|element| element.identity())
             && self.enumeration.declaration() == other.enumeration.declaration()
             && self.structure.identity() == other.structure.identity()
+            && self.kept_container.declaration() == other.kept_container.declaration()
     }
 }
 impl Eq for VariableDimensions {}
@@ -472,7 +459,6 @@ impl DerefMut for VariableDimensions {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct VariableShape {
-    pub(super) container: Option<Arc<ContainerType>>,
     /// Whether a scope randomize may write the variable: no container, no
     /// chandle, no net or constant (18.12). Whether its type is an
     /// enumeration whose members are not resolved its semantic type tells
@@ -501,7 +487,6 @@ impl VariableShape {
         // An enumeration is named by its declaration, which a shape of a
         // class specialization shares with the other specializations.
         type_names::Declared::of_shape(self).is_none_or(|ty| ty.enumeration().is_none())
-            && self.container.is_none()
             // The width of a dimension is computed from its bounds.
             && self
                 .packed

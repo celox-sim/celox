@@ -204,7 +204,6 @@ fn member_dimensions(name: &str, r#type: &Type, dimensions: &PackedDimensions) -
         name.to_string(),
         VariableDimensions::new(VariableShape {
             declared: type_names::Declared::default(),
-            container: None,
             chandle: false,
             randomizable: true,
             real: false,

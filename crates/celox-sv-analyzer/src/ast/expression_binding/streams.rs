@@ -251,7 +251,7 @@ pub(in crate::ast) fn selection_receiver(
             .and_then(|shape| {
                 patterns::shape_width(
                     functions,
-                    &shape.derived(VariableShape {
+                    &shape.derived_keeping_container(VariableShape {
                         unpacked: Vec::new(),
                         ..shape.clone_shape()
                     }),

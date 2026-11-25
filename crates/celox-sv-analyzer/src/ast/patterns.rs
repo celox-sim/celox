@@ -80,7 +80,6 @@ fn pattern_value(
             dimension_bounds(&tree.functions, &dimension.left, &dimension.right, dims)?;
         let element = shape.derived(VariableShape {
             declared: type_names::Declared::default(),
-            container: None,
             real: false,
             string: false,
             unpacked: rest.to_vec(),
@@ -173,7 +172,6 @@ pub(super) fn assignment_value(
                 &dim.width,
                 shape.derived(VariableShape {
                     declared: type_names::Declared::default(),
-                    container: None,
                     unpacked: rest.to_vec(),
                     ..shape.clone_shape()
                 }),
@@ -185,7 +183,6 @@ pub(super) fn assignment_value(
                 &dim.width,
                 shape.derived(VariableShape {
                     declared: type_names::Declared::default(),
-                    container: None,
                     packed: rest.to_vec(),
                     signed: shape.signed_element_depth == Some(1),
                     signed_element_depth: shape
