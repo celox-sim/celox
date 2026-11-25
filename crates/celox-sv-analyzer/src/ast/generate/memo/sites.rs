@@ -186,6 +186,7 @@ impl CallSites for VariableDimensions {
             declared: _,
             randomizable: _,
             real: _,
+            shortreal: _,
             string: _,
             packed,
             unpacked,

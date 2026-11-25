@@ -69,6 +69,7 @@ impl VariableDimensions {
     pub(super) fn unpacked_element(&self, table: &semantic_types::TyTable) -> VariableDimensions {
         let mut element = self.derived(VariableShape {
             real: false,
+            shortreal: false,
             unpacked: self.shape.unpacked[1..].to_vec(),
             ..self.clone_shape()
         });
@@ -465,6 +466,8 @@ pub(super) struct VariableShape {
     /// (see [`VariableDimensions::enumeration_in`]).
     pub(super) randomizable: bool,
     pub(super) real: bool,
+    /// A `shortreal` (6.12): `real` holds too.
+    pub(super) shortreal: bool,
     /// A `string`: each element is a heap handle, not packed bits.
     pub(super) string: bool,
     pub(super) packed: Vec<PackedDimension>,

@@ -133,10 +133,10 @@ fn convert(
         unpacked_struct: ty.structure.declaration(),
         kind: ty.kind,
         members: &ty.members,
-        declaration: ty.declaration_name(),
+        declaration: ty.spelling.declaration(),
         typename: ty.spelling.name_of(),
         aggregate: ty.spelling.aggregate_of(),
-        scope: ty.declaration_scope(),
+        scope: ty.spelling.scope(),
         signed: ty.is_signed,
         signed_element_depth: ty.signed_element_depth,
         packed: ty
@@ -165,11 +165,10 @@ pub(in crate::ast) fn of_shape(
 ) -> Option<TyId> {
     let kind = if shape.string {
         TypeKind::String
+    } else if shape.shortreal {
+        TypeKind::Shortreal
     } else if shape.real {
-        match type_names::declared_type(shape).map(Type::kind) {
-            Some(TypeKind::Shortreal) => TypeKind::Shortreal,
-            _ => TypeKind::Real,
-        }
+        TypeKind::Real
     } else if shape.is_2state {
         TypeKind::Bit
     } else {
@@ -186,10 +185,10 @@ pub(in crate::ast) fn of_shape(
         unpacked_struct: shape.structure_declaration(),
         kind,
         members: &shape.members,
-        declaration: declared.and_then(Type::declaration_name),
+        declaration: declared.and_then(|ty| ty.spelling.declaration()),
         typename: declared.and_then(|ty| ty.spelling.name_of()),
         aggregate: declared.and_then(|ty| ty.spelling.aggregate_of()),
-        scope: declared.and_then(Type::declaration_scope),
+        scope: declared.and_then(|ty| ty.spelling.scope()),
         signed: shape.signed,
         signed_element_depth: shape.signed_element_depth,
         packed: shape
@@ -435,9 +434,9 @@ impl Parts<'_> {
             self.scope,
             self.aggregate,
         );
-        let decl = table.declare(self.declaration.unwrap_or(owner), self.scope);
-        let typename = self.declaration.and(self.typename);
-        table.record_spelling(decl, typename, self.aggregate);
+        let decl = table.declare(naming.declaration().unwrap_or(owner), naming.scope());
+        let typename = naming.declaration().and(naming.name_of());
+        table.record_spelling(decl, typename, keyword);
         Decl::Aggregate { decl, members }
     }
 }
