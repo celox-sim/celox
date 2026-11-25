@@ -134,6 +134,7 @@ pub(super) fn process_effect(op: ProcessOp) -> ProcessEffect {
         | ProcessOp::MailboxTryGet => ProcessEffect::Schedules,
         // `Observe` records what a level wait reads, for its own process.
         ProcessOp::SelfHandle
+        | ProcessOp::SelfHandleInternal
         | ProcessOp::Status
         | ProcessOp::Srandom
         | ProcessOp::GetRandstate

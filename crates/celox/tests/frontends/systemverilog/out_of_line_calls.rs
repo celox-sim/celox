@@ -206,6 +206,41 @@ endmodule
 }
 
 #[test]
+fn named_fork_branch_disable_in_recursive_tasks() {
+    // A named fork branch a sibling `disable` ends records its process
+    // with a compiler-owned handle (IEEE 1800-2023 9.6.2): that request
+    // is a suspending host request like `process::self()`, so a
+    // recursive task containing the fork still goes out of line.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int q, output int late);
+    task automatic down(input int n);
+        fork
+            begin : hold #10; late = 1; end
+            begin #1; disable hold; end
+        join
+        if (n > 0) down(n - 1);
+        else q = 7;
+    endtask
+    initial down(3);
+endmodule
+"#;
+    assert!(function_units(source, true) >= 1, "function units");
+    // Inlining cannot expand recursion: without the switch the policy
+    // takes the recursive task out of line, with the same results.
+    assert_eq!(
+        simulate(source, false, false, "interpreter", 8, &["q", "late"]),
+        simulate(source, false, true, "interpreter", 8, &["q", "late"])
+    );
+    for backend in backends() {
+        assert_eq!(
+            simulate(source, false, true, backend, 8, &["q", "late"]),
+            Ok(vec![value(7), value(0)]),
+            "{backend}"
+        );
+    }
+}
+
+#[test]
 fn wide_and_four_state_arguments_and_results() {
     let source = r#"`timescale 1ns/1ns
 module Top(output logic [199:0] w, output logic [7:0] x, output logic [7:0] y);

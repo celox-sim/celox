@@ -21,6 +21,12 @@ pub struct ProcessControl {
     /// The heap object of the activation's process handle.
     #[serde(default)]
     pub handle: Option<u32>,
+    /// A compiler-owned handle records this process (see
+    /// `ProcessOp::SelfHandleInternal`): it may be controlled through
+    /// that handle, but a killed one's activation stays out of reuse,
+    /// since its armed variable may still name it.
+    #[serde(default)]
+    pub internal: bool,
     pub random: Option<u64>,
     pub killed: bool,
     pub suspended: Option<SuspendedProcess>,
@@ -555,7 +561,16 @@ impl<B: SimBackend> SimulationState<B> {
         self.process_state
             .activations
             .get(id)
-            .is_some_and(|activation| !activation.live && !activation.control.exposed)
+            .is_some_and(|activation| {
+                !activation.live
+                    && !activation.control.exposed
+                    // A killed compiler-owned activation may still be
+                    // named by its armed variable, which its trailing
+                    // disarm never ran to clear: reusing its slot could
+                    // let that stale handle kill an unrelated process.
+                    // One that finished normally disarmed itself first.
+                    && !(activation.control.internal && activation.control.killed)
+            })
             && self.activation_children.get(id) == Some(&0)
     }
 

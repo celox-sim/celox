@@ -18,6 +18,7 @@ impl Ff<'_, '_> {
             && matches!(
                 op,
                 ProcessOp::SelfHandle
+                    | ProcessOp::SelfHandleInternal
                     | ProcessOp::Srandom
                     | ProcessOp::GetRandstate
                     | ProcessOp::SetRandstate
