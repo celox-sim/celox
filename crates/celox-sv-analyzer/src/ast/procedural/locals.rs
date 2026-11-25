@@ -202,6 +202,15 @@ impl BodyBuilder<'_, '_, '_> {
                         signal.name().to_string(),
                         dimensions_from_type(signal.r#type()),
                     );
+                    if let Some(shape) = scoped.get(signal.name()) {
+                        array_compatibility::note_packed_initializer(
+                            &self.tree,
+                            self.session,
+                            root,
+                            shape,
+                            &scoped,
+                        );
+                    }
                     expression_binding::check_chandle_assignment(
                         signal.r#type().is_chandle() && signal.r#type().unpacked_ranges.is_empty(),
                         root,

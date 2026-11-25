@@ -125,6 +125,7 @@ pub(super) fn lower_instances(
                         actual: connection.actual().to_string(),
                         actual_expr: connection.actual_expr().cloned(),
                         bound_pattern: connection.bound_pattern().cloned(),
+                        array_operand: connection.array_assignment_operand().cloned(),
                     })
                     .collect(),
                 array_element,
@@ -390,43 +391,23 @@ pub(super) fn array_element_connections(
                     connection.formal
                 )));
             };
-            let unpacked = parent_signal_names
+            let variable = parent_signal_names
                 .get(name)
-                .and_then(|id| parent_variables.get(id))
-                .is_some_and(|variable| variable.array_dims == [count]);
-            if unpacked && actual_width == port_width * count {
-                // An unpacked array of `count` elements: element `i` of the
-                // instance array takes array element `i`.
-                let lsb = position * port_width;
-                return Ok(LoweredSvPortConnection {
-                    formal: connection.formal.clone(),
-                    actual: connection.actual.clone(),
-                    bound_pattern: None,
-                    actual_expr: Some(sv::ir::Expr::Select {
-                        expr: Box::new(actual_expr.clone()),
-                        msb: sv::ir::ConstExpr::Literal((lsb + port_width - 1).to_string()),
-                        lsb: sv::ir::ConstExpr::Literal(lsb.to_string()),
-                        signed: false,
-                    }),
-                });
-            }
-            let zero_based = parent_signal_names
-                .get(name)
-                .and_then(|id| parent_variables.get(id))
-                .is_some_and(|variable| {
-                    variable.array_dims.is_empty()
-                        && matches!(
-                            variable.packed_ranges.as_slice(),
-                            [] | [(_, 0)]
-                        )
-                });
-            if !zero_based {
+                .and_then(|id| parent_variables.get(id));
+            let lsb = if variable.is_some_and(|variable| variable.array_dims == [count]) {
+                // Each instance takes the corresponding element of the array.
+                position * port_width
+            } else if variable.is_some_and(|variable| {
+                variable.array_dims.is_empty()
+                    && matches!(variable.packed_ranges.as_slice(), [] | [(_, 0)])
+            }) {
+                (count - 1 - position) * port_width
+            } else {
                 return Err(unsupported(format!(
                     "`{}` is split between the elements only from a vector declared [N-1:0]",
                     connection.formal
                 )));
-            }
-            let lsb = (count - 1 - position) * port_width;
+            };
             let slice = sv::ir::Expr::Select {
                 expr: Box::new(actual_expr.clone()),
                 msb: sv::ir::ConstExpr::Literal((lsb + port_width - 1).to_string()),
@@ -438,9 +419,40 @@ pub(super) fn array_element_connections(
                 actual: connection.actual.clone(),
                 actual_expr: Some(slice),
                 bound_pattern: None,
+                array_operand: variable.and_then(array_assignment_value).map(|_| {
+                    sv::ir::ArrayAssignmentOperand {
+                        value: sv::ir::ArrayAssignmentValue::Packed(port_width as u128),
+                        site: connection.array_operand.as_ref().and_then(|actual| actual.site.clone()),
+                    }
+                }),
             })
         })
         .collect()
+}
+
+/// The integral shape used by packed-to-unpacked assignment diagnostics.
+pub(super) fn array_assignment_value(
+    variable: &SvVariable,
+) -> Option<sv::ir::ArrayAssignmentValue> {
+    use sv::ir::ArrayAssignmentValue;
+    if variable.value_kind != celox_design::ValueKind::Bits
+        || variable.float.is_some()
+        || variable.is_unpacked_struct
+    {
+        return None;
+    }
+    let bits = variable.width as u128;
+    Some(if variable.array_dims.is_empty() {
+        ArrayAssignmentValue::Packed(bits)
+    } else {
+        ArrayAssignmentValue::FixedUnpacked {
+            bits,
+            packed_elements: match variable.array_dims.as_slice() {
+                [count] => Some(*count as u128),
+                _ => None,
+            },
+        }
+    })
 }
 
 /// Tagged unions cannot acquire an arbitrary tag through an integral port connection.
@@ -585,6 +597,7 @@ pub(super) fn expand_structure_connections<'a>(
                     actual: connection.actual.clone(),
                     actual_expr: Some(value),
                     bound_pattern: None,
+                    array_operand: None,
                 });
             }
             continue;
@@ -631,6 +644,7 @@ pub(super) fn expand_structure_connections<'a>(
                 actual: actual.clone(),
                 actual_expr: Some(sv::ir::Expr::Ident(actual)),
                 bound_pattern: None,
+                array_operand: None,
             });
         }
     }

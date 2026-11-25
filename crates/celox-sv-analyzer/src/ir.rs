@@ -1100,6 +1100,52 @@ pub struct PortConnection {
     actual: String,
     actual_expr: Option<Expr>,
     bound_pattern: Option<crate::ast::BoundPattern>,
+    array_operand: Option<ArrayAssignmentOperand>,
+}
+
+/// The type information needed to detect packed-to-unpacked compatibility
+/// extensions after the connected module's ports have been specialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArrayAssignmentValue {
+    Packed(u128),
+    PackedConcat {
+        bits: u128,
+        parts: u128,
+    },
+    UnbasedFill,
+    FixedUnpacked {
+        bits: u128,
+        packed_elements: Option<u128>,
+    },
+}
+
+impl ArrayAssignmentValue {
+    /// Whether this assignment relies on the whole-array packed copy or fill.
+    pub fn uses_packed_to_unpacked_extension(self, target: Self) -> bool {
+        let Self::FixedUnpacked {
+            bits,
+            packed_elements,
+        } = target
+        else {
+            return false;
+        };
+        match self {
+            Self::Packed(width) => width == bits,
+            // A concatenation of packed values can supply one packed
+            // element per operand in an unpacked array concatenation (10.10).
+            Self::PackedConcat { bits: width, parts } => {
+                width == bits && packed_elements != Some(parts)
+            }
+            Self::UnbasedFill => true,
+            Self::FixedUnpacked { .. } => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArrayAssignmentOperand {
+    pub value: ArrayAssignmentValue,
+    pub site: Option<SourceSpan>,
 }
 
 impl PortConnection {
@@ -1108,12 +1154,14 @@ impl PortConnection {
         actual: String,
         actual_expr: Option<Expr>,
         bound_pattern: Option<crate::ast::BoundPattern>,
+        array_operand: Option<ArrayAssignmentOperand>,
     ) -> Self {
         Self {
             formal,
             actual,
             actual_expr,
             bound_pattern,
+            array_operand,
         }
     }
 
@@ -1133,6 +1181,10 @@ impl PortConnection {
 
     pub fn actual_expr(&self) -> Option<&Expr> {
         self.actual_expr.as_ref()
+    }
+
+    pub fn array_assignment_operand(&self) -> Option<&ArrayAssignmentOperand> {
+        self.array_operand.as_ref()
     }
 }
 

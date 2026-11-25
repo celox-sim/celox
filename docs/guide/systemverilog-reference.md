@@ -350,21 +350,22 @@ Celox intentionally accepts the following non-standard constructs and compatibil
   default and are rejected in strict mode; see
   [`[diagnostics]`](./celox-toml.md#diagnostics) (alongside `inferred_latch`).
 
-**Accepted even in strict mode (intentional extensions):**
-
 - **Packed values and unbased fills assigned to fixed-size unpacked arrays
-  (7.6).** Celox accepts assigning a packed value of the exact whole-array
-  bit width (bit for bit) and filling every element with an unbased unsized
-  literal such as `'0`. Values of any other width, `real`, or `string` are
-  rejected.
-- **Procedural `force` on variable selects and unpacked array elements
-  (10.6.2).** Extends `force` beyond vector nets to constant bit/part-selects
-  or members of variables, and constant-indexed elements (or constant
-  selects/members) of fixed-size unpacked arrays of packed integrals
-  (emitting `forced_array`).
-- **`$psprintf` is accepted as `$sformatf`.** The vendor system function
-  `$psprintf` is accepted as `$sformatf` (21.3.3); diagnostics name it
-  `$sformatf`.
+  (7.6).** With `packed_to_unpacked_assignment` at `warn` (the default) or
+  `allow`, Celox copies an exact-width packed value bit for bit or fills every
+  element with an unbased unsized literal such as `'0`. Strict mode rejects
+  these assignments and equivalent module port connections (10.8) by
+  default. Use an explicit cast to the array type or an assignment pattern
+  such as `'{default: '0}`.
+- **Procedural `force` and `release` on variable selects and unpacked array
+  elements (10.6.2).** `nonstandard_force_target` warns by default and becomes
+  an error in strict mode for constant bit/part-selects or members of variables
+  and constant-indexed elements (or selections of those elements) of fixed-size
+  unpacked arrays of packed integrals. Forcing an array element can also emit
+  the `forced_array` diagnostic about the size of the force controls.
+- **Vendor alias `$psprintf` (21.3.3).** Celox interprets it as `$sformatf`
+  and emits `psprintf_alias` by default. Strict mode rejects the alias by
+  default.
 
 ## Implementation-defined and unspecified behavior {#semantics-worth-knowing}
 

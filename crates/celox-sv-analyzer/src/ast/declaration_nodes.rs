@@ -569,6 +569,7 @@ impl PortConnection {
             actual,
             actual_expr,
             bound_pattern: None,
+            array_operand: None,
         }
     }
 
@@ -576,6 +577,10 @@ impl PortConnection {
     /// port supplies its element types after parameter specialization.
     pub fn bound_pattern(&self) -> Option<&BoundPattern> {
         self.bound_pattern.as_ref()
+    }
+
+    pub(crate) fn array_assignment_operand(&self) -> Option<&crate::ir::ArrayAssignmentOperand> {
+        self.array_operand.as_ref()
     }
 
     pub(super) fn map_expressions(&mut self, mut map: impl FnMut(Expr) -> Expr) {

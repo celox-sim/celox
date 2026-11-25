@@ -68,15 +68,14 @@ pub(crate) fn elaborate_instances(
         let Some(child) = lowered_modules.get(&child_id) else {
             return Err(unsupported_sv_instance(instance.module_name.clone()));
         };
-        let mut authored_connections = expand_structure_connections(
+        let authored_connections = expand_structure_connections(
             &instance.port_connections,
             &lowered.source,
             &child.source,
             Some(&mut *design),
         )?
         .into_owned();
-        bind_port_patterns(&mut authored_connections, child, design)?;
-        let connections = match instance.array_element {
+        let mut connections = match instance.array_element {
             Some((position, count)) => {
                 module
                     .indexed_instance_names
@@ -99,6 +98,18 @@ pub(crate) fn elaborate_instances(
             }
             None => authored_connections,
         };
+        for connection in &connections {
+            note_packed_to_unpacked_port(
+                connection,
+                child,
+                &parent_variables,
+                &signal_names,
+                warnings,
+            );
+        }
+        // Patterns are bound in the context of a single formal and are
+        // shared by the instances of an array.
+        bind_port_patterns(&mut connections, child, design)?;
         check_tagged_port_connections(&lowered.source, &child.source, &connections)?;
         ensure_parent_output_signals(
             module,
@@ -1035,6 +1046,52 @@ fn check_unpacked_port_connection(
         error.to_string(),
         None,
     ))
+}
+
+/// Diagnose the same compatibility extension on port connections (10.8)
+/// once the formal's specialized type is known.
+fn note_packed_to_unpacked_port(
+    connection: &LoweredSvPortConnection,
+    child: &LoweredSvModule,
+    parent_variables: &HashMap<SourceVarId, SvVariable>,
+    parent_signal_names: &HashMap<String, SourceVarId>,
+    warnings: &mut Vec<crate::warning::PendingWarning>,
+) {
+    let Some(port) = child
+        .signal_names
+        .get(&connection.formal)
+        .map(|id| &child.variables[id])
+    else {
+        return;
+    };
+    let actual = connection
+        .array_operand
+        .as_ref()
+        .map(|actual| actual.value)
+        .or_else(|| {
+            let Some(sv::ir::Expr::Ident(actual)) = &connection.actual_expr else {
+                return None;
+            };
+            let id = parent_signal_names.get(actual)?;
+            array_assignment_value(&parent_variables[id])
+        });
+    let formal = array_assignment_value(port);
+    let (source, target) = match port.kind {
+        VariableKind::Input => (actual, formal),
+        VariableKind::Output => (formal, actual),
+        _ => return,
+    };
+    if let (Some(source), Some(target)) = (source, target)
+        && source.uses_packed_to_unpacked_extension(target)
+    {
+        warnings.push((
+            crate::FrontendWarningKind::PackedToUnpackedAssignment,
+            connection
+                .array_operand
+                .as_ref()
+                .and_then(|actual| actual.site.clone()),
+        ));
+    }
 }
 
 /// Whether `expr` reads a generic interconnect variable of the parent

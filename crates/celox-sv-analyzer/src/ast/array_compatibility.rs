@@ -337,13 +337,12 @@ fn check_assignment(
     dims: &PackedDimensions,
 ) -> Converted<()> {
     let native = tree.declarations();
+    let expr = native.expression(expression_binding::ungroup(id, native));
     if let celox_sv_syntax::ExprKind::Conditional {
         then_expression,
         else_expression,
         ..
-    } = &native
-        .expression(expression_binding::ungroup(id, native))
-        .kind
+    } = &expr.kind
     {
         check_assignment(tree, session, *then_expression, target, context, dims)?;
         return check_assignment(tree, session, *else_expression, target, context, dims);
@@ -390,6 +389,7 @@ fn check_assignment(
             });
         }
     }
+    note_packed_assignment(tree, session, expr, actual, target);
     if !(array && fixed) {
         return Ok(());
     }
@@ -398,6 +398,9 @@ fn check_assignment(
 
 /// The bits of fixed-size unpacked array type `id` of packed elements.
 fn fixed_array_bits(table: &semantic_types::TyTable, mut id: semantic_types::TyId) -> Option<u128> {
+    if !matches!(table.data(id), semantic_types::TyData::Array { .. }) {
+        return None;
+    }
     let mut count = 1u128;
     loop {
         match table.data(id) {
@@ -410,6 +413,105 @@ fn fixed_array_bits(table: &semantic_types::TyTable, mut id: semantic_types::TyI
             }
             semantic_types::TyData::Packed(packed) => return count.checked_mul(packed.bits()),
             _ => return None,
+        }
+    }
+}
+
+/// Describe a value that the packed-to-unpacked extension can copy.
+/// Context-typed patterns, streams,
+/// and string literals that can initialize byte arrays (5.9) have their own rules.
+pub(super) fn packed_value(
+    kind: &celox_sv_syntax::ExprKind,
+    actual: &semantic_types::TyData,
+) -> Option<crate::ir::ArrayAssignmentValue> {
+    use crate::ir::ArrayAssignmentValue;
+    use celox_sv_syntax::ExprKind;
+    let semantic_types::TyData::Packed(packed) = actual else {
+        return None;
+    };
+    match kind {
+        ExprKind::Concatenation(parts) => Some(ArrayAssignmentValue::PackedConcat {
+            bits: packed.bits(),
+            parts: parts.len() as u128,
+        }),
+        ExprKind::Pattern { .. } | ExprKind::Streaming { .. } => None,
+        ExprKind::Literal(text) if text.starts_with('"') => None,
+        ExprKind::Literal(text)
+            if casts::resize_unbased_fill_literal_for_cast(text, 1, false).is_some() =>
+        {
+            Some(ArrayAssignmentValue::UnbasedFill)
+        }
+        _ => Some(ArrayAssignmentValue::Packed(packed.bits())),
+    }
+}
+
+pub(super) fn fixed_unpacked_value(
+    table: &semantic_types::TyTable,
+    target: semantic_types::TyId,
+) -> Option<crate::ir::ArrayAssignmentValue> {
+    use semantic_types::{ArrayKind, TyData};
+    let TyData::Array {
+        kind: ArrayKind::Fixed(range),
+        element,
+    } = table.data(target)
+    else {
+        return None;
+    };
+    Some(crate::ir::ArrayAssignmentValue::FixedUnpacked {
+        bits: fixed_array_bits(table, target)?,
+        packed_elements: matches!(table.data(*element), TyData::Packed(_)).then(|| range.size()),
+    })
+}
+
+fn note_packed_assignment(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    expr: &celox_sv_syntax::Expr,
+    actual: semantic_types::TyId,
+    target: semantic_types::TyId,
+) {
+    let table = &session.types;
+    if let Some(target) = fixed_unpacked_value(table, target)
+        && packed_value(&expr.kind, table.data(actual))
+            .is_some_and(|value| value.uses_packed_to_unpacked_extension(target))
+    {
+        warnings::append(
+            &mut session.diagnostics,
+            [warnings::AnalyzerWarning::PackedToUnpackedAssignment {
+                site: procedural::source_span(expr.tokens, tree),
+            }],
+        );
+    }
+}
+
+/// Diagnose the extension in an initializer already checked by its binder.
+pub(super) fn note_packed_initializer(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    root: celox_sv_syntax::ExprId,
+    target: &VariableDimensions,
+    dims: &PackedDimensions,
+) {
+    if target.unpacked.is_empty() {
+        return;
+    }
+    let Some(target) = target.type_id(&mut session.types, &tree.functions, &dims.const_env) else {
+        return;
+    };
+    let native = tree.declarations();
+    let mut pending = vec![root];
+    while let Some(id) = pending.pop() {
+        let id = expression_binding::ungroup(id, native);
+        let expr = native.expression(id);
+        if let celox_sv_syntax::ExprKind::Conditional {
+            then_expression,
+            else_expression,
+            ..
+        } = expr.kind
+        {
+            pending.extend([else_expression, then_expression]);
+        } else if let Ok(actual) = expression_types::type_of(tree, session, id, native, dims) {
+            note_packed_assignment(tree, session, expr, actual, target);
         }
     }
 }

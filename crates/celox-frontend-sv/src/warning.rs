@@ -114,6 +114,16 @@ pub enum FrontendWarningKind {
     /// the `static` keyword (IEEE 1800-2023 6.21).
     #[error("static variable `{name}` has an initializer but is not declared `static`")]
     ImplicitStaticInitializer { name: String },
+    #[error(
+        "assigning a packed value or unbased fill directly to an unpacked array is a language extension"
+    )]
+    PackedToUnpackedAssignment,
+    #[error(
+        "force or release of a variable select, variable member, or unpacked array element is a language extension"
+    )]
+    NonstandardForceTarget,
+    #[error("`$psprintf` is a vendor alias for the standard system function `$sformatf`")]
+    PsprintfAlias,
     /// A call of `$set_coverage_db_name` or `$load_coverage_db` (`task`):
     /// there is no coverage database, so nothing is saved or loaded (IEEE
     /// 1800-2023 19.9).
@@ -202,6 +212,16 @@ pub(crate) fn analyzer_warnings(
             FrontendWarningKind::ImplicitStaticInitializer { name: name.clone() },
             site.clone(),
         ),
+        celox_sv_analyzer::ir::AnalyzerWarning::PackedToUnpackedAssignment { site } => (
+            FrontendWarningKind::PackedToUnpackedAssignment,
+            site.clone(),
+        ),
+        celox_sv_analyzer::ir::AnalyzerWarning::NonstandardForceTarget { site } => {
+            (FrontendWarningKind::NonstandardForceTarget, site.clone())
+        }
+        celox_sv_analyzer::ir::AnalyzerWarning::PsprintfAlias { site } => {
+            (FrontendWarningKind::PsprintfAlias, site.clone())
+        }
         celox_sv_analyzer::ir::AnalyzerWarning::NoCoverageDatabase { task, site } => (
             FrontendWarningKind::NoCoverageDatabase { task },
             site.clone(),
@@ -277,6 +297,9 @@ impl miette::Diagnostic for FrontendWarning {
             FrontendWarningKind::ExitOutsideProgram => "exit_outside_program",
             FrontendWarningKind::SharedAlwaysTemporary { .. } => "shared_always_temporary",
             FrontendWarningKind::ImplicitStaticInitializer { .. } => "implicit_static_initializer",
+            FrontendWarningKind::PackedToUnpackedAssignment => "packed_to_unpacked_assignment",
+            FrontendWarningKind::NonstandardForceTarget => "nonstandard_force_target",
+            FrontendWarningKind::PsprintfAlias => "psprintf_alias",
             FrontendWarningKind::ForcedSpecialization { .. } => "forced_specialization",
             FrontendWarningKind::ForcedArray { .. } => "forced_array",
             FrontendWarningKind::NoCoverageDatabase { .. } => "no_coverage_database",
@@ -326,6 +349,15 @@ impl miette::Diagnostic for FrontendWarning {
             FrontendWarningKind::ImplicitStaticInitializer { .. } => {
                 "IEEE 1800-2023 6.21 requires an explicit `static` when a declaration specifies an initialization value; declare the variable `static`, or silence with implicit_static_initializer=allow"
             }
+            FrontendWarningKind::PackedToUnpackedAssignment => {
+                "IEEE 1800-2023 7.6 requires an explicit cast to the array type for a packed value; use an assignment pattern such as `'{default: '0}` to fill the array"
+            }
+            FrontendWarningKind::NonstandardForceTarget => {
+                "IEEE 1800-2023 10.6.2 permits whole singular variables, nets, and constant bit- or part-selects of vector nets"
+            }
+            FrontendWarningKind::PsprintfAlias => {
+                "use `$sformatf` as defined by IEEE 1800-2023 21.3.3"
+            }
             FrontendWarningKind::NoCoverageDatabase { .. } => {
                 "the argument is evaluated and nothing is saved or loaded (IEEE 1800-2023 19.9; tracking issue #4294); read the coverage of the covergroups from the simulation instead"
             }
@@ -345,6 +377,8 @@ impl miette::Diagnostic for FrontendWarning {
         let location = self.location.as_ref()?;
         let label = match self.kind {
             FrontendWarningKind::CovergroupBinValue { .. } => "written here",
+            FrontendWarningKind::PackedToUnpackedAssignment => "value assigned here",
+            FrontendWarningKind::NonstandardForceTarget => "target selected here",
             _ => "called here",
         };
         Some(Box::new(std::iter::once(

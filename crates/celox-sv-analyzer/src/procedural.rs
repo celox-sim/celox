@@ -78,10 +78,12 @@ pub enum StmtBase<E, L> {
     Force {
         lhs: L,
         rhs: E,
+        site: Option<SourceSpan>,
     },
     /// `release lhs;` (10.6.2), lowered with [`StmtBase::Force`].
     Release {
         lhs: L,
+        site: Option<SourceSpan>,
     },
     /// The store of a forced value into the target of a `force`: the
     /// target takes the value at once (10.6.2), and the store is no
@@ -372,11 +374,12 @@ impl<E, L> StmtBase<E, L> {
                 rhs: fe(rhs),
             },
             StmtBase::Deassign { lhs } => StmtBase::Deassign { lhs: fl(lhs) },
-            StmtBase::Force { lhs, rhs } => StmtBase::Force {
+            StmtBase::Force { lhs, rhs, site } => StmtBase::Force {
                 lhs: fl(lhs),
                 rhs: fe(rhs),
+                site,
             },
-            StmtBase::Release { lhs } => StmtBase::Release { lhs: fl(lhs) },
+            StmtBase::Release { lhs, site } => StmtBase::Release { lhs: fl(lhs), site },
             StmtBase::ForceStore { lhs, rhs } => StmtBase::ForceStore {
                 lhs: fl(lhs),
                 rhs: fe(rhs),
@@ -545,12 +548,12 @@ impl<E, L> StmtBase<E, L> {
             }
             StmtBase::Assign { lhs, rhs, .. }
             | StmtBase::ProceduralAssign { lhs, rhs }
-            | StmtBase::Force { lhs, rhs }
+            | StmtBase::Force { lhs, rhs, .. }
             | StmtBase::ForceStore { lhs, rhs } => {
                 fl(lhs);
                 fe(rhs);
             }
-            StmtBase::Deassign { lhs } | StmtBase::Release { lhs } => fl(lhs),
+            StmtBase::Deassign { lhs } | StmtBase::Release { lhs, .. } => fl(lhs),
             StmtBase::AssignConcat { parts, rhs, .. } => {
                 parts.iter().for_each(&mut *fl);
                 fe(rhs);
@@ -682,12 +685,12 @@ impl<E, L> StmtBase<E, L> {
             }
             StmtBase::Assign { lhs, rhs, .. }
             | StmtBase::ProceduralAssign { lhs, rhs }
-            | StmtBase::Force { lhs, rhs }
+            | StmtBase::Force { lhs, rhs, .. }
             | StmtBase::ForceStore { lhs, rhs } => {
                 fl(lhs);
                 fe(rhs);
             }
-            StmtBase::Deassign { lhs } | StmtBase::Release { lhs } => fl(lhs),
+            StmtBase::Deassign { lhs } | StmtBase::Release { lhs, .. } => fl(lhs),
             StmtBase::AssignConcat { parts, rhs, .. } => {
                 parts.iter_mut().for_each(&mut *fl);
                 fe(rhs);
