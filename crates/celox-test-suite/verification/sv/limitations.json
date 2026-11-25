@@ -5106,5 +5106,21 @@
         "pattern_matching::pattern_value_contexts"
       ]
     }
+  },
+  {
+    "id": "sv_icarus_package_array_methods",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+    "reason": "Icarus 13.0 reports a syntax error (\"Malformed statement\") for an array ordering method called on a fixed-size array of a package named through its package, such as pkg::seq.sort(). IEEE 1800-2023 7.12.2 defines the ordering methods of unpacked arrays, and 26.3 permits naming a package item by its package. Verilator 5.054 passes the case.",
+    "upstream": [],
+    "evidence": [
+      "src/sv/cases/containers.vtest"
+    ],
+    "cases": {
+      "icarus": [
+        "containers::ordering_fixed_package_variables"
+      ]
+    }
   }
 ]

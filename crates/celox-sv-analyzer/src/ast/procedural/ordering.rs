@@ -45,13 +45,9 @@ impl BodyBuilder<'_, '_, '_> {
             "shuffle" => ContainerOp::Shuffle,
             _ => return Ok(None),
         };
-        let ExprKind::Name(array) = &native
-            .expression(expression_binding::ungroup(*base, native))
-            .kind
-        else {
+        let Some(array) = containers::array_variable_name(*base, &self.tree) else {
             return Ok(None);
         };
-        let array = instances::normalize_identifier(&array.spelling);
         let Some(shape) = self.dims.get(&array) else {
             return Ok(None);
         };

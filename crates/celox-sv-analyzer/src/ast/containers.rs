@@ -1099,6 +1099,36 @@ pub(super) fn fixed_assignment(
 /// The container `target` holds of the elements of ordinary fixed-size
 /// array `id`, a variable named by itself, from its left index to its right
 /// one (IEEE 1800-2023 7.6), for an assignment or a comparison.
+/// The variable that native expression `id` names: by its name, or by its
+/// package's (`p::a`, IEEE 1800-2023 26.3).
+pub(super) fn array_variable_name(id: ExprId, tree: &AnalysisContext<'_>) -> Option<String> {
+    let native = tree.declarations();
+    match &native
+        .expression(expression_binding::ungroup(id, native))
+        .kind
+    {
+        ExprKind::Name(name) => Some(instances::normalize_identifier(&name.spelling)),
+        ExprKind::Member {
+            expression: package,
+            separator,
+            name,
+        } if separator == "::" => {
+            let ExprKind::Name(package) = &native
+                .expression(expression_binding::ungroup(*package, native))
+                .kind
+            else {
+                return None;
+            };
+            Some(super::scope::qualified_name(
+                tree,
+                &instances::normalize_identifier(&package.spelling),
+                &instances::normalize_identifier(&name.spelling),
+            ))
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn fixed_array_literal(
     id: ExprId,
     tree: &AnalysisContext<'_>,
@@ -1106,16 +1136,9 @@ pub(super) fn fixed_array_literal(
     dims: &PackedDimensions,
     target: &ContainerType,
 ) -> Converted<Expr> {
-    let native = tree.declarations();
     let other =
         || unsupported("fixed-size array class property with an array other than a variable");
-    let ExprKind::Name(name) = &native
-        .expression(expression_binding::ungroup(id, native))
-        .kind
-    else {
-        return Err(other());
-    };
-    let name = instances::normalize_identifier(&name.spelling);
+    let name = array_variable_name(id, tree).ok_or_else(other)?;
     let shape = dims.get(&name).ok_or_else(other)?;
     let [range] = shape.unpacked.as_slice() else {
         return Err(other());

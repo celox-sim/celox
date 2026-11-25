@@ -89,6 +89,35 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq checks 255))
 
+; The ordering methods of a fixed-size array of a package named through its
+; package (IEEE 1800-2023 7.12.2, 26.3), also in the package itself, order
+; the package's array.
+(case ordering_fixed_package_variables
+  (source "ordering_fixed_package.sv" #"
+package pkg;
+  int seq[4] = '{3, 1, 4, 2};
+  function void flip(); pkg::seq.reverse(); endfunction
+endpackage
+module Top(output int checks);
+  initial begin
+    int sum, prod;
+    pkg::seq.sort();
+    checks = (pkg::seq[0] == 1 && pkg::seq[1] == 2 && pkg::seq[2] == 3 && pkg::seq[3] == 4) * 1;
+    pkg::seq.rsort();
+    checks += (pkg::seq[0] == 4 && pkg::seq[1] == 3 && pkg::seq[2] == 2 && pkg::seq[3] == 1) * 2;
+    pkg::flip();
+    checks += (pkg::seq[0] == 1 && pkg::seq[3] == 4) * 4;
+    pkg::seq.reverse();
+    checks += (pkg::seq[0] == 4 && pkg::seq[3] == 1) * 8;
+    pkg::seq.shuffle();
+    sum = pkg::seq[0] + pkg::seq[1] + pkg::seq[2] + pkg::seq[3];
+    prod = pkg::seq[0] * pkg::seq[1] * pkg::seq[2] * pkg::seq[3];
+    checks += (sum == 10 && prod == 24) * 16;
+  end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 31))
+
 ; 4-state elements keep their X and Z bits as an ordering method of a
 ; fixed-size array variable moves them.
 (case ordering_fixed_four_state
