@@ -26,10 +26,6 @@ use super::*;
 pub(crate) use monitor::MonitorState;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-#[expect(
-    clippy::disallowed_types,
-    reason = "cross-thread: the runtime-event read sequence and flags shared between the simulation thread and a RuntimeEventDrain handle on another thread"
-)]
 use std::sync::atomic::{AtomicBool, AtomicU64};
 pub(crate) use strobe::StrobeCall;
 

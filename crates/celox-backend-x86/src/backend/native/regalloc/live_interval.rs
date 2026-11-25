@@ -1305,8 +1305,14 @@ impl DominatorIntervals {
         cfg: &NormalizedCfg,
     ) -> Result<Self, LiveIntervalError> {
         let mut children = vec![Vec::new(); program.block_count()];
-        for block in 1..program.block_count() {
-            let Some(parent) = cfg.idom[block] else {
+        for (block, &parent) in cfg
+            .idom
+            .iter()
+            .enumerate()
+            .take(program.block_count())
+            .skip(1)
+        {
+            let Some(parent) = parent else {
                 return Err(LiveIntervalError::new(
                     "LIVE_INTERVAL.DOMINATOR_TREE",
                     Some(program.block_id(block)),
