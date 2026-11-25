@@ -127,7 +127,16 @@ impl ExportedOverride {
                             }
                             .name(),
                         ))],
-                        body: part(arm).clone(),
+                        // The arm is a copy of the override of the module
+                        // instance it selects: its sites name that instance.
+                        body: {
+                            let mut body = part(arm).clone();
+                            crate::procedural::set_site_home(
+                                &mut body,
+                                &crate::procedural::arm_home(),
+                            );
+                            body
+                        },
                     })
                     .collect(),
                 default: Some(Vec::new()),

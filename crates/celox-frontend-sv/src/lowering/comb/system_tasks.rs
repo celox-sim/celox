@@ -368,6 +368,7 @@ impl Comb<'_, '_> {
             arg_is_string,
             arg_float_precision,
             arg_is_handle,
+            home: self.m.site_home.clone(),
         });
         let mut preceding_writes = Vec::new();
         for (id, range) in store.iter() {

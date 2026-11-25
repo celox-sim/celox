@@ -351,6 +351,7 @@ impl Ff<'_, '_> {
             arg_is_string: vec![false, false],
             arg_float_precision: vec![None, None],
             arg_is_handle: vec![true, false],
+            home: None,
         });
         self.b.emit(SIRInstruction::RuntimeEvent {
             site_id,

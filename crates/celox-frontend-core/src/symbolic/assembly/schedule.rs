@@ -57,6 +57,8 @@ struct Design {
     clock_domains: HashMap<AbsoluteAddr, AbsoluteAddr>,
     /// The readiness bit gated `always_comb` units read, if any is gated.
     startup_ready: Option<AbsoluteAddr>,
+    /// See [`SymbolicRtl::site_homes`].
+    site_homes: celox_design::SiteHomes,
 }
 
 impl Design {

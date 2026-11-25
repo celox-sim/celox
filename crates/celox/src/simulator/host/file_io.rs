@@ -210,7 +210,12 @@ impl<B: SimBackend> Simulator<B> {
                 self.cancel_file_strobes(descriptor);
             }
             2 | 3 => {
-                let scope = self.process_scope(site.process.index());
+                // A copied subroutine's request names the instance it
+                // belongs to (`SiteHome`), resolved at relocation.
+                let scope = match &site.scope {
+                    Some(celox_design::FormatScope::Absolute(name)) => Some(name.clone()),
+                    _ => self.process_scope(site.process.index()),
+                };
                 let format = RuntimeEventSite {
                     kind: RuntimeEventKind::Write,
                     template: site.strings.first().cloned(),
@@ -231,6 +236,7 @@ impl<B: SimBackend> Simulator<B> {
                     arg_is_string: Vec::new(),
                     arg_float_precision: Vec::new(),
                     arg_is_handle: Vec::new(),
+                    home: None,
                 };
                 let (args, message) =
                     formatted_file_write(site, &values, &format, timestamp, self.backend.heap());

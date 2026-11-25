@@ -77,6 +77,10 @@ pub(super) struct ProcModule<'a> {
     capture_counter: u64,
     /// What the module reports at run time.
     pub runtime: RuntimeReports,
+    /// The instance whose scope `%m` names in the sites the statement being
+    /// lowered makes, when it is in a copy of another instance's
+    /// subroutine (`sv::ir::Stmt::SystemTask::home`, `FormatOptions::home`).
+    pub site_home: Option<celox_design::SiteHome>,
     /// The sites of the module's function units.
     pub function_sites: FunctionSites,
     /// The change counts of the boxes of the module's units, in the order
@@ -305,6 +309,7 @@ impl<'a> ProcModule<'a> {
             temp_counter: 0,
             capture_counter: 0,
             runtime: RuntimeReports::default(),
+            site_home: None,
             function_sites: FunctionSites::default(),
             box_changes: Vec::new(),
             event_assignments: Vec::new(),
@@ -322,7 +327,12 @@ impl<'a> ProcModule<'a> {
     }
 
     /// Register a runtime event site and return its local number.
-    pub fn event_site(&mut self, site: RuntimeEventSite) -> u32 {
+    pub fn event_site(&mut self, mut site: RuntimeEventSite) -> u32 {
+        // A site the statement makes, a synthesized one included, names the
+        // statement's home.
+        if site.home.is_none() {
+            site.home = self.site_home.clone();
+        }
         self.runtime.event_sites.push(site);
         (self.runtime.event_sites.len() - 1) as u32
     }

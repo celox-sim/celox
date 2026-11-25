@@ -487,6 +487,7 @@ pub(super) fn assertion_failure(
         args: vec![SystemTaskArg::Str(format!("{keyword} failed"))],
         site,
         assertion: None,
+        home: None,
     }]
 }
 

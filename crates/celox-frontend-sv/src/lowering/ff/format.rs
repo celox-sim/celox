@@ -14,6 +14,7 @@ impl Ff<'_, '_> {
         &mut self,
         ticks_per_unit: u64,
         scope: Option<&sv::system_functions::FormatScope>,
+        home: Option<&celox_design::SiteHome>,
         args: &[sv::ir::Expr],
     ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
         let (format, values) = args
@@ -110,6 +111,8 @@ impl Ff<'_, '_> {
                     celox_design::FormatScope::Relative(path.clone())
                 }
             }),
+            // The call's home, or that of the statement holding it.
+            home: home.cloned().or_else(|| self.m.site_home.clone()),
         });
         self.request_host(HostRequestKind::Format, site)?;
         Ok(sv::ir::Expr::Ident(name))

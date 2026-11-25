@@ -870,6 +870,9 @@ pub struct FormatOptions {
     pub ticks_per_unit: u64,
     /// The scope that `%m` names when the format is read at run time.
     pub scope: Option<FormatScope>,
+    /// The instance whose scope `%m` names, when the call is in a copy of a
+    /// subroutine of another instance (see [`celox_design::SiteHome`]).
+    pub home: Option<celox_design::SiteHome>,
 }
 
 impl StringOp {
@@ -879,6 +882,7 @@ impl StringOp {
             options: Box::new(FormatOptions {
                 ticks_per_unit,
                 scope,
+                home: None,
             }),
         }
     }

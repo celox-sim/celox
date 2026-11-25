@@ -108,6 +108,7 @@ fn host_request_mapping_relocates_operands_and_results() {
         results: vec![value(5)],
         strings: vec!["COUNT=%d".into()],
         scope: None,
+        home: None,
     };
     let relocated = site.map(|id| id + 10);
     assert_eq!(relocated.slots().collect::<Vec<_>>(), vec![13, 15]);
@@ -197,6 +198,7 @@ fn initial_state_and_runtime_error_schemas_accept_design_owned_ids() {
         arg_is_string: Vec::new(),
         arg_float_precision: Vec::new(),
         arg_is_handle: Vec::new(),
+        home: None,
     });
     runtime.comb_observers.push(RuntimeCombObserver {
         site_id: 0,

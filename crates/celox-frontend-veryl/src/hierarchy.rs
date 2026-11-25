@@ -479,6 +479,7 @@ fn parse_external_hierarchy<'a>(
                 .map(|(name, module_id)| (name.clone(), external_ids[module_id]))
                 .collect(),
             instance_values: Vec::new(),
+            site_homes: Default::default(),
         },
         module_ir,
         source_id_maps,

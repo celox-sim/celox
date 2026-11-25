@@ -46,6 +46,7 @@ pub(super) fn dispatch_body(
         ],
         site: None,
         assertion: None,
+        home: None,
     };
     Stmt::Case {
         kind: CaseKind::Exact,

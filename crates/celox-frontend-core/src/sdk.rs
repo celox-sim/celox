@@ -1924,6 +1924,7 @@ pub fn lower_frontend_artifact(
         hidden_root: false,
         packages: Vec::new(),
         instance_values: Vec::new(),
+        site_homes: Default::default(),
     };
     let external = ExternalHierarchy {
         modules: [(
