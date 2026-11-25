@@ -129,7 +129,7 @@ fn convert(
     let parts = Parts {
         bound_element: ty.element.get(table),
         bound_enumeration: ty.enumeration.declaration(),
-        container: ty.container.as_deref(),
+        container: kept_container(ty.kept_container.declaration(), ty.container.as_ref()),
         unpacked_struct: ty.structure.declaration(),
         kind: ty.kind,
         members: &ty.members,
@@ -182,7 +182,7 @@ pub(in crate::ast) fn of_shape(
             .element_type(table)
             .map(|element| table.without_keyword(element)),
         bound_enumeration: shape.enumeration_declaration(),
-        container: shape.container.as_deref(),
+        container: kept_container(shape.container_declaration(), shape.container.as_ref()),
         unpacked_struct: shape.structure_declaration(),
         kind,
         members: &shape.members,
@@ -207,6 +207,24 @@ pub(in crate::ast) fn of_shape(
     parts.intern(table, functions, env, unpacked)
 }
 
+/// The container type (IEEE 1800-2023 7.5, 7.10, 7.8) a type is, or whose
+/// elements it has: the one it keeps, which debug builds check against the
+/// field, or else the field.
+fn kept_container<'a>(
+    kept: Option<&'a Arc<ContainerType>>,
+    field: Option<&'a Arc<ContainerType>>,
+) -> Option<&'a Arc<ContainerType>> {
+    let Some(kept) = kept else {
+        return field;
+    };
+    debug_assert_eq!(
+        Some(&**kept),
+        field.map(|container| &**container),
+        "the container a type keeps is not that of its field"
+    );
+    Some(kept)
+}
+
 /// What a type is made of, from a [`Type`] or a [`VariableDimensions`].
 struct Parts<'a> {
     /// The semantic type of an element of the unpacked dimensions, where
@@ -215,7 +233,7 @@ struct Parts<'a> {
     /// The declaration of the enumerated type the type is or has elements
     /// of.
     bound_enumeration: Option<&'a super::EnumDeclaration>,
-    container: Option<&'a ContainerType>,
+    container: Option<&'a Arc<ContainerType>>,
     unpacked_struct: Option<&'a Arc<UnpackedStruct>>,
     kind: TypeKind,
     members: &'a [PackedMember],
@@ -291,6 +309,9 @@ impl Parts<'_> {
     ) -> Option<TyId> {
         let element = self.element(table, functions, env, range)?;
         let id = table.intern(element);
+        if let Some(container) = self.container {
+            table.record_container(id, container);
+        }
         if let Some(aggregate) = self.unpacked_struct
             && table.is_unpacked_struct(id)
         {

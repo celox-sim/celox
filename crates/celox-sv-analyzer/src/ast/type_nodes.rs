@@ -248,6 +248,9 @@ impl Type {
                 // the container type stays the same.
                 binding: container.binding.clone(),
             }));
+            // The type keeps its container, with the bounds resolved.
+            let container = resolved.container.clone();
+            resolved.keep_container(container);
         }
         Some(resolved)
     }

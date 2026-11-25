@@ -24,6 +24,9 @@ pub(super) struct VariableDimensions {
     /// a fixed-size unpacked array of it has, which only
     /// [`Self::keep_structure`] sets (see [`kept`]).
     structure: kept::KeptStructure,
+    /// The container type the variable is, or whose elements a fixed-size
+    /// unpacked array of it has, which only [`Self::keep_container`] sets.
+    kept_container: kept::KeptContainer,
 }
 
 impl VariableDimensions {
@@ -34,6 +37,7 @@ impl VariableDimensions {
             element: None,
             enumeration: kept::KeptEnumeration::default(),
             structure: kept::KeptStructure::default(),
+            kept_container: kept::KeptContainer::default(),
         }
     }
 
@@ -46,8 +50,12 @@ impl VariableDimensions {
             element: ty.element.retained(),
             enumeration: kept::KeptEnumeration::default(),
             structure: kept::KeptStructure::default(),
+            kept_container: kept::KeptContainer::default(),
         };
         bound.keep_enumeration(ty.enumeration.binding());
+        if let Some(container) = ty.kept_container.binding() {
+            bound.keep_container(Some(container));
+        }
         if let Some(aggregate) = ty.structure.binding() {
             bound.keep_structure(Some(aggregate));
         }
@@ -155,6 +163,17 @@ impl VariableDimensions {
             Some(aggregate) => self.keep_structure(Some(aggregate.clone())),
             None => self.structure.forget(),
         }
+        // The shape's own container, whose bounds its scope names, or else
+        // the one registered for the semantic type or that of its elements.
+        match self
+            .shape
+            .container
+            .clone()
+            .or_else(|| table.container(id).cloned())
+        {
+            Some(container) => self.keep_container(Some(container)),
+            None => self.kept_container.forget(),
+        }
     }
 
     /// This shape with the enumerated type `enumeration`, which it was made
@@ -168,6 +187,12 @@ impl VariableDimensions {
     /// it can be given to another shape of the same variable.
     pub(super) fn retained_enumeration(&self) -> semantic_types::EnumBinding {
         self.enumeration.binding()
+    }
+
+    /// The container type the variable is, or whose elements it has, as
+    /// the variable keeps it.
+    pub(super) fn container_declaration(&self) -> Option<&Arc<ContainerType>> {
+        self.kept_container.declaration()
     }
 
     /// The declaration of the unpacked structure type the variable is, or
@@ -336,6 +361,7 @@ impl VariableDimensions {
         if !self.shape.is_closed()
             || self.enumeration.declaration().is_some()
             || self.structure.declaration().is_some()
+            || self.kept_container.declaration().is_some()
             || self
                 .element
                 .as_ref()
@@ -389,6 +415,11 @@ impl VariableDimensions {
             .shape
             .container
             .map(|container| renamer.container(&container));
+        // The shape keeps its container, renamed.
+        if self.kept_container.declaration().is_some() {
+            let container = self.shape.container.clone();
+            self.keep_container(container);
+        }
         self
     }
 }
@@ -422,6 +453,7 @@ impl DerefMut for VariableDimensions {
         self.element = None;
         self.enumeration.forget();
         self.structure.forget();
+        self.kept_container.forget();
         &mut self.shape
     }
 }
