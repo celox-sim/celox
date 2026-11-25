@@ -59,8 +59,10 @@ impl ConstantType {
         while let Some(container) = declaration.container() {
             declaration = &container.element;
         }
-        base.spelling = declaration.spelling.clone();
-        // A member has the enumerated type that declares it (6.19).
+        // A member has the enumerated type that declares it (6.19), not the
+        // semantic type of its base, which it forgets with the integer type
+        // keyword of the declaration.
+        base.keyword = declaration.keyword;
         base.keep_enumeration(declaration.enumeration.binding());
         Self::of_type(base, functions, table, env)
     }

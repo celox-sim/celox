@@ -484,7 +484,7 @@ fn extend_variable_dimensions_from_markers(
                 .collect(),
             members: Vec::new(),
             signed_element_depth: None,
-            spelling: type_names::Spelling::default(),
+            keyword: type_names::Keyword::default(),
         });
         let mut shape = procedural::dimensions_from_type(&ty);
         // The markers keep the shape, not the declared type.

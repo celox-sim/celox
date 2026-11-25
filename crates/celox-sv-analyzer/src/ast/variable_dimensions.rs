@@ -477,7 +477,7 @@ pub(super) struct VariableShape {
     pub(super) members: Vec<packed_structs::PackedMember>,
     /// See [`Type::signed_element_depth`].
     pub(super) signed_element_depth: Option<usize>,
-    /// The declared type, for `$typename`.
+    /// The declared type of the variable (see [`type_names::Declared`]).
     pub(super) declared: type_names::Declared,
     /// A `chandle` variable (see [`Type::chandle`]).
     pub(super) chandle: bool,

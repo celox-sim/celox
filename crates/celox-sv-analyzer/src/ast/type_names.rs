@@ -13,122 +13,32 @@
 use super::*;
 use semantic_types::{ArrayKind, Decl, DeclId, PackedElement, TyData, TyId};
 
-/// The declaration that names an enumeration, struct or union type, and how
-/// `$typename` spells a type where its structure does not tell. Type
-/// equality does not compare it: the declaration tells a type apart from
-/// another of the same structure (IEEE 1800-2023 6.19, 6.22.1) where a class
-/// specialization is keyed by its type arguments (8.25), and `int` matches
-/// `bit signed [31:0]` (6.22.1) although `$typename` tells them apart. It is
-/// one pointer, as types are held on deeply recursive binding frames.
-#[derive(Debug, Clone, Default)]
-pub(super) struct Spelling(Option<Arc<SpellingParts>>);
+/// The integer type with a predefined width (IEEE 1800-2023 6.11) that
+/// declared a type, which `$typename` writes while the type keeps its one
+/// range (20.6.1). Type equality does not compare it: `int` matches
+/// `bit signed [31:0]` (6.22.1).
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct Keyword(Option<&'static str>);
 
-#[derive(Debug, Clone, Default)]
-struct SpellingParts {
-    /// The identity of the typedef that names an enumeration, struct or
-    /// union type.
-    declaration: Option<Arc<str>>,
-    /// The integer type with a predefined width (6.11) that declared the
-    /// type, which spells it while the type keeps its one range.
-    keyword: Option<&'static str>,
-    /// `struct` or `union` of a packed aggregate other than a soft or
-    /// tagged union.
-    aggregate: Option<&'static str>,
-    /// The name of the typedef of an enumeration, struct or union.
-    name: Option<TypedefName>,
-    /// The elaborated scope that declares the enumeration, struct or union
-    /// type: an analysis of a module, interface or program, which each
-    /// instance with other parameter values has (6.22). `None` for a
-    /// package, a compilation unit or a class specialization, whose
-    /// declarations are named apart already.
-    scope: Option<Arc<str>>,
-}
-
-impl Spelling {
-    pub(super) fn keyword(keyword: &'static str) -> Self {
-        Self(Some(Arc::new(SpellingParts {
-            keyword: Some(keyword),
-            ..SpellingParts::default()
-        })))
+impl Keyword {
+    pub(super) fn new(keyword: &'static str) -> Self {
+        Self(Some(keyword))
     }
 
-    pub(super) fn aggregate(aggregate: &'static str) -> Self {
-        Self(Some(Arc::new(SpellingParts {
-            aggregate: Some(aggregate),
-            ..SpellingParts::default()
-        })))
-    }
-
-    /// Name the type after the typedef whose identity is `declaration` and
-    /// whose `$typename` name is `name`, declared in elaborated scope
-    /// `scope`.
-    pub(super) fn name(
-        &mut self,
-        declaration: Arc<str>,
-        name: TypedefName,
-        scope: Option<Arc<str>>,
-    ) {
-        self.name_spelled(declaration, Some(name), scope);
-    }
-
-    /// [`Self::name`] for a typedef whose `$typename` name may not be
-    /// known.
-    pub(super) fn name_spelled(
-        &mut self,
-        declaration: Arc<str>,
-        name: Option<TypedefName>,
-        scope: Option<Arc<str>>,
-    ) {
-        let mut parts = self.0.as_deref().cloned().unwrap_or_default();
-        parts.declaration = Some(declaration);
-        parts.name = name;
-        parts.scope = scope;
-        self.0 = Some(Arc::new(parts));
-    }
-
-    /// Record that elaborated scope `scope` declares the anonymous type.
-    pub(super) fn declared_in(&mut self, scope: Arc<str>) {
-        let mut parts = self.0.as_deref().cloned().unwrap_or_default();
-        parts.scope = Some(scope);
-        self.0 = Some(Arc::new(parts));
-    }
-
-    /// The identity of the typedef that names the type.
-    pub(super) fn declaration(&self) -> Option<&str> {
-        self.parts()?.declaration.as_deref()
-    }
-
-    /// The elaborated scope that declares the type.
-    pub(super) fn scope(&self) -> Option<&str> {
-        self.parts()?.scope.as_deref()
-    }
-
-    fn parts(&self) -> Option<&SpellingParts> {
-        self.0.as_deref()
-    }
-
-    pub(super) fn keyword_of(&self) -> Option<&'static str> {
-        self.parts()?.keyword
-    }
-
-    pub(super) fn aggregate_of(&self) -> Option<&'static str> {
-        self.parts()?.aggregate
-    }
-
-    pub(super) fn name_of(&self) -> Option<&TypedefName> {
-        self.parts()?.name.as_ref()
+    pub(super) fn get(self) -> Option<&'static str> {
+        self.0
     }
 }
 
-impl PartialEq for Spelling {
+impl PartialEq for Keyword {
     fn eq(&self, _: &Self) -> bool {
         true
     }
 }
 
-impl Eq for Spelling {}
+impl Eq for Keyword {}
 
-impl std::hash::Hash for Spelling {
+impl std::hash::Hash for Keyword {
     fn hash<H: std::hash::Hasher>(&self, _: &mut H) {}
 }
 
@@ -147,7 +57,10 @@ struct NamingParts {
     /// How `$typename` writes the name of the typedef.
     name: Option<TypedefName>,
     /// The elaborated scope that declares the type or its typedef: an
-    /// analysis of a module, interface or program (see [`SpellingParts`]).
+    /// analysis of a module, interface or program, which each instance with
+    /// other parameter values has (6.22); none for a package, a compilation
+    /// unit or a class specialization, whose declarations are named apart
+    /// already.
     scope: Option<Arc<str>>,
 }
 
@@ -223,54 +136,28 @@ pub(super) fn aggregate_naming<'a>(
 }
 
 /// The typedef that names the enumeration `enumeration`, or else the
-/// aggregate whose naming is `aggregate`, and the elaborated scope that
-/// declares it.
-fn kept_naming<'a>(
+/// aggregate whose naming is `aggregate`.
+fn kept_name<'a>(
     enumeration: Option<&'a semantic_types::EnumDeclaration>,
     aggregate: Option<(&'a Naming, Option<&'static str>)>,
-) -> (Option<&'a str>, Option<&'a str>) {
+) -> Option<&'a str> {
     match enumeration {
-        Some(enumeration) => (
-            enumeration.name.as_deref().filter(|_| enumeration.named),
-            enumeration.scope.as_deref(),
-        ),
-        None => aggregate.map_or((None, None), |(naming, _)| {
-            (naming.declaration(), naming.scope())
-        }),
+        Some(enumeration) => enumeration.name.as_deref().filter(|_| enumeration.named),
+        None => aggregate?.0.declaration(),
     }
 }
 
 impl Type {
-    /// The typedef that names this enumeration, struct or union type, and
-    /// the elaborated scope that declares it, as its declaration keeps
-    /// them.
-    pub(super) fn naming(&self) -> (Option<&str>, Option<&str>) {
-        let naming = kept_naming(
+    /// The typedef that names this enumeration, struct or union type, as
+    /// its declaration keeps it.
+    pub(super) fn declaration_name(&self) -> Option<&str> {
+        kept_name(
             self.enumeration(),
             aggregate_naming(
                 self.unpacked_struct().map(|structure| &**structure),
                 &self.members,
             ),
-        );
-        // The spelling names the declaration as the declaration does, where
-        // it names one. A type that keeps no declaration, such as the bits of
-        // a structure, may still be spelled as it was.
-        let declared = self.enumeration().is_some()
-            || self.unpacked_struct().is_some()
-            || !self.members.is_empty();
-        debug_assert!(
-            !declared
-                || self
-                    .spelling
-                    .declaration()
-                    .is_none_or(|name| Some(name) == naming.0)
-                    && (self.spelling.declaration().is_none() && self.spelling.scope().is_none()
-                        || self.spelling.scope() == naming.1),
-            "the type is named {naming:?}, but spelled {:?} {:?}",
-            self.spelling.declaration(),
-            self.spelling.scope(),
-        );
-        naming
+        )
     }
 }
 
@@ -306,24 +193,14 @@ pub(super) fn scoped_name(unit: Option<&celox_sv_syntax::Unit>, name: &str) -> S
 pub(super) fn declaration_of(shape: &VariableDimensions) -> Option<String> {
     // The typedef names the element type, which selecting from an array
     // or changing its dimensions does not change.
-    let name = kept_naming(
+    kept_name(
         shape.enumeration_declaration(),
         aggregate_naming(
             shape.structure_declaration().map(|structure| &**structure),
             &shape.members,
         ),
     )
-    .0;
-    let spelled = shape
-        .declared
-        .0
-        .as_deref()
-        .and_then(|ty| ty.spelling.declaration());
-    debug_assert!(
-        spelled.is_none_or(|spelled| Some(spelled) == name),
-        "the shape is named {name:?}, but its declared type {spelled:?}"
-    );
-    name.map(str::to_owned)
+    .map(str::to_owned)
 }
 
 /// The declared type of the variable of `shape`, whose element type it
@@ -332,8 +209,13 @@ pub(super) fn declared_type(shape: &VariableDimensions) -> Option<&Type> {
     shape.declared.0.as_deref()
 }
 
-/// The declared type of a variable, for `$typename` of its name. Shape
-/// equality does not compare it.
+/// The declared type of a variable, as its declaration writes it: the type
+/// of its name for `$typename` and the type operator (IEEE 1800-2023
+/// 20.6.1, 6.23), the type of a case scrutinee, the element of the
+/// ordering methods and the kinds that process and event checks ask. It is
+/// no input of the semantic type of a shape, which the shape tells by its
+/// own fields and the declarations it keeps. Shape equality does not
+/// compare it.
 #[derive(Debug, Clone, Default)]
 pub(super) struct Declared(Option<Arc<Type>>);
 

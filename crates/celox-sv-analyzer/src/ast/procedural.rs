@@ -721,7 +721,7 @@ pub(super) fn int_type() -> Type {
         unpacked_ranges: Vec::new(),
         members: Vec::new(),
         signed_element_depth: None,
-        spelling: type_names::Spelling::keyword("int"),
+        keyword: type_names::Keyword::new("int"),
     })
 }
 
