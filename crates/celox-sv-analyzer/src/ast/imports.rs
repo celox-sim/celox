@@ -32,6 +32,12 @@ pub(super) struct ScopeImports {
     pub qualified: Vec<(String, String)>,
     /// The first token of each reference of `qualified`.
     pub qualified_tokens: Vec<usize>,
+    /// Whether each reference of `qualified` is in a class that extends
+    /// another, or in an out-of-block method of one, whose `p` may be a
+    /// type parameter it inherits (IEEE 1800-2023 8.23, 8.25): unless `p`
+    /// names a package, `p::x` then names a member of that parameter's
+    /// class, which binding resolves.
+    pub qualified_in_derived: Vec<bool>,
     /// The package exports (IEEE 1800-2023 26.6).
     pub exports: Vec<Export>,
     /// The source offset of each `export p::x;` item, by `(p, x)`.
@@ -77,6 +83,12 @@ impl ScopeImports {
         shadows.extend_scopes(nested_declarations(tree));
         let aliases = type_alias_scopes(tree, &blocks);
         let classes = visible_classes(tree);
+        let derived = derived_class_ranges(tree);
+        let in_derived = |offset: usize| {
+            derived
+                .iter()
+                .any(|(start, end)| (*start..*end).contains(&offset))
+        };
         for view in package_owners::scope(tree)? {
             let binding = tree.declarations().package_binding(view.id);
             // An import of a procedural block binds in the block only.
@@ -199,6 +211,7 @@ impl ScopeImports {
                         .qualified
                         .push((package, normalize_identifier(&name.spelling)));
                     imports.qualified_tokens.push(offset);
+                    imports.qualified_in_derived.push(in_derived(offset));
                 }
             }
         }
@@ -225,6 +238,9 @@ impl ScopeImports {
                         .qualified
                         .push((package, normalize_identifier(&name.name.spelling)));
                     imports.qualified_tokens.push(ty.tokens.start);
+                    imports
+                        .qualified_in_derived
+                        .push(in_derived(ty.tokens.start));
                 }
             }
         }
@@ -1153,6 +1169,34 @@ fn scope_lookup(
 
 /// Lexical class type-parameter scopes, including out-of-block methods.
 /// These prefixes name types rather than package dependencies (6.20.3, 8.25).
+/// The token ranges of the classes of the scope of `tree` that extend
+/// another class, and of their out-of-block methods (8.24), which see what
+/// the classes inherit.
+fn derived_class_ranges(tree: &SyntaxTree) -> Vec<(usize, usize)> {
+    let native = tree.declarations();
+    let derived = native
+        .classes
+        .iter()
+        .filter(|class| class.base.is_some())
+        .collect::<Vec<_>>();
+    if derived.is_empty() {
+        return Vec::new();
+    }
+    let out_of_block = out_of_block_subroutines(native);
+    let mut ranges = Vec::new();
+    for class in derived {
+        ranges.push((class.tokens.start, class.tokens.end));
+        ranges.extend(
+            out_of_block
+                .get(&normalize_identifier(&class.name.spelling))
+                .into_iter()
+                .flatten()
+                .map(|sub| (sub.tokens.start, sub.tokens.end)),
+        );
+    }
+    ranges
+}
+
 fn class_type_parameter_scopes(tree: &SyntaxTree) -> Vec<(usize, usize, HashSet<String>)> {
     use celox_sv_syntax::{BodyItemKind, ParameterKind};
     let native = tree.declarations();
@@ -1437,7 +1481,18 @@ fn resolve_scope_imports(
     let mut own_exported: Vec<String> = Vec::new();
     // Whether the scope uses an item of its compilation unit.
     let mut uses_unit = false;
-    for (package_name, name) in &imports.qualified {
+    for ((package_name, name), in_derived) in
+        imports.qualified.iter().zip(&imports.qualified_in_derived)
+    {
+        // A type parameter a class inherits may name the class whose member
+        // the reference names; binding resolves it.
+        if *in_derived
+            && package_name != packages::UNIT
+            && packages.get(package_name).is_none()
+            && own.as_ref() != Some(package_name)
+        {
+            continue;
+        }
         if own.as_ref() == Some(package_name) {
             // The package names one of its own items.
             if own_names.is_none() {
