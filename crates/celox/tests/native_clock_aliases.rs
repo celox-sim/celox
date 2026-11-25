@@ -168,3 +168,46 @@ fn unrelated_combinational_loop_does_not_prevent_clock_specialization() {
         sim.inactive_edge(clk).unwrap();
     }
 }
+
+#[test]
+fn repeated_clock_expressions_share_one_domain_per_edge() {
+    let source = r#"`timescale 1ns/1ns
+module Rise(input logic c, output int n);
+    always_ff @(posedge c) n <= n + 1;
+endmodule
+module Fall(input logic c, output int n);
+    always_ff @(negedge c) n <= n + 1;
+endmodule
+module Top(output int a, b, f, gated);
+    bit clk = 1, en = 0;
+    Rise left(~clk, a);
+    Rise right(~clk, b);
+    Fall falling(~clk, f);
+    Rise other(clk & en, gated);
+    initial begin #1 clk=0; #1 clk=1; #1 clk=0; #1 en=1; #1 clk=1; end
+endmodule"#;
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("clock-expression.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .build_native()
+        .unwrap();
+        let program = sim.program();
+        let domain = |instance| {
+            let addr = program.get_addr(&[(instance, 0)], &["c"]).unwrap();
+            program.design.events.canonical(addr)
+        };
+        assert_eq!(domain("left"), domain("right"));
+        assert_ne!(domain("left"), domain("falling"));
+        assert_ne!(domain("left"), domain("other"));
+        sim.run_until(0).unwrap();
+        let signals = ["a", "b", "f", "gated"].map(|name| sim.signal(name));
+        let initial = signals.map(|signal| sim.get(signal));
+        sim.run_until(5).unwrap();
+        for ((signal, before), delta) in signals.into_iter().zip(initial).zip([2u32, 2, 2, 1]) {
+            assert_eq!(sim.get(signal), before + delta);
+        }
+    }
+}
