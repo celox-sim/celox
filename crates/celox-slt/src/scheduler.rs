@@ -17,6 +17,7 @@ use std::hash::Hash;
 use thiserror::Error;
 
 mod lanes;
+mod local_fanout;
 pub use lanes::{InstanceHierarchy, LanePartitionOptions, LaneScheduleResult, sort_lanes};
 
 mod deps;
@@ -378,7 +379,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
     grouping: CombGrouping<Addr>,
     unit_limits: UnitLimits,
 ) -> Result<ScheduleResult<Addr>, ClockSortError<Addr, E>> {
-    let prepared = prepare_schedule(
+    let mut prepared = prepare_schedule(
         input,
         arena,
         four_state,
@@ -387,6 +388,27 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
         ff.as_deref().map(|lowering| lowering.summaries()),
     )
     .map_err(ClockSortError::Scheduler)?;
+    let (partitioning, write_domains) = match grouping {
+        CombGrouping::Whole => (None, None),
+        CombGrouping::EventDomains(domains) => (None, Some(domains)),
+        CombGrouping::Partitioned(request) => (Some(request), None),
+    };
+    let settle_profile_waits = partitioning
+        .as_ref()
+        .filter(|_| ff.is_none())
+        .and_then(|partitioning| partitioning.profile);
+    let plan = partitioning
+        .filter(|_| ff.is_none())
+        .and_then(|partitioning| {
+            plan_settle_partitions(
+                &mut prepared,
+                arena,
+                var_widths,
+                unpacked_element_widths,
+                partitioning,
+                four_state,
+            )
+        });
     let component = &prepared.component_by_path;
     let looping: HashSet<usize> = prepared
         .adj
@@ -443,26 +465,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
     }
     let mut runtime_errors: HashMap<i64, RuntimeErrorInfo<Addr>> = HashMap::default();
     let mut next_runtime_error_code = first_runtime_error_code;
-    let (partitioning, write_domains) = match grouping {
-        CombGrouping::Whole => (None, None),
-        CombGrouping::EventDomains(domains) => (None, Some(domains)),
-        CombGrouping::Partitioned(request) => (Some(request), None),
-    };
-    lowering.settle_profile_waits = partitioning
-        .as_ref()
-        .filter(|_| ff.is_none())
-        .and_then(|partitioning| partitioning.profile);
-    let plan = partitioning
-        .filter(|_| ff.is_none())
-        .and_then(|partitioning| {
-            plan_settle_partitions(
-                &prepared,
-                arena,
-                var_widths,
-                unpacked_element_widths,
-                partitioning,
-            )
-        });
+    lowering.settle_profile_waits = settle_profile_waits;
     // End a unit when its driving clock domains change. This is only a
     // lowering boundary; the timed scheduler computes activation from the
     // optimized units and canonical storage. No runtime flags are emitted.

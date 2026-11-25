@@ -599,6 +599,85 @@ fn partitioned_sort_with_cost(
 }
 
 #[test]
+fn settle_keeps_a_mux_select_with_its_readers_when_their_orders_allow_it() {
+    // The second mux needs a value computed between the two readers.
+    // If that value in turn depends on the first reader, the group cannot move.
+    fn schedule(
+        dependency: u32,
+        unpacked: HashMap<u32, usize>,
+    ) -> Vec<super::SettlePartition<u32>> {
+        let mut arena = SLTNodeArena::new();
+        let mut select = simple_path(&mut arena, 10, Some(1));
+        let other = simple_path(&mut arena, 0, Some(2)).expr;
+        select.expr = arena
+            .alloc(SLTNode::Binary(select.expr, BinaryOp::Ne, other))
+            .unwrap();
+        select.target = LogicPathTarget::Var(VarAtomBase::new(10, 0, 0));
+        select.sources.insert(VarAtomBase::new(2, 0, 7));
+        let cond = arena
+            .alloc(SLTNode::Input {
+                variable: 10,
+                index: vec![],
+                access: BitAccess::new(0, 0),
+                signed: false,
+            })
+            .unwrap();
+        let mut mux = |target, data| {
+            let mut path = simple_path(&mut arena, target, Some(data));
+            path.expr = arena
+                .alloc(SLTNode::Mux {
+                    cond,
+                    then_expr: path.expr,
+                    else_expr: other,
+                })
+                .unwrap();
+            path.sources
+                .extend([VarAtomBase::new(10, 0, 0), VarAtomBase::new(2, 0, 7)]);
+            path
+        };
+        let first = mux(11, 3);
+        let last = mux(13, 12);
+        let middle = simple_path(&mut arena, 12, Some(dependency));
+        let widths = [(10, 1), (11, 8), (12, 8), (13, 8)].into_iter().collect();
+        super::sort_with_unpacked_element_widths(
+            vec![select, first, middle, last],
+            &arena,
+            &HashSet::default(),
+            &HashMap::default(),
+            false,
+            &widths,
+            &unpacked,
+            1,
+            Some(super::SettlePartitioning {
+                flags: 99,
+                target_cost: 1,
+                external_readers: HashMap::default(),
+                clock_nets: HashSet::default(),
+                write_domains: HashMap::default(),
+                profile: None,
+            }),
+        )
+        .unwrap()
+        .partitions
+    }
+    let watches_select = |parts: &[super::SettlePartition<u32>]| {
+        parts
+            .iter()
+            .flat_map(|p| &p.plan.watched)
+            .any(|watch| watch.object == 10)
+    };
+    let independent = schedule(4, HashMap::default());
+    assert!(
+        independent
+            .iter()
+            .any(|p| [10, 11, 13].iter().all(|target| p.writes.contains(target)))
+    );
+    assert!(!watches_select(&independent));
+    assert!(watches_select(&schedule(11, HashMap::default())));
+    assert!(watches_select(&schedule(4, [(3, 8)].into_iter().collect())));
+}
+
+#[test]
 fn a_chain_in_one_event_domain_needs_no_intermediate_publication() {
     let mut arena = SLTNodeArena::new();
     let paths = vec![
