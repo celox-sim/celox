@@ -73,7 +73,7 @@ impl Generator<'_> {
         let index = counters.index(ActivationSite {
             kind,
             subject: subject(program),
-            measure,
+            measure: measure.to_string(),
         });
         let pointer = self.arena_header_load(std::mem::offset_of!(ArenaHeader, profile));
         let word = self.constant(index as u64, 64);
@@ -169,4 +169,74 @@ pub(super) fn written_names<'a>(
         names.push(format!("+{}", written.len() - names.len()));
     }
     names.join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::SchedulerMode;
+
+    /// Every block of the scheduler unit carries a role, those a phase
+    /// fills after an earlier one made them included.
+    #[test]
+    fn every_scheduler_block_has_a_role() {
+        let source = "`timescale 1ns/1ns
+module Top;
+  logic clk = 0;
+  logic [7:0] cnt = 0;
+  logic [7:0] dbl;
+  always #5 clk = ~clk;
+  always_ff @(posedge clk) cnt <= cnt + 8'd1;
+  assign dbl = cnt * 8'd2;
+endmodule
+";
+        let options = crate::SimulatorOptions {
+            emit_triggers: true,
+            scheduler: SchedulerMode::Compiled,
+            ..Default::default()
+        };
+        let (program, _) = crate::compile_sv_to_sir(
+            &[(source, std::path::Path::new("roles.sv"))],
+            "Top",
+            &[],
+            &[],
+            false,
+            &Default::default(),
+            None,
+            None,
+            None,
+            None,
+            &[],
+            &options.optimize_options,
+        )
+        .unwrap();
+        let mut program = program.into_laid_out(false);
+        super::super::enable_native_services(&mut program);
+        super::super::attach(&mut program, true, false, true);
+        let schema = program.runtime.runtime_schema.scheduler.as_ref().unwrap();
+        let unit = &program.sir.processes[schema.unit.unwrap()];
+        let roles = &program.scheduler_block_roles;
+        let mut missing: Vec<usize> = unit
+            .blocks
+            .keys()
+            .map(|block| block.0)
+            .filter(|block| {
+                !roles
+                    .iter()
+                    .any(|(start, end, _)| (*start..*end).contains(block))
+            })
+            .collect();
+        missing.sort_unstable();
+        assert!(
+            missing.is_empty(),
+            "blocks without a role: {missing:?}\n{roles:#?}"
+        );
+        // The header is made before the first phase and filled by the next
+        // slot's: its role is that phase's, not the setup's.
+        assert!(
+            roles
+                .iter()
+                .any(|(start, end, role)| end - start == 1 && role == "scheduler: next slot"),
+            "{roles:#?}"
+        );
+    }
 }

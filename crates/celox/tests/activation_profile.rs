@@ -80,3 +80,23 @@ fn counts_slots_domains_and_quiet_judgments() {
         "{text}"
     );
 }
+
+#[test]
+fn a_profiled_native_image_counts_after_it_is_reloaded() {
+    let mut built = simulation(true);
+    built.run_until(100).unwrap();
+    let image = Simulation::from_sv_sources(vec![(DESIGN, Path::new("profile.sv"))], "Top")
+        .activation_profile(true)
+        .compile_native()
+        .unwrap()
+        .into_program_image();
+    let image =
+        celox::NativeProgramImage::from_container_bytes(&image.to_container_bytes().unwrap())
+            .unwrap();
+    let mut loaded = Simulation::from_sv_sources(Vec::new(), "Top")
+        .build_native_from_image(image)
+        .unwrap();
+    loaded.run_until(100).unwrap();
+    assert_eq!(outputs(&mut loaded), outputs(&mut built));
+    assert_eq!(loaded.activation_profile(), built.activation_profile());
+}

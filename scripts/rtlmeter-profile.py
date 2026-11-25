@@ -223,7 +223,10 @@ def attribute(directory):
             shutil.move(str(path), directory / path.name)
     top = sorted(blocks.items(), key=lambda item: -item[1])[:200]
     return {'functions': functions, 'blocks': dict(top),
+            # Only the top symbols are kept; the total keeps all of their
+            # weight for scaling.
             'host': dict(sorted(host.items(), key=lambda item: -item[1])[:50]),
+            'hostTotal': sum(host.values()),
             'throttleEvents': int(throttled[1]) if throttled else 0}
 
 
@@ -259,7 +262,8 @@ def attribution_rows(summary, out):
     profile = out / 'profiled' / 'activation.json'
     table = profile_tool.counters(json.loads(profile.read_text())) if profile.is_file() else {}
     cycles = summary['profiled']['cycles']
-    sampled = sum(attribution['functions'].values()) + sum(attribution.get('host', {}).values())
+    host = attribution.get('hostTotal', sum(attribution.get('host', {}).values()))
+    sampled = sum(attribution['functions'].values()) + host
     execute = (summary.get('sampled') or {}).get('execute', {}).get('instructions')
     # Sampled instructions, scaled to the execute phase's count.
     scale = execute / sampled if execute and sampled else 1
@@ -269,7 +273,7 @@ def attribution_rows(summary, out):
         row = rows.setdefault(role, {'role': role, 'instructions': 0, 'functions': 0})
         row['instructions'] += instructions * scale
         row['functions'] += 1
-    host = sum(attribution.get('host', {}).values()) * scale
+    host *= scale
     if host:
         rows['(host code)'] = {'role': '(host code)', 'instructions': host}
     for row in rows.values():
@@ -463,6 +467,10 @@ def main():
     p.add_argument('--top', type=int, default=40)
     p.set_defaults(run=compare)
     args = parser.parse_args()
+    if getattr(args, 'source', None):
+        # The simulators run in the output directory: relative source and
+        # include paths would point into it.
+        args.source = args.source.resolve()
     (getattr(args, 'run_command', None) or args.run)(args)
 
 

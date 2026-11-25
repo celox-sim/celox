@@ -103,6 +103,20 @@ class ActivationProfileTests(unittest.TestCase):
         self.assertAlmostEqual(rows['scheduler: domain waves']['perClock'], 9.0)
         self.assertAlmostEqual(rows['(host code)']['perClock'], 1.0)
 
+    def test_attribution_scales_by_every_host_sample_not_only_the_listed_ones(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            (out / 'profiled').mkdir()
+            (out / 'profiled' / 'activation.json').write_text(json.dumps(profile(1100, 1500)))
+            # 200 JIT and 6000 host instructions over 60 symbols, of which
+            # the attribution lists 50.
+            summary = {'profiled': {'cycles': 1}, 'sampled': {'execute': {'instructions': 6200}},
+                       'attribution': {'functions': {'settle': 200}, 'blocks': {},
+                                       'host': {f'h{i}': 100 for i in range(50)}, 'hostTotal': 6000}}
+            rows = {row['role']: row for row in runner.attribution_rows(summary, out)}
+        self.assertAlmostEqual(rows['settle']['perClock'], 200.0)
+        self.assertAlmostEqual(rows['(host code)']['perClock'], 6000.0)
+
     def test_rejects_unknown_versions(self):
         with tempfile.TemporaryDirectory() as directory:
             path = self.write(directory, 'a', {'version': 2})

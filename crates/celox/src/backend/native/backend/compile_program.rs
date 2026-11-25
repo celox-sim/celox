@@ -1548,6 +1548,7 @@ fn native_runtime_schema(
         initial_copies: sir.runtime().runtime_schema.initial_copies.clone(),
         scheduler: sir.runtime().runtime_schema.scheduler.clone(),
         derived_edges: sir.runtime().runtime_schema.derived_edges.clone(),
+        activation_sites: sir.runtime().activation_sites.clone(),
     }
 }
 

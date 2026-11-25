@@ -4,7 +4,9 @@
 //! on.
 
 /// What part of the compiled scheduler an [`ActivationSite`] counts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ActivationKind {
     /// The time slots the unit runs.
@@ -40,13 +42,13 @@ pub enum ActivationKind {
 
 /// One counter of a compiled scheduler built with
 /// `SimulatorBuilder::activation_profile`.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ActivationSite {
     pub kind: ActivationKind,
     /// What the counter belongs to: an event signal, a kernel, a call site.
     pub subject: String,
     /// What it counts: `runs`, `edges`, `quiet`, `dirty`, ...
-    pub measure: &'static str,
+    pub measure: String,
 }
 
 /// One counter of [`ActivationProfile`] and its count.
