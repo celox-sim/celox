@@ -602,6 +602,7 @@ pub(in crate::ast) fn subroutines_with_symbolic_parameters(
                 item,
                 None,
                 None,
+                None,
             );
             let subroutine = match (lowered, rejected.as_deref_mut()) {
                 (Ok(subroutine), _) => subroutine,
@@ -814,6 +815,7 @@ pub(in crate::ast) fn lower_subroutine(
     item: &generate::Item,
     class: Option<&classes::Class>,
     dispatch: Option<&[(String, Vec<u32>)]>,
+    class_scope: Option<&ClassScope>,
 ) -> Converted<Subroutine> {
     let native = tree.declarations().subroutine(native_id);
     let name = instances::normalize_identifier(&native.name.spelling);
@@ -908,13 +910,27 @@ pub(in crate::ast) fn lower_subroutine(
         None => name.clone(),
     });
     let scope = scope_name(tree, session, declaration_env, native.tokens, class, &name);
-    let mut builder = BodyBuilder::new(
-        tree,
-        session,
-        item_dimensions,
-        state,
-        system_functions::Body::Subroutine,
-    );
+    // The scope of the class is entered already when no static variable of
+    // a subroutine is bound in it, which is what each method would bind.
+    let class_scope = class_scope.filter(|_| {
+        class.is_some_and(|class| super::static_references::bind_none(tree, state, class))
+    });
+    let mut builder = match class_scope {
+        Some(class_scope) => BodyBuilder::in_class_scope(
+            tree,
+            session,
+            class_scope,
+            state,
+            system_functions::Body::Subroutine,
+        ),
+        None => BodyBuilder::new(
+            tree,
+            session,
+            item_dimensions,
+            state,
+            system_functions::Body::Subroutine,
+        ),
+    };
     builder.set_owner(qualified_name.clone());
     // A subroutine of a generate block is named under it.
     let scope = match (builder.dims.scope_name.as_deref(), scope) {
@@ -952,9 +968,13 @@ pub(in crate::ast) fn lower_subroutine(
         });
     }
     let first_static = builder.state.statics.len();
-    builder.push_scope();
+    if class_scope.is_none() {
+        builder.push_scope();
+    }
     if let Some(class) = class {
-        builder.enter_class_scope(class);
+        if class_scope.is_none() {
+            builder.enter_class_scope(class);
+        }
         builder.dims.constructor = constructor;
         builder.dims.method_name = Some(name.clone());
         // Method formals and locals may shadow properties, but not another
@@ -1233,9 +1253,19 @@ pub(in crate::ast) fn lower_subroutine(
     }
     body.extend(aggregate_epilogue);
     builder.pop_scope();
-    if class.is_some() {
-        builder.pop_scope();
-    }
+    // What follows reads the constants of the scope that declares the
+    // subroutine: ending the class's scope restores them, and a body
+    // started in a shared class scope has them from before it (see
+    // `ClassScope`), the scope ending with the builder.
+    let declaration_constants = match class_scope {
+        Some(class_scope) => class_scope.outer_env.clone(),
+        None => {
+            if class.is_some() {
+                builder.pop_scope();
+            }
+            builder.dims.const_env.clone()
+        }
+    };
     // The locals of the array locator calls of the body are its own, as
     // automatic as the rest of them (IEEE 1800-2023 7.12).
     builder.flush_locator_locals();
@@ -1330,7 +1360,7 @@ pub(in crate::ast) fn lower_subroutine(
             && lifetimes::check_static_result(
                 tree,
                 builder.session,
-                &builder.dims.const_env,
+                &declaration_constants,
                 &builder.state.locals[first_local..],
                 &subroutine,
                 builder.state.subroutine_directions,
@@ -1361,7 +1391,7 @@ pub(in crate::ast) fn lower_subroutine(
                         tree,
                         builder.session,
                         &subroutine,
-                        &builder.dims.const_env,
+                        &declaration_constants,
                         &builder.state.locals[first_local..],
                         &std::iter::once((*name).clone()).collect(),
                         builder.state.subroutine_directions,
