@@ -411,16 +411,21 @@ fn instances_from_native_declaration(
             );
             parameter_overrides.extend(binding.parameters.iter().cloned());
         }
-        instances.push(Instance::new(
-            binding.map_or_else(|| module_name.clone(), |binding| binding.module.clone()),
-            name,
-            parameter_names,
-            parameter_overrides,
-            condition.clone(),
-            port_names,
-            port_connections,
-            array_range,
-        ));
+        instances.push(
+            Instance::new(
+                binding.map_or_else(|| module_name.clone(), |binding| binding.module.clone()),
+                name,
+                parameter_names,
+                parameter_overrides,
+                condition.clone(),
+                port_names,
+                port_connections,
+                array_range,
+            )
+            .with_interface_actuals(
+                binding.map_or_else(Vec::new, |binding| binding.interface_actuals.clone()),
+            ),
+        );
     }
     Ok(())
 }

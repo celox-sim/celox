@@ -32,6 +32,7 @@ impl ModuleBinding<'_> {
                     let child = &self.packages.interface_plan.modules[alias];
                     let mut connections = HashMap::default();
                     let mut parameters = Vec::new();
+                    let mut interface_actuals = Vec::new();
                     for port in &child.ports {
                         let actual = connection_expression(
                             authored,
@@ -78,6 +79,14 @@ impl ModuleBinding<'_> {
                             }
                         }
                         connections.insert(port.name.clone(), members);
+                        // The actual by the module's name for it, resolved
+                        // through the generate scopes around the instance as
+                        // the connection is.
+                        if port.array_rank == 0
+                            && let Some(actual) = item.interface_handle(&actuals.elements[0])
+                        {
+                            interface_actuals.push((port.name.clone(), actual));
+                        }
                         for (dimension, size) in actuals.shape.iter().enumerate() {
                             parameters.push(ParameterOverride::new(
                                 format!("{}$$dimension{dimension}", port.name),
@@ -133,6 +142,7 @@ impl ModuleBinding<'_> {
                         module: alias.clone(),
                         connections,
                         parameters,
+                        interface_actuals,
                     };
                     if item.scope_name().is_empty() {
                         self.imported
