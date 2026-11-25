@@ -357,7 +357,7 @@ impl BodyBuilder<'_, '_, '_> {
                                     0..0,
                                     [
                                         assign(
-                                            handle,
+                                            handle.clone(),
                                             events::call(
                                                 celox_design::ProcessOp::SelfHandleInternal,
                                                 Vec::new(),
@@ -372,6 +372,8 @@ impl BodyBuilder<'_, '_, '_> {
                                 // `disable` of its name must not meet the
                                 // stale handle of a completed activation.
                                 branches[branch].push(assign(armed, Expr::Literal("1'b0".into())));
+                                branches[branch]
+                                    .push(assign(handle, Expr::Literal("32'b0".into())));
                             }
                             branch += 1;
                         }

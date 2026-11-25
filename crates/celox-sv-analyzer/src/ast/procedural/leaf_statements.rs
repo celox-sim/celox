@@ -510,11 +510,16 @@ impl BodyBuilder<'_, '_, '_> {
                                 then_body: vec![
                                     Stmt::Eval(events::call(
                                         celox_design::ProcessOp::Kill,
-                                        vec![Expr::Ident(handle)],
+                                        vec![Expr::Ident(handle.clone())],
                                     )),
                                     Stmt::Assign {
                                         lhs: LValue::Ident(armed),
                                         rhs: Expr::Literal("1'b0".into()),
+                                        nonblocking: false,
+                                    },
+                                    Stmt::Assign {
+                                        lhs: LValue::Ident(handle),
+                                        rhs: Expr::Literal("32'b0".into()),
                                         nonblocking: false,
                                     },
                                 ],
