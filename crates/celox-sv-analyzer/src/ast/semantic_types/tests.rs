@@ -882,3 +882,59 @@ fn classes_and_interfaces_are_declarations_of_their_own() {
     table.record_class_arguments(class, arguments.clone());
     assert_eq!(table.decl(class).arguments.as_ref(), Some(&arguments));
 }
+
+#[test]
+fn typedefs_name_the_declarations_of_their_aggregates() {
+    // IEEE 1800-2023 6.18: a typedef names a structure or union type, and
+    // `typedef A B` names the type of `A` still (6.22.1). The declaration
+    // of the type keeps the name: each member of a packed aggregate (7.2.1,
+    // 7.3.1), and an unpacked structure (7.2), which keep it through the
+    // copies of their type.
+    let session = &mut Session::default();
+    let source = "module M;
+        typedef struct packed {logic a;} p_t;
+        typedef p_t q_t;
+        typedef union packed {logic a;} u_t;
+        typedef struct {int a;} s_t;
+        endmodule";
+    let tree =
+        crate::source_tree::parse_scope_fixture(source, Path::new("semantic_types.sv")).unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
+    let env = ConstEnv::default();
+    let aliases = types::type_aliases_from_scope_with_env(&tree, session, &env).unwrap();
+    let packed = |name: &str| {
+        let ty = &aliases[name];
+        let declaration = ty.members[0].declaration().clone();
+        assert!(
+            ty.members
+                .iter()
+                .all(|member| Arc::ptr_eq(member.declaration(), &declaration))
+        );
+        let rebuilt = crate::ast::Type::new(crate::ast::TypeKind::Logic).with_members_of(ty);
+        assert_eq!(
+            rebuilt.members[0].declaration().naming().declaration(),
+            declaration.naming().declaration()
+        );
+        (
+            declaration.naming().declaration().map(str::to_owned),
+            declaration.keyword(),
+            ty.declaration_name().map(str::to_owned),
+        )
+    };
+    let (p_t, keyword, spelled) = packed("p_t");
+    assert!(p_t.as_deref().is_some_and(|name| name.ends_with("p_t")));
+    assert_eq!((keyword, &spelled), (Some("struct"), &p_t));
+    assert_eq!(packed("q_t"), (p_t.clone(), Some("struct"), p_t));
+    let (u_t, keyword, spelled) = packed("u_t");
+    assert!(u_t.as_deref().is_some_and(|name| name.ends_with("u_t")));
+    assert_eq!((keyword, spelled), (Some("union"), u_t));
+    let s_t = &aliases["s_t"];
+    let structure = s_t.unpacked_struct().expect("an unpacked structure");
+    assert!(
+        structure
+            .naming()
+            .declaration()
+            .is_some_and(|name| name.ends_with("s_t"))
+    );
+    assert_eq!(structure.naming().declaration(), s_t.declaration_name());
+}

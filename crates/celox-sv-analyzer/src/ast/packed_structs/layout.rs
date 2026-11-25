@@ -44,12 +44,13 @@ pub(in crate::ast) fn native_type(
     tree: &AnalysisContext<'_>,
     kind: AggregateKind,
     signed: bool,
-    owner: Arc<str>,
+    owner: AggregateDeclaration,
     fields: Vec<(String, Type, bool)>,
     ranges: Vec<PackedRange>,
     env: &ConstEnv,
 ) -> Option<Type> {
     let functions = &tree.functions;
+    let owner = Arc::new(owner);
     let mut names = HashSet::default();
     let members = fields
         .into_iter()
