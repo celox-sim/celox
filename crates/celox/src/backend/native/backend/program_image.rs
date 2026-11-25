@@ -382,7 +382,7 @@ impl NativeProgramImage {
         }
     }
 
-    pub(in crate::backend::native) fn validate(&self) -> Result<(), String> {
+    pub(in crate::backend::native) fn validate(&self, lazy_slots: usize) -> Result<(), String> {
         self.design
             .validate()
             .map_err(|error| format!("invalid runtime design: {error}"))?;
@@ -445,7 +445,17 @@ impl NativeProgramImage {
         if !entry_offsets.contains(&self.comb_offset) {
             return Err("eval_comb offset does not name an image entry".into());
         }
-        for &offset in &self.runtime_schema.native_kernel_offsets {
+        for (slot, &offset) in self.runtime_schema.native_kernel_offsets.iter().enumerate() {
+            if offset == LAZY_FUNCTION_OFFSET {
+                if slot < lazy_slots {
+                    continue;
+                }
+                return Err(
+                    "the image compiles its function units at their first call, \
+                     in the process that compiled it only"
+                        .into(),
+                );
+            }
             if !entry_offsets.contains(&offset) {
                 return Err("native kernel offset does not name an image entry".into());
             }

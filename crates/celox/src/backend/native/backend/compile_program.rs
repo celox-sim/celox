@@ -26,7 +26,54 @@ pub(super) fn compile_program(
     capture_trace: bool,
     cancel: Option<&CompileCancel>,
 ) -> Result<(NativeProgramImage, Option<NativeCodegenTrace>), SimulatorError> {
-    compile_program_with_outlining_threshold(laid_out, options, capture_trace, cancel, 32_768)
+    compile_program_with_outlining_threshold(
+        laid_out,
+        options,
+        capture_trace,
+        cancel,
+        32_768,
+        false,
+    )
+}
+
+/// [`compile_program`] without the function units: their kernel offsets are
+/// [`LAZY_FUNCTION_OFFSET`], for [`LazyFunctions`] to compile each at its
+/// first call. The image can only be loaded with them.
+#[cfg(lazy_native_functions)]
+pub(super) fn compile_program_without_functions(
+    laid_out: &LaidOutProgram,
+    options: &SimulatorOptions,
+) -> Result<NativeProgramImage, SimulatorError> {
+    let (image, trace) =
+        compile_program_with_outlining_threshold(laid_out, options, false, None, 32_768, true)?;
+    debug_assert!(trace.is_none());
+    Ok(image)
+}
+
+/// The options every unit of a program with function units compiles with:
+/// `options` with the units' frames. `None` for a program without them,
+/// which compiles with the options it was given.
+pub(super) fn function_options(
+    sir: &LaidOutProgram,
+    options: &SimulatorOptions,
+) -> Result<Option<SimulatorOptions>, SimulatorError> {
+    if sir.sir.functions.is_empty() {
+        return Ok(None);
+    }
+    let extern_count = sir.runtime().runtime_schema.extern_functions.len();
+    let mut with_functions = options.clone();
+    with_functions.x86_options.functions =
+        Some(std::sync::Arc::new(crate::backend::NativeFunctions {
+            frames: sir
+                .sir
+                .functions
+                .iter()
+                .map(|function| function.frame.clone())
+                .collect(),
+            first_slot: u32::try_from(extern_count)
+                .map_err(|_| codegen_message("too many native extern functions"))?,
+        }));
+    Ok(Some(with_functions))
 }
 
 pub(super) fn compile_program_with_outlining_threshold(
@@ -35,6 +82,7 @@ pub(super) fn compile_program_with_outlining_threshold(
     capture_trace: bool,
     cancel: Option<&CompileCancel>,
     outline_threshold: usize,
+    lazy_functions: bool,
 ) -> Result<(NativeProgramImage, Option<NativeCodegenTrace>), SimulatorError> {
     laid_out.reject_unsupported_callee_stores("native", true)?;
     let sir = laid_out;
@@ -44,26 +92,13 @@ pub(super) fn compile_program_with_outlining_threshold(
     // every compile sees their frames; a program without them compiles with
     // the options it was given.
     let extern_count = sir.runtime().runtime_schema.extern_functions.len();
-    let function_options;
-    let options = if sir.sir.functions.is_empty() {
-        options
+    let function_options = function_options(sir, options)?;
+    let options = function_options.as_ref().unwrap_or(options);
+    let (function_jits, lazy_functions) = if lazy_functions {
+        (Vec::new(), sir.sir.functions.len())
     } else {
-        let mut with_functions = options.clone();
-        with_functions.x86_options.functions =
-            Some(std::sync::Arc::new(crate::backend::NativeFunctions {
-                frames: sir
-                    .sir
-                    .functions
-                    .iter()
-                    .map(|function| function.frame.clone())
-                    .collect(),
-                first_slot: u32::try_from(extern_count)
-                    .map_err(|_| codegen_message("too many native extern functions"))?,
-            }));
-        function_options = with_functions;
-        &function_options
+        (compile_function_units(sir, layout, options, cancel)?, 0)
     };
-    let function_jits = compile_function_units(sir, layout, options, cancel)?;
     let force_bindings =
         build_force_bindings(sir.runtime(), layout, &options.signal_access.force_signals)?;
     let (compile_tasks, task_bindings) = collect_event_compile_tasks(sir);
@@ -408,6 +443,7 @@ pub(super) fn compile_program_with_outlining_threshold(
         task_bindings,
         force_bindings,
         function_jits,
+        lazy_functions,
         callee_jits,
         callee_names,
         comb_chunk_jits,
@@ -635,33 +671,45 @@ fn compile_function_units(
         workers,
         || layout.clone(),
         |function_layout, index| {
-            let mut function_options = options.x86_options.clone();
-            function_options.function = Some(celox_sir::FunctionId(
-                u32::try_from(index).map_err(|_| codegen_message("too many function units"))?,
-            ));
-            let frame = &function_options
-                .functions
-                .as_deref()
-                .ok_or_else(|| codegen_message("function units without their frames"))?
-                .frames[index];
-            let placed =
-                emit::place_frame_slots(function_layout, frame).map_err(codegen_message)?;
-            let compiled = compile_unit_refs(
-                &[&functions[index].unit],
-                function_layout,
-                options.four_state,
-                &format!("function[{index}]"),
-                NativeMergeKind::Complete,
-                &function_options,
-                false,
-                &options.optimize_options.diagnostics,
-                cancel,
-            );
-            emit::remove_frame_slots(function_layout, &placed);
-            compiled
+            compile_function_unit(sir, function_layout, options, index, cancel)
         },
     )
     .map_err(|_| codegen_message("native function compile thread panicked"))?
+}
+
+/// Compile function unit `index` of a program, with `options` from
+/// [`function_options`]. `layout` is a copy of the program's layout, which
+/// holds the objects of the unit's frame slots while it is compiled.
+pub(super) fn compile_function_unit(
+    sir: &LaidOutProgram,
+    layout: &mut MemoryLayout,
+    options: &SimulatorOptions,
+    index: usize,
+    cancel: Option<&CompileCancel>,
+) -> Result<CompiledNativeFunction, SimulatorError> {
+    let mut function_options = options.x86_options.clone();
+    function_options.function = Some(celox_sir::FunctionId(
+        u32::try_from(index).map_err(|_| codegen_message("too many function units"))?,
+    ));
+    let frame = &function_options
+        .functions
+        .as_deref()
+        .ok_or_else(|| codegen_message("function units without their frames"))?
+        .frames[index];
+    let placed = emit::place_frame_slots(layout, frame).map_err(codegen_message)?;
+    let compiled = compile_unit_refs(
+        &[&sir.sir.functions[index].unit],
+        layout,
+        options.four_state,
+        &format!("function[{index}]"),
+        NativeMergeKind::Complete,
+        &function_options,
+        false,
+        &options.optimize_options.diagnostics,
+        cancel,
+    );
+    emit::remove_frame_slots(layout, &placed);
+    compiled
 }
 
 /// The unit a derived edge inlines instead of combinational logic outlined
@@ -1105,6 +1153,7 @@ fn assemble_program_image(
     task_bindings: NativeTaskBindings,
     force_bindings: Vec<NativeForceBinding>,
     function_jits: Vec<CompiledNativeFunction>,
+    lazy_functions: usize,
     callee_jits: Vec<CompiledNativeFunction>,
     callee_names: Vec<String>,
     comb_chunk_jits: Vec<CompiledNativeFunction>,
@@ -1200,7 +1249,8 @@ fn assemble_program_image(
         &comb_jit,
     )?;
     // The function units' slots come first, then the generated kernels'.
-    let mut native_kernel_offsets = Vec::with_capacity(function_jits.len() + 1);
+    let mut native_kernel_offsets = Vec::with_capacity(function_jits.len() + lazy_functions + 1);
+    native_kernel_offsets.resize(lazy_functions, LAZY_FUNCTION_OFFSET);
     for (index, code) in function_jits.iter().enumerate() {
         native_kernel_offsets.push(append_native_code(
             &mut packed_image,
