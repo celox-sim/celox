@@ -1991,13 +1991,11 @@ impl SimBackend for InterpBackend {
     /// (sched_bench (d): about 9% more per cycle).
     fn runs_compiled_scheduler(&self) -> bool {
         #[cfg(hotspot_jit)]
-        if self
+        return self
             .hotspots
             .as_ref()
-            .is_some_and(HotspotRuntime::has_compiled_scheduler)
-        {
-            return true;
-        }
+            .is_some_and(HotspotRuntime::has_compiled_scheduler);
+        #[cfg(not(hotspot_jit))]
         false
     }
 

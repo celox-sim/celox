@@ -122,8 +122,14 @@ pub(super) fn best_same_predicate_plan(
         }
 
         let mut groups = BTreeMap::<RegisterId, Vec<usize>>::new();
-        for index in segment_start..segment_end {
-            for condition in conditional_source_conditions(eu, &block.instructions[index]) {
+        for (index, inst) in block
+            .instructions
+            .iter()
+            .enumerate()
+            .take(segment_end)
+            .skip(segment_start)
+        {
+            for condition in conditional_source_conditions(eu, inst) {
                 groups.entry(condition).or_default().push(index);
             }
         }
@@ -190,8 +196,13 @@ pub(super) fn plan_same_predicate_region(
     // into a small live-out frontier instead of one block parameter per Mux.
     let mut affected = HashSet::<RegisterId>::default();
     let mut cofactor = HashSet::<usize>::default();
-    for index in segment_start..segment_end {
-        let inst = &block.instructions[index];
+    for (index, inst) in block
+        .instructions
+        .iter()
+        .enumerate()
+        .take(segment_end)
+        .skip(segment_start)
+    {
         let dst = def_reg(inst)?;
         if muxes.contains(&index) {
             affected.insert(dst);
@@ -501,20 +512,25 @@ pub(super) fn same_predicate_arm_is_closed(
         .filter_map(|index| def_reg(&block.instructions[*index]))
         .collect::<HashSet<_>>();
     let mut mapped = HashSet::default();
-    for index in plan.segment_start..plan.segment_end {
+    for (index, inst) in block
+        .instructions
+        .iter()
+        .enumerate()
+        .take(plan.segment_end)
+        .skip(plan.segment_start)
+    {
         if owned.contains(&index) || arm_cofactor.contains(&index) {
-            if instruction_uses(&block.instructions[index])
+            if instruction_uses(inst)
                 .into_iter()
                 .any(|operand| removed.contains(&operand) && !mapped.contains(&operand))
             {
                 return false;
             }
-            if let Some(dst) = def_reg(&block.instructions[index]) {
+            if let Some(dst) = def_reg(inst) {
                 mapped.insert(dst);
             }
         } else if arm_muxes.contains(&index) {
-            let Some(source) = conditional_source(eu, &block.instructions[index], plan.condition)
-            else {
+            let Some(source) = conditional_source(eu, inst, plan.condition) else {
                 return false;
             };
             if let ConditionalArm::Value(selected) = source.selected(true_arm) {
@@ -633,13 +649,19 @@ pub(super) fn apply_same_predicate_plan(
         .remove(&plan.block_id)
         .expect("planned same-predicate block must remain present");
     let mut head_instructions = original.instructions[..plan.segment_start].to_vec();
-    for index in plan.segment_start..plan.segment_end {
+    for (index, inst) in original
+        .instructions
+        .iter()
+        .enumerate()
+        .take(plan.segment_end)
+        .skip(plan.segment_start)
+    {
         if !plan.true_owned.contains(&index)
             && !plan.false_owned.contains(&index)
             && !plan.muxes.contains(&index)
             && !plan.cofactor.contains(&index)
         {
-            head_instructions.push(original.instructions[index].clone());
+            head_instructions.push(inst.clone());
         }
     }
     let merge_instructions = original.instructions[plan.segment_end..].to_vec();
@@ -739,8 +761,13 @@ pub(super) fn build_same_predicate_arm(
     let mut instructions = Vec::new();
     let mut replacements = HashMap::<RegisterId, RegisterId>::default();
     let mut zero = None;
-    for index in plan.segment_start..plan.segment_end {
-        let inst = &original.instructions[index];
+    for (index, inst) in original
+        .instructions
+        .iter()
+        .enumerate()
+        .take(plan.segment_end)
+        .skip(plan.segment_start)
+    {
         if owned.contains(&index) || arm_cofactor.contains(&index) {
             let old_dst = def_reg(inst).expect("pure region instruction must define a value");
             *reg_counter += 1;

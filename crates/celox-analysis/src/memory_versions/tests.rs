@@ -539,7 +539,7 @@ fn acyclic_cfgs_agree_with_the_clobber_walker_on_snapshot_equality() {
         let mut walker = ClobberWalker::new();
 
         let mut points = Vec::new();
-        for block in 0..blocks {
+        for (block, events) in program.events.iter().enumerate().take(blocks) {
             points.push((
                 analysis.block_entry(block).unwrap(),
                 walker_analysis.points.block_entry(block).unwrap(),
@@ -548,7 +548,7 @@ fn acyclic_cfgs_agree_with_the_clobber_walker_on_snapshot_equality() {
                 analysis.block_exit(block).unwrap(),
                 walker_analysis.points.block_exit(block).unwrap(),
             ));
-            for index in 0..program.events[block].len() {
+            for index in 0..events.len() {
                 let (before, after) = analysis.event(block, index).unwrap();
                 let access = walker_analysis.points.event((block, index)).unwrap();
                 points.push((before, access.before));
