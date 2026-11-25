@@ -59,7 +59,7 @@ pub(super) fn concurrent_monitor_clock(body: &[sv::ir::Stmt]) -> Option<Clock> {
 /// its predicate is true on every tick, so the monitor process, its region
 /// transitions and its sampled-value readers can all be dropped. Anything
 /// not in exactly that shape keeps its process.
-pub(super) fn vacuous_two_state_monitor(body: &[sv::ir::Stmt]) -> bool {
+pub(in crate::lowering) fn vacuous_two_state_monitor(body: &[sv::ir::Stmt]) -> bool {
     use sv::ir::{LoopKind, Stmt};
     let [
         Stmt::Loop {
