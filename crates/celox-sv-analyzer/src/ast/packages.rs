@@ -874,6 +874,7 @@ fn analyze_package(
         active_interfaces: Arc::default(),
         timescale: Arc::default(),
         interface_instance: None,
+        instance_scope: None,
         declared_values: true,
     };
     let tree = &context;

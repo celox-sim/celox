@@ -229,6 +229,59 @@ sv_backends! {
             "Top.u.genblk3 unnamed",
         ]);
     }
+    // `%m` in the processes of an interface instance, and in the subroutines
+    // and named blocks they run, names the instance as its parent does: an
+    // element of an instance array, one in a generate block (IEEE 1800-2023
+    // 21.2.1.5), in literal and run-time formats alike. The lines are sorted.
+    fn scope_name_of_interface_instances(sim) {
+        @setup {
+            let source = r#"
+                `timescale 1ns/1ns
+                interface bfm;
+                    string fmt = "%m", s;
+                    task w(); $display("task %m"); endtask
+                    function automatic string f(); return $sformatf("%m"); endfunction
+                    initial begin
+                        #1;
+                        w();
+                        $display("initial %m");
+                        s = $sformatf(fmt);
+                        $display("runtime %s", s);
+                        $display("function %s", f());
+                        begin : nb $display("block %m"); end
+                    end
+                endinterface
+                module Top;
+                    bfm b0();
+                    bfm arr[2] ();
+                    if (1) begin : g bfm u(); end
+                endmodule
+            "#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("interface_scope.sv"))], "Top");
+        sim.run_until(2).unwrap();
+        let mut lines: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        lines.sort();
+        let mut want = Vec::new();
+        for instance in ["Top.arr[0]", "Top.arr[1]", "Top.b0", "Top.g.u"] {
+            want.push(format!("block {instance}.nb"));
+            want.push(format!("function {instance}.f"));
+            want.push(format!("initial {instance}"));
+            want.push(format!("runtime {instance}"));
+            want.push(format!("task {instance}.w"));
+        }
+        want.sort();
+        assert_eq!(lines, want);
+    }
     // An escaped block name keeps the white space that ends it in `%m`
     // (IEEE 1800-2023 5.6.1), so a `.` in it does not read as a separator.
     fn scope_name_of_escaped_named_blocks(sim) {

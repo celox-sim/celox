@@ -243,6 +243,11 @@ impl ScopeElaboration<'_> {
             &self.type_aliases,
         );
         self.packed_dimensions.constant_types = self.constant_types();
+        // `%m` in the body of an interface instance names the instance.
+        self.packed_dimensions.scope_name = syntax_tree
+            .instance_scope
+            .as_deref()
+            .map(|instance| Arc::new(expression_binding::ScopeName::Relative(instance.to_owned())));
         // Four-state parameter values cannot be represented by the numeric
         // environment. Keep their expressions for constant case analysis.
         self.packed_dimensions.parameter_values = parameter_value_env_with_imported(

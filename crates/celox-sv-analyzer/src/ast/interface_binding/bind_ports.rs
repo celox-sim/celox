@@ -135,6 +135,9 @@ impl ModuleBinding<'_> {
                             tree.interface_instance.as_deref(),
                             handle,
                         )),
+                        // A port's body runs in the instance it denotes,
+                        // which this scope does not name (#4354).
+                        instance_scope: None,
                         ..tree.clone()
                     };
                     interface_ast::analyze(

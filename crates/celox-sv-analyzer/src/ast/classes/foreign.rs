@@ -406,6 +406,7 @@ fn specialize(
         package: Some(name.into()),
         timescale: timescales::for_tree(owner.timescales.clone(), &owner.tree)?,
         interface_instance: None,
+        instance_scope: None,
         declared_values: false,
     };
 
