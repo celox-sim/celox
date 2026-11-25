@@ -92,7 +92,11 @@ pub(super) fn ports_from_scope(
         // the module, such as a member of an enumeration of a package the
         // header imports (IEEE 1800-2023 26.4): take its value here, as for
         // a variable of the module.
-        let mut ty = procedural::scoped_type(
+        let bound_ty = if direction == PortDirection::Ref {
+            let mut context = PackedDimensions::new(HashMap::default(), const_env, type_aliases);
+            context.type_declarations = Some(declarations.clone());
+            containers::with_dimensions(base, &native.dimensions, syntax_tree, session, &context)?
+        } else {
             type_with_unpacked_ranges(
                 base,
                 constant_binding::unpacked_ranges(
@@ -102,9 +106,9 @@ pub(super) fn ports_from_scope(
                     const_env,
                     type_aliases,
                 )?,
-            )?,
-            const_env,
-        );
+            )?
+        };
+        let mut ty = procedural::scoped_type(bound_ty, const_env);
         // The port is declared in this scope: its type is the one the
         // scope's constants give it.
         semantic_types::bind_declared(
@@ -113,10 +117,10 @@ pub(super) fn ports_from_scope(
             &mut ty,
             const_env,
         );
-        if ty.container().is_some() {
+        if ty.container().is_some() && direction != PortDirection::Ref {
             return Err(unsupported("dynamic container port"));
         }
-        if ty.kind() == TypeKind::Event {
+        if ty.kind() == TypeKind::Event && direction != PortDirection::Ref {
             return Err(unsupported("event port"));
         }
         if ty.is_unpacked_struct_in(&session.types) {
@@ -149,14 +153,15 @@ pub(super) fn ports_from_scope(
             if !ty.unpacked_ranges.is_empty() {
                 return Err(unsupported("array of unpacked structures on a port"));
             }
-            if !matches!(direction, PortDirection::Input | PortDirection::Output) {
-                return Err(unsupported("unpacked structure inout or ref port"));
+            if direction == PortDirection::Inout {
+                return Err(unsupported("unpacked structure inout port"));
             }
             if native.default.is_some() {
                 return Err(unsupported("unpacked structure port default"));
             }
         }
         let variable = native.variable
+            || direction == PortDirection::Ref
             || typed_output
             || (direction == PortDirection::Output
                 && native.net_type.is_none()
@@ -229,11 +234,12 @@ pub(super) fn ports_from_scope(
             ty,
             !explicit && !variable,
         )
+        .with_const(native.constant)
         .with_unresolved_net(inherited_unresolved)
         .with_net_resolution(inherited_resolution)
         .with_default(default)
         .with_expression(expression.flatten());
-        port.randomizable = variable && direction != PortDirection::Input;
+        port.randomizable = variable && direction != PortDirection::Input && !native.constant;
         ports.push(port);
     }
     Ok(ports)

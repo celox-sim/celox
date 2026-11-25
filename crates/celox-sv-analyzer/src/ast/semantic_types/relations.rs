@@ -212,6 +212,38 @@ impl TyTable {
         }
     }
 
+    /// Whether two equivalent types agree on queue bounds at every array
+    /// nesting level. [`Self::equivalent`] ignores queue bounds per IEEE
+    /// 1800-2023 6.22.2, whereas `ref` port connections require matching bounds
+    /// at every level.
+    pub(crate) fn queue_bounds_match(&self, a: TyId, b: TyId) -> bool {
+        match (self.data(a), self.data(b)) {
+            (
+                TyData::Array {
+                    kind: a_kind,
+                    element: a_element,
+                },
+                TyData::Array {
+                    kind: b_kind,
+                    element: b_element,
+                },
+            ) => {
+                let bounds_ok = match (a_kind, b_kind) {
+                    (ArrayKind::Queue { bound: a_bound }, ArrayKind::Queue { bound: b_bound }) => {
+                        a_bound == b_bound
+                    }
+                    (
+                        ArrayKind::Associative { key: a_key },
+                        ArrayKind::Associative { key: b_key },
+                    ) => self.queue_bounds_match(*a_key, *b_key),
+                    _ => true,
+                };
+                bounds_ok && self.queue_bounds_match(*a_element, *b_element)
+            }
+            _ => true,
+        }
+    }
+
     /// Whether an unpacked array of type `source` may be assigned to one of
     /// type `target` (IEEE 1800-2023 7.6, 7.9.9): the kinds of their
     /// slowest-varying dimensions may differ, but their elements are

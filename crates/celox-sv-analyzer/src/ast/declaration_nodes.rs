@@ -324,6 +324,10 @@ impl Signal {
         &self.r#type
     }
 
+    pub(crate) fn is_const(&self) -> bool {
+        self.is_const
+    }
+
     pub(crate) fn is_net(&self) -> bool {
         self.is_net
     }
@@ -366,12 +370,25 @@ impl Port {
             direction,
             r#type,
             randomizable: !is_net,
+            is_const: false,
             is_net,
             unresolved_net: false,
             net_resolution: NetResolution::Wire,
             default: None,
             expression: None,
         }
+    }
+
+    pub(crate) fn is_const(&self) -> bool {
+        self.is_const
+    }
+
+    pub(crate) fn with_const(mut self, is_const: bool) -> Self {
+        self.is_const = is_const;
+        if is_const {
+            self.randomizable = false;
+        }
+        self
     }
 
     pub fn name(&self) -> &str {

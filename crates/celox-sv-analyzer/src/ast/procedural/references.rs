@@ -230,13 +230,15 @@ fn root_variable(actual: &Expr) -> Option<&str> {
     }
 }
 
-/// Whether an actual passed to a writable formal writes variable `name`:
-/// the variable itself, a select of it, or a part of a concatenation.
-fn writes_through(actual: &Expr, name: &str) -> bool {
+/// Whether an actual passed to a writable formal writes a variable matching
+/// `matches`: the variable itself, a select of it, or a part of a concatenation.
+fn written_target_in<'a>(actual: &'a Expr, matches: &dyn Fn(&str) -> bool) -> Option<&'a str> {
     match actual {
-        Expr::Ident(ident) => ident == name,
-        Expr::Select { expr, .. } | Expr::Resize { expr, .. } => writes_through(expr, name),
-        Expr::Concat(parts) => parts.iter().any(|part| writes_through(part, name)),
+        Expr::Ident(ident) if matches(ident) => Some(ident.as_str()),
+        Expr::Select { expr, .. } | Expr::Resize { expr, .. } => written_target_in(expr, matches),
+        Expr::Concat(parts) => parts
+            .iter()
+            .find_map(|part| written_target_in(part, matches)),
         Expr::Call {
             callee: Callee::Checked { .. },
             args,
@@ -244,9 +246,434 @@ fn writes_through(actual: &Expr, name: &str) -> bool {
         } => args
             .last()
             .and_then(Option::as_ref)
-            .is_some_and(|value| writes_through(value, name)),
-        _ => false,
+            .and_then(|value| written_target_in(value, matches)),
+        Expr::Call {
+            callee: Callee::Object(op),
+            args,
+            ..
+        } if matches!(
+            op.as_ref(),
+            crate::system_functions::ObjectOp::Container {
+                op: crate::system_functions::ContainerOp::Get,
+                ..
+            } | crate::system_functions::ObjectOp::Load(crate::system_functions::ObjectField {
+                nullable: true,
+                ..
+            }) | crate::system_functions::ObjectOp::Unbox(_)
+        ) =>
+        {
+            args.first()
+                .and_then(Option::as_ref)
+                .and_then(|container| written_target_in(container, matches))
+        }
+        _ => None,
     }
+}
+
+/// First target matching `matches` written via an argument of `callee(args)`.
+fn written_by_call<'a>(
+    callee: &Callee,
+    args: &'a [Option<Expr>],
+    directions: &lifetimes::Directions,
+    forwarded: Option<&[SubroutineParam]>,
+    matches: &dyn Fn(&str) -> bool,
+) -> Option<&'a str> {
+    args.iter().enumerate().find_map(|(position, arg)| {
+        let target = arg
+            .as_ref()
+            .and_then(|arg| written_target_in(arg, matches))?;
+        call_writes_argument(callee, position, directions, forwarded).then_some(target)
+    })
+}
+
+fn written_target_in_const<'a>(
+    actual: &'a ConstExpr,
+    matches: &dyn Fn(&str) -> bool,
+) -> Option<&'a str> {
+    match actual {
+        ConstExpr::Ident(ident) if matches(ident) => Some(ident.as_str()),
+        ConstExpr::Select { expr, .. }
+        | ConstExpr::SelectRange { expr, .. }
+        | ConstExpr::Resize { expr, .. } => written_target_in_const(expr, matches),
+        ConstExpr::Function {
+            callee: Callee::Checked { .. },
+            args,
+            ..
+        } => args
+            .last()
+            .and_then(|value| written_target_in_const(value, matches)),
+        ConstExpr::Function {
+            callee: Callee::Object(op),
+            args,
+            ..
+        } if matches!(
+            op.as_ref(),
+            crate::system_functions::ObjectOp::Container {
+                op: crate::system_functions::ContainerOp::Get,
+                ..
+            } | crate::system_functions::ObjectOp::Load(crate::system_functions::ObjectField {
+                nullable: true,
+                ..
+            }) | crate::system_functions::ObjectOp::Unbox(_)
+        ) =>
+        {
+            args.first()
+                .and_then(|container| written_target_in_const(container, matches))
+        }
+        _ => None,
+    }
+}
+
+fn call_writes_argument(
+    callee: &Callee,
+    position: usize,
+    directions: &lifetimes::Directions,
+    forwarded: Option<&[SubroutineParam]>,
+) -> bool {
+    match callee {
+        Callee::Subroutine(name) => match directions.get(name) {
+            Some(directions) => directions.get(position).copied(),
+            None => forwarded
+                .and_then(|params| params.get(position))
+                .map(|param| param.direction),
+        }
+        .is_none_or(|direction| direction.is_written()),
+        Callee::System(function) => function.writes_argument(position),
+        Callee::Object(op) => op.writes_argument(position),
+        Callee::String(_) | Callee::Checked { .. } | Callee::Lookup { .. } | Callee::Stream(_) => {
+            false
+        }
+    }
+}
+
+fn written_by_const_call<'a>(
+    callee: &Callee,
+    args: &'a [ConstExpr],
+    directions: &lifetimes::Directions,
+    forwarded: Option<&[SubroutineParam]>,
+    matches: &dyn Fn(&str) -> bool,
+) -> Option<&'a str> {
+    args.iter().enumerate().find_map(|(position, arg)| {
+        let target = written_target_in_const(arg, matches)?;
+        call_writes_argument(callee, position, directions, forwarded).then_some(target)
+    })
+}
+
+fn visit_const_calls_in<'a>(expr: &'a ConstExpr, f: &mut impl FnMut(&'a Callee, &'a [ConstExpr])) {
+    match expr {
+        ConstExpr::Literal(_) | ConstExpr::Ident(_) => {}
+        ConstExpr::Function { callee, args, .. } => {
+            f(callee, args);
+            for arg in args {
+                visit_const_calls_in(arg, f);
+            }
+        }
+        ConstExpr::Select { expr, bit } => {
+            visit_const_calls_in(expr, f);
+            visit_const_calls_in(bit, f);
+        }
+        ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+            visit_const_calls_in(expr, f);
+            visit_const_calls_in(msb, f);
+            visit_const_calls_in(lsb, f);
+        }
+        ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
+            visit_const_calls_in(expr, f);
+        }
+        ConstExpr::Binary { left, right, .. } => {
+            visit_const_calls_in(left, f);
+            visit_const_calls_in(right, f);
+        }
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            visit_const_calls_in(condition, f);
+            visit_const_calls_in(then_expr, f);
+            visit_const_calls_in(else_expr, f);
+        }
+    }
+}
+
+fn const_expr_written_by_call<'a>(
+    expr: &'a ConstExpr,
+    directions: &lifetimes::Directions,
+    forwarded: Option<&[SubroutineParam]>,
+    matches: &dyn Fn(&str) -> bool,
+) -> Option<&'a str> {
+    let mut hit = None;
+    visit_const_calls_in(expr, &mut |callee, args| {
+        if hit.is_none() {
+            hit = written_by_const_call(callee, args, directions, forwarded, matches);
+        }
+    });
+    hit
+}
+
+fn expr_written_by_call<'a>(
+    expr: &'a Expr,
+    directions: &lifetimes::Directions,
+    forwarded: Option<&[SubroutineParam]>,
+    matches: &dyn Fn(&str) -> bool,
+) -> Option<&'a str> {
+    match expr {
+        Expr::Ident(_) | Expr::Literal(_) => None,
+        Expr::Call { callee, args, .. } => {
+            written_by_call(callee, args, directions, forwarded, matches).or_else(|| {
+                args.iter()
+                    .flatten()
+                    .find_map(|arg| expr_written_by_call(arg, directions, forwarded, matches))
+            })
+        }
+        Expr::Select { expr, msb, lsb, .. } => {
+            expr_written_by_call(expr, directions, forwarded, matches)
+                .or_else(|| const_expr_written_by_call(msb, directions, forwarded, matches))
+                .or_else(|| const_expr_written_by_call(lsb, directions, forwarded, matches))
+        }
+        Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => {
+            expr_written_by_call(expr, directions, forwarded, matches)
+        }
+        Expr::Concat(parts) => parts
+            .iter()
+            .find_map(|part| expr_written_by_call(part, directions, forwarded, matches)),
+        Expr::RepeatConcat { count, parts } => {
+            const_expr_written_by_call(count, directions, forwarded, matches).or_else(|| {
+                parts
+                    .iter()
+                    .find_map(|part| expr_written_by_call(part, directions, forwarded, matches))
+            })
+        }
+        Expr::Binary { left, right, .. } => {
+            expr_written_by_call(left, directions, forwarded, matches)
+                .or_else(|| expr_written_by_call(right, directions, forwarded, matches))
+        }
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => expr_written_by_call(condition, directions, forwarded, matches)
+            .or_else(|| expr_written_by_call(then_expr, directions, forwarded, matches))
+            .or_else(|| expr_written_by_call(else_expr, directions, forwarded, matches)),
+        Expr::Inside { expr, items } => expr_written_by_call(expr, directions, forwarded, matches)
+            .or_else(|| {
+                items.iter().find_map(|item| match item {
+                    InsideItem::Value(value) => {
+                        expr_written_by_call(value, directions, forwarded, matches)
+                    }
+                    InsideItem::Range { low, high } => {
+                        expr_written_by_call(low, directions, forwarded, matches)
+                            .or_else(|| expr_written_by_call(high, directions, forwarded, matches))
+                    }
+                })
+            }),
+    }
+}
+
+fn object_place_written_by_call<'a>(
+    place: &'a ObjectPlace,
+    directions: &lifetimes::Directions,
+    forwarded: Option<&[SubroutineParam]>,
+    matches: &dyn Fn(&str) -> bool,
+) -> Option<&'a str> {
+    match place {
+        ObjectPlace::Property { handle, .. } => {
+            expr_written_by_call(handle, directions, forwarded, matches)
+        }
+        ObjectPlace::Element {
+            container, index, ..
+        } => expr_written_by_call(container, directions, forwarded, matches)
+            .or_else(|| expr_written_by_call(index, directions, forwarded, matches)),
+        ObjectPlace::Member { outer, .. } => {
+            object_place_written_by_call(outer, directions, forwarded, matches)
+        }
+    }
+}
+
+fn lvalue_written_by_call<'a>(
+    lvalue: &'a LValue,
+    directions: &lifetimes::Directions,
+    forwarded: Option<&[SubroutineParam]>,
+    matches: &dyn Fn(&str) -> bool,
+) -> Option<&'a str> {
+    match lvalue {
+        LValue::Ident(_) => None,
+        LValue::Select {
+            msb,
+            lsb,
+            array_slice_width,
+            window,
+            ..
+        } => const_expr_written_by_call(msb, directions, forwarded, matches)
+            .or_else(|| const_expr_written_by_call(lsb, directions, forwarded, matches))
+            .or_else(|| {
+                array_slice_width.as_ref().and_then(|width| {
+                    const_expr_written_by_call(width, directions, forwarded, matches)
+                })
+            })
+            .or_else(|| {
+                window
+                    .as_ref()
+                    .and_then(|w| w.at.as_deref())
+                    .and_then(|at| const_expr_written_by_call(at, directions, forwarded, matches))
+            }),
+        LValue::Object {
+            place,
+            select,
+            guards,
+            ..
+        } => object_place_written_by_call(place, directions, forwarded, matches)
+            .or_else(|| lvalue_written_by_call(select, directions, forwarded, matches))
+            .or_else(|| {
+                guards
+                    .iter()
+                    .find_map(|guard| expr_written_by_call(guard, directions, forwarded, matches))
+            }),
+    }
+}
+
+fn stmt_lvalues(stmt: &Stmt) -> &[LValue] {
+    match stmt {
+        Stmt::Assign { lhs, .. }
+        | Stmt::ProceduralAssign { lhs, .. }
+        | Stmt::Force { lhs, .. }
+        | Stmt::ForceStore { lhs, .. }
+        | Stmt::Deassign { lhs }
+        | Stmt::Release { lhs } => std::slice::from_ref(lhs),
+        Stmt::AssignConcat { parts, .. } => parts.as_slice(),
+        _ => &[],
+    }
+}
+
+/// Check that no statement or continuous assignment in module `module` writes
+/// any of its `const ref` ports (or their unpacked structure members).
+pub(in crate::ast) fn validate_const_ref_ports<'a>(
+    module: &str,
+    ports: &[Port],
+    subroutines: impl Iterator<Item = &'a Subroutine>,
+    comb: &[CombProcess],
+    ff: &[FfProcess],
+    processes: &[InitialProcess],
+    directions: &lifetimes::Directions,
+) -> Result<(), AnalyzerError> {
+    let mut const_ports = HashSet::default();
+    for port in ports {
+        if port.direction() == PortDirection::Ref && port.is_const() {
+            const_ports.insert(port.name().to_string());
+            for (member, _) in port.r#type().structure_leaves() {
+                const_ports.insert(format!("{}.{member}", port.name()));
+            }
+        }
+    }
+    if const_ports.is_empty() {
+        return Ok(());
+    }
+    let check_stmts = |stmts: &[Stmt], shadowed: &HashSet<&str>| -> Result<(), AnalyzerError> {
+        let is_target = |name: &str| !shadowed.contains(name) && const_ports.contains(name);
+        let mut hit: Option<String> = None;
+        for stmt in stmts {
+            stmt.walk(&mut |stmt| {
+                if hit.is_some() {
+                    return;
+                }
+                match stmt {
+                    Stmt::Assign { lhs, .. } => {
+                        if is_target(lhs.name()) {
+                            hit = Some(lhs.name().to_owned());
+                        }
+                    }
+                    Stmt::AssignConcat { parts, .. } => {
+                        if let Some(part) = parts.iter().find(|part| is_target(part.name())) {
+                            hit = Some(part.name().to_owned());
+                        }
+                    }
+                    Stmt::Call { name, args, .. } => {
+                        if let Some(target) = written_by_call(
+                            &Callee::Subroutine(name.clone()),
+                            args,
+                            directions,
+                            None,
+                            &is_target,
+                        ) {
+                            hit = Some(target.to_owned());
+                        }
+                    }
+                    Stmt::SystemTask { task, args, .. } => {
+                        for (position, arg) in args.iter().enumerate() {
+                            if task.writes_argument(position)
+                                && let crate::procedural::SystemTaskArg::Expr(expr) = arg
+                                && let Some(target) = written_target_in(expr, &is_target)
+                            {
+                                hit = Some(target.to_owned());
+                                break;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                if hit.is_none() {
+                    hit = stmt_exprs(stmt)
+                        .into_iter()
+                        .find_map(|expr| expr_written_by_call(expr, directions, None, &is_target))
+                        .or_else(|| {
+                            stmt_lvalues(stmt).iter().find_map(|lhs| {
+                                lvalue_written_by_call(lhs, directions, None, &is_target)
+                            })
+                        })
+                        .map(str::to_owned);
+                }
+            });
+            if let Some(port) = hit {
+                return Err(AnalyzerError::ConstRefPortAssignment {
+                    module: module.to_owned(),
+                    port,
+                });
+            }
+        }
+        Ok(())
+    };
+    let empty = HashSet::default();
+    let is_const_port = |name: &str| const_ports.contains(name);
+    for process in comb {
+        for assignment in process.assignments() {
+            if const_ports.contains(assignment.lhs()) {
+                return Err(AnalyzerError::ConstRefPortAssignment {
+                    module: module.to_owned(),
+                    port: assignment.lhs().to_owned(),
+                });
+            }
+            if let Some(port) = expr_written_by_call(
+                assignment.rhs(),
+                directions,
+                None,
+                &is_const_port,
+            )
+            .or_else(|| {
+                lvalue_written_by_call(assignment.lhs_value(), directions, None, &is_const_port)
+            }) {
+                return Err(AnalyzerError::ConstRefPortAssignment {
+                    module: module.to_owned(),
+                    port: port.to_owned(),
+                });
+            }
+        }
+        check_stmts(process.body(), &empty)?;
+    }
+    for process in ff {
+        check_stmts(process.body(), &empty)?;
+    }
+    for process in processes {
+        check_stmts(process.body(), &empty)?;
+    }
+    for subroutine in subroutines {
+        let shadowed: HashSet<&str> = subroutine
+            .params
+            .iter()
+            .map(|param| param.name.as_str())
+            .collect();
+        check_stmts(&subroutine.body, &shadowed)?;
+    }
+    Ok(())
 }
 
 /// Record in `error` why statement `stmt` cannot use reference formal
@@ -260,26 +687,7 @@ fn check_formal(
     error: &mut Option<&'static str>,
 ) {
     let constant = direction == ParamDirection::ConstRef;
-    let written_by_call = |callee: &Callee, args: &[Option<Expr>]| {
-        args.iter().enumerate().any(|(position, arg)| {
-            arg.as_ref().is_some_and(|arg| writes_through(arg, formal))
-                && match callee {
-                    Callee::Subroutine(name) => match directions.get(name) {
-                        Some(directions) => directions.get(position).copied(),
-                        None => forwarded
-                            .and_then(|params| params.get(position))
-                            .map(|param| param.direction),
-                    }
-                    .is_none_or(|direction| direction.is_written()),
-                    Callee::System(function) => function.writes_argument(position),
-                    Callee::Object(op) => op.writes_argument(position),
-                    Callee::String(_)
-                    | Callee::Checked { .. }
-                    | Callee::Lookup { .. }
-                    | Callee::Stream(_) => false,
-                }
-        })
-    };
+    let is_formal = |name: &str| name == formal;
     stmt.walk(&mut |stmt| {
         if error.is_some() {
             return;
@@ -305,23 +713,26 @@ fn check_formal(
         }
         if constant && error.is_none() {
             let mut written = match stmt {
-                Stmt::Call { name, args, .. } => {
-                    written_by_call(&Callee::Subroutine(name.clone()), args)
-                }
-                Stmt::SystemTask { task, args, .. } => {
-                    args.iter().enumerate().any(|(position, arg)| {
-                        task.writes_argument(position)
-                            && matches!(arg, crate::procedural::SystemTaskArg::Expr(arg)
-                                if writes_through(arg, formal))
-                    })
-                }
+                Stmt::Call { name, args, .. } => written_by_call(
+                    &Callee::Subroutine(name.clone()),
+                    args,
+                    directions,
+                    forwarded,
+                    &is_formal,
+                )
+                .is_some(),
+                Stmt::SystemTask { task, args, .. } => args.iter().enumerate().any(|(pos, arg)| {
+                    task.writes_argument(pos)
+                        && matches!(arg, crate::procedural::SystemTaskArg::Expr(arg)
+                            if written_target_in(arg, &is_formal).is_some())
+                }),
                 _ => false,
             };
-            for expr in stmt_exprs(stmt) {
-                visit_calls(expr, &mut |callee, args| {
-                    written |= written_by_call(callee, args);
-                });
-            }
+            written |= stmt_exprs(stmt).into_iter().any(|expr| {
+                expr_written_by_call(expr, directions, forwarded, &is_formal).is_some()
+            }) || stmt_lvalues(stmt).iter().any(|lhs| {
+                lvalue_written_by_call(lhs, directions, forwarded, &is_formal).is_some()
+            });
             if written {
                 *error = Some("a const ref argument cannot be written (IEEE 1800-2023 13.5.2)");
             }
@@ -477,12 +888,23 @@ mod tests {
              endfunction initial f(q);",
         );
         assert!(error.contains("const ref"), "{error}");
+        let error = invalid(
+            "int q[$][$]; function automatic void f(const ref int x[$][$]); x[0].push_back(1); \
+             endfunction initial f(q);",
+        );
+        assert!(error.contains("const ref"), "{error}");
         // `const` is part of the direction the next formal inherits (13.3).
         let error = invalid(
             "int g, h; function automatic void f(const ref int a, b); b = 1; endfunction \
              initial f(g, h);",
         );
         assert!(error.contains("`b`"), "{error}");
+        let error = invalid(
+            "int g; function automatic int mut(ref int y); y = 1; return 0; endfunction \
+             function automatic void f(const ref int x); logic [3:0] a; a[mut(x)] = 1'b1; \
+             endfunction initial f(g);",
+        );
+        assert!(error.contains("const ref"), "{error}");
     }
 
     // `$root` of the two top modules uses `p`, whose dispatcher of `f` also
@@ -544,5 +966,179 @@ mod tests {
             Path::new("const_ref_continuous.sv"),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn const_ref_ports_are_read_only_and_ref_ports_allow_module_constructs() {
+        for bad in [
+            "module Sub(const ref int x); initial x = 1; endmodule",
+            "module Sub(const ref logic clk, const ref int x); always_ff @(posedge clk) x <= 1; endmodule",
+            "module Sub(const ref int x); assign x = 2; endmodule",
+            "module Sub(const ref int x); always_comb x = 3; endmodule",
+            "module Sub(const ref int q[$]); initial q.push_back(1); endmodule",
+            "module Sub(const ref int x); task automatic w(ref int z); z = 1; endtask initial w(x); endmodule",
+            "module Sub(const ref struct { int a; bit b; } s); initial s.a = 5; endmodule",
+            "module Sub(const ref int q[$][$]); initial q[0].push_back(1); endmodule",
+            "module Sub(const ref int q[$][$]); initial q[0][0] = 2; endmodule",
+            "module Sub(const ref int q[$][$]); initial q[0].delete(); endmodule",
+            "module Sub(const ref logic [127:0] q[$]); initial q[0] = 128'd1; endmodule",
+            "package p; typedef struct { int x; } s_t; endpackage module Sub(const ref p::s_t q[$]); initial q[0].x = 1; endmodule",
+            "module Sub(const ref int x); logic [3:0] a; function automatic int f(ref int y); y = 1; return 0; endfunction initial a[f(x)] = 1'b1; endmodule",
+            "module Sub(const ref int x); logic [3:0] a; logic b; function automatic int f(ref int y); y = 1; return 0; endfunction initial {a[f(x)], b} = 2'b10; endmodule",
+            "module Sub(const ref int x); logic [3:0] a; logic y; function automatic int f(ref int z); z = 1; return 0; endfunction initial y = a[f(x)]; endmodule",
+        ] {
+            let result = analyze_source(bad, Path::new("const_ref_port_write.sv"));
+            assert!(
+                matches!(result, Err(AnalyzerError::ConstRefPortAssignment { .. })),
+                "{bad}: got {result:?}"
+            );
+        }
+
+        for allowed in [
+            "package p; class Box; int items[$]; endclass endpackage
+             module Sub(const ref p::Box b);
+                initial if (b != null) b.items.push_back(1);
+             endmodule",
+            "package p; class Box; int items[$]; endclass endpackage
+             module Sub(const ref p::Box q[$]);
+                initial if (q[0] != null) q[0].items.push_back(1);
+             endmodule",
+        ] {
+            analyze_source(allowed, Path::new("const_ref_class_prop_write.sv"))
+                .unwrap_or_else(|e| panic!("{allowed}: {e}"));
+        }
+
+        analyze_source(
+            "module Sub(const ref logic clk, ref int x, ref int q[$], ref struct { int a; bit b; } s);
+                task t(input int a); endtask
+                always_ff @(posedge clk) x <= x + 1;
+                initial begin
+                    t(q.size());
+                    fork
+                        x = 10;
+                    join_none
+                    s.a = 7;
+                end
+            endmodule",
+            Path::new("ref_port_valid.sv"),
+        )
+        .unwrap();
+
+        for unsupported in [
+            "module Sub(ref logic [7:0] x); initial force x = 8'hff; endmodule",
+            "module Sub(ref logic [7:0] x); initial assign x = 8'h11; endmodule",
+        ] {
+            let result = analyze_source(unsupported, Path::new("ref_port_unsupported.sv"));
+            assert!(
+                matches!(result, Err(AnalyzerError::Unsupported(_))),
+                "{unsupported}: got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ref_port_type_equivalence_handles_packed_arrays_queues_and_objects() {
+        let source = r#"
+            package p;
+                typedef struct { logic [7:0] x; int y; } s_t;
+                typedef enum { A, B } e1_t;
+                typedef enum { C, D } e2_t;
+                class Base; int v; endclass
+                class Derived extends Base; int w; endclass
+            endpackage
+            module M(
+                ref int r_int,
+                ref bit signed [31:0] r_bit_signed,
+                ref int unsigned r_uint,
+                ref int r_arr4[4],
+                ref int r_arr_bounds[0:3],
+                ref int r_q[$],
+                ref int r_q1[$:1],
+                ref int r_qq[$][$],
+                ref int r_qq1[$][$:1],
+                ref int r_qq2[$][$:2],
+                ref int r_qq2_b[$][$:2],
+                ref int r_dq1[][$:1],
+                ref int r_dq2[][$:2],
+                ref p::s_t r_s,
+                ref p::e1_t r_e1,
+                ref p::e2_t r_e2,
+                ref p::Base r_base,
+                ref p::Derived r_derived,
+                ref string r_str,
+                ref event r_ev
+            );
+                p::s_t s_var;
+                int dyn_arr[];
+            endmodule
+        "#;
+        let path = Path::new("ref_equiv.sv");
+        let packages = crate::analyze_packages(&[(source, path)]).unwrap();
+        let mut design = packages.design();
+        let ir = crate::analyze_source_module_with_packages(
+            source,
+            path,
+            "M",
+            &crate::HashMap::default(),
+            &packages,
+            &mut design,
+        )
+        .unwrap();
+        let m = ir.modules().iter().find(|m| m.name() == "M").unwrap();
+        let port = |name: &str| {
+            m.ports()
+                .iter()
+                .find(|p| p.name() == name)
+                .unwrap()
+                .r#type()
+        };
+        assert_eq!(
+            design.check_ref_port_type_equivalent(port("r_bit_signed"), port("r_int")),
+            Ok(())
+        );
+        assert_eq!(
+            design.check_ref_port_type_equivalent(port("r_arr4"), port("r_arr_bounds")),
+            Ok(())
+        );
+        assert_eq!(
+            design.check_ref_port_type_equivalent(port("r_str"), port("r_str")),
+            Ok(())
+        );
+        assert_eq!(
+            design.check_ref_port_type_equivalent(port("r_ev"), port("r_ev")),
+            Ok(())
+        );
+        assert_eq!(
+            design.check_ref_port_type_equivalent(port("r_uint"), port("r_int")),
+            Err(crate::RefPortTypeError::NotEquivalent)
+        );
+        assert_eq!(
+            design.check_ref_port_type_equivalent(port("r_e1"), port("r_e2")),
+            Err(crate::RefPortTypeError::NotEquivalent)
+        );
+        assert_eq!(
+            design.check_ref_port_type_equivalent(port("r_derived"), port("r_base")),
+            Err(crate::RefPortTypeError::NotEquivalent)
+        );
+        assert_eq!(
+            design.check_ref_port_type_equivalent(port("r_q1"), port("r_q")),
+            Err(crate::RefPortTypeError::QueueBoundsDiffer)
+        );
+        assert_eq!(
+            design.check_ref_port_type_equivalent(port("r_qq1"), port("r_qq2")),
+            Err(crate::RefPortTypeError::QueueBoundsDiffer)
+        );
+        assert_eq!(
+            design.check_ref_port_type_equivalent(port("r_qq"), port("r_qq1")),
+            Err(crate::RefPortTypeError::QueueBoundsDiffer)
+        );
+        assert_eq!(
+            design.check_ref_port_type_equivalent(port("r_dq1"), port("r_dq2")),
+            Err(crate::RefPortTypeError::QueueBoundsDiffer)
+        );
+        assert_eq!(
+            design.check_ref_port_type_equivalent(port("r_qq2"), port("r_qq2_b")),
+            Ok(())
+        );
     }
 }
