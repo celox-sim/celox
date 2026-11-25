@@ -429,8 +429,18 @@ impl Plan {
             assertions,
             ..
         } = cx;
-        let code = |status: ProcessStatus| u64::from(status.code());
-        let finished = g.equals(status, code(ProcessStatus::Finish));
+        let exits = returned_words(&program.sir.processes[index], process.status, process.delay);
+        let is_status = |g: &mut Generator<'_>, wanted: ProcessStatus| {
+            let code = u64::from(wanted.code());
+            if exits.iter().all(|(s, _)| s.is_some_and(|s| s != code)) {
+                g.constant(0, 1)
+            } else if exits.iter().all(|(s, _)| *s == Some(code)) {
+                g.constant(1, 1)
+            } else {
+                g.equals(status, code)
+            }
+        };
+        let finished = is_status(g, ProcessStatus::Finish);
         let not_finished = g.b.new_block();
         // A run that finishes the simulation made its updates all the
         // same.
@@ -450,7 +460,7 @@ impl Plan {
         }
         g.b.switch_to_block(not_finished);
         let resumed = g.b.new_block();
-        let done = g.equals(status, code(ProcessStatus::Done));
+        let done = is_status(g, ProcessStatus::Done);
         let ended = g.b.new_block();
         let suspended = g.b.new_block();
         g.b.seal_block(SIRTerminator::Branch {
@@ -491,6 +501,15 @@ impl Plan {
                 false_block: (other, Vec::new()),
             });
             g.b.switch_to_block(queue);
+            if cx.deferred.contains(&index) && g.has_deferred_hint() {
+                let pending = g.constant(1, SCHEDULER_FLAG_WIDTH);
+                g.store_at(
+                    slots.defer_limit_settle,
+                    DEFERRED_ACTIVE_BIT,
+                    SCHEDULER_FLAG_WIDTH,
+                    pending,
+                );
+            }
             let idle = g.constant(0, SCHEDULER_FLAG_WIDTH);
             g.store(slots.waiting[index], SCHEDULER_FLAG_WIDTH, idle);
             if kernel.delays {
@@ -505,8 +524,8 @@ impl Plan {
                 // nonblocking assignments (see `Plan::new`), so a staged
                 // site is never staged again before the NBA region and
                 // the kernel never returns `Nba`.
-                let waiting = g.equals(status, code(ProcessStatus::Wait));
-                let pending = g.equals(status, code(ProcessStatus::Pending));
+                let waiting = is_status(g, ProcessStatus::Wait);
+                let pending = is_status(g, ProcessStatus::Pending);
                 let suspends = g.binary(1, waiting, BinaryOp::Or, pending);
                 let block = g.b.new_block();
                 Some((wait, suspends, block))
@@ -514,8 +533,8 @@ impl Plan {
             None => None,
         };
         if kernel.delays {
-            let delay = g.equals(status, code(ProcessStatus::Delay));
-            let inactive = g.equals(status, code(ProcessStatus::InactiveDelay));
+            let delay = is_status(g, ProcessStatus::Delay);
+            let inactive = is_status(g, ProcessStatus::InactiveDelay);
             let delayed = g.binary(1, delay, BinaryOp::Or, inactive);
             let wait = g.b.new_block();
             let other = g.b.new_block();
@@ -525,7 +544,16 @@ impl Plan {
                 false_block: (other, Vec::new()),
             });
             g.b.switch_to_block(wait);
-            let amount = g.load(process.delay, celox_design::PROCESS_DELAY_WIDTH);
+            let mut amounts = exits
+                .iter()
+                .filter(|(code, _)| code.is_none_or(is_delay_code))
+                .map(|(_, amount)| *amount);
+            let amount = match amounts.next().flatten() {
+                Some(value) if amounts.all(|amount| amount == Some(value)) => {
+                    g.constant(value, celox_design::PROCESS_DELAY_WIDTH)
+                }
+                _ => g.load(process.delay, celox_design::PROCESS_DELAY_WIDTH),
+            };
             let wake = g.binary(SCHEDULER_TIME_WIDTH, time, BinaryOp::Add, amount);
             let overflow = g.binary(1, wake, BinaryOp::LtU, time);
             let overflow_exit = g.exit_block(SchedulerExit::DelayOverflow);

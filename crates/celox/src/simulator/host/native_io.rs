@@ -857,7 +857,9 @@ impl Scope<'_> {
     }
 
     fn scheduler_fault(&self, timestamp: u64, budget: &str) -> RuntimeErrorCode {
-        let mut processes = self.arena.header.recent.to_vec();
+        let header = &self.arena.header;
+        let used = header.recent_next.min(header.recent.len() as u64) as usize;
+        let mut processes = header.recent[..used].to_vec();
         processes.retain(|&process| process != u64::MAX);
         processes.sort_unstable();
         processes.dedup();

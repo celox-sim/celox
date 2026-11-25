@@ -82,7 +82,6 @@ impl Header {
             self.passes = 0;
             self.work = 0;
             self.returns = 0;
-            self.recent.fill(u64::MAX);
             self.recent_next = 0;
         }
     }
