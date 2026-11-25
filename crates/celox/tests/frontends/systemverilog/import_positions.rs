@@ -251,14 +251,13 @@ endmodule
     }
 }
 
-/// A reference after two wildcard imports of a block whose packages both
-/// declare the name sees both of them and is rejected as their conflict,
-/// in a procedural block and a generate block alike: no reference binds
-/// one of the two declarations silently. (IEEE 1800-2023 26.3 binds it to
-/// the one an earlier reference already made locally visible: binding by
-/// position is a follow-up.)
+/// The first reference to a name that a wildcard import provides imports
+/// that declaration, which is then locally visible: references after a
+/// second wildcard import whose package declares the name too bind it, in a
+/// procedural block, a generate block and a module alike (IEEE 1800-2023
+/// 26.3).
 #[test]
-fn references_after_two_wildcard_imports_of_a_block_are_rejected() {
+fn a_name_an_earlier_reference_imported_binds_the_references_after_another_import() {
     for source in [
         r#"module top;
   initial begin
@@ -277,6 +276,98 @@ endmodule
     import qf::*;
     initial #1 $display("%0d", f());
   end
+endmodule
+"#,
+        r#"module top;
+  import pf::*;
+  initial $display("%0d", f());
+  import qf::*;
+  initial #1 $display("%0d", f());
+endmodule
+"#,
+    ] {
+        for four_state in [false, true] {
+            let mut sim = build(source, four_state).unwrap_or_else(|error| panic!("{error}"));
+            sim.run_until(2).unwrap();
+            assert_eq!(displays(&mut sim).join(" "), "10 10", "{source}");
+        }
+    }
+}
+
+/// An explicit import, a declaration of the scope and an export before the
+/// reference come before the wildcard candidates (IEEE 1800-2023 26.3,
+/// 26.6): two wildcard imports that both provide the name are then no
+/// conflict.
+#[test]
+fn explicit_imports_declarations_and_exports_come_before_wildcard_candidates() {
+    for (source, expected) in [
+        (
+            r#"module top;
+  import pf::f;
+  import pf::*;
+  import qf::*;
+  initial $display("%0d", f());
+endmodule
+"#,
+            "10",
+        ),
+        (
+            r#"module top;
+  import pf::*;
+  import qf::*;
+  function automatic int f(); return 5; endfunction
+  initial $display("%0d", f());
+endmodule
+"#,
+            "5",
+        ),
+        (
+            r#"package ex;
+  import pf::*;
+  import qf::*;
+  export pf::f;
+  function automatic int a(); return f(); endfunction
+endpackage
+module top;
+  initial $display("%0d", ex::a());
+endmodule
+"#,
+            "10",
+        ),
+    ] {
+        for displays in run(source) {
+            assert_eq!(displays, [expected], "{source}");
+        }
+    }
+}
+
+/// A reference that two wildcard imports before it both provide, with no
+/// earlier reference that imported one of them, is their conflict, in a
+/// procedural block, a generate block and a module alike.
+#[test]
+fn a_reference_after_two_wildcard_imports_that_provide_it_is_rejected() {
+    for source in [
+        r#"module top;
+  initial begin
+    import pf::*;
+    import qf::*;
+    int y = f();
+    $display("%0d", y);
+  end
+endmodule
+"#,
+        r#"module top;
+  if (1) begin : g
+    import pf::*;
+    import qf::*;
+    initial $display("%0d", f());
+  end
+endmodule
+"#,
+        r#"module top;
+  import pf::*;
+  import qf::*;
+  initial $display("%0d", f());
 endmodule
 "#,
     ] {
@@ -314,11 +405,11 @@ endmodule
     assert!(error.contains("both before and after"), "{error}");
 }
 
-/// Every reference before `export p::x;` is checked, not only the first: a
-/// later one after another wildcard import that also declares the name is
-/// rejected rather than bound to the exported declaration.
+/// A reference after another wildcard import that also declares the name
+/// binds the declaration an earlier reference imported, which the package
+/// then exports (IEEE 1800-2023 26.3, 26.6).
 #[test]
-fn every_reference_before_an_export_is_checked() {
+fn references_before_an_export_bind_the_declaration_an_earlier_reference_imported() {
     let source = r#"package ex;
   import pf::*;
   function automatic int a(); return f(); endfunction
@@ -330,13 +421,7 @@ module top;
   initial $display("%0d %0d", ex::a(), ex::b());
 endmodule
 "#;
-    let Err(error) = build(source, false) else {
-        panic!("the second reference before the export must be checked");
-    };
-    let error = error.to_string();
-    assert!(
-        error.contains("declared by both wildcard-imported packages")
-            || error.contains("both before and after"),
-        "{error}"
-    );
+    for displays in run(source) {
+        assert_eq!(displays, ["10 10"]);
+    }
 }
