@@ -522,43 +522,90 @@ pub(super) fn written_storage(
     inst.state_writes().objects().into_iter().flatten()
 }
 
-/// Whether `inst` makes an external call, itself or in a function it calls.
-/// The scheduler treats an external call as opaque: it may change state the
-/// SIR does not show.
+/// Whether `inst` makes an external call of any function, itself or in a
+/// function it calls. That is more than [`makes_host_calls`] asks: a native
+/// memory operation and a call of the coverage helper are external calls
+/// too. A compiled kernel that makes one has every wait checked after its
+/// run, not only the waits its writes select.
 pub(super) fn makes_extern_calls(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
     inst.host_effects().extern_calls
 }
 
-/// Whether `inst` calls into the host, which may change state outside its
-/// explicit stores: an extern call other than a native memory operation (the
-/// settle instrumentation's wide commits, whose writes the typed commits
-/// after them name), or a call of a function that makes one.
+/// Whether `inst` calls into the host, which may read or change state its
+/// explicit loads and stores do not name: an extern call, or a call of a
+/// function that makes one, other than a native memory operation (the settle
+/// instrumentation's wide commits, whose writes the typed commits after them
+/// name) and a call of the coverage helper, which reads and writes only the
+/// heap (`celox_sir::HostEffects::state_calls`).
+fn makes_host_calls(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
+    inst.host_effects().state_calls
+}
+
+/// Whether `inst` calls a function of the host at all, itself or in a
+/// function it calls: [`makes_host_calls`], and a call of the coverage
+/// helper too. Combinational logic is classified with this. Every run of a
+/// settle makes the calls of its units again, so how often and where the
+/// settles run is observable through a call that touches no simulation
+/// state as much as through one that does, and nothing is planned from the
+/// difference there.
+///
+/// A summary does not tell a coverage helper call from a native memory
+/// operation, so a call of a function that holds only those counts as well;
+/// no function unit holds one.
+fn calls_host_functions(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
+    match inst {
+        SIRInstruction::ExternCall { func, .. } => {
+            celox_sir::native_memory::NativeMemoryOp::decode(*func).is_none()
+        }
+        _ => makes_extern_calls(inst),
+    }
+}
+
+/// Whether `inst` is a call of an isolated function of `functions`, such as
+/// a noncontext DPI-C import: it reaches nothing of the design but its
+/// arguments and its result (see [`celox_design::ExternFunction::isolated`]).
+fn calls_isolated_function(
+    inst: &SIRInstruction<RegionedAbsoluteAddr>,
+    functions: &[celox_design::ExternFunction],
+) -> bool {
+    matches!(
+        inst,
+        SIRInstruction::ExternCall { func, .. }
+            if functions
+                .get(*func as usize)
+                .is_some_and(|function| function.isolated)
+    )
+}
+
 /// Whether `inst` is a host call that may read or write state of the design
 /// beyond its arguments and its result, as [`makes_host_calls`] says of
-/// every host call: a call of an isolated function of `functions`, such as
-/// a noncontext DPI-C import, reaches only those (see
-/// [`celox_design::ExternFunction::isolated`]).
+/// every host call but a call of an isolated function of `functions`. The
+/// units that run once per event or per wake-up are classified with this:
+/// the domains of the events and the kernels.
 pub(super) fn makes_opaque_calls(
     inst: &SIRInstruction<RegionedAbsoluteAddr>,
     functions: &[celox_design::ExternFunction],
 ) -> bool {
-    match inst {
-        SIRInstruction::ExternCall { func, .. }
-            if functions
-                .get(*func as usize)
-                .is_some_and(|function| function.isolated) =>
-        {
-            false
-        }
-        _ => makes_host_calls(inst),
-    }
+    !calls_isolated_function(inst, functions) && makes_host_calls(inst)
+}
+
+/// [`makes_opaque_calls`] for combinational logic: [`calls_host_functions`]
+/// of every call but a call of an isolated function of `functions`, so a
+/// call of the coverage helper in a settle counts as a call of the heap
+/// helper there does.
+pub(super) fn makes_opaque_calls_in_settle(
+    inst: &SIRInstruction<RegionedAbsoluteAddr>,
+    functions: &[celox_design::ExternFunction],
+) -> bool {
+    !calls_isolated_function(inst, functions) && calls_host_functions(inst)
 }
 
 /// Whether `inst` is a call of a container operation of the heap, whose
 /// code `constants` (the immediates of its unit) give: it changes no state
 /// of the design but its result, a value or the handle of a new container
 /// that the unit stores where the container lives
-/// ([`celox_heap::containers::is_container_value_op`]).
+/// ([`celox_heap::containers::is_container_value_op`]). No operation of the
+/// coverage helper is one, so only the heap helper's own `func` is asked.
 pub(super) fn container_value_call(
     inst: &SIRInstruction<RegionedAbsoluteAddr>,
     constants: &HashMap<RegisterId, u64>,
@@ -584,15 +631,6 @@ pub(super) fn unit_constants(unit: &Unit) -> HashMap<RegisterId, u64> {
             _ => None,
         })
         .collect()
-}
-
-pub(super) fn makes_host_calls(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
-    match inst {
-        SIRInstruction::ExternCall { func, .. } => {
-            celox_sir::native_memory::NativeMemoryOp::decode(*func).is_none()
-        }
-        _ => makes_extern_calls(inst),
-    }
 }
 
 /// Whether `inst` is a call whose callee may record runtime events, and so

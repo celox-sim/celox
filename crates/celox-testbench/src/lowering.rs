@@ -1247,7 +1247,7 @@ mod tests {
                 } else {
                     None
                 })
-                .all(|id| id == celox_sir::extern_abi::HEAP_HELPER_ID)
+                .all(celox_sir::extern_abi::is_heap_helper)
         );
     }
     #[test]

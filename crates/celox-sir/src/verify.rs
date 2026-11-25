@@ -714,7 +714,7 @@ fn verify_instruction_types<A>(
                     "a native kernel call has only an implicit state pointer",
                 ));
             }
-            if *func == crate::extern_abi::HEAP_HELPER_ID
+            if crate::extern_abi::is_heap_helper(*func)
                 && args.len() != crate::extern_abi::HEAP_HELPER_ARGUMENTS
             {
                 return Err(SirVerifyError::instruction(
