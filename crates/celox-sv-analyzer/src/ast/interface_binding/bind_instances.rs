@@ -248,6 +248,12 @@ impl ModuleBinding<'_> {
                             tree.interface_instance.as_deref(),
                             &handle,
                         )),
+                        // The instance's body runs in it, under the scope
+                        // that binds it.
+                        instance_scope: Some(timescales::interface_instance(
+                            tree.instance_scope.as_deref(),
+                            &handle,
+                        )),
                         ..tree.clone()
                     };
                     interface_ast::analyze(
