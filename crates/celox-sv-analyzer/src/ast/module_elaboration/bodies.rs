@@ -104,8 +104,8 @@ impl ScopeElaboration<'_> {
         let disables = std::mem::take(&mut body_state.disables);
         // A subroutine a branch calls may need the process that runs the
         // block, which only the lowered subroutines show (9.6.1, 9.6.3).
-        let needs_their_process =
-            procedural::external_disables::subroutines_that_need_their_process(
+        let (needs_their_process, spawns_detached) =
+            procedural::external_disables::subroutine_process_effects(
                 self.subroutines.iter().chain(
                     self.imported
                         .subroutines
@@ -120,6 +120,23 @@ impl ScopeElaboration<'_> {
             || procedural::external_disables::calls_subroutine_that_needs_its_process(
                 &disables,
                 &needs_their_process,
+            )
+            || procedural::external_disables::pending_children_may_precede(
+                &disables,
+                self.comb_processes
+                    .iter()
+                    .map(|process| process.body.as_slice())
+                    .chain(
+                        self.ff_processes
+                            .iter()
+                            .map(|process| process.body.as_slice()),
+                    )
+                    .chain(
+                        self.initial_processes
+                            .iter()
+                            .map(|process| process.body.as_slice()),
+                    ),
+                &spawns_detached,
             )
         {
             return Err(unsupported("disable statement"));

@@ -208,18 +208,15 @@ impl BodyBuilder<'_, '_, '_> {
         let mut children = false;
         let mut calls = Vec::new();
         for stmt in &body {
+            let mut target_asks = false;
+            let mut target_calls = Vec::new();
             stmt.visit(
-                &mut |expr| {
-                    asks_for_process |= calls_self_handle(expr);
-                    const_functions::visit_expr_calls(expr, &mut |callee, _| {
-                        if let Callee::Subroutine(name) = callee {
-                            calls.push(name.clone());
-                        }
-                    });
-                },
-                &mut |_| {},
+                &mut |expr| expr_effects(expr, &mut asks_for_process, &mut calls),
+                &mut |lvalue| lvalue_effects(lvalue, &mut target_asks, &mut target_calls),
                 &mut |_| {},
             );
+            asks_for_process |= target_asks;
+            calls.extend(target_calls);
             stmt.walk(&mut |stmt| match stmt {
                 Stmt::Block { id, .. } => {
                     defined.insert(*id);
@@ -323,52 +320,315 @@ fn leaves_block(stmts: &[Stmt], in_loop: bool) -> bool {
     })
 }
 
-/// The subroutines that would see a different process as a branch of a
-/// `fork`: one whose body, or a subroutine it calls, asks for the current
-/// process or waits for or disables the caller's forked children
-/// (9.6.1, 9.6.3). Their callers cannot tell from the call alone, so a
-/// block that calls one stays in its process (see
-/// `BodyBuilder::external_disable_block`).
-pub(in crate::ast) fn subroutines_that_need_their_process<'a>(
-    subroutines: impl Iterator<Item = &'a Subroutine>,
-) -> HashSet<String> {
-    let subroutines: Vec<_> = subroutines.collect();
-    let mut needs = HashSet::default();
-    loop {
-        let previous = needs.len();
-        for subroutine in &subroutines {
-            if needs.contains(&subroutine.name) {
-                continue;
-            }
-            let mut direct = false;
-            let mut callees = Vec::new();
-            for stmt in subroutine.body.iter().chain(&subroutine.sensitivity_body) {
-                stmt.visit(
-                    &mut |expr| {
-                        direct |= calls_self_handle(expr);
-                        const_functions::visit_expr_calls(expr, &mut |callee, _| {
-                            if let Callee::Subroutine(name) = callee {
-                                callees.push(name.as_str());
-                            }
-                        });
-                    },
-                    &mut |_| {},
-                    &mut |_| {},
-                );
-                stmt.walk(&mut |stmt| match stmt {
-                    Stmt::WaitFork | Stmt::DisableFork => direct = true,
-                    Stmt::Call { name, .. } => callees.push(name.as_str()),
-                    _ => {}
-                });
-            }
-            if direct || callees.iter().any(|name| needs.contains(*name)) {
-                needs.insert(subroutine.name.clone());
+/// What an expression does to the process that evaluates it: whether it
+/// asks for that process, and the subroutines it calls.
+fn expr_effects(expr: &Expr, asks: &mut bool, calls: &mut Vec<String>) {
+    *asks |= calls_self_handle(expr);
+    const_functions::visit_expr_calls(expr, &mut |callee, _| {
+        if let Callee::Subroutine(name) = callee {
+            calls.push(name.clone());
+        }
+    });
+}
+
+/// The same for a constant expression, which holds the calls of an
+/// assignment target's runtime selectors.
+fn const_effects(expr: &ConstExpr, asks: &mut bool, calls: &mut Vec<String>) {
+    const_functions::visit_const_calls(expr, &mut |callee, _| match callee {
+        Callee::System(SystemFunction::Process(celox_design::ProcessOp::SelfHandle)) => {
+            *asks = true
+        }
+        Callee::Subroutine(name) => calls.push(name.clone()),
+        _ => {}
+    });
+}
+
+/// The calls in an assignment target: its selectors and, for a class or
+/// container place, the expressions that name the place. `Stmt::visit`
+/// passes a target to its lvalue callback, not its expression one.
+fn lvalue_effects(lvalue: &LValue, asks: &mut bool, calls: &mut Vec<String>) {
+    match lvalue {
+        LValue::Ident(_) => {}
+        LValue::Select {
+            msb,
+            lsb,
+            array_slice_width,
+            ..
+        } => {
+            const_effects(msb, asks, calls);
+            const_effects(lsb, asks, calls);
+            if let Some(width) = array_slice_width {
+                const_effects(width, asks, calls);
             }
         }
-        if needs.len() == previous {
-            return needs;
+        LValue::Object {
+            place,
+            select,
+            guards,
+            ..
+        } => {
+            for guard in guards {
+                expr_effects(guard, asks, calls);
+            }
+            place_effects(place, asks, calls);
+            lvalue_effects(select, asks, calls);
         }
     }
+}
+
+/// The expressions that name a class or container place.
+fn place_effects(place: &ObjectPlace, asks: &mut bool, calls: &mut Vec<String>) {
+    match place {
+        ObjectPlace::Property { handle, .. } => expr_effects(handle, asks, calls),
+        ObjectPlace::Element {
+            container, index, ..
+        } => {
+            expr_effects(container, asks, calls);
+            expr_effects(index, asks, calls);
+        }
+        ObjectPlace::Member { outer, .. } => place_effects(outer, asks, calls),
+    }
+}
+
+/// The subroutines that would see a different process as a branch of a
+/// `fork`, and those that leave detached children with the caller: one
+/// whose body, or a subroutine it calls, asks for the current process,
+/// waits for or disables the caller's forked children, or starts a
+/// `fork` its children outlive (9.6.1, 9.6.2, 9.6.3). Their callers
+/// cannot tell from the call alone, so a block that calls one stays in
+/// its process (see `BodyBuilder::external_disable_block`).
+pub(in crate::ast) fn subroutine_process_effects<'a>(
+    subroutines: impl Iterator<Item = &'a Subroutine>,
+) -> (HashSet<String>, HashSet<String>) {
+    let mut scanned = Vec::new();
+    for subroutine in subroutines {
+        let mut needs = false;
+        let mut spawns = false;
+        let mut callees = Vec::new();
+        for stmt in subroutine.body.iter().chain(&subroutine.sensitivity_body) {
+            let mut target_asks = false;
+            let mut target_calls = Vec::new();
+            stmt.visit(
+                &mut |expr| expr_effects(expr, &mut needs, &mut callees),
+                &mut |lvalue| lvalue_effects(lvalue, &mut target_asks, &mut target_calls),
+                &mut |_| {},
+            );
+            needs |= target_asks;
+            callees.extend(target_calls);
+            stmt.walk(&mut |stmt| match stmt {
+                Stmt::WaitFork | Stmt::DisableFork => needs = true,
+                Stmt::Fork { join, .. } if *join != celox_design::ForkJoin::All => {
+                    needs = true;
+                    spawns = true;
+                }
+                Stmt::Call { name, .. } => callees.push(name.clone()),
+                _ => {}
+            });
+        }
+        scanned.push((subroutine.name.clone(), needs, spawns, callees));
+    }
+    let (mut needs, mut spawns) = (HashSet::default(), HashSet::default());
+    loop {
+        let previous = (needs.len(), spawns.len());
+        for (name, direct_needs, direct_spawns, callees) in &scanned {
+            if (*direct_needs || callees.iter().any(|callee| needs.contains(callee)))
+                && !needs.contains(name)
+            {
+                needs.insert(name.clone());
+            }
+            if (*direct_spawns || callees.iter().any(|callee| spawns.contains(callee)))
+                && !spawns.contains(name)
+            {
+                spawns.insert(name.clone());
+            }
+        }
+        if (needs.len(), spawns.len()) == previous {
+            return (needs, spawns);
+        }
+    }
+}
+
+/// Whether some process that runs a block as a branch may hold forked
+/// children the branch would start early: the synthetic `fork`-`join`
+/// suspends its process, which starts the children pending since its
+/// last suspension, where the block itself suspends nowhere (9.6.2).
+/// A detached fork of the process, or a call of a subroutine that
+/// starts one, outside the branch counts; the fork the branch sits in
+/// does not, as its process holds no children when it starts.
+pub(in crate::ast) fn pending_children_may_precede<'a>(
+    disables: &ExternalDisables,
+    bodies: impl Iterator<Item = &'a [Stmt]>,
+    spawns: &HashSet<String>,
+) -> bool {
+    bodies.into_iter().any(|body| {
+        let mut found = false;
+        scan_pending(body, disables, spawns, &mut found);
+        found
+    })
+}
+
+/// Scan one process for a branch it runs that its detached children may
+/// precede, and record it in `found`.
+fn scan_pending(
+    stmts: &[Stmt],
+    disables: &ExternalDisables,
+    spawns: &HashSet<String>,
+    found: &mut bool,
+) {
+    let mut present = HashSet::default();
+    let mut pending = false;
+    scan_context(stmts, disables, spawns, &mut present, &mut pending, found);
+    *found |= pending && present.iter().any(|label| disables.targets.contains(label));
+}
+
+/// Scan `stmts` of one process for the branches of `disables` and for
+/// detached children it may hold, without entering a branch itself. A
+/// fork's branches are processes of their own, which hold no children
+/// when they start; the fork itself leaves its children with this
+/// process when it does not join them all.
+fn scan_context(
+    stmts: &[Stmt],
+    disables: &ExternalDisables,
+    spawns: &HashSet<String>,
+    present: &mut HashSet<String>,
+    pending: &mut bool,
+    found: &mut bool,
+) {
+    for stmt in stmts {
+        if let Some(label) = branch_label(stmt, disables) {
+            present.insert(label);
+            continue;
+        }
+        match stmt {
+            Stmt::Fork { join, branches } => {
+                for branch in branches {
+                    scan_pending(branch, disables, spawns, found);
+                }
+                *pending |= *join != celox_design::ForkJoin::All;
+            }
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                *pending |= expr_spawns(condition, spawns);
+                scan_context(then_body, disables, spawns, present, pending, found);
+                scan_context(else_body, disables, spawns, present, pending, found);
+            }
+            Stmt::Case {
+                selector,
+                items,
+                default,
+                ..
+            } => {
+                *pending |= expr_spawns(selector, spawns);
+                for item in items {
+                    for label in &item.labels {
+                        match label {
+                            crate::procedural::CaseLabel::Value(value) => {
+                                *pending |= expr_spawns(value, spawns)
+                            }
+                            crate::procedural::CaseLabel::Range { low, high } => {
+                                *pending |= expr_spawns(low, spawns) || expr_spawns(high, spawns)
+                            }
+                        }
+                    }
+                    scan_context(&item.body, disables, spawns, present, pending, found);
+                }
+                if let Some(default) = default {
+                    scan_context(default, disables, spawns, present, pending, found);
+                }
+            }
+            Stmt::Loop {
+                kind,
+                init,
+                condition,
+                step,
+                body,
+            } => {
+                if let crate::procedural::LoopKind::Repeat(count) = kind {
+                    *pending |= expr_spawns(count, spawns);
+                }
+                if let Some(condition) = condition {
+                    *pending |= expr_spawns(condition, spawns);
+                }
+                scan_context(init, disables, spawns, present, pending, found);
+                scan_context(step, disables, spawns, present, pending, found);
+                scan_context(body, disables, spawns, present, pending, found);
+            }
+            Stmt::Block { body, .. } => {
+                scan_context(body, disables, spawns, present, pending, found)
+            }
+            Stmt::DelayedNonblocking {
+                control,
+                assignment,
+            } => {
+                scan_context(
+                    std::slice::from_ref(&**control),
+                    disables,
+                    spawns,
+                    present,
+                    pending,
+                    found,
+                );
+                scan_context(
+                    std::slice::from_ref(&**assignment),
+                    disables,
+                    spawns,
+                    present,
+                    pending,
+                    found,
+                );
+            }
+            _ => {
+                let mut calls = Vec::new();
+                let mut named = Vec::new();
+                let mut asks = false;
+                stmt.visit(
+                    &mut |expr| expr_effects(expr, &mut asks, &mut calls),
+                    &mut |_| {},
+                    &mut |name| named.push(name.to_string()),
+                );
+                calls.extend(named);
+                *pending |= calls.iter().any(|name| spawns.contains(name));
+            }
+        }
+    }
+}
+
+/// Whether `expr` calls a subroutine in `spawns`.
+fn expr_spawns(expr: &Expr, spawns: &HashSet<String>) -> bool {
+    let mut calls = Vec::new();
+    let mut asks = false;
+    expr_effects(expr, &mut asks, &mut calls);
+    calls.iter().any(|name| spawns.contains(name))
+}
+
+/// The label whose branch `stmt` is, if it is one: the `fork`-`join`
+/// that records the process of a block a `disable` ends from outside.
+fn branch_label(stmt: &Stmt, disables: &ExternalDisables) -> Option<String> {
+    let Stmt::Fork {
+        join: celox_design::ForkJoin::All,
+        branches,
+    } = stmt
+    else {
+        return None;
+    };
+    let [branch] = branches.as_slice() else {
+        return None;
+    };
+    let Some(Stmt::Assign {
+        lhs: LValue::Ident(name),
+        ..
+    }) = branch.first()
+    else {
+        return None;
+    };
+    disables
+        .blocks
+        .iter()
+        .find(|label| variables(label).0 == *name)
+        .cloned()
 }
 
 /// Whether a block that runs as a branch calls a subroutine that needs
@@ -488,6 +748,12 @@ mod tests {
              task helper; inner(); endtask",
             // A function the block evaluates.
             "function int helper; return process::self() != null; endfunction",
+            // Children the callee leaves with the calling process.
+            "task helper; fork begin #3; end join_none endtask",
+            "task helper; fork begin #3; end join_any endtask",
+            // Through another subroutine.
+            "task inner; fork begin #3; end join_none endtask \
+             task helper; inner(); endtask",
         ] {
             let call = if helper.contains("function int helper") {
                 "if (helper()) #5;"
@@ -502,6 +768,52 @@ mod tests {
             assert!(
                 error.to_string().contains("disable statement"),
                 "{helper}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn calls_in_assignment_target_selectors_keep_blocks_in_their_process() {
+        for source in [
+            // A selector of the block's own assignment.
+            "module Top; bit [3:0] bits; \
+             function int idx; return process::self() != null; endfunction \
+             initial begin : work bits[idx()] = 1'b1; #5; end \
+             initial #1 disable work; endmodule",
+            // A selector in an assignment of a subroutine the block calls.
+            "module Top; bit [3:0] bits; \
+             function int idx; return process::self() != null; endfunction \
+             task helper; bits[idx()] = 1'b1; endtask \
+             initial begin : work helper(); #5; end \
+             initial #1 disable work; endmodule",
+            // The process itself in a selector.
+            "module Top; bit [3:0] bits; \
+             initial begin : work bits[process::self() != null] = 1'b1; #5; end \
+             initial #1 disable work; endmodule",
+        ] {
+            let error = analyze(source).unwrap_err();
+            assert!(
+                error.to_string().contains("disable statement"),
+                "{source}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn pending_children_keep_blocks_in_their_process() {
+        for body in [
+            // A detached child the process started before the block.
+            "initial begin fork begin #3; end join_none \
+             begin : work #5; end wait fork; end",
+            // Through a subroutine the process called before the block.
+            "task spawn; fork begin #3; end join_none endtask \
+             initial begin spawn(); begin : work #5; end end",
+        ] {
+            let source = format!("module Top; {body} initial #1 disable work; endmodule");
+            let error = analyze(&source).unwrap_err();
+            assert!(
+                error.to_string().contains("disable statement"),
+                "{body}: {error}"
             );
         }
     }
