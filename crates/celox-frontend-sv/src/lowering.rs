@@ -321,6 +321,7 @@ pub(crate) struct LoweredSvPortConnection {
     pub actual: String,
     pub actual_expr: Option<sv::ir::Expr>,
     pub bound_pattern: Option<sv::ast::BoundPattern>,
+    pub array_operand: Option<sv::ir::ArrayAssignmentOperand>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

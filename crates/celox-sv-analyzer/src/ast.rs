@@ -502,6 +502,7 @@ pub struct PortConnection {
     actual: String,
     actual_expr: Option<Expr>,
     bound_pattern: Option<BoundPattern>,
+    array_operand: Option<crate::ir::ArrayAssignmentOperand>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

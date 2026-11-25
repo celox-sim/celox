@@ -1,4 +1,4 @@
-//! Diagnostics derived from authored function declarations.
+//! Recoverable source diagnostics.
 
 use super::*;
 use crate::procedural::SourceSpan;
@@ -32,6 +32,12 @@ pub enum AnalyzerWarning {
         name: String,
         site: Option<SourceSpan>,
     },
+    /// A packed integral value or unbased fill assigned to a fixed unpacked array (7.6).
+    PackedToUnpackedAssignment { site: Option<SourceSpan> },
+    /// A force or release on a variable selection or unpacked array element (10.6.2).
+    NonstandardForceTarget { site: Option<SourceSpan> },
+    /// The vendor alias of the standard formatting function (21.3.3).
+    PsprintfAlias { site: Option<SourceSpan> },
     /// A call of `$set_coverage_db_name` or `$load_coverage_db` (`task`),
     /// which saves or loads nothing: there is no coverage database (IEEE
     /// 1800-2023 19.9).
@@ -150,6 +156,31 @@ fn coverage_databases(
     warnings
 }
 
+/// The parser canonicalizes the alias even in expressions that are folded
+/// away, so use the original spelling from the preprocessed tokens.
+fn psprintf_aliases(
+    tree: &SyntaxTree,
+    range: celox_sv_syntax::TokenRange,
+) -> impl Iterator<Item = AnalyzerWarning> + '_ {
+    use celox_sv_syntax::{TokenKind, TokenRange};
+    tree.declarations().tokens[range.start..range.end]
+        .iter()
+        .enumerate()
+        .filter(|(_, token)| token.kind == TokenKind::SystemIdentifier && token.text == "$psprintf")
+        .map(move |(offset, _)| {
+            let start = range.start + offset;
+            AnalyzerWarning::PsprintfAlias {
+                site: procedural::source_span(
+                    TokenRange {
+                        start,
+                        end: start + 1,
+                    },
+                    tree,
+                ),
+            }
+        })
+}
+
 pub(crate) fn components(tree: &SyntaxTree) -> HashMap<String, Vec<AnalyzerWarning>> {
     let mut warnings = HashMap::default();
     for unit in tree.declarations().all_units() {
@@ -164,6 +195,7 @@ pub(crate) fn components(tree: &SyntaxTree) -> HashMap<String, Vec<AnalyzerWarni
                 .or_default();
             append(warnings, functions(tree, unit.tokens));
             append(warnings, coverage_databases(tree, unit.tokens));
+            append(warnings, psprintf_aliases(tree, unit.tokens));
         }
     }
     warnings
@@ -178,6 +210,12 @@ pub(crate) fn packages(tree: &SyntaxTree) -> Vec<AnalyzerWarning> {
     {
         append(&mut warnings, functions(tree, unit.tokens));
         append(&mut warnings, coverage_databases(tree, unit.tokens));
+        append(&mut warnings, psprintf_aliases(tree, unit.tokens));
+    }
+    for item in &native.source_items {
+        if matches!(item.kind, celox_sv_syntax::SourceItemKind::Declaration(_)) {
+            append(&mut warnings, psprintf_aliases(tree, item.tokens));
+        }
     }
     // Compilation-unit functions have no enclosing design unit.
     for function in &native.subroutines {
@@ -199,5 +237,6 @@ pub(crate) fn source(tree: &SyntaxTree) -> Vec<AnalyzerWarning> {
     };
     let mut warnings = functions(tree, range);
     append(&mut warnings, coverage_databases(tree, range));
+    append(&mut warnings, psprintf_aliases(tree, range));
     warnings
 }
