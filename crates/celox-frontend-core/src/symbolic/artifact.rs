@@ -478,6 +478,9 @@ pub struct SymbolicRtl {
     /// Initial values that differ between the instances of a module, such as
     /// the id of an interface instance for virtual interfaces.
     pub instance_values: Vec<InstanceValue>,
+    /// What the homes of runtime event and host request sites denote
+    /// ([`celox_design::SiteHome`]).
+    pub site_homes: celox_design::SiteHomes,
 }
 
 /// The initial value of a variable of one instance.

@@ -88,6 +88,7 @@ impl<'a> FfParser<'a> {
                 .map(|arg| arg.0.comptime().r#type.is_string())
                 .collect(),
             arg_is_handle: Vec::new(),
+            home: None,
         };
         let id = self
             .runtime
@@ -513,6 +514,7 @@ impl<'a> FfParser<'a> {
             arg_float_precision: vec![None],
             arg_is_string: vec![false],
             arg_is_handle: vec![true],
+            home: None,
         });
         ir_builder.emit(SIRInstruction::RuntimeEvent {
             site_id: id,

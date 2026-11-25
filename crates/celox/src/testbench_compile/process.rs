@@ -887,6 +887,7 @@ fn marker_event_site() -> celox_design::RuntimeEventSite {
         arg_is_string: vec![false],
         arg_float_precision: vec![None],
         arg_is_handle: Vec::new(),
+        home: None,
     }
 }
 
@@ -924,6 +925,7 @@ pub(crate) fn display_event_site(
         arg_is_string: vec![false; args.len()],
         arg_float_precision: args.iter().map(|arg| arg.float_precision).collect(),
         arg_is_handle: Vec::new(),
+        home: None,
     })
 }
 

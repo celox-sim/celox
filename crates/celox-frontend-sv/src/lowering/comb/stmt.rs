@@ -337,15 +337,21 @@ impl Comb<'_, '_> {
                 args,
                 site,
                 assertion,
+                home,
             } => {
-                self.system_task(
+                // Every site the task makes names its home.
+                let inner = home.clone().or_else(|| self.m.site_home.clone());
+                let outer = std::mem::replace(&mut self.m.site_home, inner);
+                let result = self.system_task(
                     &mut store,
                     frames,
                     *task,
                     args,
                     site.as_ref(),
                     assertion.as_ref(),
-                )?;
+                );
+                self.m.site_home = outer;
+                result?;
                 Ok(store)
             }
         }

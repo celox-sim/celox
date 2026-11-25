@@ -282,6 +282,175 @@ sv_backends! {
         want.sort();
         assert_eq!(lines, want);
     }
+    // `%m` in a subroutine that runs in another instance's code names the
+    // subroutine's own instance (IEEE 1800-2023 21.2.1.5): a call through a
+    // virtual interface, from a module or from class code, with the
+    // interface's own functions it calls, run-time formats, file output,
+    // severity tasks and assertion reports; a downward and an upward
+    // hierarchical call, into generate blocks, arrays and escaped names; a
+    // function imported through an interface port, through a port of the
+    // parent too (`$printtimescale` there names the instance as well), and
+    // the copies a copied subroutine holds; and an override of a class of a
+    // module. Reports name the same scope. The lines are sorted: processes
+    // in one time slot run in no defined order.
+    fn scope_name_of_subroutines_of_other_instances(sim) {
+        @setup {
+            let source = r#"
+                `timescale 1ns/1ns
+                interface bfm;
+                    logic x, y;
+                    function automatic string f(); return $sformatf("%m f"); endfunction
+                    task automatic w();
+                        string fmt;
+                        fmt = "%m rt";
+                        $display("%m w");
+                        $display("%s", f());
+                        $display("%s", $sformatf(fmt));
+                        $fdisplay(32'h8000_0001, "%m fd");
+                        $error("%m error");
+                        assert (x);
+                        assert (x) else $warning("%m action");
+                    endtask
+                    function automatic string pf(); $printtimescale; return $sformatf("%m pf"); endfunction
+                    modport mp(input x, import pf);
+                endinterface
+                package p;
+                    virtual class B;
+                        pure virtual function void f();
+                    endclass
+                    B obj[$];
+                    class h;
+                        virtual bfm v;
+                        task call(); v.w(); endtask
+                    endclass
+                endpackage
+                module user(bfm.mp port);
+                    initial #3 $display("%s", port.pf());
+                    task pt(); $display("%s via", port.pf()); endtask
+                endmodule
+                module mid(bfm.mp q);
+                    user u(.port(q));
+                endmodule
+                module sub;
+                    task t(); $display("%m t"); endtask
+                endmodule
+                module leaf;
+                    initial #4 Top.t2();
+                endmodule
+                module chain_leaf;
+                    task u(); $display("%m chain"); endtask
+                endmodule
+                module chain;
+                    chain_leaf c0 ();
+                    task t(); c0.u(); endtask
+                endmodule
+                module m;
+                    int k;
+                    class C extends p::B;
+                        virtual function void f(); $display("%m override %0d", k); endfunction
+                    endclass
+                    initial begin
+                        C c = new;
+                        p::obj.push_back(c);
+                    end
+                endmodule
+                module Top;
+                    bfm b0 ();
+                    bfm arr[2] ();
+                    for (genvar i = 0; i < 2; i++) begin : g
+                        sub s ();
+                    end
+                    sub \esc.x ();
+                    leaf l ();
+                    chain ch ();
+                    user u (.port(arr[1]));
+                    mid md (.q(b0));
+                    for (genvar i = 0; i < 1; i++) begin : gg
+                        bfm bus ();
+                        user gu (.port(bus));
+                    end
+                    m m0 ();
+                    m m1 ();
+                    virtual bfm v;
+                    p::h x;
+                    task t2(); $display("%m up"); endtask
+                    initial begin
+                        b0.x = 0;
+                        arr[1].x = 0;
+                        m0.k = 1;
+                        m1.k = 2;
+                        #1;
+                        v = b0;
+                        v.w();
+                        // A member access through the handle is no copy:
+                        // the value assigned is formatted in this scope.
+                        v.y = ($sformatf("%m") == "Top");
+                        $display("member %0d", b0.y);
+                        x = new;
+                        x.v = arr[1];
+                        x.call();
+                        #1;
+                        g[1].s.t();
+                        \esc.x .t();
+                        ch.t();
+                        u.pt();
+                        #4;
+                        foreach (p::obj[i]) p::obj[i].f();
+                    end
+                endmodule
+            "#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("copied_scope.sv"))], "Top");
+        sim.run_until(7).unwrap();
+        let mut lines: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                celox::RuntimeEvent::Report(report) => Some(format!(
+                    "{:?} {} [{}]",
+                    report.severity,
+                    String::from_utf8_lossy(&report.message),
+                    report.scope.unwrap_or_default(),
+                )),
+                _ => None,
+            })
+            .collect();
+        lines.sort();
+        assert_eq!(lines, [
+            "Error Top.arr[1].w error [Top.arr[1]]",
+            "Error Top.b0.w error [Top.b0]",
+            "Error assert failed [Top.arr[1]]",
+            "Error assert failed [Top.b0]",
+            "Time scale of (Top.arr[1]) is 1ns / 1ns",
+            "Time scale of (Top.arr[1]) is 1ns / 1ns",
+            "Time scale of (Top.b0) is 1ns / 1ns",
+            "Time scale of (Top.gg[0].bus) is 1ns / 1ns",
+            "Top.\\esc.x.t t",
+            "Top.arr[1].f f",
+            "Top.arr[1].pf pf",
+            "Top.arr[1].pf pf via",
+            "Top.arr[1].w fd",
+            "Top.arr[1].w rt",
+            "Top.arr[1].w w",
+            "Top.b0.f f",
+            "Top.b0.pf pf",
+            "Top.b0.w fd",
+            "Top.b0.w rt",
+            "Top.b0.w w",
+            "Top.ch.c0.u chain",
+            "Top.g[1].s.t t",
+            "Top.gg[0].bus.pf pf",
+            "Top.m0.C::f override 1",
+            "Top.m1.C::f override 2",
+            "Top.t2 up",
+            "Warning Top.arr[1].w action [Top.arr[1]]",
+            "Warning Top.b0.w action [Top.b0]",
+            "member 1",
+        ]);
+    }
     // An escaped block name keeps the white space that ends it in `%m`
     // (IEEE 1800-2023 5.6.1), so a `.` in it does not read as a separator.
     fn scope_name_of_escaped_named_blocks(sim) {

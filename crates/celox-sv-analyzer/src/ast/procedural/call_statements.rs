@@ -553,6 +553,7 @@ impl BodyBuilder<'_, '_, '_> {
                     args: vec![SystemTaskArg::Str(
                         "$cast of a value that is no member of the enumerated type".into(),
                     )],
+                    home: None,
                 }],
             }]);
         }
@@ -578,6 +579,7 @@ impl BodyBuilder<'_, '_, '_> {
                     args: vec![SystemTaskArg::Str(
                         "$cast of a value that is not cast compatible with its destination".into(),
                     )],
+                    home: None,
                 }],
             }]);
         }
@@ -611,6 +613,7 @@ impl BodyBuilder<'_, '_, '_> {
                 args: vec![SystemTaskArg::Str(
                     "$cast of a class handle to an incompatible class".into(),
                 )],
+                home: None,
             };
             if let expression_binding::ObjectCast::Fails = cast {
                 return Ok(vec![error]);
@@ -785,6 +788,7 @@ impl BodyBuilder<'_, '_, '_> {
                         &self.tree,
                         system_functions::CallSite::Statement(self.body),
                     )?)],
+                    home: None,
                 }]);
             }
             system_functions::SystemCall::Task(
@@ -1019,6 +1023,7 @@ impl BodyBuilder<'_, '_, '_> {
             args,
             site: source_span(declarations.expression(root).tokens, &self.tree),
             assertion: None,
+            home: None,
         }])
     }
 }

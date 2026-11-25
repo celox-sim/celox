@@ -127,6 +127,7 @@ pub struct Module {
     imported_parameters: Vec<Parameter>,
     interface_scope_names: Vec<String>,
     interface_handles: Vec<InterfaceHandle>,
+    home_handles: Vec<InterfaceHandle>,
     /// The overrides of the module's classes that other scopes call.
     exported_overrides: Vec<ExportedOverride>,
     program: bool,
@@ -389,6 +390,7 @@ impl Module {
             program: false,
             interface_scope_names: Vec::new(),
             interface_handles: Vec::new(),
+            home_handles: Vec::new(),
             exported_overrides: Vec::new(),
         }
     }
@@ -448,6 +450,19 @@ impl Module {
 
     pub(crate) fn with_interface_handles(mut self, handles: Vec<InterfaceHandle>) -> Self {
         self.interface_handles = handles;
+        self
+    }
+
+    /// Every interface instance and port of the module, with the signals or
+    /// ports that hold their members: what the connections of its instances
+    /// tell the interface instance each port denotes, which `%m` in the
+    /// subroutines the port imports names (see [`celox_design::SiteHomes::ports`]).
+    pub fn home_handles(&self) -> &[InterfaceHandle] {
+        &self.home_handles
+    }
+
+    pub(crate) fn with_home_handles(mut self, handles: Vec<InterfaceHandle>) -> Self {
+        self.home_handles = handles;
         self
     }
 
@@ -2002,6 +2017,60 @@ pub enum Expr {
         expr: Box<Expr>,
         items: Vec<InsideItem>,
     },
+}
+
+impl crate::procedural::VisitFormats for Expr {
+    fn visit_formats_mut(
+        &mut self,
+        f: &mut impl FnMut(&mut crate::system_functions::FormatOptions),
+    ) {
+        match self {
+            Expr::Ident(_) | Expr::Literal(_) => {}
+            Expr::Select { expr, .. } | Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => {
+                expr.visit_formats_mut(f)
+            }
+            Expr::Concat(parts) | Expr::RepeatConcat { parts, .. } => {
+                for part in parts {
+                    part.visit_formats_mut(f);
+                }
+            }
+            Expr::Binary { left, right, .. } => {
+                left.visit_formats_mut(f);
+                right.visit_formats_mut(f);
+            }
+            Expr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                condition.visit_formats_mut(f);
+                then_expr.visit_formats_mut(f);
+                else_expr.visit_formats_mut(f);
+            }
+            Expr::Call { callee, args, .. } => {
+                if let Callee::String(crate::system_functions::StringOp::Format { options }) =
+                    callee
+                {
+                    f(options);
+                }
+                for arg in args.iter_mut().flatten() {
+                    arg.visit_formats_mut(f);
+                }
+            }
+            Expr::Inside { expr, items } => {
+                expr.visit_formats_mut(f);
+                for item in items {
+                    match item {
+                        InsideItem::Value(value) => value.visit_formats_mut(f),
+                        InsideItem::Range { low, high } => {
+                            low.visit_formats_mut(f);
+                            high.visit_formats_mut(f);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// One item of an `inside` set.
@@ -3603,12 +3672,28 @@ mod virtual_instances {
                     for &id in ids.get(&interface).into_iter().flatten() {
                         expanded.push(crate::procedural::CaseItemBase {
                             labels: vec![crate::procedural::CaseLabel::Value(id_literal(id))],
-                            body: item
-                                .body
-                                .iter()
-                                .cloned()
-                                .map(|stmt| stmt_for_instance(stmt, interface, id))
-                                .collect(),
+                            body: {
+                                let mut body: Vec<_> = item
+                                    .body
+                                    .iter()
+                                    .cloned()
+                                    .map(|stmt| stmt_for_instance(stmt, interface, id))
+                                    .collect();
+                                // A dispatcher's arm (a copy of a subroutine,
+                                // see `procedural::arm_home`) runs it for
+                                // instance `id`, whose scope its `%m` names;
+                                // the arms of member accesses have no such
+                                // homes and keep the caller's scope. The
+                                // arms of the cases inside are expanded
+                                // after this one, so they see the number.
+                                let arm = crate::procedural::arm_home();
+                                crate::procedural::visit_site_homes(&mut body, &mut |home| {
+                                    if home.as_ref() == Some(&arm) {
+                                        *home = Some(celox_design::SiteHome::Instance(id));
+                                    }
+                                });
+                                body
+                            },
                         });
                     }
                 }

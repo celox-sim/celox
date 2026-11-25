@@ -1753,6 +1753,45 @@ pub(super) fn handles(
     handles
 }
 
+/// Every interface instance and port of a module with `symbols` and `ports`,
+/// each with the signals or ports that hold its members (see
+/// [`crate::ir::Module::home_handles`]).
+pub(super) fn home_handles(
+    symbols: &scope::ScopeSymbols,
+    ports: &[Port],
+) -> Vec<crate::ir::InterfaceHandle> {
+    let mut handles = symbols
+        .interface_types
+        .iter()
+        .map(|(handle, interface)| {
+            // The members of the handle are the paths it starts, as
+            // `handles` spells them (`g[0].bus.x` for `g[0].bus`).
+            let prefix = format!("{handle}.");
+            let mut members: Vec<(String, String)> = symbols
+                .interface_members
+                .iter()
+                .filter_map(|(path, signal)| {
+                    path.strip_prefix(&prefix)
+                        .map(|member| (member.to_owned(), signal.clone()))
+                })
+                .collect();
+            members.sort();
+            let port = members
+                .iter()
+                .any(|(_, signal)| ports.iter().any(|port| port.name() == signal));
+            crate::ir::InterfaceHandle {
+                handle: handle.clone(),
+                interface: interface.clone(),
+                port,
+                members,
+                blocks: Vec::new(),
+            }
+        })
+        .collect::<Vec<_>>();
+    handles.sort_by(|left, right| left.handle.cmp(&right.handle));
+    handles
+}
+
 /// The element of an interface instance array, or the interface instance of
 /// a generate scope, that native expression `id` names, as a virtual
 /// interface value.

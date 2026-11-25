@@ -21,10 +21,14 @@ pub(super) struct TimingMetadata {
 /// here, which is the module's order.
 pub(super) fn relocate_timing(
     bindings: &PackageBindings,
+    expanded: &HashMap<InstancePath, InstanceId>,
     instance_modules: &HashMap<InstanceId, ModuleId>,
     modules: &HashMap<ModuleId, SimModule>,
     processes: &[RelocatedProcess],
+    homes: &relocation::HomeNames<'_>,
 ) -> TimingMetadata {
+    let paths: HashMap<InstanceId, &InstancePath> =
+        expanded.iter().map(|(path, id)| (*id, path)).collect();
     let process_index: HashMap<(InstanceId, usize), usize> = processes
         .iter()
         .enumerate()
@@ -67,12 +71,33 @@ pub(super) fn relocate_timing(
         metadata
             .host_request_sites
             .extend(module.host_request_sites.iter().map(|site| {
-                HostRequestSite {
+                let mut site = HostRequestSite {
                     process: site
                         .process
                         .with_index(process_index[&(instance, site.process.index())]),
                     ..site.map(locate)
+                };
+                // A copied subroutine's request names the instance it
+                // belongs to, under which a run-time format's scope is.
+                if let Some(name) = site
+                    .home
+                    .take()
+                    .zip(paths.get(&instance))
+                    .and_then(|(home, path)| homes.resolve(path, &home))
+                {
+                    site.scope = match site.scope.take() {
+                        Some(celox_design::FormatScope::Absolute(name)) => {
+                            Some(celox_design::FormatScope::Absolute(name))
+                        }
+                        Some(celox_design::FormatScope::Relative(path)) if !path.is_empty() => {
+                            Some(celox_design::FormatScope::Absolute(format!(
+                                "{name}.{path}"
+                            )))
+                        }
+                        _ => Some(celox_design::FormatScope::Absolute(name)),
+                    };
                 }
+                site
             }));
         metadata.time_slots.extend(module.time_slot.map(locate));
         metadata.sample_shadows.extend(

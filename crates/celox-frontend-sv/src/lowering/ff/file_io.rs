@@ -94,6 +94,8 @@ impl Ff<'_, '_> {
             results,
             strings,
             scope: None,
+            // The home of the statement making the request.
+            home: self.m.site_home.clone(),
         });
         self.request_host(HostRequestKind::FileIo, site)
     }

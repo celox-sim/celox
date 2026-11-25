@@ -468,6 +468,7 @@ impl Ff<'_, '_> {
             arg_is_string: Vec::new(),
             arg_float_precision: Vec::new(),
             arg_is_handle: Vec::new(),
+            home: None,
         });
         self.assertions.flush_site = Some(site);
         Some(site)
