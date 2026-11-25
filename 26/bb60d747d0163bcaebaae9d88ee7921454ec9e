@@ -1,1 +1,1 @@
-Rebase onto latest origin/master
+Rebase onto latest origin/master and address Codex P2 review findings: stage aliased unpacked array NBA writes and correlate foreign write overlap with driver kind
