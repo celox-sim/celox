@@ -712,7 +712,7 @@ impl BodyBuilder<'_, '_, '_> {
         // A property of integral type is a place of the ordinary target
         // (`expression_binding::object_place`).
         if property.field.handle.is_none()
-            && property.r#type.container.is_none()
+            && property.r#type.container().is_none()
             && !property.r#type.is_unpacked_struct_in(&self.session.types)
         {
             return Ok(None);
@@ -748,7 +748,7 @@ impl BodyBuilder<'_, '_, '_> {
                 containers::fixed_assignment(right, &self.tree, self.session, &self.dims, storage)?;
             return self.property_store(&property, handle, op, value).map(Some);
         }
-        if let Some(container) = property.r#type.container.as_deref() {
+        if let Some(container) = property.r#type.container().map(|c| &**c) {
             if op != "=" {
                 return Err(unsupported("compound assignment to a container property"));
             }

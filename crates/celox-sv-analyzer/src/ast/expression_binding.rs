@@ -147,7 +147,7 @@ pub(super) fn expression(
         };
         return streams::pack(root, Some(receiver), native, tree, session, dimensions);
     }
-    if let Some(target) = shape.and_then(|shape| shape.container.as_deref()) {
+    if let Some(target) = shape.and_then(|shape| shape.container().map(|c| &**c)) {
         return containers::assignment(root, tree, session, dimensions, target);
     }
     // `new` creates an object of the class of the variable or of the

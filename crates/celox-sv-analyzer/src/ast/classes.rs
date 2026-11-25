@@ -133,7 +133,7 @@ impl Property {
     /// 7.5, 7.10), whose size a constraint may name (18.4).
     pub fn sequence(&self) -> bool {
         self.r#type.unpacked_ranges.is_empty()
-            && self.r#type.container.as_ref().is_some_and(|container| {
+            && self.r#type.container().is_some_and(|container| {
                 matches!(
                     container.layout.kind,
                     ContainerKind::Dynamic | ContainerKind::Queue { .. }
@@ -147,7 +147,7 @@ impl Property {
     pub fn array_storage(&self) -> Option<&Arc<ContainerType>> {
         self.storage
             .as_ref()
-            .or_else(|| self.r#type.container.as_ref().filter(|_| self.sequence()))
+            .or_else(|| self.r#type.container().filter(|_| self.sequence()))
     }
 
     /// Whether a constraint program holds the property as an array.
@@ -164,7 +164,7 @@ impl Property {
     pub fn rand_object(&self, table: &semantic_types::TyTable) -> bool {
         self.rand
             && self.r#type.class_in(table).is_some()
-            && self.r#type.container.is_none()
+            && self.r#type.container().is_none()
             && self.r#type.unpacked_ranges.is_empty()
     }
 
@@ -1659,7 +1659,7 @@ fn lay_out_shared_class(
                     &context,
                 )?)
             };
-            if ty.container.is_some() && property.declaration.constant {
+            if ty.container().is_some() && property.declaration.constant {
                 return Err(unsupported("const dynamic container class property"));
             }
             let property_name = instances::normalize_identifier(&variable.name.spelling);
@@ -2298,7 +2298,7 @@ pub(super) fn field(
         return Err(unsupported("class property of unpacked structure type"));
     }
     let (width, signed, handle) = match ty.kind() {
-        _ if ty.container.is_some() => (HANDLE_WIDTH, false, Some(HandleProperty::Object)),
+        _ if ty.container().is_some() => (HANDLE_WIDTH, false, Some(HandleProperty::Object)),
         TypeKind::String => (HANDLE_WIDTH, false, Some(HandleProperty::String)),
         TypeKind::Object => (HANDLE_WIDTH, false, Some(HandleProperty::Object)),
         TypeKind::Process | TypeKind::Event => (HANDLE_WIDTH, false, None),

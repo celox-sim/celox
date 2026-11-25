@@ -107,7 +107,7 @@ fn chandle() -> AnalyzerError {
 
 /// Reject the kinds of data a fixed-size stream cannot hold.
 fn check_fixed(shape: &VariableDimensions, table: &semantic_types::TyTable) -> Converted<()> {
-    if shape.container.is_some() {
+    if shape.container().is_some() {
         return Err(unsupported(
             "streaming concatenation of a dynamically sized array",
         ));
@@ -198,7 +198,7 @@ pub(in crate::ast) fn receiver(
     functions: &const_functions::ConstantFunctions,
     dims: &PackedDimensions,
 ) -> Converted<Receiver> {
-    if let Some(container) = &shape.container {
+    if let Some(container) = shape.container() {
         return Ok(Receiver::Container(stream_container(container)?));
     }
     if shape.string {
@@ -367,7 +367,7 @@ fn wide_field(
         Some(record)
             if !container.element_is_unpacked_struct(table)
                 && container.element_class(table).is_none()
-                && container.element.container.is_none()
+                && container.element.container().is_none()
                 && record.fields.len() == 1
                 && record.fields[0].offset == 0
                 && record.fields[0].handle.is_none()
@@ -437,7 +437,7 @@ fn operand(
     // bit-stream cast to a queue type.
     let container = match containers::native_type(id, native, tree, session, dims)? {
         Some(container) => Some(container),
-        None => shape.as_ref().and_then(|shape| shape.container.clone()),
+        None => shape.as_ref().and_then(|shape| shape.container().cloned()),
     };
     if let Some(container) = container {
         let layout = container.layout.clone();
@@ -1053,9 +1053,9 @@ pub(in crate::ast) fn unpack(
         }
         let shape = dimensions::operand_shape(id, tree, session, dims)?
             .ok_or_else(|| unsupported("streaming concatenation unpack target"))?;
-        let dynamic = shape.container.is_some() || shape.string;
+        let dynamic = shape.container().is_some() || shape.string;
         if let Some(range) = range {
-            let Some(container) = &shape.container else {
+            let Some(container) = shape.container() else {
                 return Err(if shape.unpacked.len() == 1 {
                     unsupported("streaming concatenation with range on a fixed-size unpack target")
                 } else {
@@ -1081,7 +1081,7 @@ pub(in crate::ast) fn unpack(
             // fixed-size variables after it leave; the others stay empty.
             let reserve = if greedy { usize::MAX } else { 0 };
             greedy = true;
-            takes.push(match &shape.container {
+            takes.push(match shape.container() {
                 Some(container) => Take::Rest {
                     layout: stream_container(container)?,
                     reserve,

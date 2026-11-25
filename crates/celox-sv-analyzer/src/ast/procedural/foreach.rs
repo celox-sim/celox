@@ -90,7 +90,7 @@ impl BodyBuilder<'_, '_, '_> {
                         outer,
                         vec![array, Expr::Ident(index.clone())],
                     );
-                    container = container.element.container.clone().ok_or_else(|| {
+                    container = container.element.container().cloned().ok_or_else(|| {
                         unsupported("foreach index beyond the container dimensions")
                     })?;
                 }

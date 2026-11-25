@@ -218,7 +218,7 @@ impl BodyBuilder<'_, '_, '_> {
         // A variable holds each formal and the value, as a whole.
         let plain = |ty: &Type, table: &semantic_types::TyTable| {
             ty.unpacked_ranges.is_empty()
-                && ty.container.is_none()
+                && ty.container().is_none()
                 && !ty.is_unpacked_struct_in(table)
                 && !events::is_event(ty)
         };

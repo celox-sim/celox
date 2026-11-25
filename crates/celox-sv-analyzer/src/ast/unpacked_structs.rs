@@ -101,7 +101,7 @@ impl UnpackedStruct {
     pub(in crate::ast) fn holds_container(&self) -> bool {
         self.leaves()
             .iter()
-            .any(|leaf| leaf.r#type.container.is_some())
+            .any(|leaf| leaf.r#type.container().is_some())
     }
 
     pub(in crate::ast) fn has_array_members(&self) -> bool {
@@ -235,7 +235,7 @@ pub(in crate::ast) fn native_type(
         .map(|(name, ty, default)| {
             // A dynamic array, queue or associative array member is held by
             // its handle (7.2.1, 7.4).
-            if ty.container.is_some() {
+            if ty.container().is_some() {
                 return Some(Member {
                     name,
                     r#type: ty,
@@ -697,7 +697,7 @@ fn struct_of(
 ) -> Converted<Option<semantic_types::TyId>> {
     // Every shape keeps its structure metadata until declarations bind
     // their types.
-    let metadata = shape.structure_declaration().is_some() && shape.container.is_none();
+    let metadata = shape.structure_declaration().is_some() && shape.container().is_none();
     let Some(mut ty) = shape.type_id(table, functions, env) else {
         return match metadata {
             true => Err(unsupported(
@@ -887,7 +887,7 @@ pub(in crate::ast) fn record(
         )
     };
     let handles = leaves.iter().any(|leaf| {
-        leaf.r#type.container.is_some()
+        leaf.r#type.container().is_some()
             || matches!(leaf.r#type.kind, TypeKind::String | TypeKind::Object)
     });
     let uniform = leaves.iter().all(two_state) || !leaves.iter().any(two_state);

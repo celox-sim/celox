@@ -954,7 +954,7 @@ pub(in crate::ast) fn lower_subroutine(
                     let shape = (ty.tagged_identity().is_some()
                         || ty.is_unpacked_struct_in(&builder.session.types)
                         || ty.is_chandle() && ty.unpacked_ranges.is_empty()
-                        || ty.container.is_some() && *direction == ParamDirection::Input)
+                        || ty.container().is_some() && *direction == ParamDirection::Input)
                         .then(|| dimensions_from_type(ty));
                     let mut value = expression_binding::bind_value(
                         root,

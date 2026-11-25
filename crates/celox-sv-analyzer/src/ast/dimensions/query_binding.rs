@@ -1145,7 +1145,7 @@ pub(in crate::ast) fn shape(
                             // whole container, whose size depends on its
                             // elements: reject it rather than describing
                             // its handle as a packed range.
-                            if container.element.container.is_some() {
+                            if container.element.container().is_some() {
                                 return Err(unsupported("query of a container element"));
                             }
                             values.push(procedural::dimensions_from_type(&container.element));

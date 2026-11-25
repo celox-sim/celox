@@ -2093,7 +2093,7 @@ pub(in crate::ast) fn bind_inputs(
                                     .into(),
                             );
                         }
-                        if property.r#type.container.is_some()
+                        if property.r#type.container().is_some()
                             || !property.r#type.unpacked_ranges.is_empty()
                         {
                             return Err("an array in a uniqueness constraint".into());

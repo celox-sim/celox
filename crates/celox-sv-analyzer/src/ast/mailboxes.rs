@@ -33,7 +33,7 @@ impl Message {
         env: &ConstEnv,
     ) -> Converted<Self> {
         if !ty.unpacked_ranges.is_empty()
-            || ty.container.is_some()
+            || ty.container().is_some()
             || ty.is_unpacked_struct_in(table)
             || matches!(ty.kind(), TypeKind::Real | TypeKind::Shortreal)
         {

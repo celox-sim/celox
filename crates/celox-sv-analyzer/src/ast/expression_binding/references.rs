@@ -160,8 +160,8 @@ pub(super) fn check_actual(
     // Bounded and unbounded queues are equivalent (6.22.2), but a formal's
     // operations would apply its own bound to the actual.
     if let (Some(formal), Some(actual)) = (
-        formal.and_then(|formal| formal.container.as_deref()),
-        shape.container.as_deref(),
+        formal.and_then(|formal| formal.container().map(|c| &**c)),
+        shape.container().map(|c| &**c),
     ) && let (
         system_functions::ContainerKind::Queue { capacity: bound },
         system_functions::ContainerKind::Queue { capacity },

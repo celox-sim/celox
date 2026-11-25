@@ -148,8 +148,8 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                 VariableShape {
                     declared: type_names::Declared::new(port.r#type()),
                     chandle: port.r#type().is_chandle(),
-                    container: port.r#type().container.clone(),
-                    randomizable: port.r#type().container.is_none()
+                    container: port.r#type().container().cloned(),
+                    randomizable: port.r#type().container().is_none()
                         && !port.r#type().holds_chandle()
                         && port.randomizable,
                     real: matches!(port.r#type().kind(), TypeKind::Real | TypeKind::Shortreal),
@@ -196,8 +196,8 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                 VariableShape {
                     declared: type_names::Declared::new(signal.r#type()),
                     chandle: signal.r#type().is_chandle(),
-                    container: signal.r#type().container.clone(),
-                    randomizable: signal.r#type().container.is_none()
+                    container: signal.r#type().container().cloned(),
+                    randomizable: signal.r#type().container().is_none()
                         && !signal.r#type().holds_chandle()
                         && !signal.is_net()
                         && !signal.is_const,

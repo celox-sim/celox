@@ -58,7 +58,7 @@ impl FunctionReturnMetadata {
             signed: ty.is_some_and(Type::is_signed),
             is_2state: ty.is_some_and(|ty| matches!(ty.kind(), TypeKind::Bit | TypeKind::Chandle)),
             string: ty.is_some_and(|ty| ty.kind() == TypeKind::String),
-            container: ty.and_then(|ty| ty.container.clone()),
+            container: ty.and_then(|ty| ty.container().cloned()),
             chandle: ty.is_some_and(|ty| ty.is_chandle() && ty.unpacked_ranges.is_empty()),
             pattern_type: ty
                 .filter(|ty| {
