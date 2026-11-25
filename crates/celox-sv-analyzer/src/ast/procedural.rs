@@ -399,6 +399,54 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
 
 /// The names a body declares: its scopes of locals, innermost last, and
 /// the values of its local parameters.
+/// The tables of a body of a method of a class once it entered the
+/// class's scope (see [`BodyBuilder::enter_class_scope`]), which every
+/// method of the class starts from: the names of the class's properties
+/// and methods hide those of the design element (IEEE 1800-2023 8.5,
+/// 23.9). Hiding them takes the same work for each method, so a class's
+/// methods share it.
+pub(super) struct ClassScope {
+    dims: PackedDimensions,
+    names: Names,
+    type_aliases: TypeAliases,
+    /// The constants of the scope that declares the class, which ending
+    /// the class's scope would restore.
+    pub(super) outer_env: SharedEnv,
+}
+
+impl ClassScope {
+    /// The tables of a body of a method of `class` with the tables `dims`
+    /// of the scope that declares it.
+    pub(super) fn new(
+        tree: &AnalysisContext<'_>,
+        session: &mut Session,
+        dims: &PackedDimensions,
+        state: &mut BodyState<'_>,
+        class: &classes::Class,
+    ) -> Self {
+        let mut builder = BodyBuilder::new_unbound(
+            tree,
+            session,
+            dims,
+            state,
+            system_functions::Body::Subroutine,
+        );
+        let outer_env = builder.dims.const_env.clone();
+        builder.push_scope();
+        builder.enter_class_members(class);
+        if let Some(sink) = builder.dims.locator_locals.take() {
+            sink.close(builder.session);
+        }
+        Self {
+            dims: builder.dims.clone(),
+            names: builder.names.clone(),
+            type_aliases: builder.type_aliases.clone(),
+            outer_env,
+        }
+    }
+}
+
+#[derive(Clone)]
 pub(super) struct Names {
     scopes: Vec<Scope>,
     /// The values of the local parameters declared in the body.
@@ -699,11 +747,73 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         state: &'s mut BodyState<'a>,
         body: system_functions::Body,
     ) -> Self {
+        let mut builder = Self::new_unbound(tree, session, dims, state, body);
+        // A class whose layout fails is rejected where it is used.
+        let _ = builder.bind_static_references();
+        builder
+    }
+
+    /// [`Self::new`] without the bindings of the static variables of
+    /// subroutines (see [`Self::bind_static_references`]).
+    fn new_unbound(
+        tree: &'t AnalysisContext<'t>,
+        session: &'s mut Session,
+        dims: &PackedDimensions,
+        state: &'s mut BodyState<'a>,
+        body: system_functions::Body,
+    ) -> Self {
         let type_aliases = (*dims.type_aliases).clone();
+        Self::with_tables(
+            tree,
+            session,
+            dims.clone(),
+            Names {
+                scopes: vec![Scope {
+                    entries: Vec::new(),
+                    shadowed_types: Vec::new(),
+                }],
+                local_constants: HashMap::default(),
+            },
+            type_aliases,
+            state,
+            body,
+        )
+    }
+
+    /// A builder of a body of a method of a class whose names `scope` holds
+    /// (see [`ClassScope`]), as [`Self::new`] and [`Self::enter_class_scope`]
+    /// in a scope of its own make it when they bind no static variable of a
+    /// subroutine.
+    pub(super) fn in_class_scope(
+        tree: &'t AnalysisContext<'t>,
+        session: &'s mut Session,
+        scope: &ClassScope,
+        state: &'s mut BodyState<'a>,
+        body: system_functions::Body,
+    ) -> Self {
+        Self::with_tables(
+            tree,
+            session,
+            scope.dims.clone(),
+            scope.names.clone(),
+            scope.type_aliases.clone(),
+            state,
+            body,
+        )
+    }
+
+    fn with_tables(
+        tree: &'t AnalysisContext<'t>,
+        session: &'s mut Session,
+        mut dims: PackedDimensions,
+        names: Names,
+        type_aliases: TypeAliases,
+        state: &'s mut BodyState<'a>,
+        body: system_functions::Body,
+    ) -> Self {
         let automatic = state.automatic;
-        let mut dims = dims.clone();
         dims.locator_locals = Some(locators::LocalSink::new(session, *state.counter));
-        let mut builder = Self {
+        Self {
             automatic,
             subroutine: body == system_functions::Body::Subroutine,
             task_timing: false,
@@ -728,20 +838,11 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             outer_contexts: Vec::new(),
             session,
             dims,
-            names: Names {
-                scopes: vec![Scope {
-                    entries: Vec::new(),
-                    shadowed_types: Vec::new(),
-                }],
-                local_constants: HashMap::default(),
-            },
+            names,
             state,
             type_aliases,
             body,
-        };
-        // A class whose layout fails is rejected where it is used.
-        let _ = builder.bind_static_references();
-        builder
+        }
     }
 
     /// Declare the locals that the array locator methods of the bound
@@ -1193,6 +1294,15 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     /// A static property's name is renamed to the module variable that holds
     /// it (IEEE 1800-2023 8.9).
     fn enter_class_scope(&mut self, class: &classes::Class) {
+        self.enter_class_members(class);
+        // `m.v` of a static variable of a method `m` of the class (23.6). A
+        // class whose layout fails is rejected where it is used.
+        let _ = self.bind_static_references();
+    }
+
+    /// [`Self::enter_class_scope`] without the bindings of the static
+    /// variables of subroutines.
+    fn enter_class_members(&mut self, class: &classes::Class) {
         self.dims.class_scope = Some(class.name.clone());
         let constants =
             classes::specializations::constant_types(&self.tree, self.session, &class.name);
@@ -1254,9 +1364,6 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 .entries
                 .push(entry);
         }
-        // `m.v` of a static variable of a method `m` of the class (23.6). A
-        // class whose layout fails is rejected where it is used.
-        let _ = self.bind_static_references();
     }
 
     fn rename_expr(&self, expr: &mut Expr) {
