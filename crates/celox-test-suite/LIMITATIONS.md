@@ -1765,24 +1765,43 @@ No assertions or exclusions are weakened.
 
 ### Covergroups
 
-The 5 `covergroup::*` cases check what IEEE 1800-2023 fixes of a covergroup
-without items: a variable of a covergroup type holds a handle or `null`
-(19.3), `new` and `sample` take the arguments of the covergroup and of its
-sample method, by position, by name and by default (19.3, 19.8.1), each
-element of an array holds its own instance, an embedded covergroup is
-constructed by the `new` method of its class (19.4), and a shallow copy has
-none (8.12). Celox passes all of them on every backend. No coverage value is
-compared: the coverage of a covergroup without items is a zero-denominator
-case the tools need not agree on.
+The 12 `covergroup::*` cases check what IEEE 1800-2023 fixes of covergroups.
+Five are of a covergroup without items: a variable of a covergroup type holds
+a handle or `null` (19.3), `new` and `sample` take the arguments of the
+covergroup and of its sample method, by position, by name and by default
+(19.3, 19.8.1), each element of an array holds its own instance, an embedded
+covergroup is constructed by the `new` method of its class (19.4), and a
+shallow copy has none (8.12). No coverage value is compared in these: the
+coverage of a covergroup without items is a zero-denominator case the tools
+need not agree on. Seven are of coverpoints, and display
+`get_inst_coverage()` with two decimals, expecting the value 19.11 gives, so
+that a result that differs shows the coverage the tool computed: bins of
+values and ranges count the samples in them (19.5.1), a coverpoint without
+bins has a bin for each value, `option.auto_bin_max` bins that share the
+values, or a bin for each enumerator (19.5.3), a guard that is false skips
+the sample (19.5), the arguments of the sample method are what the
+coverpoints read (19.8.1), the arguments of `new` set the bins of an
+instance (19.3, 19.5), `option.weight` and `option.at_least` weigh a
+coverpoint and cover a bin (19.7, 19.11), and the coverpoints of an embedded
+covergroup read the members of its class (19.4). Celox passes all of them on
+every backend.
 
-Verilator 5.054 passes the four cases that construct and sample, and keeps
-the embedded covergroup in a shallow copy
-(`covergroup::shallow_copy_has_no_embedded_covergroup` reads the handle of the
-copy as not `null`), where 8.12 gives the new object a `null` handle. xezim
-0.11.4 keeps it too, and compares a covergroup variable that nothing assigned
-with `null` as `x` (`covergroup::handles_are_null_until_constructed`,
-`covergroup::embedded_covergroup_is_constructed_by_new`); it passes the other
-two cases. Icarus 13.0 compiles none of the cases: it has no covergroups
+Verilator 5.054 passes ten cases. It keeps the embedded covergroup in a
+shallow copy (`covergroup::shallow_copy_has_no_embedded_covergroup` reads the
+handle of the copy as not `null`), where 8.12 gives the new object a `null`
+handle, and it rejects the bins of
+`covergroup::constructor_arguments_set_the_bins` ("Non-constant expression in
+bin range; range bounds must be constants"), where 19.5 lets a bin name the
+non-`ref` arguments of its covergroup. xezim 0.11.4 passes eight. It keeps
+the embedded covergroup in a shallow copy too, compares a covergroup variable
+that nothing assigned with `null` as `x`
+(`covergroup::handles_are_null_until_constructed`,
+`covergroup::embedded_covergroup_is_constructed_by_new`), and gives the
+coverpoint of an enumeration of three enumerators in two bits four automatic
+bins (`covergroup::automatic_bins_of_a_coverpoint` displays 50.00 after a
+sample of two of the enumerators and 75.00 after one of each, where the case
+expects 66.67 and 100.00), where 19.5.3 makes their number the cardinality of
+the enumeration. Icarus 13.0 compiles none of the cases: it has no covergroups
 ("Invalid module item", "Invalid class item"). All of these remain executed
 evidence in the [Verilator report](verification/sv/verilator/covergroup.json),
 the [xezim report](verification/sv/xezim/covergroup.json) and the

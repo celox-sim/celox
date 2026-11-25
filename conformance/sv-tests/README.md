@@ -158,6 +158,28 @@ calls itself with constant arguments, which no longer keep the call inlined;
 the local simulation driver prints 1, 1, 2, 120 and 39916800 in both modes.
 CI reports no other change; no failure expectation is broadened.
 
+Coverpoints of covergroups (IEEE 1800-2023 19.5) update two expectations:
+both state modes of `generated/uvm-examples/uvm_id_register` now pass. The
+`new` of its covergroup, which has a coverpoint, ended the build before; in a
+focused official invocation with a 480-second case timeout the case now ends
+with exit status 0 after about 240 to 265 seconds. The verdict is the
+official runner's, which reads the exit status of a case without `:assert:`.
+The UVM test of the case itself reports 26 `UVM_ERROR`: every read of the
+ID register through the register model returns 0 (`[ID_IDX_WR] Index 0
+returned 0 expected 160`). That is what the sources give with the UVM
+library of the pinned revision (2020-3.x). The register map of the test is
+`UVM_BIG_ENDIAN` and four bytes wide, and `uvm_reg_map::perform_accesses` of
+that library reverses the bytes of the whole 64-bit `uvm_reg_data_t` for
+such a map: the `'ha0` of the bus becomes `'ha000_0000_0000_0000`, of which
+the mask of the bus width leaves 0, and a written index reaches the bus as 0
+the same way. Probes in a copy of the sources show the right values on the
+bus, in the DUT and in the mirror the predictor keeps, and the reversed ones
+at the adapter. The agent of the test constructs no coverage monitor, so its
+covergroup is compiled and never constructed. `uvm_register_spi_bl_tb` and
+`uvm_tb_build_bl_tb`, whose covergroups compile as well, keep failing on a
+constraint over a random property that is not a scalar integral. No failure
+expectation is broadened.
+
 The official runner’s process exit code is separate from the case verdict.
 The wrapper reads its `PASS`/`FAIL` log messages; it does not reconstruct their
 rules from tool exit codes or `should_fail` metadata. A negative test may pass

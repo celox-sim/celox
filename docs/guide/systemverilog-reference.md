@@ -207,14 +207,20 @@ For `expect (property_spec) action_block` (16.17), the executing process makes o
 
 A covergroup (clause 19) is a type: declared in a module, a program, a package, the compilation unit or a generate block, or embedded in a class (19.4). `new` constructs an instance, with the arguments of the covergroup; `sample()` samples it, with the arguments of a `with function sample` declaration; `get_inst_coverage()`, `get_coverage()`, `T::get_coverage()` and `$get_coverage()` give coverage. The results are read through `Simulation::coverage()` (see [Coverage](#coverage)).
 
+A coverpoint (19.5) is of an integral type of any width: with or without a label, with a type of its own, and with an `iff` guard, whose expression is evaluated first. Its expression and its guard read the arguments of the covergroup and of `sample`, then the members of the class of an embedded covergroup, then the names of the scope. Its bins are the automatic bins of 19.5.3, also those of an enumeration, or bins of values and ranges (`bins b = {0, [1:3], [8:$]};`). A bin value is a constant, an argument of the covergroup or a call of a function with these, which the construction evaluates, so the instances of one type may differ in their bins. The definition may assign `option.name`, `comment`, `per_instance`, `weight`, `goal`, `at_least` and `auto_bin_max`, each at the levels 19.10 gives it, with any expression of the scope of `new` as the value.
+
 A construct of the **Not supported** column is rejected where a `new` or a method of the covergroup is written, not where the covergroup is declared: a covergroup that nothing constructs is accepted whatever it declares, and so is a variable of its type. All of them point to [#4294](https://github.com/celox-sim/celox/issues/4294), which tracks what is left of clause 19.
 
 | Aspect | Supported | Not supported |
 | --- | --- | --- |
 | **Declarations (19.3, 19.4)** | A covergroup of a module, a program, a package, the compilation unit or a generate block; a covergroup embedded in a class; variables of a covergroup type | `covergroup extends` (19.4.1); a covergroup declared in an interface, which rejects the interface; one declared in a checker or in a loop generate block; constructing or sampling a covergroup type that a module takes as a type parameter (it declares variables there) |
-| **Coverpoints, crosses, and options (19.5–19.7)** | Covergroups without items | A covergroup that declares a `coverpoint`, a `cross`, or an `option` or `type_option` assignment cannot be constructed, so the covergroups that can be have no item yet |
+| **Coverpoints (19.5)** | Coverpoints of an integral type of any width, with or without a label, with a type of their own, and with an `iff` guard | A coverpoint of a `real` type; one of an enumeration whose enumerators have x or z bits; a coverpoint of a signal of a clocking block (clocking blocks are not supported) |
+| **Bins (19.5)** | The automatic bins of 19.5.3, also those of an enumeration; bins of values and ranges (`bins b = {0, [1:3], [8:$]};`) whose values are constants, arguments of the covergroup or calls of functions with these | Bin arrays (`bins b[]`, `bins b[N]`); `default` and `default sequence` bins; `ignore_bins` and `illegal_bins`; `wildcard` bins; a guard on a bin (`bins b = {1} iff (en);`); `with` filters; bins of a set expression; ranges with a tolerance (`[a +/- b]`); transition bins; a bin value that is not integral |
+| **Crosses (19.6)** | — | Every `cross` |
+| **Options (19.7)** | `option.name`, `comment`, `per_instance`, `weight`, `goal`, `at_least` and `auto_bin_max` assigned in the definition, each at the levels 19.10 gives it, with any expression of the scope of `new` as the value | `type_option` assignments; the `option` members `detect_overlap`, `cross_num_print_missing`, `cross_retain_auto_bins` and `get_inst_coverage` |
 | **Sampling (19.3, 19.8.1)** | `sample()` | A covergroup declared with a clocking event (`covergroup cg @(posedge clk);`) or a block event (`@@(begin f)`); `sample()` in a sequence match item |
-| **Arguments (19.3, 19.8.1)** | The arguments of a covergroup and of its `with function sample` declaration | `ref` arguments of a covergroup or of its sample method; arguments of unpacked type; an argument whose type or default names a `let` declaration |
+| **Arguments (19.3, 19.8.1)** | The arguments of a covergroup and of its `with function sample` declaration | `ref` arguments of a covergroup or of its sample method; arguments of unpacked type; an argument of the covergroup that a coverpoint reads and that is not of an integral type, a string or a class handle, such as a `real` |
+| **`let` declarations (11.12)** | — | A `let` is not expanded in what follows the name of a covergroup: a covergroup whose argument types or defaults, coverpoint expressions, guards, bin values or option values name one is rejected, unless an argument of the covergroup or of `sample` has the name |
 | **Methods (19.8)** | `sample()`, `get_inst_coverage()`, `get_coverage()`, `T::get_coverage()`, and `$get_coverage()`; a method of an embedded covergroup called on its variable (`cg` in the class, `obj.cg`) | `start()`, `stop()` and `set_inst_name()`; `get_coverage` and `get_inst_coverage` with `ref int` arguments; the methods of coverpoints and crosses; reading or writing `option` and `type_option` members; a method of an embedded covergroup called on another expression that gives the handle, such as a conditional expression |
 | **Construction (19.3, 19.4)** | `new` with the arguments of the covergroup; in the `new` method of its class, an embedded covergroup assigned as `cg = new;` or `this.cg = new;` | `new` with a covergroup handle as a shallow copy (8.12); an embedded covergroup assigned through another handle of the class (`other.cg = new;`) in the `new` method (outside that method the assignment is the error 19.4 makes it) |
 | **Type names (20.6.1)** | — | `$typename` of a covergroup type, of a variable of one, or of an array or structure that holds one (20.6.1 has no rule for the name) |
@@ -516,6 +522,39 @@ advances no time.
   `get_coverage()` of a covergroup that declares no coverpoint or cross are
   0, and it takes no part in `$get_coverage()`, which is 100 when no
   covergroup of the design does (19.11).
+- **Bin values are compared as values of the coverpoint type (19.5.7).** A
+  value the type does not have takes no part in its bin, and a range takes
+  part with the values the type has. For a constant the build warns
+  (`covergroup_bin_value`); for a value that an argument of the covergroup
+  gives, the `new` that constructs the instance issues a `$warning` report
+  with every such value of the instance, and one for
+  `option.auto_bin_max` below 1, which makes one automatic bin. A range
+  whose bounds differ in signedness is read in their common type, as the
+  operands of a binary operator are (11.8.1): in `[-1:8'd5]` the bound -1
+  is a large unsigned value, which is warned of too. An unsigned value on a
+  signed coverpoint stands for the value its bits read as: `8'hFF` is -1 on
+  an 8-bit signed coverpoint.
+- **x and z.** A sample with an x or z bit is in no automatic bin (19.5.3).
+  On a coverpoint of a 4-state type, a bin value written with x or z bits
+  holds exactly the samples with those bits; on one of a 2-state type it
+  takes no part, with a warning (19.5.4 and 19.5.7 differ here). A bound of
+  a range with such bits drops the range. In two-state simulation no
+  sample has such a bit.
+- **Automatic bins of a signed coverpoint start at its lowest value**, and
+  are named by their values: `auto[3]`, `auto[0:3]`, `auto[NAME]` for an
+  enumerator. A coverpoint without a label has the name of its variable
+  where its expression is that name alone (19.5). Of any other expression,
+  a member of an object (`t.kind`) and a select of a variable among them,
+  it is shown as `$point<n>`, with the number of the coverpoint in the
+  covergroup from 1.
+- **A coverpoint has at most 1,048,576 bins.** A construction that would
+  make more ends the simulation with an error, as does a sample whose
+  values the heap cannot take as those of the coverpoints of its type,
+  which only an error of Celox causes; such a sample is not counted.
+- **Sampling calls a function of a coverpoint once.** The guards and the
+  expressions of all coverpoints of a `sample()` are evaluated in the order
+  of their declaration before any of them is counted, so a function among
+  them may itself call `sample()`.
 - **Coverage is cumulative and instances are never freed.** The samples of
   an instance stay in the coverage of its type and in the report when
   nothing refers to it any more; the report marks it as no longer live. A

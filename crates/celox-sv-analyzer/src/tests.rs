@@ -3967,7 +3967,9 @@ fn unsupported_constructs_map_to_their_tracking_issues() {
     assert_eq!(issue("undriven net declaration `n`"), 460);
     // Every construct of a covergroup is tracked by the issue of clause 19.
     for construct in [
-        "covergroup coverpoint (IEEE 1800-2023 19.5)",
+        "covergroup cross (IEEE 1800-2023 19.6)",
+        "covergroup bin array (IEEE 1800-2023 19.5.1)",
+        "covergroup expression (semantic type of native expression `x`)",
         "covergroup declared in an interface (`I`; IEEE 1800-2023 19.3)",
         "covergroup extends (IEEE 1800-2023 19.4.1)",
         "covergroup sample call in a sequence match item (IEEE 1800-2023 19.8.1)",
@@ -7560,13 +7562,13 @@ fn covergroups_of_classes_are_declared_members() {
     // A covergroup a class declares is a member of it (IEEE 1800-2023
     // 19.4): a property that holds the handle of its instance, so a select
     // of it reads that property. The class constructs none, and a
-    // coverpoint is not supported yet, which a `sample()` reports and a
+    // cross is not supported yet, which a `sample()` reports and a
     // read of the property does not. (The read is a comparison: a `void`
     // cast takes a function call alone, A.6.9.)
-    let class = "class C; int x; covergroup cg; coverpoint x; endgroup \
+    let class = "class C; int x; covergroup cg; coverpoint x; cross x, x; endgroup \
         function new(); endfunction endclass";
     let unsupported_coverpoint =
-        AnalyzerError::Unsupported("covergroup coverpoint (IEEE 1800-2023 19.5)".to_string());
+        AnalyzerError::Unsupported("covergroup cross (IEEE 1800-2023 19.6)".to_string());
     let read = "if (c.cg == null) c.x = 1;";
     let source = format!("module Top; {class} C c; initial begin c = new; {read} end endmodule");
     analyze_source(&source, Path::new("covergroups.sv"))
@@ -7579,8 +7581,8 @@ fn covergroups_of_classes_are_declared_members() {
             .map_err(AnalyzerError::into_error),
         Err(unsupported_coverpoint.clone())
     );
-    // Without the coverpoint the covergroup is sampled and compared.
-    let empty = "class C; int x; covergroup cg; endgroup endclass";
+    // Without the cross the covergroup is sampled and compared.
+    let empty = "class C; int x; covergroup cg; coverpoint x; endgroup endclass";
     for access in ["c.cg.sample();", "if (c.cg == null) c.x = 1;"] {
         let source =
             format!("module Top; {empty} C c; initial begin c = new; {access} end endmodule");
