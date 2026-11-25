@@ -272,6 +272,7 @@ fn publish(
                                 connection.actual().to_string(),
                                 connection.actual_expr().cloned().map(Into::into),
                                 connection.bound_pattern().cloned(),
+                                connection.array_assignment_operand().cloned(),
                             )
                         })
                         .collect(),

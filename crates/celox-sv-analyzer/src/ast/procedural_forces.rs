@@ -42,7 +42,7 @@
 //! ```
 use super::*;
 use crate::ir::{ForceControl, ForceRole};
-use crate::procedural::{EventEdge, EventItemBase, LoopKind};
+use crate::procedural::{EventEdge, EventItemBase, LoopKind, SourceSpan};
 
 /// The bits of a target that a force or a release names: all of them, or
 /// the constant range `(msb, lsb)` of a select or a member.
@@ -209,7 +209,7 @@ impl Lowering<'_> {
         let mut lowered = Vec::with_capacity(stmts.len());
         for mut stmt in std::mem::take(stmts) {
             match stmt {
-                Stmt::Force { lhs, rhs } => {
+                Stmt::Force { lhs, rhs, .. } => {
                     let target = lhs.name().to_string();
                     let controls = self
                         .controls
@@ -253,7 +253,7 @@ impl Lowering<'_> {
                         });
                     }
                 }
-                Stmt::Release { lhs } => {
+                Stmt::Release { lhs, .. } => {
                     // A target nothing forces is released by nothing.
                     let Some(controls) = self.controls.get(lhs.name()) else {
                         continue;
@@ -303,7 +303,7 @@ impl Lowering<'_> {
         let mut lowered = Vec::with_capacity(stmts.len());
         for mut stmt in std::mem::take(stmts) {
             match stmt {
-                Stmt::Force { lhs, rhs } => lowered.push(Stmt::Assign {
+                Stmt::Force { lhs, rhs, .. } => lowered.push(Stmt::Assign {
                     lhs,
                     rhs,
                     nonblocking: false,
@@ -740,8 +740,7 @@ fn bit_type(width: usize) -> Type {
 pub(super) fn lower(
     tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
-    types: &mut semantic_types::TyTable,
-    functions: &const_functions::ConstantFunctions,
+    session: &mut Session,
     ports: &[Port],
     signals: &mut Vec<Signal>,
     comb: &[CombProcess],
@@ -750,6 +749,8 @@ pub(super) fn lower(
     subroutines: &mut [Subroutine],
     external: &[String],
 ) -> Converted<HashMap<String, String>> {
+    let functions = &tree.functions;
+    let types = &mut session.types;
     // A procedure of a generate block whose condition is false never runs
     // (27.5), and assigns nothing.
     let comb: Vec<CombProcess> = comb
@@ -773,17 +774,32 @@ pub(super) fn lower(
     // The ranges each statement names, and whether a force of them has a
     // varying expression.
     let mut ranges: Vec<(String, Range, bool)> = Vec::new();
-    let mut note = |lhs: &LValue, varying: bool| {
-        if !names.iter().any(|name| name == lhs.name()) {
-            names.push(lhs.name().to_string());
+    let mut note = |lhs: &LValue, varying: bool, site: &Option<SourceSpan>| {
+        let name = lhs.name();
+        if !names.iter().any(|target| target == name) {
+            names.push(name.to_string());
         }
         let bits = range(lhs);
+        if dimensions
+            .get(name)
+            .is_some_and(|shape| !shape.unpacked.is_empty())
+            || bits.is_some()
+                && (signals
+                    .iter()
+                    .any(|signal| signal.name() == name && !signal.is_net())
+                    || ports.iter().any(|port| port.name() == name && !port.is_net))
+        {
+            warnings::append(
+                &mut session.diagnostics,
+                [warnings::AnalyzerWarning::NonstandardForceTarget { site: site.clone() }],
+            );
+        }
         match ranges
             .iter_mut()
-            .find(|(name, range, _)| name == lhs.name() && *range == bits)
+            .find(|(target, range, _)| target == name && *range == bits)
         {
             Some((_, _, varies)) => *varies |= varying,
-            None => ranges.push((lhs.name().to_string(), bits, varying)),
+            None => ranges.push((name.to_string(), bits, varying)),
         }
     };
     let bodies = initial
@@ -793,8 +809,8 @@ pub(super) fn lower(
     for body in bodies {
         for stmt in body {
             stmt.walk(&mut |stmt| match stmt {
-                Stmt::Force { lhs, rhs } => note(lhs, varies(rhs, &module)),
-                Stmt::Release { lhs } => note(lhs, false),
+                Stmt::Force { lhs, rhs, site } => note(lhs, varies(rhs, &module), site),
+                Stmt::Release { lhs, site } => note(lhs, false, site),
                 _ => {}
             });
         }

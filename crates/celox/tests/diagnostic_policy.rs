@@ -1171,3 +1171,149 @@ fn implicit_static_initializer_warns_by_default_and_errors_in_strict_mode() {
         .unwrap();
     assert!(sim.warnings().is_empty());
 }
+
+#[test]
+fn systemverilog_extensions_warn_by_default_and_error_in_strict_mode() {
+    use miette::Diagnostic;
+    use std::path::Path;
+
+    for (code, source, count) in [
+        (
+            "packed_to_unpacked_assignment",
+            "module Child(input logic [7:0] data[2], output wire [15:0] packed_data);
+                assign packed_data = {data[0], data[1]};
+             endmodule
+             module Top;
+                logic [7:0] data[2] = '0;
+                wire [7:0] other[2];
+                wire [7:0] port_out[2];
+                wire [15:0] packed_data = 16'h1234;
+                wire [31:0] distributed = 32'h1234_5678;
+                assign other = packed_data;
+                Child child(.data(16'h1234), .packed_data(port_out));
+                Child instances[1:0](.data(distributed), .packed_data());
+                initial begin
+                    static logic [7:0] local_data[2] = 'x;
+                    data <= (16'h5678);
+                    data = {16'h9abc};
+                end
+             endmodule",
+            8,
+        ),
+        (
+            "nonstandard_force_target",
+            "module Child; logic [3:0] value; endmodule
+             module Top;
+                Child child();
+                logic [7:0] data[2];
+                struct packed {logic [3:0] field; logic flag;} word;
+                wire [7:0] net_data[2];
+                initial begin
+                    force child.value[1] = 1'b1;
+                    release child.value[1];
+                    force word.field = 4'hf;
+                    force data[0][3:1] = 3'b111;
+                    release net_data[0];
+                end
+             endmodule",
+            5,
+        ),
+        (
+            "psprintf_alias",
+            "`define FORMAT $psprintf
+             package Formats;
+                localparam string NAME = $psprintf(\"pkg\");
+             endpackage
+             module Top;
+                localparam string NAME = $psprintf(\"%s%0d\", Formats::NAME, 3);
+                initial $display(\"%s\", `FORMAT(\"%s\", NAME));
+             endmodule",
+            3,
+        ),
+    ] {
+        let build = || {
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("extensions.sv"))], "Top")
+        };
+        let matches_code = |warning: &celox::CompilationWarning| {
+            warning
+                .code()
+                .is_some_and(|actual| actual.to_string() == code)
+        };
+        let sim = build().build().unwrap();
+        let warnings: Vec<_> = sim
+            .warnings()
+            .iter()
+            .filter(|warning| matches_code(warning))
+            .collect();
+        assert_eq!(warnings.len(), count, "{code}: {:?}", sim.warnings());
+        assert!(warnings.iter().all(|warning| warning.labels().is_some()));
+
+        for error in [
+            build().strict(true).build().err().unwrap(),
+            build()
+                .diagnostic_policy(policy(code, DiagnosticLevel::Error))
+                .build()
+                .err()
+                .unwrap(),
+        ] {
+            let SimulatorErrorKind::DiagnosticPolicy(errors) = error.kind() else {
+                panic!("{error}");
+            };
+            assert_eq!(
+                errors
+                    .iter()
+                    .filter(|warning| matches_code(warning))
+                    .count(),
+                count,
+                "{error}"
+            );
+        }
+
+        let sim = build()
+            .diagnostic_policy(policy(code, DiagnosticLevel::Allow).strict(true))
+            .build()
+            .unwrap();
+        assert!(!sim.warnings().iter().any(matches_code));
+    }
+}
+
+#[test]
+fn standard_array_assignments_force_targets_and_formatting_work_in_strict_mode() {
+    use std::path::Path;
+
+    let source = r#"module Child(input logic [7:0] data[2]);
+        initial $display("%h", data[0]);
+    endmodule
+    module PackedChild(input logic [15:0] data);
+        initial $display("%h", data);
+    endmodule
+    module Top;
+        typedef logic [7:0] array_t[2];
+        array_t a;
+        logic [7:0] b[2];
+        byte bytes[3] = "abc";
+        logic [7:0] variable_word;
+        wire [7:0] net_word = '0;
+        wire [31:0] distributed = 32'h1234_5678;
+        Child child(.data(array_t'(16'h1234)));
+        Child broadcast[1:0](.data(a));
+        Child patterns[1:0](.data('{default: '0}));
+        PackedChild instances[1:0](.data(distributed));
+        initial begin
+            a = '{default: '0};
+            b = {8'h12, 8'h34};
+            a = array_t'(16'h5678);
+            a = b;
+            force variable_word = 8'hff;
+            force net_word[3:0] = 4'hf;
+            release net_word[3:0];
+            release variable_word;
+            $display("%s", $sformatf("%h", a[0]));
+        end
+    endmodule"#;
+    let sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("standard.sv"))], "Top")
+        .strict(true)
+        .build()
+        .unwrap();
+    assert!(sim.warnings().is_empty());
+}

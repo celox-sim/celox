@@ -539,7 +539,7 @@ fn stmt_lvalues(stmt: &Stmt) -> &[LValue] {
         | Stmt::Force { lhs, .. }
         | Stmt::ForceStore { lhs, .. }
         | Stmt::Deassign { lhs }
-        | Stmt::Release { lhs } => std::slice::from_ref(lhs),
+        | Stmt::Release { lhs, .. } => std::slice::from_ref(lhs),
         Stmt::AssignConcat { parts, .. } => parts.as_slice(),
         _ => &[],
     }

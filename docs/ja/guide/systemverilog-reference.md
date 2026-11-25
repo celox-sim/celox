@@ -335,17 +335,19 @@ Celox が意図的に受理している標準外構文および互換拡張で�
   メモリ共有（`multiple_always_ff_drivers`）は、既定で警告を出し strict mode で拒否します。
   詳細は [`[diagnostics]`](./celox-toml.md#diagnostics)（および `inferred_latch`）を参照してください。
 
-**strict モードでも受理する意図的な拡張:**
-
 - **固定長 unpacked 配列への packed 値と一括充填の代入（7.6）。**
-  配列全体とちょうど同じ幅の packed 値をビットごとに代入すること、および `'0` のような
-  unbased unsized リテラルで全要素を埋めることを受理します。それ以外の幅の値、`real`、`string` は拒否します。
-- **変数の選択や unpacked 配列要素への手続き的 `force`（10.6.2）。**
-  標準がベクタネットに限定している `force` を、変数の定数ビット/部分選択・メンバ、および
-  packed 整数型固定長 unpacked 配列の定数添字要素（または定数選択・メンバ）へ拡張しています
-  （条件により `forced_array` 警告を出します）。
-- **`$psprintf` を `$sformatf` として受理。** ベンダー拡張の `$psprintf` を
-  `$sformatf`（21.3.3）として受理し、診断では `$sformatf` と表示します。
+  `packed_to_unpacked_assignment` が既定の `warn` または `allow` の場合は、
+  配列全体と同じ幅の packed 値をビットごとに代入したり、`'0` のような
+  unbased unsized リテラルで全要素を埋めたりできます。strict モードでは、これらの代入と
+  同等のモジュールポート接続（10.8）を既定で拒否します。配列型への明示的なキャストや
+  `'{default: '0}` のような代入パターンを使ってください。
+- **変数の選択や unpacked 配列要素への手続き的 `force` と `release`（10.6.2）。**
+  変数の定数ビット選択・部分選択・メンバ、および packed 整数型の固定長 unpacked 配列の
+  定数添字要素（またはその要素の選択）に対して、`nonstandard_force_target` を既定で警告し、
+  strict モードではエラーにします。配列要素への `force` では、制御信号のサイズを示す
+  `forced_array` 診断も出ることがあります。
+- **ベンダー拡張の別名 `$psprintf`（21.3.3）。** Celox は `$sformatf` として扱い、既定で
+  `psprintf_alias` を警告します。strict モードでは既定で拒否します。
 
 ## 処理系定義・順序未規定の挙動 {#semantics-worth-knowing}
 

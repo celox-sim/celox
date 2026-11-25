@@ -238,8 +238,7 @@ impl ScopeElaboration<'_> {
         let forced = procedural_forces::lower(
             syntax_tree,
             &self.packed_dimensions,
-            &mut session.types,
-            &syntax_tree.functions,
+            session,
             &self.ports,
             &mut self.signals,
             &self.comb_processes,
