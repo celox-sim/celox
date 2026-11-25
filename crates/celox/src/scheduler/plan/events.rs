@@ -208,11 +208,14 @@ impl<'a> PlanBuilder<'a> {
         // blocking result even when no waiter or clock reads it. Include all
         // combinational inputs so indirect cones are covered too. Missing
         // statefulness metadata is conservative for the same reason.
-        if sir
-            .updates
-            .retained
-            .as_ref()
-            .is_none_or(|targets| !targets.is_empty())
+        // Ordered waves can observe orphan clocks as well as clocks described
+        // by the gate topology. Include every settle input in that case.
+        if self.found.ordered_available
+            || sir
+                .updates
+                .retained
+                .as_ref()
+                .is_none_or(|targets| !targets.is_empty())
         {
             active_observers.extend(sir.updates.observe.iter().flat_map(loads).map(storage));
         }

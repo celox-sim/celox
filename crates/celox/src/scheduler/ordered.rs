@@ -1,5 +1,6 @@
 //! Ordered Active-domain evaluations and deferred publication inside native code.
 mod guards;
+mod read_only;
 pub(super) use guards::Guards;
 
 use super::*;
@@ -140,6 +141,89 @@ impl Ordered {
 }
 
 impl Generator<'_> {
+    fn no_host_observers(&mut self) -> RegisterId {
+        let slot = self.arena_header_load(std::mem::offset_of!(ArenaHeader, slot_observer));
+        let updates = self.arena_header_load(std::mem::offset_of!(ArenaHeader, observes_updates));
+        let observers = self.binary(64, slot, BinaryOp::Or, updates);
+        self.equals(observers, 0)
+    }
+
+    fn event_mask(&mut self, events: &[usize]) -> RegisterId {
+        let mask = events.iter().fold(BigUint::default(), |m, &event| {
+            m | (BigUint::from(1u8) << event)
+        });
+        self.wide_constant(mask, self.event_bits)
+    }
+
+    /// Run each selected domain in ascending event order. Once the mask is
+    /// captured, evaluating a domain cannot add an event to the current wave.
+    fn for_selected_events(
+        &mut self,
+        mask: RegisterId,
+        events: &[usize],
+        mut emit: impl FnMut(&mut Self, usize),
+    ) {
+        for chunk in events.chunk_by(|a, b| a / 64 == b / 64) {
+            if chunk.len() < 8 {
+                for &event in chunk {
+                    self.if_bit(mask, event, |g| emit(g, event));
+                }
+                continue;
+            }
+            let start = chunk[0] / 64 * 64;
+            let width = (self.event_bits - start).min(64);
+            let word = self.b.alloc_bit(width, false);
+            self.b.emit(SIRInstruction::Slice(word, mask, start, width));
+            let tracked = chunk.iter().fold(0u64, |m, e| m | (1u64 << (e - start)));
+            let valid = self.constant(tracked, width);
+            let selected = self.binary(width, word, BinaryOp::And, valid);
+            let remaining = self.b.alloc_bit(width, false);
+            let header = self.b.new_block_with(vec![remaining]);
+            let run = self.b.new_block();
+            let done = self.b.new_block();
+            self.b
+                .seal_block(SIRTerminator::Jump(header, vec![selected]));
+            self.b.switch_to_block(header);
+            let zero = self.constant(0, width);
+            let empty = self.binary(1, remaining, BinaryOp::Eq, zero);
+            self.b.seal_block(SIRTerminator::Branch {
+                cond: empty,
+                true_block: (done, vec![]),
+                false_block: (run, vec![]),
+            });
+            self.b.switch_to_block(run);
+            let lowest = self.b.alloc_bit(width, false);
+            self.b.emit(SIRInstruction::Unary(
+                lowest,
+                UnaryOp::CountTrailingZeros,
+                remaining,
+            ));
+            let bit = self.b.alloc_bit(8, false);
+            self.b.emit(SIRInstruction::Slice(bit, lowest, 0, 8));
+            let one = self.constant(1, width);
+            let below = self.binary(width, remaining, BinaryOp::Sub, one);
+            let next = self.binary(width, remaining, BinaryOp::And, below);
+            let cases = chunk
+                .iter()
+                .map(|e| celox_sir::SIRSwitchCase {
+                    value: (e - start).into(),
+                    target: self.b.new_block(),
+                })
+                .collect::<Vec<_>>();
+            self.b.seal_block(SIRTerminator::Switch {
+                selector: bit,
+                cases: cases.clone(),
+                default: done,
+            });
+            for (&event, case) in chunk.iter().zip(cases) {
+                self.b.switch_to_block(case.target);
+                emit(self, event);
+                self.b.seal_block(SIRTerminator::Jump(header, vec![next]));
+            }
+            self.b.switch_to_block(done);
+        }
+    }
+
     pub(super) fn native_load(&mut self, op: Memory, args: Vec<RegisterId>) -> RegisterId {
         let dst = self.b.alloc_bit(64, false);
         self.b.emit(SIRInstruction::ExternCall {
@@ -251,6 +335,21 @@ impl Generator<'_> {
 }
 
 impl Plan {
+    fn intermediate_commits(&self, g: &mut Generator<'_>, ready: RegisterId) -> RegisterId {
+        let mut commits = g.event_mask(&self.active);
+        if !self.observed_active.is_empty() {
+            let unobserved = g.no_host_observers();
+            let mask = g.event_mask(&self.observed_active);
+            let watched = g.binary(self.event_bits, commits, BinaryOp::Or, mask);
+            let selected = g.b.alloc_bit(self.event_bits, false);
+            g.b.emit(SIRInstruction::Mux(selected, unobserved, commits, watched));
+            commits = selected;
+        }
+        let commits = g.binary(self.event_bits, commits, BinaryOp::And, ready);
+        let zero = g.constant(0, self.event_bits);
+        g.binary(1, commits, BinaryOp::Ne, zero)
+    }
+
     pub(super) fn batch_ordered(
         &self,
         g: &mut Generator<'_>,
@@ -270,13 +369,27 @@ impl Plan {
         let zero = g.constant(0, 64);
         let valid = g.binary(1, context, BinaryOp::Ne, zero);
         g.arena_require(valid);
-        ordered.reset(g);
+        // Without Active commits or Inactive work, the wave goes straight to
+        // NBA publication. Each selected domain occurs once, in mask order,
+        // so the same mask describes both phases; no record can be superseded.
+        let single_wave =
+            self.active.is_empty() && self.observed_active.is_empty() && self.inactive.is_empty();
+        if !single_wave {
+            ordered.reset(g);
+        } else if !self.published_events.is_empty() {
+            let required = g.constant((ordered.events * 2) as u64, 64);
+            ordered.reserve(g, false, required);
+        }
         let zero = g.constant(0, 64);
         g.arena_header_store(std::mem::offset_of!(ArenaHeader, phase), zero);
         g.arena_header_store(std::mem::offset_of!(ArenaHeader, waves), zero);
         let flush = g.b.new_block();
         let mask = g.b.alloc_bit(self.event_bits, false);
         let fire = g.b.new_block_with(vec![mask]);
+        let ready_mask = g.b.alloc_bit(self.event_bits, false);
+        let evaluated_levels = g.b.new_block_with(vec![ready_mask]);
+        let publish_mask = g.b.alloc_bit(self.event_bits, false);
+        let publish_levels = g.b.new_block_with(vec![publish_mask]);
         let judge = g.b.new_block();
         if self.lazy.is_some() {
             g.settle_then(judge);
@@ -286,7 +399,9 @@ impl Plan {
         g.b.switch_to_block(judge);
         let active = g.load(g.slots.exit_arg, self.event_bits);
         let levels = g.load_levels();
-        let stable = self.stable_edges(g, tracked, levels);
+        let current = self.sample_clock_levels(g, tracked);
+        let stable = self.edges_between(g, tracked, levels, current);
+        g.store_levels(current);
         let counted = self.counted_edges(g);
         let active = g.binary(self.event_bits, active, BinaryOp::Or, counted);
         let stable = g.binary(self.event_bits, stable, BinaryOp::Or, counted);
@@ -303,10 +418,11 @@ impl Plan {
         g.store(g.slots.exit_arg, self.event_bits, zero);
         g.store_at(g.slots.exit_arg, self.event_bits, self.event_bits, zero);
         let quiet = g.binary(1, triggers, BinaryOp::Eq, zero);
+        self.finish_read_only_wave(g, ordered, tracked, triggers, slot_end, finish_exit, checks);
         g.b.seal_block(SIRTerminator::Branch {
             cond: quiet,
-            true_block: (flush, Vec::new()),
-            false_block: (fire, vec![triggers]),
+            true_block: (publish_levels, vec![zero]),
+            false_block: (evaluated_levels, vec![triggers]),
         });
 
         g.b.switch_to_block(wave);
@@ -385,6 +501,9 @@ impl Plan {
         });
 
         g.b.switch_to_block(fire);
+        self.ordered_save_levels(g, tracked);
+        g.b.seal_block(SIRTerminator::Jump(evaluated_levels, vec![mask]));
+        g.b.switch_to_block(evaluated_levels);
         let waves = g.arena_header_load(std::mem::offset_of!(ArenaHeader, waves));
         let limit = g.arena_header_load(std::mem::offset_of!(ArenaHeader, wave_limit));
         let exceeded = g.binary(1, waves, BinaryOp::GeU, limit);
@@ -394,14 +513,7 @@ impl Plan {
         let one = g.constant(1, 64);
         let next = g.binary(64, waves, BinaryOp::Add, one);
         g.arena_header_store(std::mem::offset_of!(ArenaHeader, waves), next);
-        let mut commits = g.constant(0, self.event_bits);
-        for &event in &self.active {
-            let bit = g.single(event, self.event_bits);
-            commits = g.binary(self.event_bits, commits, BinaryOp::Or, bit);
-        }
-        let commits = g.binary(self.event_bits, commits, BinaryOp::And, mask);
-        let zero = g.constant(0, self.event_bits);
-        let commits = g.binary(1, commits, BinaryOp::Ne, zero);
+        let commits = self.intermediate_commits(g, ready_mask);
         let phase = g.arena_header_load(std::mem::offset_of!(ArenaHeader, phase));
         let pre = g.equals(phase, 0);
         let pre = if self.inactive.is_empty() {
@@ -416,28 +528,46 @@ impl Plan {
             let phase = g.constant(1, 64);
             g.arena_header_store(std::mem::offset_of!(ArenaHeader, phase), phase);
             let fired = g.load(g.slots.exit_arg, self.event_bits);
-            let fired = g.binary(self.event_bits, fired, BinaryOp::Or, mask);
+            let fired = g.binary(self.event_bits, fired, BinaryOp::Or, ready_mask);
             g.store(g.slots.exit_arg, self.event_bits, fired);
         });
-        self.ordered_save_levels(g, tracked);
-        for &event in tracked {
-            g.if_bit(mask, event, |g| {
-                ordered.push(g, event);
-                g.inline_event_writers(
-                    &self.events[event],
-                    self.events[event]
-                        .eval_only
-                        .as_ref()
-                        .expect("ordered evaluation unit"),
-                    finish_exit,
-                );
-            });
-        }
+        // With no older records and no intervening Active pass, the captured
+        // mask is exactly the queue that would be consumed by publication.
+        let direct = if single_wave {
+            g.constant(1, 1)
+        } else if self.inactive.is_empty() {
+            let count = g.arena_header_load(std::mem::offset_of!(ArenaHeader, record_len));
+            let empty = g.equals(count, 0);
+            g.binary(1, post, BinaryOp::And, empty)
+        } else {
+            g.constant(0, 1)
+        };
+        let enqueue = g.equals(direct, 0);
+        g.for_selected_events(ready_mask, tracked, |g, event| {
+            if !single_wave {
+                g.if_bit(enqueue, 0, |g| ordered.push(g, event));
+            }
+            g.inline_event_writers(
+                &self.events[event],
+                self.events[event]
+                    .eval_only
+                    .as_ref()
+                    .expect("ordered evaluation unit"),
+                finish_exit,
+            );
+        });
+        let queued = g.b.new_block();
+        g.b.seal_block(SIRTerminator::Branch {
+            cond: direct,
+            true_block: (publish_levels, vec![ready_mask]),
+            false_block: (queued, vec![]),
+        });
+        g.b.switch_to_block(queued);
         let settle = g.b.new_block();
         g.b.seal_block(SIRTerminator::Branch {
             cond: pre,
-            true_block: (settle, Vec::new()),
-            false_block: (flush, Vec::new()),
+            true_block: (settle, vec![]),
+            false_block: (flush, vec![]),
         });
         g.b.switch_to_block(settle);
         g.settle_then(wave);
@@ -449,7 +579,12 @@ impl Plan {
         let phase = g.arena_header_load(std::mem::offset_of!(ArenaHeader, phase));
         let pre = g.equals(phase, 0);
         g.if_bit(pre, 0, |g| self.ordered_save_levels(g, tracked));
+        let empty = g.constant(0, self.event_bits);
+        g.b.seal_block(SIRTerminator::Jump(publish_levels, vec![empty]));
+        g.b.switch_to_block(publish_levels);
         if !self.inactive.is_empty() {
+            let phase = g.arena_header_load(std::mem::offset_of!(ArenaHeader, phase));
+            let pre = g.equals(phase, 0);
             let ready = if g.has_inactive_mask() {
                 g.load_at(g.slots.timed, g.ready_bits, g.ready_bits)
             } else {
@@ -505,15 +640,31 @@ impl Plan {
         let one = g.constant(1, 64);
         g.arena_header_store(std::mem::offset_of!(ArenaHeader, phase), one);
         self.ordered_raw_levels(g, ordered, false);
-        let images = g.arena_header_load(std::mem::offset_of!(ArenaHeader, image_len));
-        let zero = g.constant(0, 64);
-        let has_images = g.binary(1, images, BinaryOp::Ne, zero);
-        g.if_bit(has_images, 0, |g| {
-            let live = ordered.capture(g);
-            self.ordered_publish(g, ordered, tracked, finish_exit, checks, true);
-            ordered.copy_image(g, live, true);
+        let queued = g.equals(publish_mask, 0);
+        let direct = g.equals(queued, 0);
+        g.if_bit(direct, 0, |g| {
+            g.for_selected_events(publish_mask, tracked, |g, event| {
+                let event = &self.events[event];
+                g.inline_event_writers(
+                    event,
+                    event.apply.as_deref().expect("ordered apply unit"),
+                    finish_exit,
+                );
+            });
         });
-        self.ordered_publish(g, ordered, tracked, finish_exit, checks, false);
+        if !single_wave {
+            g.if_bit(queued, 0, |g| {
+                let images = g.arena_header_load(std::mem::offset_of!(ArenaHeader, image_len));
+                let zero = g.constant(0, 64);
+                let has_images = g.binary(1, images, BinaryOp::Ne, zero);
+                g.if_bit(has_images, 0, |g| {
+                    let live = ordered.capture(g);
+                    self.ordered_publish(g, ordered, tracked, finish_exit, checks, true);
+                    ordered.copy_image(g, live, true);
+                });
+                self.ordered_publish(g, ordered, tracked, finish_exit, checks, false);
+            });
+        }
         self.ordered_raw_levels(g, ordered, true);
         g.check_waits_at(checks, false);
         let staged: Vec<_> = self
@@ -529,16 +680,14 @@ impl Plan {
                 .filter(|_| !self.nba_processes.is_empty()),
             checks,
         );
-        ordered.reset(g);
+        if !single_wave {
+            ordered.reset(g);
+        }
         g.settle_then(wave);
     }
 
     fn ordered_save_levels(&self, g: &mut Generator<'_>, tracked: &[usize]) {
-        let mut levels = g.no_levels();
-        for (bit, &event) in tracked.iter().enumerate() {
-            let level = g.level(&self.events[event]);
-            levels = g.with_level(levels, level, bit);
-        }
+        let levels = self.sample_clock_levels(g, tracked);
         g.store_levels(levels);
     }
 
@@ -861,6 +1010,45 @@ endmodule
             assert!(sim.scheduler_stats().native_service_calls > 0);
         }
     }
+    #[test]
+    fn ordered_wave_samples_before_publication_and_finishes_on_a_read_only_edge() {
+        let source = r#"`timescale 1ns/1ns
+module Top;
+    bit clk, gate_clk;
+    bit [7:0] count, sampled;
+    always #1 clk = !clk;
+    always @(clk) gate_clk = clk;
+    always @(posedge clk) count <= count + 1;
+    always @(posedge gate_clk) sampled <= count;
+    always @(negedge clk) if (count == 3) $finish;
+endmodule"#;
+        let build = |mode| {
+            Simulation::from_sv_sources(vec![(source, Path::new("ordered-monitor.sv"))], "Top")
+                .four_state(false)
+                .scheduler_mode(mode)
+                .build_native()
+                .unwrap()
+        };
+        let mut sim = build(SchedulerMode::Compiled);
+        let mut reference = build(SchedulerMode::Reference);
+        for end in [1, 3, 5, 10] {
+            sim.run_until(end).unwrap();
+            reference.run_until(end).unwrap();
+            assert_eq!(sim.time(), reference.time());
+            assert_eq!(sim.is_finished(), reference.is_finished());
+            for name in ["count", "sampled"] {
+                assert_eq!(
+                    sim.get(sim.signal(name)),
+                    reference.get(reference.signal(name))
+                );
+            }
+        }
+        assert!(sim.is_finished());
+        assert_eq!(sim.time(), 6);
+        assert_eq!(sim.get(sim.signal("count")), 3u8.into());
+        assert!(sim.scheduler_stats().compiled_slots > 0);
+    }
+
     #[test]
     fn native_ordered_domains_cross_mask_words() {
         const DOMAINS: usize = 65;
