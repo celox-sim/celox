@@ -277,7 +277,7 @@ fn native_signature(
         return_is_2state: ty
             .as_ref()
             .is_some_and(|ty| matches!(ty.kind(), TypeKind::Bit | TypeKind::Chandle)),
-        return_container: ty.as_ref().and_then(|ty| ty.container.clone()),
+        return_container: ty.as_ref().and_then(|ty| ty.container().cloned()),
         return_type: ty
             .filter(|ty| {
                 !ty.members.is_empty()

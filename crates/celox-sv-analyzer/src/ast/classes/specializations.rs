@@ -1360,7 +1360,7 @@ impl Parameters {
                         | TypeKind::Logic
                         | TypeKind::Reg
                         | TypeKind::Implicit
-                ) && ty.container.is_none()
+                ) && ty.container().is_none()
                     && ty.class_in(&session.types).is_none()
                     && ty.unpacked_ranges.is_empty()
             });
@@ -1828,7 +1828,7 @@ fn spelled(ty: &Type, id: Option<semantic_types::TyId>, table: &semantic_types::
     let class = id
         .and_then(|id| table.handle_class(id))
         .map(|class| &**class);
-    let mut spelled = if let Some(container) = &ty.container {
+    let mut spelled = if let Some(container) = ty.container() {
         // The element and key types of a container are those of its
         // semantic type, where they are not bound themselves.
         let (element, key) = match id.map(|id| table.data(id)) {
@@ -1867,7 +1867,7 @@ fn spelled(ty: &Type, id: Option<semantic_types::TyId>, table: &semantic_types::
             (None, TypeKind::Logic | TypeKind::Implicit | TypeKind::Reg) => "logic".to_owned(),
         }
     };
-    let integral = ty.container.is_none()
+    let integral = ty.container().is_none()
         && class.is_none()
         && !matches!(
             ty.kind(),

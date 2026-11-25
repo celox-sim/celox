@@ -225,7 +225,7 @@ pub(super) fn selected_value(
         && let Some((property, receiver)) =
             objects::property(tree, session, base, native, dimensions)?
         && property.field.handle.is_none()
-        && property.r#type.container.is_none()
+        && property.r#type.container().is_none()
         && !property.r#type.is_unpacked_struct_in(&session.types)
     {
         // The value has the positions of a `[N-1:0]` vector.
@@ -276,10 +276,10 @@ pub(super) fn selected_value(
     // selects, such as `q[0][129]`, are not bound yet.
     if let ExprKind::Name(name) = &native.expression(base).kind
         && let Some(shape) = dimensions.get(&instances::normalize_identifier(&name.spelling))
-        && let Some(mut container) = shape.container.as_deref()
+        && let Some(mut container) = shape.container().map(|c| &**c)
     {
         let mut levels = shape.unpacked.len() + 1;
-        while let Some(inner) = container.element.container.as_deref() {
+        while let Some(inner) = container.element.container().map(|c| &**c) {
             container = inner;
             levels += 1;
         }
@@ -637,7 +637,7 @@ pub(in crate::ast) fn object_place(
     } else if let Some((property, receiver)) =
         objects::property(tree, session, base, native, dimensions)?
         && property.field.handle.is_none()
-        && property.r#type.container.is_none()
+        && property.r#type.container().is_none()
         && !property.r#type.is_unpacked_struct_in(&session.types)
     {
         let place = property_place(property, receiver, native, tree, session, dimensions)?;

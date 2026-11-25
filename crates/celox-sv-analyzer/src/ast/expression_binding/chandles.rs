@@ -342,7 +342,7 @@ pub(in crate::ast) fn type_holds_chandle(ty: &Type) -> bool {
 
 /// Whether a destination of shape `shape` receives a chandle.
 pub(super) fn receives_chandle(shape: &VariableDimensions) -> bool {
-    shape.chandle && shape.unpacked.is_empty() && shape.container.is_none()
+    shape.chandle && shape.unpacked.is_empty() && shape.container().is_none()
 }
 
 /// Check that value native expression `value` may be assigned to a target

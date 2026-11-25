@@ -497,8 +497,8 @@ pub(super) fn dimensions_from_type(r#type: &Type) -> VariableDimensions {
     VariableDimensions::bound_to(
         VariableShape {
             chandle: r#type.is_chandle(),
-            container: r#type.container.clone(),
-            randomizable: r#type.container.is_none() && !r#type.holds_chandle(),
+            container: r#type.container().cloned(),
+            randomizable: r#type.container().is_none() && !r#type.holds_chandle(),
             real: matches!(r#type.kind(), TypeKind::Real | TypeKind::Shortreal),
             string: matches!(r#type.kind(), TypeKind::String),
             packed: dimensions::signal_packed_dimension_widths(r#type.packed_ranges()),

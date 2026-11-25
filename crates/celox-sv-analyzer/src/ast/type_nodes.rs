@@ -86,6 +86,19 @@ impl Type {
         self.structure.declaration()
     }
 
+    /// The container type (IEEE 1800-2023 7.5, 7.10, 7.8) the type is, or
+    /// whose elements a fixed-size unpacked array of it has (7.4.2), as the
+    /// type keeps it.
+    pub(in crate::ast) fn container(&self) -> Option<&Arc<ContainerType>> {
+        let kept = self.kept_container.declaration();
+        debug_assert_eq!(
+            kept.map(|container| &**container),
+            self.shape.container.as_deref(),
+            "the container a type keeps is not that of its field: {self:?}"
+        );
+        kept
+    }
+
     pub(crate) fn structure_identity(&self) -> Option<&str> {
         self.unpacked_struct().map(|ty| ty.identity())
     }
@@ -208,7 +221,7 @@ impl Type {
     /// Whether the type is that of an associative or dynamic array or of a
     /// queue: a heap handle with the type of the container it denotes.
     pub(crate) fn is_container(&self) -> bool {
-        self.container.is_some()
+        self.container().is_some()
     }
 
     /// This container type as a scope other than the one that declares it
@@ -234,7 +247,7 @@ impl Type {
             let right = eval(&range.right().clone().into())?;
             *range = UnpackedRange::new(literal(left), literal(right));
         }
-        if let Some(container) = &self.container {
+        if let Some(container) = self.container() {
             shape.container = Some(Arc::new(ContainerType {
                 key: match &container.key {
                     Some(key) => Some(key.with_resolved_container_bounds(eval)?),

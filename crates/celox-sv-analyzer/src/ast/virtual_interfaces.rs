@@ -1287,7 +1287,7 @@ fn shape_holds_virtual_interface(
     match shape.type_id(table, functions, env) {
         Some(ty) => of_type(table, ty).is_some() || element_of_array(table, ty).is_some(),
         None => {
-            shape.container.is_none()
+            shape.container().is_none()
                 && shape
                     .element_type(table)
                     .is_some_and(|element| of_type(table, element).is_some())

@@ -56,7 +56,7 @@ impl ConstantType {
         env: &ConstEnv,
     ) -> Option<Self> {
         let mut declaration = declaration;
-        while let Some(container) = &declaration.container {
+        while let Some(container) = declaration.container() {
             declaration = &container.element;
         }
         base.spelling = declaration.spelling.clone();

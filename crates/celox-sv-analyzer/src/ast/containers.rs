@@ -91,7 +91,7 @@ fn dimensioned(
                 Some(ty) => {
                     index_type = Some(ty.clone());
                     let string = ty.kind() == TypeKind::String;
-                    let object = ty.kind() == TypeKind::Object && ty.container.is_none();
+                    let object = ty.kind() == TypeKind::Object && ty.container().is_none();
                     let shape =
                         casts::expr_type_from_type(&tree.functions, &ty, &context.const_env)
                             .ok_or_else(|| unsupported("associative index type"))?;
@@ -164,7 +164,7 @@ fn dimensioned(
     } else {
         base
     };
-    if base.container.is_none() && dims.len() > 1 || !base.unpacked_ranges.is_empty() {
+    if base.container().is_none() && dims.len() > 1 || !base.unpacked_ranges.is_empty() {
         return Err(unsupported(
             "dynamic container of fixed-size unpacked arrays",
         ));
@@ -196,7 +196,7 @@ fn container_type(
         // An integral element wider than a container word is held in a
         // record of one field, like a structure element.
         None if shape.width > 64
-            && base.container.is_none()
+            && base.container().is_none()
             && matches!(
                 base.kind(),
                 TypeKind::Bit
@@ -221,12 +221,12 @@ fn container_type(
     }
     // Allocating elements would need a synchronization object for each
     // (IEEE 1800-2023 15.5).
-    if base.kind() == TypeKind::Event && base.container.is_none() {
+    if base.kind() == TypeKind::Event && base.container().is_none() {
         return Err(unsupported("array of named events"));
     }
     let handle = match base.kind() {
         // An element in a record, or a nested container, is a handle.
-        _ if record.is_some() || base.container.is_some() => Some(HandleProperty::Object),
+        _ if record.is_some() || base.container().is_some() => Some(HandleProperty::Object),
         TypeKind::String => Some(HandleProperty::String),
         TypeKind::Object => Some(HandleProperty::Object),
         _ => None,
@@ -340,7 +340,7 @@ pub(super) fn fixed_storage(
         tree,
         context,
     )?;
-    Ok(storage.container.clone().expect("a container type"))
+    Ok(storage.container().cloned().expect("a container type"))
 }
 
 impl ContainerType {
@@ -489,7 +489,7 @@ fn shape_holds_container(
     functions: &const_functions::ConstantFunctions,
     env: &ConstEnv,
 ) -> bool {
-    let metadata = shape.container.is_some();
+    let metadata = shape.container().is_some();
     let Some(mut ty) = shape.type_id(table, functions, env) else {
         return metadata;
     };
@@ -547,20 +547,20 @@ pub(super) fn native_type(
     if let Some(name) = expression_binding::native_name(tree, id, native)
         && let Some(shape) = dims.get(&name)
     {
-        return Ok(shape.container.clone());
+        return Ok(shape.container().cloned());
     }
     // A member of a variable of unpacked structure type, which is a leaf
     // variable of its own (see `unpacked_structs`).
     if let Some(name) = unpacked_structs::native_member(id, native, &session.types, dims)
         && let Some(shape) = dims.get(&name)
     {
-        return Ok(shape.container.clone());
+        return Ok(shape.container().cloned());
     }
     // A container member of a container element, `q[i].m`.
     if matches!(native.expression(ungrouped).kind, ExprKind::Member { .. })
         && let Some((member, _)) = element_member(id, native, tree, session, dims)?
     {
-        return Ok(member.container.clone());
+        return Ok(member.container().cloned());
     }
     // A hierarchical name, or the name of a member of an interface, is
     // bound to a local variable of the type of the object it denotes.
@@ -571,17 +571,17 @@ pub(super) fn native_type(
             .get(&name)
             .and_then(|binding| dims.get(binding))
     {
-        return Ok(shape.container.clone());
+        return Ok(shape.container().cloned());
     }
     if let Some((property, _)) =
         expression_binding::object_property(tree, session, id, native, dims)?
     {
-        return Ok(property.storage.or(property.r#type.container.clone()));
+        return Ok(property.storage.or(property.r#type.container().cloned()));
     }
     if let Some(name) = expression_binding::object_static_property(tree, session, id, native, dims)?
         && let Some(shape) = dims.get(&name)
     {
-        return Ok(shape.container.clone());
+        return Ok(shape.container().cloned());
     }
     // A conditional of containers, whose operands have equivalent types
     // (IEEE 1800-2023 11.4.11), has their type.
@@ -613,7 +613,7 @@ pub(super) fn native_type(
         } = &native.expression(callee).kind
         && matches!(name.spelling.as_str(), "pop_front" | "pop_back")
         && let Some(outer) = native_type(*expression, native, tree, session, dims)?
-        && let Some(inner) = outer.element.container.clone()
+        && let Some(inner) = outer.element.container().cloned()
     {
         return Ok(Some(inner));
     }
@@ -645,7 +645,7 @@ pub(super) fn native_type(
             dimension.kind,
             DimensionKind::Index(_) | DimensionKind::Queue(None)
         ) {
-            return Ok(outer.element.container.clone());
+            return Ok(outer.element.container().cloned());
         }
     }
     locators::result_type(
@@ -694,7 +694,7 @@ pub(super) fn conditional(
 ) -> Option<ContainerLayout> {
     let target = target
         .filter(|shape| shape.unpacked.is_empty())
-        .and_then(|shape| shape.container.as_deref())?;
+        .and_then(|shape| shape.container().map(|c| &**c))?;
     expression_types::type_of(tree, session, condition, native, dims)
         .is_ok_and(|ty| {
             matches!(
@@ -743,7 +743,7 @@ pub(super) fn memory_load(
         matches!(
             r#type.kind(),
             TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit
-        ) && r#type.container.is_none()
+        ) && r#type.container().is_none()
             && r#type.unpacked_ranges.is_empty()
     };
     if let Some(key) = &target.key
@@ -849,7 +849,7 @@ pub(super) fn assignment(
             // past the ones it copies.
             Some(id)
                 if let Some(value) = default_only_pattern(id, native)
-                    && target.element.container.is_none()
+                    && target.element.container().is_none()
                     && !target.element_is_unpacked_struct(&session.types) =>
             {
                 let value = element_value(value, tree, session, dims, target)?;
@@ -953,7 +953,7 @@ pub(super) fn assignment(
                 // containers, an item of the element type is one element.
                 Some(item)
                     if concatenation
-                        && (target.element.container.is_none()
+                        && (target.element.container().is_none()
                             || array_item(id, native, tree, session, dims, target)) =>
                 {
                     if matches!(item.layout.kind, ContainerKind::Associative { .. }) {
@@ -1124,7 +1124,10 @@ pub(super) fn fixed_array_literal(
     let [range] = shape.unpacked.as_slice() else {
         return Err(other());
     };
-    if shape.container.is_some() || target.record.is_some() || target.element.container.is_some() {
+    if shape.container().is_some()
+        || target.record.is_some()
+        || target.element.container().is_some()
+    {
         return Err(unsupported(
             "fixed-size array class property of unpacked structures or containers with an array",
         ));
@@ -1213,7 +1216,7 @@ pub(super) fn convert(value: Expr, target: &ContainerType) -> Expr {
 fn inner_levels(mut value: Expr, target: &ContainerType) -> Expr {
     let mut depth = 0;
     let mut level = target;
-    while let Some(inner) = level.element.container.as_deref() {
+    while let Some(inner) = level.element.container().map(|c| &**c) {
         depth += 1;
         if matches!(inner.layout.kind, ContainerKind::Queue { capacity } if capacity != 0) {
             value = call(
@@ -1263,8 +1266,8 @@ pub(super) fn check_written_actual(
             ));
         }
         match (
-            actual.element.container.as_deref(),
-            formal.element.container.as_deref(),
+            actual.element.container().map(|c| &**c),
+            formal.element.container().map(|c| &**c),
         ) {
             (Some(a), Some(f)) => (actual, formal) = (a, f),
             _ => return Ok(()),
@@ -1369,7 +1372,7 @@ fn element_value(
     let native = tree.declarations();
     // An element that is itself a container takes a container value, as an
     // assignment to a container variable does.
-    if let Some(inner) = target.element.container.as_deref() {
+    if let Some(inner) = target.element.container().map(|c| &**c) {
         return assignment(id, tree, session, dims, inner);
     }
     if native_type(id, native, tree, session, dims)?.is_some() {
@@ -1469,7 +1472,7 @@ pub(super) fn check_written_storage(
         id = expression_binding::ungroup(id, native);
         if matches!(native.expression(id).kind, ExprKind::Member { .. })
             && element_member(id, native, tree, session, dims)?
-                .is_some_and(|(member, _)| member.container.is_some())
+                .is_some_and(|(member, _)| member.container().is_some())
         {
             return Err(unsupported(
                 "update of a container member of a structure element of a container",
@@ -1582,7 +1585,7 @@ fn index_value_in(
                     // an object key (7.8.5).
                     ty.class_in(&session.types)
                         .is_some_and(|class| &*class != processes::CLASS)
-                        || ty.container.is_some()
+                        || ty.container().is_some()
                 })))
     {
         return Err(unsupported("nonintegral associative array index"));
@@ -1728,7 +1731,7 @@ pub(super) fn value(
                         "comparison of dynamic containers of unpacked structures or of elements wider than 64 bits",
                     ));
                 }
-                level = container.element.container.as_ref();
+                level = container.element.container();
             }
             let op = match operator.as_str() {
                 "==" | "!=" => ContainerOp::Equal,
@@ -2097,7 +2100,7 @@ fn query(
         // A container of containers has one unpacked dimension per level.
         let mut innermost = target.clone();
         let mut unpacked = 1;
-        while let Some(inner) = innermost.element.container.clone() {
+        while let Some(inner) = innermost.element.container().cloned() {
             innermost = inner;
             unpacked += 1;
         }
@@ -2197,7 +2200,7 @@ pub(super) fn selected_element(
             let ty = &target.element;
             // A select of an element that is a container selects its
             // elements, see `set`; other elements have no bits to select.
-            if ty.container.is_some()
+            if ty.container().is_some()
                 || target.element_class(&session.types).is_some()
                 || ty.is_chandle()
                 || ty.is_unpacked_struct_in(&session.types)
@@ -2426,7 +2429,7 @@ fn compound_value(
         ));
     }
     let element = &target.element;
-    if element.container.is_some()
+    if element.container().is_some()
         || target.element_class(&session.types).is_some()
         || target.layout.handle.is_some()
         || target.record.is_some()
@@ -2550,7 +2553,7 @@ mod tests {
         // that the caller's scope lacks is still a queue: the guards that
         // ask leave it out of the values a call passes in (13.5.1).
         let queue = symbolic_queue();
-        assert!(queue.container.is_some());
+        assert!(queue.container().is_some());
         let functions = const_functions::ConstantFunctions::default();
         let mut table = semantic_types::TyTable::default();
         assert!(
@@ -2570,7 +2573,7 @@ mod tests {
         let mut vector = Type::new(TypeKind::Logic);
         vector
             .packed_ranges
-            .push(queue.container.as_ref().unwrap().element.packed_ranges[0].clone());
+            .push(queue.container().unwrap().element.packed_ranges[0].clone());
         let vector = procedural::dimensions_from_type(&vector);
         assert!(!shape_holds_container(
             &vector,
@@ -2721,7 +2724,7 @@ mod tests {
             .iter()
             .find(|s| s.name() == "q")
             .unwrap();
-        assert!(q.r#type().container.is_some(), "{:?}", q.r#type());
+        assert!(q.r#type().container().is_some(), "{:?}", q.r#type());
         let tree = crate::source_tree::parse_source("module Top; bit[7:0] a[] = new[2]; typedef bit[7:0] queue_t[$]; queue_t q; initial begin automatic bit[7:0] b[] = new[3]; q.push_back(9); a[1]=7; b[2]=8; if(a.size()==2 && b.size()==3 && q[0]==9)begin end end endmodule", Path::new("container.sv")).unwrap();
         Source::from_syntax(&tree).unwrap();
     }

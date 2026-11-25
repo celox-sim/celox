@@ -49,7 +49,7 @@ pub(super) fn enter(
     if let Some(container) = target
         .as_deref()
         .filter(|shape| shape.unpacked.is_empty())
-        .and_then(|shape| shape.container.as_deref())
+        .and_then(|shape| shape.container().map(|c| &**c))
         .filter(|_| {
             !matches!(
                 native.expression(ungroup(id, native)).kind,
@@ -853,7 +853,7 @@ fn enter_stream_cast(
         .filter(|shape| match target_layout {
             Some(semantic_types::StreamLayout::Bits { element: None, .. }) => false,
             Some(_) => true,
-            None => shape.container.is_some() || shape.string || !shape.unpacked.is_empty(),
+            None => shape.container().is_some() || shape.string || !shape.unpacked.is_empty(),
         })
     {
         let receiver = streams::cast_receiver(&shape, &session.types, &tree.functions, dimensions)?;

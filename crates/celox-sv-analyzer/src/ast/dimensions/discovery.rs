@@ -2194,6 +2194,6 @@ mod tests {
             width(&tree.functions, context.get("ordinary").unwrap(), &context),
             Some(32)
         );
-        assert!(context.get("dyn").unwrap().container.is_some());
+        assert!(context.get("dyn").unwrap().container().is_some());
     }
 }

@@ -528,7 +528,7 @@ pub(in crate::ast) fn bind_native(
                 // A container member or element receives its item as a
                 // container variable is assigned (10.9, 7.5-7.10): a
                 // pattern, a concatenation or a container value.
-                if let Some(container) = shape.container.clone()
+                if let Some(container) = shape.container().cloned()
                     && shape.unpacked.is_empty()
                 {
                     values.push(containers::assignment(id, tree, session, dims, &container)?);

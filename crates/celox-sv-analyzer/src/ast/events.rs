@@ -16,7 +16,7 @@ pub(super) fn new_event() -> Expr {
 
 /// Whether type `ty` is `event`.
 pub(super) fn is_event(ty: &Type) -> bool {
-    ty.kind() == TypeKind::Event && ty.unpacked_ranges.is_empty() && ty.container.is_none()
+    ty.kind() == TypeKind::Event && ty.unpacked_ranges.is_empty() && ty.container().is_none()
 }
 
 /// A call of scheduler operation `op` on events `events`.

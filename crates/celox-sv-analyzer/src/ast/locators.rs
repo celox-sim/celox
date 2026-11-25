@@ -634,7 +634,7 @@ pub(super) fn bind(
                 }
                 _ if element.class_in(&session.types).is_some()
                     || element.is_unpacked_struct_in(&session.types)
-                    || element.container.is_some() =>
+                    || element.container().is_some() =>
                 {
                     return Err(unsupported(
                         "array locator method comparing nonintegral elements requires a with expression",

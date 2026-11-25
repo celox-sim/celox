@@ -240,7 +240,7 @@ pub(super) fn local_signals(
             session,
             &context,
         )?;
-        if declaration.constant && ty.container.is_some() {
+        if declaration.constant && ty.container().is_some() {
             return Err(unsupported("const dynamic container"));
         }
         let mut signal = Signal::new(name, ty);
@@ -323,7 +323,7 @@ pub(super) fn net_signals(
             session,
             &context,
         )?;
-        if ty.container.is_some() {
+        if ty.container().is_some() {
             return Err(unsupported("dynamic container net"));
         }
         signals.push(net_signal(name, ty, &declaration.net_type));

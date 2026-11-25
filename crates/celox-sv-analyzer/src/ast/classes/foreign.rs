@@ -270,7 +270,7 @@ pub(in crate::ast) fn request(
                     })
             })
             .or_else(|| {
-                let container = ty.container.as_ref()?;
+                let container = ty.container()?;
                 module_class(tree, session, &container.element).or_else(|| {
                     container
                         .key
