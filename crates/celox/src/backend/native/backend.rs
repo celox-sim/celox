@@ -332,7 +332,7 @@ impl SharedNativeCode {
         options: &SimulatorOptions,
     ) -> Result<Self, SimulatorError> {
         let (image, mut functions) = Self::compile_lazy(laid_out, options)?;
-        functions.fail_compiles = true;
+        functions.fail_compiles();
         // Safety: the image was produced in-process by the Celox compiler.
         unsafe { Self::from_image_parts(image, &options.dpi, Some(Arc::new(functions))) }
     }

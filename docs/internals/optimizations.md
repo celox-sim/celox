@@ -108,8 +108,10 @@ level.
 A timed simulation built on the x86-64 native backend (`Simulation::build`)
 compiles each function unit, an out-of-line SystemVerilog subroutine, at its
 first call. Until that call the unit's slot in the extern address table holds
-a stub, which compiles the unit with the same pipeline and options an image
-compiles it with, points the slot at the code and continues the call. A unit
+a stub, which has a compile thread compile the unit with the same pipeline
+and options an image compiles it with, points the slot at the code and
+continues the call. The thread starts at the first call and compiles every
+unit after it, with the stack an eager compile worker has. A unit
 the simulation never calls is never compiled; a design without function units
 compiles as before. A compile error at that call ends the call as a
 simulation error. The program stays in memory for these compiles, so such an
