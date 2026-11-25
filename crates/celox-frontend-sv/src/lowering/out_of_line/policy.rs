@@ -474,18 +474,16 @@ impl ProcModule<'_> {
             .and_then(|graph| graph.out_of_line.as_ref())
             .is_some_and(|functions| {
                 functions.recursive.contains(name)
-                    || (!functions.forced
-                        && functions
-                            .inlined_size(name)
-                            .is_some_and(|size| size > OUT_OF_LINE_STATEMENTS))
+                    || (!functions.forced && self.over_inline_threshold(name, functions))
             })
     }
 
     /// Whether a call of subroutine `name` may go out of line: always when
     /// that is forced; otherwise when `name` is on a cycle of the call
     /// graph, which inlining cannot expand, or when its fully inlined size
-    /// exceeds [`OUT_OF_LINE_STATEMENTS`]. Every other call is inlined, as
-    /// without out-of-line calls.
+    /// exceeds [`OUT_OF_LINE_STATEMENTS`], or [`CLASS_MEMBER_STATEMENTS`]
+    /// for a member of a class. Every other call is inlined, as without
+    /// out-of-line calls.
     ///
     /// The size is measured on the IR before anything is lowered (see
     /// [`Self::mark_recursive`]), so the choice does not depend on the order
@@ -497,10 +495,25 @@ impl ProcModule<'_> {
             .is_some_and(|functions| {
                 functions.forced
                     || functions.recursive.contains(name)
-                    || functions
-                        .inlined_size(name)
-                        .is_some_and(|size| size > OUT_OF_LINE_STATEMENTS)
+                    || self.over_inline_threshold(name, functions)
             })
+    }
+
+    /// Whether the fully inlined size of subroutine `name` exceeds the
+    /// most a call inlines of it: [`CLASS_MEMBER_STATEMENTS`] for a member
+    /// of a class, [`OUT_OF_LINE_STATEMENTS`] for any other subroutine.
+    fn over_inline_threshold(&self, name: &str, functions: &OutOfLine) -> bool {
+        let threshold = if self
+            .subroutine(name)
+            .is_some_and(|subroutine| subroutine.class_member)
+        {
+            CLASS_MEMBER_STATEMENTS
+        } else {
+            OUT_OF_LINE_STATEMENTS
+        };
+        functions
+            .inlined_size(name)
+            .is_some_and(|size| size > threshold)
     }
 
     /// Whether at most one activation of the unit of subroutine `name` can

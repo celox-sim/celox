@@ -329,6 +329,7 @@ impl ConstantFunctions {
                     .cloned()
                     .map(|statement| statement.map(&mut |expr| expr.into(), &mut |lhs| lhs.into()))
                     .collect(),
+                class_member: false,
             })
             .collect()
     }
