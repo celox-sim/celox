@@ -17,6 +17,7 @@ use std::sync::Arc;
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 pub mod containers;
+pub mod coverage;
 mod dpi;
 mod edges;
 pub mod memory_files;
@@ -181,6 +182,15 @@ pub struct Heap {
     /// outlives.
     #[serde(skip)]
     memory_files: memory_files::MemoryFiles,
+    /// The covergroup types and instances with what they collected (IEEE
+    /// 1800-2023 clause 19; see [`coverage`]). An instance stays when its
+    /// object goes.
+    #[serde(default)]
+    coverage: coverage::Registry,
+    /// What the coverage operations of the function being run noted, which
+    /// no state outlives.
+    #[serde(skip)]
+    coverage_scratch: coverage::Scratch,
 }
 
 impl Default for Heap {
@@ -229,6 +239,8 @@ impl Heap {
             edges: HashMap::default(),
             dpi: dpi::CallArea::default(),
             memory_files: memory_files::MemoryFiles::default(),
+            coverage: coverage::Registry::default(),
+            coverage_scratch: coverage::Scratch::default(),
         }
     }
 
@@ -271,7 +283,8 @@ impl Heap {
 
     /// Whether `other` holds the same strings, containers and objects under the same
     /// handles, including object RNG state and strings under construction,
-    /// and assigns the same handles to future allocations.
+    /// and assigns the same handles to future allocations, and the same
+    /// covergroup coverage.
     pub fn same_contents(&self, other: &Heap) -> bool {
         self.strings == other.strings
             && self.next == other.next
@@ -291,6 +304,8 @@ impl Heap {
             && self.arguments == other.arguments
             // The occurrences of watched properties decide the waits.
             && self.edges == other.edges
+            // Coverage is a value that code reads and branches on.
+            && self.coverage == other.coverage
     }
 
     /// The number of live strings, including `""`.
@@ -302,8 +317,8 @@ impl Heap {
         false
     }
 
-    /// Bytes of string contents, container elements and object properties, excluding allocator
-    /// overhead.
+    /// Bytes of string contents, container elements, object properties and covergroup hit
+    /// counters, excluding allocator overhead.
     pub fn content_size(&self) -> usize {
         self.strings
             .values()
@@ -319,6 +334,7 @@ impl Heap {
                 .values()
                 .map(|container| container.size())
                 .sum::<usize>()
+            + self.coverage.content_size()
     }
 
     /// Whether enough entries were created since the last collection to make
@@ -361,6 +377,9 @@ impl Heap {
             live
         });
         self.objects.retain(|handle, _| objects.contains(handle));
+        // A covergroup instance keeps what it collected (IEEE 1800-2023
+        // 19.11).
+        self.coverage.release(|handle| objects.contains(&handle));
         self.edges.retain(|handle, _| objects.contains(handle));
         self.containers.retain(|handle, _| objects.contains(handle));
         self.container_digests
