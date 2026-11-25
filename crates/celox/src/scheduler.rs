@@ -731,6 +731,9 @@ struct Plan {
     /// a slot (see `Generator::batch`).
     derived: Vec<usize>,
     active: Vec<usize>,
+    /// Additional blocking domains whose intermediate state is visible only
+    /// to observers installed by the host.
+    observed_active: Vec<usize>,
     /// The events the slots change that gate clocks computed
     /// combinationally from them, with those clocks: their edges are judged
     /// when the source changes.
