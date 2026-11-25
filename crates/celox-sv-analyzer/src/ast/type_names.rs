@@ -206,6 +206,74 @@ impl std::hash::Hash for Naming {
     fn hash<H: std::hash::Hasher>(&self, _: &mut H) {}
 }
 
+/// The naming of the aggregate declaration that `structure` or `members`
+/// keep, with the `struct` or `union` keyword `$typename` writes for it: an
+/// unpacked structure (IEEE 1800-2023 7.2) first, whose storage members are
+/// named as it is, else the packed structure or union whose members they
+/// are (7.2.1, 7.3.1).
+pub(super) fn aggregate_naming<'a>(
+    structure: Option<&'a unpacked_structs::UnpackedStruct>,
+    members: &'a [packed_structs::PackedMember],
+) -> Option<(&'a Naming, Option<&'static str>)> {
+    if let Some(structure) = structure {
+        return Some((structure.naming(), None));
+    }
+    let declaration = members.first()?.declaration();
+    Some((declaration.naming(), declaration.keyword()))
+}
+
+/// The typedef that names the enumeration `enumeration`, or else the
+/// aggregate whose naming is `aggregate`, and the elaborated scope that
+/// declares it.
+fn kept_naming<'a>(
+    enumeration: Option<&'a semantic_types::EnumDeclaration>,
+    aggregate: Option<(&'a Naming, Option<&'static str>)>,
+) -> (Option<&'a str>, Option<&'a str>) {
+    match enumeration {
+        Some(enumeration) => (
+            enumeration.name.as_deref().filter(|_| enumeration.named),
+            enumeration.scope.as_deref(),
+        ),
+        None => aggregate.map_or((None, None), |(naming, _)| {
+            (naming.declaration(), naming.scope())
+        }),
+    }
+}
+
+impl Type {
+    /// The typedef that names this enumeration, struct or union type, and
+    /// the elaborated scope that declares it, as its declaration keeps
+    /// them.
+    pub(super) fn naming(&self) -> (Option<&str>, Option<&str>) {
+        let naming = kept_naming(
+            self.enumeration(),
+            aggregate_naming(
+                self.unpacked_struct().map(|structure| &**structure),
+                &self.members,
+            ),
+        );
+        // The spelling names the declaration as the declaration does, where
+        // it names one. A type that keeps no declaration, such as the bits of
+        // a structure, may still be spelled as it was.
+        let declared = self.enumeration().is_some()
+            || self.unpacked_struct().is_some()
+            || !self.members.is_empty();
+        debug_assert!(
+            !declared
+                || self
+                    .spelling
+                    .declaration()
+                    .is_none_or(|name| Some(name) == naming.0)
+                    && (self.spelling.declaration().is_none() && self.spelling.scope().is_none()
+                        || self.spelling.scope() == naming.1),
+            "the type is named {naming:?}, but spelled {:?} {:?}",
+            self.spelling.declaration(),
+            self.spelling.scope(),
+        );
+        naming
+    }
+}
+
 /// The name of a typedef, prefixed with the scope that declares it (rule f).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum TypedefName {
@@ -233,18 +301,29 @@ pub(super) fn scoped_name(unit: Option<&celox_sv_syntax::Unit>, name: &str) -> S
     }
 }
 
-/// The typedef that names the declared enumeration, struct or union element
-/// type of `shape`.
+/// The typedef that names the enumeration, struct or union element type of
+/// `shape`, as its declaration keeps it.
 pub(super) fn declaration_of(shape: &VariableDimensions) -> Option<String> {
     // The typedef names the element type, which selecting from an array
     // or changing its dimensions does not change.
-    shape
+    let name = kept_naming(
+        shape.enumeration_declaration(),
+        aggregate_naming(
+            shape.structure_declaration().map(|structure| &**structure),
+            &shape.members,
+        ),
+    )
+    .0;
+    let spelled = shape
         .declared
         .0
-        .as_deref()?
-        .spelling
-        .declaration()
-        .map(str::to_owned)
+        .as_deref()
+        .and_then(|ty| ty.spelling.declaration());
+    debug_assert!(
+        spelled.is_none_or(|spelled| Some(spelled) == name),
+        "the shape is named {name:?}, but its declared type {spelled:?}"
+    );
+    name.map(str::to_owned)
 }
 
 /// The declared type of the variable of `shape`, whose element type it

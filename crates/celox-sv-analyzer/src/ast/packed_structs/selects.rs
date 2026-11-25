@@ -207,6 +207,7 @@ fn member_dimensions(name: &str, r#type: &Type, dimensions: &PackedDimensions) -
             chandle: false,
             randomizable: true,
             real: false,
+            shortreal: false,
             string: false,
             packed: function_packed_dimension_widths(&r#type.packed_ranges),
             unpacked: dimensions::unpacked_dimension_widths(&r#type.unpacked_ranges),

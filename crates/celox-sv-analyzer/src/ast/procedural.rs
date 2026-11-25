@@ -500,6 +500,7 @@ pub(super) fn dimensions_from_type(r#type: &Type) -> VariableDimensions {
             chandle: r#type.is_chandle(),
             randomizable: r#type.container().is_none() && !r#type.holds_chandle(),
             real: matches!(r#type.kind(), TypeKind::Real | TypeKind::Shortreal),
+            shortreal: matches!(r#type.kind(), TypeKind::Shortreal),
             string: matches!(r#type.kind(), TypeKind::String),
             packed: dimensions::signal_packed_dimension_widths(r#type.packed_ranges()),
             unpacked: unpacked_dimension_widths(r#type.unpacked_ranges()),

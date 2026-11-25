@@ -152,6 +152,7 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                         && !port.r#type().holds_chandle()
                         && port.randomizable,
                     real: matches!(port.r#type().kind(), TypeKind::Real | TypeKind::Shortreal),
+                    shortreal: matches!(port.r#type().kind(), TypeKind::Shortreal),
                     string: matches!(port.r#type().kind(), TypeKind::String),
                     packed: signal_packed_dimension_widths(port.r#type().packed_ranges()),
                     unpacked: unpacked_dimension_widths(port.r#type().unpacked_ranges()),
@@ -199,6 +200,7 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                         && !signal.is_net()
                         && !signal.is_const,
                     real: matches!(signal.r#type().kind(), TypeKind::Real | TypeKind::Shortreal),
+                    shortreal: matches!(signal.r#type().kind(), TypeKind::Shortreal),
                     string: matches!(signal.r#type().kind(), TypeKind::String),
                     packed: signal_packed_dimension_widths(signal.r#type().packed_ranges()),
                     unpacked: unpacked_dimension_widths(signal.r#type().unpacked_ranges()),
@@ -695,6 +697,7 @@ pub(super) fn parameter_packed_dimensions(parameters: &[Parameter]) -> VariableP
                     chandle: false,
                     randomizable: true,
                     real: false,
+                    shortreal: false,
                     string: false,
                     packed: function_packed_dimension_widths(&parameter.packed_ranges),
                     unpacked: Vec::new(),

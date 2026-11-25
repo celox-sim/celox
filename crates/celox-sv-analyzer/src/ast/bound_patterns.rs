@@ -283,6 +283,7 @@ impl BoundPattern {
             let mut element = shape.derived(VariableShape {
                 declared: type_names::Declared::default(),
                 real: false,
+                shortreal: false,
                 string: false,
                 unpacked: rest.to_vec(),
                 ..shape.clone_shape()
@@ -313,6 +314,7 @@ impl BoundPattern {
                 shape.derived(VariableShape {
                     declared: type_names::Declared::default(),
                     real: false,
+                    shortreal: false,
                     string: false,
                     packed: rest.to_vec(),
                     signed: shape.signed_element_depth == Some(1),
@@ -372,6 +374,7 @@ impl BoundPattern {
                 VariableDimensions::new(VariableShape {
                     declared: type_names::Declared::default(),
                     real: false,
+                    shortreal: false,
                     string: false,
                     packed: Vec::new(),
                     signed: false,
