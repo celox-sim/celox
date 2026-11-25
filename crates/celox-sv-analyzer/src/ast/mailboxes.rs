@@ -69,10 +69,16 @@ impl Message {
 
     /// The class name of `mailbox #(ty)`: the spelling of the type, then the
     /// shape its methods use.
-    fn class_name(&self, ty: &Type, table: &semantic_types::TyTable) -> String {
+    fn class_name(
+        &self,
+        ty: &Type,
+        table: &mut semantic_types::TyTable,
+        functions: &const_functions::ConstantFunctions,
+        env: &ConstEnv,
+    ) -> String {
         format!(
             "{PREFIX}{})@{},{},{},{}",
-            classes::specializations::spelling(ty, table),
+            classes::specializations::spelling(ty, table, functions, env),
             self.width,
             u8::from(self.signed),
             u8::from(self.two_state),
@@ -165,7 +171,12 @@ pub(super) fn named_type(
         &message,
         &context.const_env,
     )?
-    .class_name(&message, &session.types);
+    .class_name(
+        &message,
+        &mut session.types,
+        &tree.functions,
+        &context.const_env,
+    );
     Ok(Some(Box::new(classes::handle(&mut session.types, &name))))
 }
 

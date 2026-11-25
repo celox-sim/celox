@@ -476,7 +476,38 @@ fn module_scope(
     let mut patterns = bindings.patterns.iter().collect::<Vec<_>>();
     patterns.sort_by(|left, right| left.0.cmp(&right.0));
     patterns.hash(&mut hasher);
-    format!("{module_name}#{:016x}", hasher.finish()).into()
+    let scope: Arc<str> = format!("{module_name}#{:016x}", hasher.finish()).into();
+    // Specialization names write the scope by the values it hashes, which
+    // are the same in every run (see `TyTable::declaration_key`).
+    if !table.records_analysis_scope(&scope) {
+        let values = values
+            .iter()
+            .map(|(name, value)| format!("{name}={}", canonical_text::const_expr(value)));
+        let types = bindings
+            .types
+            .iter()
+            .map(|(name, ty)| {
+                let ty = classes::specializations::spelling(
+                    ty,
+                    table,
+                    &const_functions::ConstantFunctions::default(),
+                    &ConstEnv::default(),
+                );
+                (name.clone(), format!("{name}=type({ty})"))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let patterns = patterns
+            .iter()
+            .map(|(name, pattern)| format!("{name}={}", pattern.canonical(table)))
+            .collect::<Vec<_>>();
+        let arguments = values
+            .chain(types.into_values())
+            .chain(patterns)
+            .collect::<Vec<_>>();
+        let text = format!("{module_name}#({})", arguments.join(","));
+        table.record_analysis_scope(scope.clone(), text);
+    }
+    scope
 }
 
 #[cfg(test)]

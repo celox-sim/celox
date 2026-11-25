@@ -12,6 +12,28 @@ pub(in crate::ast) enum ValueType {
 }
 
 impl ValueType {
+    /// The type as [`super::BoundPattern::canonical`] writes it.
+    pub(super) fn canonical(&self, table: &mut semantic_types::TyTable) -> String {
+        match self {
+            Self::Known(None) => String::new(),
+            Self::Known(Some(ty)) => format!(
+                ":{}",
+                classes::specializations::spelling(
+                    ty,
+                    table,
+                    &const_functions::ConstantFunctions::default(),
+                    &ConstEnv::default(),
+                )
+            ),
+            Self::Call(expr) => format!(":type({})", canonical_text::expr(expr)),
+            Self::Conditional(then_type, else_type) => format!(
+                ":({}|{})",
+                then_type.canonical(table),
+                else_type.canonical(table)
+            ),
+        }
+    }
+
     pub(super) fn known(&self) -> Option<&Type> {
         match self {
             Self::Known(ty) => ty.as_ref(),
