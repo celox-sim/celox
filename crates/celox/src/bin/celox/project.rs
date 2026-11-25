@@ -829,6 +829,22 @@ impl Design {
         Ok(())
     }
 
+    /// Report what the preprocessor accepted as compilation diagnostics,
+    /// at the levels of the design's diagnostic policy.
+    fn report_preprocessor_warnings(
+        &self,
+        warnings: &[celox_sv_analyzer::syntax::SourceWarning],
+    ) -> Result<(), String> {
+        let mut warnings: Vec<_> = celox_frontend_sv::FrontendWarning::preprocessor(warnings)
+            .into_iter()
+            .map(celox::CompilationWarning::SystemVerilog)
+            .collect();
+        self.diagnostics
+            .apply(&mut warnings)
+            .map_err(|error| format!("preprocessing failed:\n{error}"))?;
+        super::report_warnings(&warnings)
+    }
+
     pub fn sv_sources(&self) -> Result<Vec<(String, PathBuf)>, String> {
         let encoding = if self.strict_source_encoding.unwrap_or(false) {
             celox_sv_analyzer::syntax::SourceEncoding::Utf8
@@ -860,12 +876,13 @@ impl Design {
                 .iter()
                 .map(|(text, path)| (text.as_str(), path.as_path()))
                 .collect::<Vec<_>>();
-            let text = celox_sv_analyzer::syntax::preprocess_sources_with_encoding(
+            let expanded = celox_sv_analyzer::syntax::preprocess_sources_with_encoding(
                 &borrowed, &macros, &includes, encoding,
             )
             .map_err(|error| format!("preprocessing compilation unit failed: {error}"))?;
+            self.report_preprocessor_warnings(&expanded.warnings)?;
             return Ok(vec![(
-                text,
+                expanded.text,
                 self.sources.first().cloned().unwrap_or_default(),
             )]);
         }
@@ -875,11 +892,12 @@ impl Design {
                 let text = encoding
                     .read(path)
                     .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-                let text = celox_sv_analyzer::syntax::preprocess_source_with_encoding(
+                let expanded = celox_sv_analyzer::syntax::preprocess_source_with_encoding(
                     &text, path, &macros, &includes, encoding,
                 )
                 .map_err(|error| format!("preprocessing {} failed: {error}", path.display()))?;
-                Ok((text, path.clone()))
+                self.report_preprocessor_warnings(&expanded.warnings)?;
+                Ok((expanded.text, path.clone()))
             })
             .collect()
     }

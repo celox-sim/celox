@@ -519,3 +519,65 @@ fn text_keeps_lines_of_skipped_branches_and_definitions() {
     assert_eq!(line(&text, "endmodule"), line(code, "endmodule"), "{text}");
     assert_eq!(line(&text, "wire a"), None, "{text}");
 }
+
+#[test]
+fn includes_ignore_trailing_semicolons_with_a_warning() {
+    let directory = std::env::temp_dir().join(format!(
+        "celox-sv-include-semicolon-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = Cleanup(directory.clone());
+    std::fs::write(directory.join("macros.svh"), "`define VALUE 5\n").unwrap();
+    let read = |code: &str| {
+        Preprocessor::new(Options {
+            include_paths: vec![directory.clone()],
+            ..Options::default()
+        })
+        .preprocess(code, directory.join("top.sv"))
+    };
+    // IEEE 1800-2023 22.4 allows only white space or a comment after the
+    // filename; semicolons there are ignored and reported.
+    let code = "`include \"macros.svh\" ; ; // done\nwire w = `VALUE;\n";
+    let output = read(code).unwrap();
+    assert!(
+        output
+            .text()
+            .split_whitespace()
+            .collect::<String>()
+            .contains("wirew=5;")
+    );
+    assert_eq!(
+        output.warnings,
+        vec![PreprocessWarning {
+            kind: PreprocessWarningKind::IncludeTrailingSemicolon,
+            span: output.warnings[0].span,
+        }]
+    );
+    let semicolon = code.find(';').unwrap();
+    assert_eq!(output.warnings[0].span.range(), semicolon..semicolon + 1);
+    // Without them nothing is reported; anything else after them fails.
+    assert!(
+        read("`include \"macros.svh\"\n")
+            .unwrap()
+            .warnings
+            .is_empty()
+    );
+    let error = read("`include \"macros.svh\"; wire\n").unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("expected only an include filename"),
+        "{error}"
+    );
+}
