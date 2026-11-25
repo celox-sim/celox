@@ -585,9 +585,6 @@ fn bind_in_mode(
                     ) else {
                         return Ok(None);
                     };
-                    if let Some(scope) = scope {
-                        ty.reshape_keeping_declarations(|shape| shape.spelling.declared_in(scope));
-                    }
                     bind_nested(&mut ty, tree, session, context);
                     values.push(ty);
                     continue;
@@ -636,13 +633,6 @@ fn bind_in_mode(
                 ) else {
                     return Ok(None);
                 };
-                if !soft && !tagged {
-                    ty.spelling =
-                        type_names::Spelling::aggregate(if union { "union" } else { "struct" });
-                }
-                if let Some(scope) = scope {
-                    ty.spelling.declared_in(scope);
-                }
                 bind_nested(&mut ty, tree, session, context);
                 values.push(ty);
             }

@@ -1567,3 +1567,72 @@ endmodule"#;
         );
     }
 }
+
+/// Two packed structure typedefs of the same members are two types (IEEE
+/// 1800-2023 6.22.1), which only type matching tells apart: a type
+/// operator comparison, a type parameter of a class specialization (8.25)
+/// and `$typename` (20.6.1). They stay equivalent, having the same bits,
+/// states and signing (6.22.2), so a value of one is assigned, compared,
+/// passed to a subroutine and connected to a port of the other as before.
+#[test]
+fn packed_structure_typedefs_of_the_same_members_are_equivalent_types_apart() {
+    let source = r#"package p;
+  typedef struct packed { logic [3:0] x; logic [3:0] y; } a_t;
+  typedef struct packed { logic [3:0] x; logic [3:0] y; } b_t;
+  typedef a_t c_t;
+endpackage
+module Child(input p::a_t i, output p::a_t o);
+  assign o = i;
+endmodule
+module Top(output logic [7:0] assigned, output logic [7:0] passed, output logic [7:0] ported,
+           output logic equal, output logic ab_match, output logic ac_match,
+           output logic names_differ, output int a_made, output int b_made);
+  import p::*;
+  class Box #(type T = int); static int made; function new(); made++; endfunction endclass
+  a_t a;
+  b_t b;
+  b_t port_in;
+  a_t port_out;
+  Box#(a_t) ba;
+  Box#(b_t) bb;
+  Box#(c_t) bc;
+  function automatic a_t pass(a_t v); return v; endfunction
+  Child child(.i(port_in), .o(port_out));
+  assign ported = port_out;
+  initial begin
+    a = '{x: 4'd1, y: 4'd2};
+    b = a;
+    assigned = b;
+    passed = pass(b);
+    port_in = b;
+    equal = a == b;
+    ab_match = type(a) == type(b);
+    ac_match = type(a_t) == type(c_t);
+    names_differ = $typename(a) != $typename(b);
+    ba = new;
+    bb = new;
+    bc = new;
+    a_made = Box#(a_t)::made;
+    b_made = Box#(b_t)::made;
+  end
+endmodule"#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("packed_typedefs.sv"))], "Top")
+            .build()
+            .unwrap();
+    sim.run_until(0).unwrap();
+    for (signal, value) in [
+        ("assigned", 0x12u32),
+        ("passed", 0x12),
+        ("ported", 0x12),
+        ("equal", 1),
+        ("ab_match", 0),
+        ("ac_match", 1),
+        ("names_differ", 1),
+        // `c_t` renames `a_t`: one specialization of the two.
+        ("a_made", 2),
+        ("b_made", 1),
+    ] {
+        assert_eq!(sim.get(sim.signal(signal)), value.into(), "{signal}");
+    }
+}

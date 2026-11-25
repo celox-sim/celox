@@ -455,7 +455,7 @@ pub(super) fn builtin_type(name: &str, signing: Option<bool>) -> Option<Type> {
         _ => None,
     };
     if let Some(keyword) = keyword {
-        ty.spelling = type_names::Spelling::keyword(keyword);
+        ty.keyword = type_names::Keyword::new(keyword);
     }
     if let Some(width) = width {
         ty.packed_ranges.push(PackedRange::new(

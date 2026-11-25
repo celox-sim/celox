@@ -363,13 +363,6 @@ impl VariableDimensions {
             .map(|dim| UnpackedRange::new(dim.left.clone(), dim.right.clone()))
             .collect();
         ty.members = self.members.clone();
-        // Rebuilding the shape must retain the declaration used by native
-        // array compatibility checks for structure elements.
-        if self.structure_declaration().is_some()
-            && let Some(declared) = type_names::declared_type(self)
-        {
-            ty.spelling = declared.spelling.clone();
-        }
         ty.signed_element_depth = self.signed_element_depth;
         // The type keeps the structure the shape keeps, after the changes of
         // its shape above, which forget it.
