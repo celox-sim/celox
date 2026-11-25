@@ -24,11 +24,55 @@
     },
     {
       "category": "Sequential",
+      "detail": "covergroup::automatic_bins_of_a_coverpoint at 162:2: expect_output: expected [118, 97, 108, 117, 101, 115, 32, 50, 53, 46, 48, 48, 10, 104, 97, 108, 118, 101, 115, 32, 53, 48, 46, 48, 48, 10, 104, 97, 108, 118, 101, 115, 32, 49, 48, 48, 46, 48, 48, 10, 99, 111, 108, 111, 114, 115, 32, 54, 54, 46, 54, 55, 10, 99, 111, 108, 111, 114, 115, 32, 49, 48, 48, 46, 48, 48, 10], got [118, 97, 108, 117, 101, 115, 32, 50, 53, 46, 48, 48, 10, 104, 97, 108, 118, 101, 115, 32, 53, 48, 46, 48, 48, 10, 104, 97, 108, 118, 101, 115, 32, 49, 48, 48, 46, 48, 48, 10, 99, 111, 108, 111, 114, 115, 32, 53, 48, 46, 48, 48, 10, 99, 111, 108, 111, 114, 115, 32, 55, 53, 46, 48, 48, 10]",
+      "expectation": "Simulation",
+      "name": "covergroup::automatic_bins_of_a_coverpoint",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "covergroup::constructor_arguments_set_the_bins",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "covergroup::coverpoint_guard_skips_the_sample",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "covergroup::embedded_covergroup_is_constructed_by_new reads q with unknown bits in a two-state run",
       "expectation": "Simulation",
       "name": "covergroup::embedded_covergroup_is_constructed_by_new",
       "phase": "execute",
       "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "covergroup::embedded_covergroup_reads_its_class",
+      "phase": "execute",
+      "status": "passed",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
@@ -46,11 +90,44 @@
     },
     {
       "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "covergroup::options_of_a_definition",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "covergroup::sample_arguments_are_the_sampled_values",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "covergroup::shallow_copy_has_no_embedded_covergroup at 101:26: assert_eq q: expected 0x7, got 0x5",
       "expectation": "Simulation",
       "name": "covergroup::shallow_copy_has_no_embedded_covergroup",
       "phase": "execute",
       "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "covergroup::value_bins_count_samples",
+      "phase": "execute",
+      "status": "passed",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []

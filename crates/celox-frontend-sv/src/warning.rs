@@ -119,6 +119,15 @@ pub enum FrontendWarningKind {
     /// 1800-2023 19.9).
     #[error("`{task}` has no effect: Celox keeps no coverage database")]
     NoCoverageDatabase { task: &'static str },
+    /// A value or a range of a bin of a coverpoint that takes no part in the
+    /// bin, or only a part of which does (IEEE 1800-2023 19.5.7).
+    #[error("bin `{bin}` of coverpoint `{item}` of covergroup `{covergroup}`: {detail}")]
+    CovergroupBinValue {
+        covergroup: String,
+        item: String,
+        bin: String,
+        detail: String,
+    },
 }
 
 /// Where a warning is in the source.
@@ -197,6 +206,21 @@ pub(crate) fn analyzer_warnings(
             FrontendWarningKind::NoCoverageDatabase { task },
             site.clone(),
         ),
+        celox_sv_analyzer::ir::AnalyzerWarning::CovergroupBinValue {
+            covergroup,
+            item,
+            bin,
+            detail,
+            site,
+        } => (
+            FrontendWarningKind::CovergroupBinValue {
+                covergroup: covergroup.clone(),
+                item: item.clone(),
+                bin: bin.clone(),
+                detail: detail.clone(),
+            },
+            site.clone(),
+        ),
     })
 }
 
@@ -256,6 +280,7 @@ impl miette::Diagnostic for FrontendWarning {
             FrontendWarningKind::ForcedSpecialization { .. } => "forced_specialization",
             FrontendWarningKind::ForcedArray { .. } => "forced_array",
             FrontendWarningKind::NoCoverageDatabase { .. } => "no_coverage_database",
+            FrontendWarningKind::CovergroupBinValue { .. } => "covergroup_bin_value",
         }))
     }
 
@@ -304,6 +329,9 @@ impl miette::Diagnostic for FrontendWarning {
             FrontendWarningKind::NoCoverageDatabase { .. } => {
                 "the argument is evaluated and nothing is saved or loaded (IEEE 1800-2023 19.9; tracking issue #4294); read the coverage of the covergroups from the simulation instead"
             }
+            FrontendWarningKind::CovergroupBinValue { .. } => {
+                "IEEE 1800-2023 19.5.7 compares the values of a bin as values of the type of the coverpoint; write the values that type has, or give the coverpoint a type that has them"
+            }
         }))
     }
 
@@ -315,8 +343,12 @@ impl miette::Diagnostic for FrontendWarning {
 
     fn labels(&self) -> Option<Box<dyn Iterator<Item = miette::LabeledSpan> + '_>> {
         let location = self.location.as_ref()?;
+        let label = match self.kind {
+            FrontendWarningKind::CovergroupBinValue { .. } => "written here",
+            _ => "called here",
+        };
         Some(Box::new(std::iter::once(
-            miette::LabeledSpan::new_with_span(Some("called here".to_string()), location.span),
+            miette::LabeledSpan::new_with_span(Some(label.to_string()), location.span),
         )))
     }
 }

@@ -39,6 +39,17 @@ pub enum AnalyzerWarning {
         task: &'static str,
         site: Option<SourceSpan>,
     },
+    /// A value or a range of bin `bin` of coverpoint `item` of covergroup
+    /// `covergroup` that takes no part in the bin, or only a part of which
+    /// does, as `detail` says: the type of the coverpoint has not all of
+    /// its values (IEEE 1800-2023 19.5.7).
+    CovergroupBinValue {
+        covergroup: String,
+        item: String,
+        bin: String,
+        detail: String,
+        site: Option<SourceSpan>,
+    },
 }
 
 pub(crate) fn append(

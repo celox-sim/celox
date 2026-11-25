@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::procedural::ParamDirection;
-use celox_sv_syntax::{CoverageEvent, CoverageItem, CovergroupKind, SubroutinePort};
+use celox_sv_syntax::{CoverageEvent, CovergroupKind, SubroutinePort};
 
 /// A formal of `new` or of `sample` of a covergroup (IEEE 1800-2023 19.3,
 /// 19.8.1).
@@ -30,6 +30,9 @@ pub(in crate::ast) struct Covergroup {
     /// The identifier of the declaration, which names the property of an
     /// embedded covergroup.
     pub identifier: String,
+    /// The declaration, in the file of the scope that declares the type:
+    /// that scope makes the subroutines of the type from it.
+    pub declaration: CovergroupId,
     /// The class an embedded covergroup is declared in (19.4): its
     /// subroutines take an object of the class, whose property the handle
     /// is, where those of another covergroup take the handle.
@@ -107,6 +110,18 @@ fn deferred(error: AnalyzerError) -> AnalyzerError {
     }
 }
 
+/// The error of making the subroutines of a covergroup type. What the
+/// analysis does not support of the expressions of its items starts with
+/// `covergroup `, as every rejection of a covergroup does.
+pub(in crate::ast) fn rejected(error: AnalyzerError) -> AnalyzerError {
+    match error {
+        AnalyzerError::Unsupported(text) if !text.starts_with("covergroup ") => {
+            unsupported(format!("covergroup expression ({text})"))
+        }
+        error => error,
+    }
+}
+
 /// The formals `ports` of `what` of the covergroup, bound in `context`.
 fn formals(
     tree: &AnalysisContext<'_>,
@@ -145,6 +160,7 @@ pub(in crate::ast) fn build(
         name: names.class,
         display: names.display,
         identifier: identifier(tree.declarations(), id),
+        declaration: id,
         owner,
         new_formals: Vec::new(),
         sample_formals: Vec::new(),
@@ -162,7 +178,10 @@ pub(in crate::ast) fn build(
     };
     // Before the formals are bound: an unexpanded `let` in one would bind
     // as a call of a function nothing declares.
-    if let Some(named) = let_name(tree, declaration) {
+    let port_tokens = formal_ports(declaration)
+        .map(|port| port.tokens)
+        .collect::<Vec<_>>();
+    if let Some(named) = let_name(tree, declaration, &port_tokens, &[]) {
         model.rejection = Some(unsupported(format!(
             "covergroup argument that names `let` `{named}` (IEEE 1800-2023 11.12, 19.3)"
         )));
@@ -239,39 +258,60 @@ pub(in crate::ast) fn build(
             }
         }
     }
-    for item in &declaration.items {
-        let construct = match item {
-            CoverageItem::Option(_) => "covergroup option (IEEE 1800-2023 19.7)",
-            CoverageItem::Coverpoint(_) => "covergroup coverpoint (IEEE 1800-2023 19.5)",
-            CoverageItem::Cross(_) => "covergroup cross (IEEE 1800-2023 19.6)",
-        };
-        model.rejection.get_or_insert(unsupported(construct));
+    // The items: what is illegal is an error here, and what is not
+    // supported is rejected where the type is used.
+    let sample_formals = model
+        .sample_formals
+        .iter()
+        .map(|formal| formal.name.clone())
+        .collect::<Vec<_>>();
+    if let Some(error) = compile::check(
+        tree.declarations(),
+        declaration,
+        &model.display,
+        &sample_formals,
+    )? {
+        reject(&mut model, error);
+    }
+    // The expressions of the items are bound with the subroutines of the
+    // type, where a `let` is not expanded either, unless an argument of the
+    // covergroup or of its sample method hides it.
+    if model.rejection.is_none() {
+        let hidden = model
+            .new_formals
+            .iter()
+            .map(|formal| formal.name.clone())
+            .chain(sample_formals)
+            .collect::<Vec<_>>();
+        let bound = compile::Bound::of(declaration).ranges(tree.declarations());
+        if let Some(named) = let_name(tree, declaration, &bound, &hidden) {
+            model.rejection = Some(unsupported(format!(
+                "covergroup expression that names `let` `{named}` (IEEE 1800-2023 11.12, 19.5)"
+            )));
+        }
     }
     Ok(model)
 }
 
 /// The `let` declaration of the design element of covergroup `declaration`
-/// that the type or the default of one of its formals names, if one does.
-/// The calls of a `let` are expanded before the element is analyzed (see
-/// `lets`), but for what follows the name of a covergroup, where a name may
-/// be a coverpoint or `item`: a `let` named there is not expanded, and the
-/// covergroup is rejected where it is used rather than bound with a call of
-/// a function that nothing declares. A formal does not hide the `let`: the
-/// types and defaults are those of the scope that declares the covergroup
-/// (13.5.3).
+/// that an expression or a type in token ranges `ports` of it names, if one
+/// does and none of `hidden` has its name. The calls of a `let` are
+/// expanded before the element is analyzed (see `lets`), but for what
+/// follows the name of a covergroup, where a name may be a coverpoint or
+/// `item`: a `let` named there is not expanded, and the covergroup is
+/// rejected where it is used rather than bound with a call of a function
+/// that nothing declares. A formal does not hide the `let` in the types and
+/// defaults of the formals, which are those of the scope that declares the
+/// covergroup (13.5.3); it does in the items of the covergroup (19.8.1).
 fn let_name(
     tree: &AnalysisContext<'_>,
     declaration: &celox_sv_syntax::CovergroupDeclaration,
+    ports: &[celox_sv_syntax::TokenRange],
+    hidden: &[String],
 ) -> Option<String> {
     use celox_sv_syntax::ExprKind;
     let native = tree.declarations();
-    if native.lets.is_empty() {
-        return None;
-    }
-    let ports = formal_ports(declaration)
-        .map(|port| port.tokens)
-        .collect::<Vec<_>>();
-    if ports.is_empty() {
+    if native.lets.is_empty() || ports.is_empty() {
         return None;
     }
     let element = |tokens| classes::enclosing_unit(native, tokens).map(|unit| unit.tokens);
@@ -282,9 +322,9 @@ fn let_name(
             .any(|port| port.start <= tokens.start && tokens.start < port.end)
     };
     tree.spans()
-        .covergroup_formals
+        .covergroup_bound
         .0
-        .within(&ports)
+        .within(ports)
         .into_iter()
         .find_map(|id| {
             let expression = native.expression(id);
@@ -295,6 +335,9 @@ fn let_name(
                 return None;
             }
             let name = instances::normalize_identifier(&name.spelling);
+            if hidden.contains(&name) {
+                return None;
+            }
             native
                 .lets
                 .iter()
