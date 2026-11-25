@@ -12,57 +12,6 @@ mod aggregates;
 pub(super) mod binding;
 pub(super) use binding::{bind, expression_type};
 
-/// Whether this declarator denotes a supported variable rather than a
-/// constructed non-variable declaration (such as a covergroup instance).
-pub(super) fn ordinary_variable(
-    variable: &celox_sv_syntax::VariableDeclarator,
-    data_type: celox_sv_syntax::TypeId,
-    native: &celox_sv_syntax::Declarations,
-) -> bool {
-    !variable.value.is_some_and(|id|matches!(&native.expression(id).kind,celox_sv_syntax::ExprKind::Name(name) if name.spelling=="new")) || names_class(data_type, native)
-}
-
-/// Whether `data_type` may name a class rather than a covergroup: a class,
-/// typedef or type parameter of the name declared in the source, a built-in
-/// class constructed with `new` (IEEE 1800-2023 15.3), or a scoped name such
-/// as `C::T` or `p::C`. A covergroup that shares its name with a typedef or
-/// type parameter is taken for a class.
-pub(super) fn names_class(
-    data_type: celox_sv_syntax::TypeId,
-    native: &celox_sv_syntax::Declarations,
-) -> bool {
-    let celox_sv_syntax::DataTypeKind::Named(segments) = &native.data_type(data_type).kind else {
-        return false;
-    };
-    let [segment] = segments.as_slice() else {
-        return segments.len() > 1;
-    };
-    let name = normalize_identifier(&segment.name.spelling);
-    let named = |spelling: &str| normalize_identifier(spelling) == name;
-    matches!(name.as_str(), "semaphore" | "mailbox")
-        || native
-            .classes
-            .iter()
-            .any(|class| named(&class.name.spelling))
-        || native
-            .type_aliases
-            .iter()
-            .any(|alias| named(&alias.name.spelling))
-        || native
-            .parameter_declarations
-            .iter()
-            .flat_map(|declaration| &declaration.parameters)
-            .chain(
-                native
-                    .all_units()
-                    .flat_map(|unit| unit.parameters.iter().flatten()),
-            )
-            .any(|parameter| {
-                matches!(parameter.kind, celox_sv_syntax::ParameterKind::Type { .. })
-                    && named(&parameter.name.spelling)
-            })
-}
-
 pub(super) fn port_direction(direction: celox_sv_syntax::Direction) -> PortDirection {
     match direction {
         celox_sv_syntax::Direction::Input => PortDirection::Input,
@@ -226,9 +175,6 @@ pub(super) fn local_signals(
     };
     let mut signals = Vec::new();
     for variable in &declaration.variables {
-        if !ordinary_variable(variable, declaration.data_type, tree.declarations()) {
-            continue;
-        }
         let name = normalize_identifier(&variable.name.spelling);
         if selected_name.is_some_and(|selected| selected != name) {
             continue;

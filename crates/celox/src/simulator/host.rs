@@ -319,6 +319,22 @@ impl<B: SimBackend> Simulator<B> {
     pub fn into_warnings(self) -> Vec<CompilationWarning> {
         self.warnings
     }
+
+    /// The functional coverage of the covergroups of the design (IEEE
+    /// 1800-2023 clause 19): every covergroup type that has an instance,
+    /// with its bins and their hits, and the coverage `$get_coverage`
+    /// gives. A design without covergroup instances, a Veryl design among
+    /// them, has 100 percent and no covergroups.
+    ///
+    /// The report is the state as of the last completed step: reading it
+    /// settles nothing, advances no time and changes nothing, so it may be
+    /// read before the first step, between steps and after the simulation
+    /// ended or failed. Restoring a checkpoint restores the coverage it was
+    /// taken with. This is covergroup coverage only, not the code coverage
+    /// of clause 40.
+    pub fn coverage(&self) -> crate::CoverageReport {
+        self.backend.heap().coverage_report()
+    }
 }
 
 #[cfg(test)]

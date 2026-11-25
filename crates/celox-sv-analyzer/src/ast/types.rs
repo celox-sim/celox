@@ -185,6 +185,15 @@ fn type_aliases_in_scope(
                 };
                 aliases.insert(instances::normalize_identifier(&alias.name.spelling), ty);
             }
+            // A covergroup declares a type of its name, whose values are
+            // handles of its instances (IEEE 1800-2023 19.3).
+            BodyItemKind::Covergroup(_) => {
+                if let Some((name, ty)) =
+                    covergroups::item_type(syntax_tree, session, id, generate_scope)
+                {
+                    aliases.insert(name, ty);
+                }
+            }
             _ => {}
         }
     }
@@ -1118,16 +1127,33 @@ mod tests {
                 panic!("{source}: {error}");
             }
         }
-        // A covergroup or nettype names a type the binder does not model.
-        for source in [
-            "module test; bit x; covergroup cg @(posedge x); coverpoint x; endgroup cg c; endmodule\n",
-            "module test; nettype logic nt; nt w; endmodule\n",
-        ] {
-            if let Some(error) = module_error(source)
-                && error.contains("not declared")
-            {
-                panic!("{source}: {error}");
-            }
+        // A covergroup declares a type, whose variables are handles (IEEE
+        // 1800-2023 19.3): `c` is a handle of the type of the covergroup,
+        // which nothing constructs here.
+        let source = "module test; bit x; covergroup cg @(posedge x); coverpoint x; endgroup cg c; endmodule\n";
+        let ir = crate::analyze_source(source, Path::new("module.sv"))
+            .unwrap_or_else(|error| panic!("{source}: {error}"));
+        let module = &ir.modules()[0];
+        let handle = module
+            .signals()
+            .iter()
+            .find(|signal| signal.name() == "c")
+            .unwrap_or_else(|| panic!("{source}: no signal `c`"))
+            .r#type();
+        assert_eq!(handle.kind(), crate::ir::TypeKind::Object, "{source}");
+        assert!(
+            handle
+                .class()
+                .is_some_and(|class| class.starts_with("$covergroup::") && class.ends_with("::cg")),
+            "{source}: {:?}",
+            handle.class()
+        );
+        // A nettype names a type the binder does not model.
+        let source = "module test; nettype logic nt; nt w; endmodule\n";
+        if let Some(error) = module_error(source)
+            && error.contains("not declared")
+        {
+            panic!("{source}: {error}");
         }
         // A type a package declares is visible where it is imported, also
         // one Celox does not bind.

@@ -1360,4 +1360,10 @@ impl Heap {
     pub fn coverage_report(&self) -> CoverageReport {
         report::report(&self.coverage)
     }
+
+    /// Whether a covergroup was constructed: the heap keeps coverage, which
+    /// only a copy of the heap itself records.
+    pub fn has_coverage(&self) -> bool {
+        self.coverage.has_instances()
+    }
 }

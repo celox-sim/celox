@@ -898,6 +898,13 @@ impl<B: SimBackend> Simulation<B> {
             .to_vec()
     }
 
+    /// The functional coverage of the covergroups of the design (IEEE
+    /// 1800-2023 clause 19), as of the last completed step (see
+    /// [`Simulator::coverage`]).
+    pub fn coverage(&self) -> crate::CoverageReport {
+        self.simulator.coverage()
+    }
+
     /// Modifies internal state via a callback and re-stabilizes combinational logic.
     ///
     /// A write that changes an event signal, and any write while a process

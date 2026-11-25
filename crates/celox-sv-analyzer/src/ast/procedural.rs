@@ -12,6 +12,7 @@ mod assign_statements;
 mod call_statements;
 mod class_methods;
 mod control;
+pub(super) mod covergroup_subroutines;
 mod display_formats;
 mod effects;
 mod final_procedures;

@@ -1,0 +1,59 @@
+{
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "covergroup::arguments_of_new_and_of_sample",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "covergroup::arrays_of_covergroup_variables",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "covergroup::embedded_covergroup_is_constructed_by_new reads q with unknown bits in a two-state run",
+      "expectation": "Simulation",
+      "name": "covergroup::embedded_covergroup_is_constructed_by_new",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "covergroup::handles_are_null_until_constructed reads q with unknown bits in a two-state run",
+      "expectation": "Simulation",
+      "name": "covergroup::handles_are_null_until_constructed",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "covergroup::shallow_copy_has_no_embedded_covergroup at 101:26: assert_eq q: expected 0x7, got 0x5",
+      "expectation": "Simulation",
+      "name": "covergroup::shallow_copy_has_no_embedded_covergroup",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

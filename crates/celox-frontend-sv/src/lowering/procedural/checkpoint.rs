@@ -56,6 +56,7 @@ impl ProcModule<'_> {
                     calls: extern_calls,
                 },
             four_state: _,
+            no_covergroups: _,
             program: _,
             forceable: _,
             procedurally_forced: _,

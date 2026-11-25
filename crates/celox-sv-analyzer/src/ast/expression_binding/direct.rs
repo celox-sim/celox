@@ -1422,6 +1422,11 @@ fn scheduler_call(
     dimensions: &PackedDimensions,
 ) -> Converted<Option<Box<Expr>>> {
     if let Some(call) =
+        super::super::covergroups::value(tree, session, id, native, dimensions, false)?
+    {
+        return Ok(Some(Box::new(call)));
+    }
+    if let Some(call) =
         super::super::processes::value(tree, session, id, native, dimensions, false)?
     {
         return Ok(Some(Box::new(call)));

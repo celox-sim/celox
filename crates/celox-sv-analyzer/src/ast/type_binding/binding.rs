@@ -851,6 +851,11 @@ fn unresolved_type_name(
         }
         _ => return Ok(None),
     };
+    // A covergroup the analysis does not model is a type it cannot bind,
+    // which its uses report (IEEE 1800-2023 19.3).
+    if let Some(error) = super::super::covergroups::unmodelled(tree, name) {
+        return Err(error);
+    }
     if types::declares_type(declarations, name, at) {
         return Ok(None);
     }

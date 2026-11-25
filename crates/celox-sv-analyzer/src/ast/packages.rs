@@ -604,6 +604,18 @@ impl Packages {
         self.design.clone()
     }
 
+    /// Whether the state of a package, the initializers of its variables,
+    /// can construct a covergroup (see
+    /// [`crate::ir::Module::constructs_covergroup`]): of the modules
+    /// [`Self::specialized_state_modules`] gives.
+    pub fn states_construct_covergroups(&self, design: &Design) -> bool {
+        let specialized = design.foreign.states();
+        self.state_modules()
+            .filter(|module| !specialized.contains_key(module.name()))
+            .chain(specialized.values())
+            .any(crate::ir::Module::constructs_covergroup)
+    }
+
     pub fn specialized_state_modules(&self, design: &Design) -> Vec<crate::ir::Module> {
         let specialized = design.foreign.states();
         // Different compilation units may each have a state module named
@@ -1487,6 +1499,72 @@ mod tests {
         // specialization changes once more, however many others there are.
         assert_eq!(lowerings(12, false) - lowerings(2, false), 10);
         assert!(lowerings(12, true) - lowerings(2, true) > 10);
+    }
+
+    #[test]
+    fn classes_taken_over_keep_their_covergroup_constructors() {
+        // A class with an embedded covergroup that the analysis of the
+        // package for a specialization takes over, rather than lowers
+        // again, still brings the subroutine that constructs the covergroup
+        // to the module that constructs the class: the module is known to
+        // construct a covergroup, which `$get_coverage` depends on (IEEE
+        // 1800-2023 19.4, 19.11).
+        use crate::ast::procedural::{CLASS_LOWERINGS, LOWER_EVERY_CLASS};
+        let source = |embedded: bool| {
+            let class = if embedded {
+                "class K;
+                    covergroup cg; endgroup
+                    function new(); cg = new; endfunction
+                endclass"
+            } else {
+                ""
+            };
+            let user = if embedded {
+                "p::K k; initial begin k = new; k.cg.sample(); end"
+            } else {
+                ""
+            };
+            format!(
+                "package p;
+                    {class}
+                    class P #(type T = int); T v; function T get(); return v; endfunction endclass
+                endpackage
+                module Top;
+                    p::P#(bit) x;
+                    initial x = new;
+                    {user}
+                endmodule"
+            )
+        };
+        let analyzed = |embedded: bool, every: bool| {
+            LOWER_EVERY_CLASS.with(|flag| flag.set(every));
+            CLASS_LOWERINGS.with(|count| count.set(0));
+            let ir = crate::analyze_source(&source(embedded), std::path::Path::new("taken.sv"));
+            LOWER_EVERY_CLASS.with(|flag| flag.set(false));
+            let ir = ir.expect("the source analyzes");
+            (CLASS_LOWERINGS.with(|count| count.get()), ir)
+        };
+        // `K` is lowered once and taken over by the analysis of the package
+        // for `P#(bit)`; lowering every class lowers it there again.
+        let (taken, ir) = analyzed(true, false);
+        let (every, lowered) = analyzed(true, true);
+        assert_eq!(taken - analyzed(false, false).0, 1);
+        assert!(every - analyzed(false, true).0 > 1);
+        let constructors = |ir: &crate::Ir| {
+            let top = ir
+                .modules()
+                .iter()
+                .find(|module| module.name() == "Top")
+                .expect("module Top");
+            assert!(top.constructs_covergroup());
+            top.subroutines()
+                .iter()
+                .map(|subroutine| subroutine.name.clone())
+                .filter(|name| crate::ast::covergroup_constructor(name))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(constructors(&ir), ["$covergroup::class::p::K::cg::$new"]);
+        assert_eq!(constructors(&ir), constructors(&lowered));
     }
 
     #[test]

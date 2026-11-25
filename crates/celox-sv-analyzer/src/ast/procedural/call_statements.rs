@@ -10,6 +10,26 @@ impl BodyBuilder<'_, '_, '_> {
         root: celox_sv_syntax::ExprId,
     ) -> Result<Option<Stmt>, AnalyzerError> {
         let native = self.syntax().declarations();
+        // `sample` of a covergroup (IEEE 1800-2023 19.8), and the uses of
+        // its other predefined members as statements.
+        if let Some((name, mut args, arg_order)) =
+            covergroups::sample_statement(&self.tree, self.session, root, native, &self.dims)?
+        {
+            for arg in args.iter_mut().flatten() {
+                self.rename_expr(arg);
+            }
+            return Ok(Some(Stmt::Call {
+                name,
+                args,
+                arg_order,
+            }));
+        }
+        if let Some(mut call) =
+            covergroups::value(&self.tree, self.session, root, native, &self.dims, true)?
+        {
+            self.rename_expr(&mut call);
+            return Ok(Some(Stmt::Eval(call)));
+        }
         if let Some(mut call) =
             processes::value(&self.tree, self.session, root, native, &self.dims, true)?
         {
@@ -190,7 +210,7 @@ impl BodyBuilder<'_, '_, '_> {
             native,
             &self.dims,
         )? {
-            expression_binding::check_writable(&property, &self.dims)?;
+            expression_binding::check_writable(&property, &self.dims, &self.session.types)?;
             if nonblocking {
                 return Err(unsupported("nonblocking assignment to a class property"));
             }
@@ -470,17 +490,6 @@ impl BodyBuilder<'_, '_, '_> {
             _ => return Err(unsupported("system task or function name")),
         };
         let celox_sv_syntax::ExprKind::Name(name) = &declarations.expression(callee).kind else {
-            if let celox_sv_syntax::ExprKind::Member { expression, .. } =
-                &declarations.expression(callee).kind
-            {
-                expression_binding::objects::reject_covergroup(
-                    &self.tree,
-                    self.session,
-                    *expression,
-                    declarations,
-                    &self.dims,
-                )?;
-            }
             // `h.m();` of a class that declares no `m` (8.5).
             expression_binding::check_member_declared(
                 &self.tree,
@@ -814,8 +823,9 @@ impl BodyBuilder<'_, '_, '_> {
                 return Ok(vec![assertion_control::set(task == SystemTask::AssertOff)]);
             }
             // The coverage database tasks name a database Celox does not
-            // keep: with no coverage data they have no effect (40.3.2.7)
-            // but that of evaluating the name.
+            // keep: nothing is saved or loaded (19.9), which the source
+            // warns of (see `warnings::AnalyzerWarning::NoCoverageDatabase`),
+            // and the name is evaluated.
             system_functions::SystemCall::Task(
                 SystemTask::SetCoverageDbName | SystemTask::LoadCoverageDb,
             ) => {
