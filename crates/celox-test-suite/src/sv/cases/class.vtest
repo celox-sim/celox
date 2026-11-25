@@ -2746,6 +2746,54 @@ endmodule
   (top Top) (run_until 0) (assert_eq bad 0) (assert_eq done 1)
   (expect_output "0\n"))
 
+; Selects of an element of a packed array of several dimensions select
+; that element's bits (IEEE 1800-2023 7.4.5, 11.5.1): a bit, a part-select
+; and an indexed part-select of `p[2]`, of an element of an element of a
+; three-dimensional array, and of an element of an unpacked array of packed
+; arrays.
+(case constrained_randomize_selects_of_packed_elements
+  (source "packed_element_selects.sv" #"
+module Top(output int bad, output bit done);
+    class Elements;
+        rand bit [3:0][7:0] p;
+        rand bit [1:0][3:0][7:0] q;
+        rand bit [1:0][7:0] a[2];
+        constraint c {
+            p[2][3] == 1;
+            p[2][0] == 0;
+            p[3][7:4] == 4'h9;
+            p[0][2+:2] == 2'b10;
+            q[1][2][5] == 1;
+            q[1][2][4:0] == 0;
+            q[0][3] == 8'hc3;
+            a[1][0][3] == 1;
+            a[1][0][2:0] == 3'b101;
+        }
+    endclass
+    Elements e;
+    initial begin
+        bit [3:0][7:0] p;
+        bit [1:0][3:0][7:0] q;
+        bit [1:0][7:0] a1;
+        e = new;
+        for (int n = 0; n < 10; n++) begin
+            if (e.randomize() == 0) bad++;
+            p = e.p;
+            q = e.q;
+            a1 = e.a[1];
+            if (p[2][3] != 1 || p[2][0] != 0 || p[3][7:4] != 4'h9 || p[0][3:2] != 2'b10
+                || q[1][2][5] != 1 || q[1][2][4:0] != 0 || q[0][3] != 8'hc3
+                || a1[0][3] != 1 || a1[0][2:0] != 3'b101)
+                bad++;
+        end
+        $display("%0d", bad);
+        done = bad == 0;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq bad 0) (assert_eq done 1)
+  (expect_output "0\n"))
+
 ; `solve before` orders the choice of values (18.5.9): the solutions are
 ; the ones the other constraints allow.
 (case constrained_randomize_solve_before

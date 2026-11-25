@@ -293,6 +293,7 @@ test("every retained baseline accepts only its existing failures", () => {
                 "class::constrained_randomize_foreach",
                 "class::constrained_randomize_rand_arrays",
                 "class::constrained_randomize_rand_objects",
+                "class::constrained_randomize_selects_of_packed_elements",
                 "class::constrained_randomize_shifts",
                 "class::constrained_randomize_state_properties",
                 "class::container_type_aliases_of_classes",

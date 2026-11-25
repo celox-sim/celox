@@ -616,6 +616,17 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:7: sorry: Constraint declarations not supported.\n",
+      "expectation": "Simulation",
+      "name": "class::constrained_randomize_selects_of_packed_elements",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:6: sorry: Constraint declarations not supported.\n<case>/source_0.sv:12: sorry: Constraint declarations not supported.\n",
       "expectation": "Simulation",
       "name": "class::constrained_randomize_shifts",

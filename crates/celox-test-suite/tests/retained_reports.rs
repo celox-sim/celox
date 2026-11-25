@@ -1405,6 +1405,11 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "compile",
                             "Unable to resolve unequal strength specifier",
                         ),
+                        ("icarus", "class::constrained_randomize_selects_of_packed_elements") => (
+                            "compile_error",
+                            "compile",
+                            "Constraint declarations not supported",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }
