@@ -645,6 +645,16 @@ fn element_at(
 /// of an unpacked array it selects, as `a[0]` (see
 /// [`expression_types::select`]).
 #[allow(clippy::too_many_arguments)]
+/// Whether `id` is a part-select, which no select follows (IEEE 1800-2023
+/// A.8.4: bit-selects come first, and one part-select may close them).
+fn part_selected(id: ExprId, native: &celox_sv_syntax::Declarations) -> bool {
+    matches!(
+        &native.expression(expression_binding::ungroup(id, native)).kind,
+        ExprKind::Select { dimension, .. }
+            if !matches!(dimension.kind, celox_sv_syntax::DimensionKind::Index(_))
+    )
+}
+
 fn select_operand_type(
     id: ExprId,
     tree: &AnalysisContext<'_>,
@@ -672,11 +682,20 @@ fn select_operand_type(
             inputs,
             loops,
         )?;
-        // A select of a select of a vector stays unsupported.
-        if !matches!(
-            session.types.data(base),
-            semantic_types::TyData::Array { .. }
-        ) {
+        // An element of an unpacked array, or of a packed array of several
+        // dimensions, whose selects are those of its element type (IEEE
+        // 1800-2023 7.4.5). A bit of a vector selects no further.
+        if part_selected(*expression, native) {
+            return None;
+        }
+        let packed_array = semantic_types::packed_bounds_of(&session.types, base)
+            .is_some_and(|bounds| bounds.len() > 1);
+        if !packed_array
+            && !matches!(
+                session.types.data(base),
+                semantic_types::TyData::Array { .. }
+            )
+        {
             return None;
         }
         let dimensions = PackedDimensions::new(HashMap::default(), env, &TypeAliases::default());
@@ -2452,10 +2471,11 @@ pub(in crate::ast) fn bind_inputs(
             ExprKind::Select {
                 expression: operand,
                 dimension,
-            } if select_operand_type(
-                *operand, tree, session, properties, names, env, inputs, loops,
-            )
-            .is_some() =>
+            } if !part_selected(*operand, native)
+                && select_operand_type(
+                    *operand, tree, session, properties, names, env, inputs, loops,
+                )
+                .is_some() =>
             {
                 let ty = select_operand_type(
                     *operand, tree, session, properties, names, env, inputs, loops,
