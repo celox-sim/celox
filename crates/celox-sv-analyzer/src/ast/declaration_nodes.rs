@@ -472,7 +472,18 @@ impl Instance {
             port_names,
             port_connections,
             array_range,
+            interface_actuals: Vec::new(),
         }
+    }
+
+    pub(super) fn with_interface_actuals(mut self, actuals: Vec<(String, String)>) -> Self {
+        self.interface_actuals = actuals;
+        self
+    }
+
+    /// See [`crate::ir::Instance::interface_actuals`].
+    pub fn interface_actuals(&self) -> &[(String, String)] {
+        &self.interface_actuals
     }
 
     pub fn array_len(&self) -> Option<usize> {

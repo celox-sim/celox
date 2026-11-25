@@ -764,7 +764,8 @@
         "interfaces::overrides_body_parameters_and_drives_members_from_imported_functions",
         "interfaces::reads_undriven_interface_members_as_unknown",
         "interfaces::rewrites_nested_references_and_keeps_declaration_functions",
-        "interfaces::runs_interface_processes_once_per_array_element"
+        "interfaces::runs_interface_processes_once_per_array_element",
+        "string_format::scope_name_of_port_imported_functions"
       ]
     }
   },
@@ -2100,7 +2101,8 @@
         "class::casts_from_interface_class_handles",
         "class::typedefs_of_interface_classes",
         "class::classes_of_packages",
-        "class::module_class_overrides_across_base_layouts"
+        "class::module_class_overrides_across_base_layouts",
+        "string_format::scope_name_of_module_class_overrides"
       ]
     }
   },
@@ -2220,7 +2222,8 @@
         "class::derived_classes_keep_their_declaration_scopes",
         "class::method_defaults_use_the_object",
         "property_selects::property_selects_of_parameterized_classes",
-        "wide_container_elements::wide_elements_of_parameterized_classes"
+        "wide_container_elements::wide_elements_of_parameterized_classes",
+        "class::module_class_bases_per_specialization"
       ]
     }
   },
@@ -5120,6 +5123,22 @@
     "cases": {
       "icarus": [
         "containers::ordering_fixed_package_variables"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_module_class_instance_scope",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.054",
+    "reason": "Verilator 5.054 names the method of a class declared in a module by the module's first instance for the objects of every instance: `%m` in the override prints `.m0.C.f` for the object created in `m1` too. IEEE 1800-2023 21.2.1.5 makes `%m` print the hierarchical name of the subroutine that invokes the task, here the method of the class that instance `m1` declares. Celox prints `.m0.` and `.m1.`.",
+    "upstream": [],
+    "evidence": [
+      "src/sv/cases/string_format.vtest"
+    ],
+    "cases": {
+      "verilator": [
+        "string_format::scope_name_of_module_class_overrides"
       ]
     }
   }
