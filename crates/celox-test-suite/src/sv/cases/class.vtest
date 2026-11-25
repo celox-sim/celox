@@ -7186,3 +7186,46 @@ endmodule
 "#)
   (top Top) (run_until 2) (assert_eq done 1)
   (expect_output "11 22\n"))
+
+; IEEE 1800-2023 8.25: each specialization of a module declares its own
+; class, whose base is the specialization of the package class its
+; parameter names. A handle of each converts to that base, is passed as it,
+; and casts back, in every specialization.
+(case module_class_bases_per_specialization
+  (source "module_class_bases.sv" #"
+package p;
+    virtual class B3 #(int W = 1);
+        bit [W-1:0] pad;
+        pure virtual function int g(int x);
+    endclass
+endpackage
+module m #(int W = 1);
+    class C extends p::B3#(W);
+        virtual function int g(int x); return x + W + $bits(pad); endfunction
+    endclass
+    p::B3#(W) h;
+    int r1, r2, r3;
+    function automatic int use_base(p::B3#(W) b); return b.g(1); endfunction
+    initial begin
+        C c = new;
+        C back;
+        h = c;
+        r1 = h.g(1);
+        r2 = use_base(c);
+        r3 = $cast(back, h) ? back.g(2) : -1;
+    end
+endmodule
+module Top(output bit done);
+    m #(4) m0 ();
+    m #(8) m1 ();
+    m #(4) m2 ();
+    initial begin
+        #1;
+        $display("%0d %0d %0d|%0d %0d %0d|%0d %0d %0d",
+            m0.r1, m0.r2, m0.r3, m1.r1, m1.r2, m1.r3, m2.r1, m2.r2, m2.r3);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 2) (assert_eq done 1)
+  (expect_output "9 9 10|17 17 18|9 9 10\n"))
