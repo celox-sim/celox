@@ -55,7 +55,7 @@ impl BodyBuilder<'_, '_, '_> {
         let Some(shape) = self.dims.get(&array) else {
             return Ok(None);
         };
-        if separator != "." || shape.container.is_some() || shape.unpacked.len() != 1 {
+        if separator != "." || shape.container().is_some() || shape.unpacked.len() != 1 {
             return Ok(None);
         }
         let Some(declared) = type_names::declared_type(shape).cloned() else {

@@ -162,7 +162,7 @@ pub(in crate::ast) fn initial_processes_from_scope(
                         }) else {
                             continue;
                         };
-                        if !shape.unpacked.is_empty() || shape.container.is_some() {
+                        if !shape.unpacked.is_empty() || shape.container().is_some() {
                             return Err(unsupported("array of named events"));
                         }
                     }

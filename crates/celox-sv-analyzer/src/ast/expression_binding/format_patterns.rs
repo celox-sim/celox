@@ -176,7 +176,7 @@ pub(in crate::ast) fn pattern(
         }
         if !element.members.is_empty()
             || container.element_is_unpacked_struct(&session.types)
-            || element.container.is_some()
+            || element.container().is_some()
             || !element.unpacked_ranges.is_empty()
         {
             return Err(unsupported("%p of a container of aggregate elements"));
@@ -230,7 +230,7 @@ pub(in crate::ast) fn pattern(
             }
             if !element.members.is_empty()
                 || container.element_is_unpacked_struct(&session.types)
-                || element.container.is_some()
+                || element.container().is_some()
                 || !element.unpacked_ranges.is_empty()
             {
                 return Err(unsupported("%p of a structure or unpacked array"));
@@ -334,13 +334,13 @@ pub(in crate::ast) fn aggregate_text(
             Element::Structure(aggregate.clone())
         } else if let Some(domain) = &enumeration.domain
             && element.unpacked_ranges.is_empty()
-            && element.container.is_none()
+            && element.container().is_none()
         {
             Element::Enum(domain.clone())
         } else if container.key_enumeration(&session.types).domain.is_some()
             && element.members.is_empty()
             && element.unpacked_ranges.is_empty()
-            && element.container.is_none()
+            && element.container().is_none()
             && container.element_class(&session.types).is_none()
             && !enumeration.packed
             && matches!(
@@ -673,7 +673,7 @@ impl Text {
             let ty = &member.r#type;
             if let Some(domain) = ty.enum_domain()
                 && ty.unpacked_ranges.is_empty()
-                && ty.container.is_none()
+                && ty.container().is_none()
             {
                 // A member of a pattern may be any expression.
                 if !rereadable(&leaf) {
@@ -691,7 +691,7 @@ impl Text {
                     "%p of a structure with a packed structure member",
                 ));
             }
-            if ty.container.is_some()
+            if ty.container().is_some()
                 || !ty.unpacked_ranges.is_empty()
                 || ty.is_chandle()
                 || matches!(

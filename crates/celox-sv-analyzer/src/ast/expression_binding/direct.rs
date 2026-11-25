@@ -791,7 +791,7 @@ fn check_written_container(
             .subroutine_param_shapes
             .get(name)
             .and_then(|shapes| shapes.get(position))
-            .and_then(|shape| shape.container.as_deref())
+            .and_then(|shape| shape.container().map(|c| &**c))
     {
         containers::check_written_actual(
             actual,
@@ -1492,7 +1492,7 @@ fn selected_container_element(
             )
             && let Some((found, _)) = objects::property(tree, session, base, native, dimensions)?
         {
-            property = Some(found.storage.or_else(|| found.r#type.container.clone()));
+            property = Some(found.storage.or_else(|| found.r#type.container().cloned()));
             break;
         }
         match &native.expression(base).kind {
@@ -1523,13 +1523,13 @@ fn selected_container_element(
             else {
                 return Ok(None);
             };
-            let Some(container) = shape.container.as_deref() else {
+            let Some(container) = shape.container().map(|c| &**c) else {
                 return Ok(None);
             };
             (container, shape.unpacked.len() + 1)
         }
     };
-    while let Some(inner) = container.element.container.as_deref() {
+    while let Some(inner) = container.element.container().map(|c| &**c) {
         container = inner;
         levels += 1;
     }
@@ -1580,7 +1580,7 @@ pub(in crate::ast) fn property_member_base(
                     objects::property(tree, session, inner, native, dimensions)?
                 {
                     let packed = property.field.handle.is_none()
-                        && property.r#type.container.is_none()
+                        && property.r#type.container().is_none()
                         && !property.r#type.members.is_empty()
                         && match property.r#type.packed_ranges() {
                             [range] => {

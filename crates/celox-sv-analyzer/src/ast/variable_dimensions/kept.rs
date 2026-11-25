@@ -235,7 +235,16 @@ impl Type {
     /// (7.4.2). The field only comes to agree with the semantic type, so
     /// the type keeps its binding.
     pub(in crate::ast) fn keep_container(&mut self, container: Option<Arc<ContainerType>>) {
-        Arc::make_mut(&mut self.shape).container = container.clone();
+        // A shape shared with other types is copied only when the field
+        // changes.
+        let same = match (&self.shape.container, &container) {
+            (Some(field), Some(container)) => Arc::ptr_eq(field, container),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            Arc::make_mut(&mut self.shape).container = container.clone();
+        }
         self.kept_container = KeptContainer(container);
     }
 }

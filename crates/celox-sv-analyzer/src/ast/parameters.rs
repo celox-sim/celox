@@ -3126,7 +3126,7 @@ pub(super) fn native_constant_type(
         };
         type_binding::bind(data_type, tree, session, dims).ok()??
     };
-    if ty.container.is_some()
+    if ty.container().is_some()
         || !ty.unpacked_ranges.is_empty()
         || ty.is_unpacked_struct_in(&session.types)
     {

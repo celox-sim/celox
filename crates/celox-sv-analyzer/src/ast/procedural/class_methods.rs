@@ -265,7 +265,7 @@ impl BodyBuilder<'_, '_, '_> {
                 }
                 continue;
             };
-            if let Some(container) = property.r#type.container.as_deref() {
+            if let Some(container) = property.r#type.container().map(|c| &**c) {
                 let mut value = containers::assignment(
                     initializer,
                     &self.tree,

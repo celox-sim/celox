@@ -857,7 +857,7 @@ pub(super) fn type_with_unpacked_ranges(
     // An array of queues, dynamic or associative arrays declared through a
     // typedef has no lowering yet; `int a [2][$]` is rejected as it is
     // parsed.
-    if r#type.container.is_some() && !ranges.is_empty() {
+    if r#type.container().is_some() && !ranges.is_empty() {
         return Err(AnalyzerError::Unsupported(
             "fixed-size unpacked array of dynamically sized arrays".into(),
         ));

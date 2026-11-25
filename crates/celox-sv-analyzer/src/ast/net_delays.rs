@@ -62,7 +62,7 @@ pub(super) fn lower(
             || shape.real
             || shape.class_in(table).is_some()
             || shape.chandle
-            || shape.container.is_some()
+            || shape.container().is_some()
             || !shape.unpacked.is_empty()
             || shape.is_unpacked_struct_in(table)
         {

@@ -92,7 +92,7 @@ impl VariableDimensions {
             ..self.clone_shape()
         });
         // A container's elements are not those of the subarray.
-        if self.shape.container.is_none() {
+        if self.container().is_none() {
             subarray.element = self.element.clone();
             subarray.keep_enumeration(self.enumeration.binding());
         }
@@ -195,6 +195,18 @@ impl VariableDimensions {
         self.kept_container.declaration()
     }
 
+    /// [`Self::container_declaration`], checked against the field in debug
+    /// builds.
+    pub(in crate::ast) fn container(&self) -> Option<&Arc<ContainerType>> {
+        let kept = self.kept_container.declaration();
+        debug_assert_eq!(
+            kept.map(|container| &**container),
+            self.shape.container.as_deref(),
+            "the container a shape keeps is not that of its field: {self:?}"
+        );
+        kept
+    }
+
     /// The declaration of the unpacked structure type the variable is, or
     /// whose elements it has, as the variable keeps it.
     pub(super) fn structure_declaration(&self) -> Option<&Arc<unpacked_structs::UnpackedStruct>> {
@@ -281,7 +293,7 @@ impl VariableDimensions {
                 _ => return false,
             }
         }
-        match (&self.shape.container, table.data(id)) {
+        match (self.container(), table.data(id)) {
             // A fixed-size array class property, held in a container, is of
             // the fixed-size array type.
             (Some(container), _) if container.fixed.is_some() => true,
@@ -539,7 +551,7 @@ impl VariableShape {
 /// literal (see [`VariableShape::is_closed`]).
 pub(super) fn type_is_closed(ty: &Type) -> bool {
     ty.enumeration().is_none()
-        && ty.container.is_none()
+        && ty.container().is_none()
         && ty.unpacked_struct().is_none()
         && ty
             .packed_ranges

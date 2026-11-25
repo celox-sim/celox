@@ -113,7 +113,7 @@ pub(super) fn ports_from_scope(
             &mut ty,
             const_env,
         );
-        if ty.container.is_some() {
+        if ty.container().is_some() {
             return Err(unsupported("dynamic container port"));
         }
         if ty.kind() == TypeKind::Event {

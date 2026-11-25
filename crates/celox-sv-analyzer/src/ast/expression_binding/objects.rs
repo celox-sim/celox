@@ -2011,7 +2011,7 @@ fn scope_randomize_with(
                     || variable.chandle
                     || !variable.randomizable
                     || variable.class_in(&session.types).is_some()
-                    || variable.container.is_some()
+                    || variable.container().is_some()
                     || !variable.unpacked.is_empty()
                     || variable.enumeration_in(&session.types).enumeration
                 {
