@@ -1572,3 +1572,21 @@ fn repeat_counts_are_evaluated_once() {
         assert_eq!(displayed, ["3 2 3 4 5"], "four_state={four_state}");
     }
 }
+
+#[test]
+fn casez_and_casex_on_real_values_are_rejected() {
+    for body in [
+        "real r; int x; initial casez (r) 1.0: x = 1; default: x = 2; endcase",
+        "real r; int x; always_comb casex (r) 1.0: x = 1; default: x = 2; endcase",
+    ] {
+        let source = format!("module Top; {body} endmodule");
+        let error =
+            celox::Simulation::from_sv_sources(vec![(&source, Path::new("real_casez.sv"))], "Top")
+                .build_cranelift()
+                .expect_err("casez on a real value was accepted");
+        assert!(
+            error.to_string().contains("casez or casex on a real value"),
+            "{body}: {error}"
+        );
+    }
+}
