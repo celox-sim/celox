@@ -363,9 +363,15 @@ impl BodyBuilder<'_, '_, '_> {
                                                 Vec::new(),
                                             ),
                                         ),
-                                        assign(armed, Expr::Literal("1'b1".into())),
+                                        assign(armed.clone(), Expr::Literal("1'b1".into())),
                                     ],
                                 );
+                                // A branch that runs to its end disarms
+                                // itself, as a killed one is disarmed by
+                                // the `disable` that killed it: a later
+                                // `disable` of its name must not meet the
+                                // stale handle of a completed activation.
+                                branches[branch].push(assign(armed, Expr::Literal("1'b0".into())));
                             }
                             branch += 1;
                         }

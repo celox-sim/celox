@@ -494,6 +494,43 @@ pub(in crate::ast) fn random_state_may_change<'a>(
     })
 }
 
+/// Whether some process that runs a block as a branch names its own
+/// process, in or around the branch, directly or through a subroutine:
+/// another process can then suspend, resume or await that handle, which
+/// names the process around the branch, not the branch itself, so the
+/// block would keep running (9.6.2, 9.7).
+pub(in crate::ast) fn own_process_may_be_named<'a>(
+    disables: &ExternalDisables,
+    bodies: impl Iterator<Item = &'a [Stmt]>,
+    needs: &HashSet<String>,
+) -> bool {
+    bodies.into_iter().any(|body| {
+        let mut present = false;
+        let mut named = false;
+        for stmt in body {
+            stmt.walk(&mut |stmt| {
+                present |= branch_label(stmt, disables)
+                    .is_some_and(|label| disables.targets.contains(&label));
+            });
+            let mut target_asks = false;
+            let mut called = Vec::new();
+            let mut named_calls = Vec::new();
+            stmt.visit(
+                &mut |expr| named |= calls_self_handle(expr),
+                &mut |lvalue| {
+                    let mut calls = Vec::new();
+                    lvalue_effects(lvalue, &mut target_asks, &mut calls);
+                    called.extend(calls);
+                },
+                &mut |name| named_calls.push(name.to_string()),
+            );
+            called.extend(named_calls);
+            named |= target_asks || called.iter().any(|name| needs.contains(name));
+        }
+        present && named
+    })
+}
+
 /// The calls in an assignment target: its selectors and, for a class or
 /// container place, the expressions that name the place. `Stmt::visit`
 /// passes a target to its lvalue callback, not its expression one.
@@ -1159,6 +1196,20 @@ mod tests {
             !format!("{:?}", ir.modules()[0]).contains("disable%"),
             "no statement keeps the branch's variables"
         );
+    }
+
+    #[test]
+    fn a_process_that_names_itself_keeps_its_blocks() {
+        // Another process could suspend the saved handle while the
+        // block runs; as a branch it would keep running.
+        let error = analyze(
+            "module Top; process p; bit done; \
+             initial begin p = process::self(); \
+             begin : work #5; done = 1; end end \
+             initial #1 disable work; endmodule",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("disable statement"), "{error}");
     }
 
     #[test]

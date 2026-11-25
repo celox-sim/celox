@@ -156,6 +156,23 @@ impl ScopeElaboration<'_> {
                     ),
                 &spawns_detached,
             )
+            || procedural::external_disables::own_process_may_be_named(
+                &disables,
+                self.comb_processes
+                    .iter()
+                    .map(|process| process.body.as_slice())
+                    .chain(
+                        self.ff_processes
+                            .iter()
+                            .map(|process| process.body.as_slice()),
+                    )
+                    .chain(
+                        self.initial_processes
+                            .iter()
+                            .map(|process| process.body.as_slice()),
+                    ),
+                &needs_their_process,
+            )
             || procedural::external_disables::random_state_may_change(
                 &disables,
                 self.comb_processes
