@@ -2031,3 +2031,24 @@ endmodule
   (assert_eq variable_count 1)
   (assert_eq bound_count 2)
   (assert_eq break_count 3))
+
+; IEEE 1800-2023 26.3: a wildcard import makes candidates only for the
+; references after it. The initializer of a module variable before a later
+; wildcard import of another package that declares the name binds the
+; declaration of the import before it.
+(case wildcard_import_after_a_variable_initializer
+  (source "import_after_initializer.sv" #"
+package pf; function automatic int f(); return 10; endfunction endpackage
+package qf; function automatic int f(); return 20; endfunction endpackage
+module Top(output bit done);
+    import pf::*;
+    int x = f();
+    import qf::*;
+    initial begin
+        $display("%0d", x);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "10\n"))
