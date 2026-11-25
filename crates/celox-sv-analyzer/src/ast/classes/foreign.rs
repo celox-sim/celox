@@ -15,6 +15,8 @@ struct Request {
     generic: String,
     arguments: BoundArguments,
     name: Option<String>,
+    /// Whether an analysis of the package has been made for the request.
+    built: bool,
 }
 
 /// Bound declarations inherited from a class, excluding its enclosing package.
@@ -286,16 +288,53 @@ pub(in crate::ast) fn request(
                     generic: generic.into(),
                     arguments,
                     name: None,
+                    built: false,
                 });
                 registry.complete.remove(&owner_name);
                 requests.len() - 1
             }
         }
     };
-    if session.foreign.requests[&owner_name][index].name.is_none() {
+    let request = &session.foreign.requests[&owner_name][index];
+    if request.name.is_none() {
+        // A scope analysis that makes the requests when it ends analyzes
+        // the package once for all those it makes (see `build_requested`);
+        // until then the specialization has no name.
+        if session.foreign_requests_wait && !request.built {
+            return Ok(None);
+        }
         build(session, &owner_name, None)?;
     }
     Ok(session.foreign.requests[&owner_name][index].name.clone())
+}
+
+/// Analyzes each package that scopes asked for specializations no
+/// analysis of it has made yet, once for all of them, as [`request`] would
+/// for each. Returns whether there was one, and the scope that asked is to
+/// be analyzed again.
+pub(in crate::ast) fn build_requested(session: &mut Session) -> bool {
+    let registry = &session.foreign;
+    let mut names = registry
+        .requests
+        .iter()
+        .filter(|(name, requests)| {
+            !registry.active.contains(*name) && requests.iter().any(|request| !request.built)
+        })
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    names.sort();
+    for name in &names {
+        if build(session, name, None).is_err() {
+            // The request makes the error where the scope asks for the
+            // specialization again, as it would have without waiting.
+            let registry = &mut session.foreign;
+            for request in registry.requests.get_mut(name).into_iter().flatten() {
+                request.built = true;
+            }
+            registry.revision += 1;
+        }
+    }
+    !names.is_empty()
 }
 
 fn build(session: &mut Session, name: &str, caller: Option<&ScopeSymbols>) -> Converted<()> {
@@ -337,6 +376,7 @@ fn build_inner(session: &mut Session, name: &str, caller: Option<&ScopeSymbols>)
     let table = &mut session.types;
     let registry = &mut session.foreign;
     for request in registry.requests.get_mut(name).unwrap() {
+        request.built = true;
         if let Some((_, _, bound)) = scope.foreign_names.iter().find(|(generic, arguments, _)| {
             generic == &request.generic && arguments.same(&request.arguments, table)
         }) {

@@ -1626,6 +1626,41 @@ mod tests {
     }
 
     #[test]
+    fn foreign_requests_of_a_scope_share_an_analysis_of_the_package() {
+        // A scope that asks for several specializations of the class
+        // templates of a package has the package analyzed for all of them
+        // at once, not once more for each (IEEE 1800-2023 8.25).
+        let analyses = |count: usize| {
+            let classes = (0..count)
+                .map(|i| format!("class U{i}; int v = {i}; endclass\n"))
+                .collect::<String>();
+            let handles = (0..count)
+                .map(|i| format!("p::C#(U{i}) c{i};\n"))
+                .collect::<String>();
+            let sum = (0..count)
+                .map(|i| format!(" + c{i}.get()"))
+                .collect::<String>();
+            let construct = (0..count)
+                .map(|i| format!("c{i} = new; "))
+                .collect::<String>();
+            scope_analyses(&format!(
+                "package p;
+                    class C #(type T = int);
+                        T t;
+                        function int get(); t = new; return t.v; endfunction
+                    endclass
+                endpackage
+                {classes}
+                module Top(output int o);
+                    {handles}
+                    initial begin {construct} o = 0{sum}; end
+                endmodule"
+            ))
+        };
+        assert_eq!(analyses(6), analyses(1));
+    }
+
+    #[test]
     fn hidden_self_qualified_names_need_a_second_analysis() {
         // A declaration around the reference that gives the name to
         // something else hides the item from the plain name, not from the
