@@ -5,8 +5,7 @@
 //! together with the spelling that names it, and only
 //! [`Type::keep_structure`] and [`VariableDimensions::keep_structure`] the
 //! structure. The container type (7.5, 7.10, 7.8) only
-//! [`Type::keep_container`] and [`VariableDimensions::keep_container`] set,
-//! together with the field that tells it.
+//! [`Type::keep_container`] and [`VariableDimensions::keep_container`] set.
 use super::*;
 use semantic_types::{EnumBinding, EnumDeclaration};
 use unpacked_structs::UnpackedStruct;
@@ -30,7 +29,7 @@ impl KeptContainer {
     }
 
     /// Forget the container type, as the shape of its holder changes in a
-    /// way that may change its type. The field stays: it tells the shape.
+    /// way that may change its type.
     pub(in crate::ast) fn forget(&mut self) {
         self.0 = None;
     }
@@ -230,21 +229,9 @@ impl Type {
         self.structure = KeptStructure(aggregate);
     }
 
-    /// Keep the container type `container`, or none, with the field that
-    /// tells it: the type is it or a fixed-size unpacked array of it
-    /// (7.4.2). The field only comes to agree with the semantic type, so
-    /// the type keeps its binding.
+    /// Keep the container type `container`, or none: the type is it or a
+    /// fixed-size unpacked array of it (7.4.2).
     pub(in crate::ast) fn keep_container(&mut self, container: Option<Arc<ContainerType>>) {
-        // A shape shared with other types is copied only when the field
-        // changes.
-        let same = match (&self.shape.container, &container) {
-            (Some(field), Some(container)) => Arc::ptr_eq(field, container),
-            (None, None) => true,
-            _ => false,
-        };
-        if !same {
-            Arc::make_mut(&mut self.shape).container = container.clone();
-        }
         self.kept_container = KeptContainer(container);
     }
 }
@@ -265,16 +252,18 @@ impl VariableDimensions {
     pub(in crate::ast) fn derived(&self, shape: VariableShape) -> VariableDimensions {
         let mut derived = VariableDimensions::new(shape);
         derived.keep_structure(self.structure.binding());
-        // The container type stays while the derived shape still has it.
-        if let Some(container) = self.kept_container.declaration()
-            && derived
-                .shape
-                .container
-                .as_ref()
-                .is_some_and(|field| **field == **container)
-        {
-            derived.keep_container(Some(container.clone()));
-        }
+        derived
+    }
+
+    /// [`Self::derived`] for a shape of the same container type as this
+    /// one, such as the place of a member of a union: it keeps the
+    /// container this shape keeps too.
+    pub(in crate::ast) fn derived_keeping_container(
+        &self,
+        shape: VariableShape,
+    ) -> VariableDimensions {
+        let mut derived = self.derived(shape);
+        derived.keep_container(self.kept_container.binding());
         derived
     }
 
@@ -284,10 +273,9 @@ impl VariableDimensions {
         self.structure = KeptStructure(aggregate);
     }
 
-    /// Keep the container type `container`, or none, with the field that
-    /// tells it, as [`Type::keep_container`] does.
+    /// Keep the container type `container`, or none, as
+    /// [`Type::keep_container`] does.
     pub(in crate::ast) fn keep_container(&mut self, container: Option<Arc<ContainerType>>) {
-        self.shape.container = container.clone();
         self.kept_container = KeptContainer(container);
     }
 }

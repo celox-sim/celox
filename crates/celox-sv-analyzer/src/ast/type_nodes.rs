@@ -11,7 +11,6 @@ impl Type {
             unpacked_ranges: Vec::new(),
             members: Vec::new(),
             signed_element_depth: None,
-            container: None,
             spelling: type_names::Spelling::default(),
         })
     }
@@ -24,7 +23,6 @@ impl Type {
             unpacked_ranges: Vec::new(),
             members: Vec::new(),
             signed_element_depth: None,
-            container: None,
             spelling: type_names::Spelling::default(),
         })
     }
@@ -90,13 +88,7 @@ impl Type {
     /// whose elements a fixed-size unpacked array of it has (7.4.2), as the
     /// type keeps it.
     pub(in crate::ast) fn container(&self) -> Option<&Arc<ContainerType>> {
-        let kept = self.kept_container.declaration();
-        debug_assert_eq!(
-            kept.map(|container| &**container),
-            self.shape.container.as_deref(),
-            "the container a type keeps is not that of its field: {self:?}"
-        );
-        kept
+        self.kept_container.declaration()
     }
 
     pub(crate) fn structure_identity(&self) -> Option<&str> {
@@ -248,7 +240,8 @@ impl Type {
             *range = UnpackedRange::new(literal(left), literal(right));
         }
         if let Some(container) = self.container() {
-            shape.container = Some(Arc::new(ContainerType {
+            // The type keeps its container, with the bounds resolved.
+            resolved.keep_container(Some(Arc::new(ContainerType {
                 key: match &container.key {
                     Some(key) => Some(key.with_resolved_container_bounds(eval)?),
                     None => None,
@@ -260,10 +253,7 @@ impl Type {
                 // The bounds take their values where the type is declared:
                 // the container type stays the same.
                 binding: container.binding.clone(),
-            }));
-            // The type keeps its container, with the bounds resolved.
-            let container = resolved.container.clone();
-            resolved.keep_container(container);
+            })));
         }
         Some(resolved)
     }

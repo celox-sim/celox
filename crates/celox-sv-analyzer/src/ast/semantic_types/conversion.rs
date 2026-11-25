@@ -129,7 +129,7 @@ fn convert(
     let parts = Parts {
         bound_element: ty.element.get(table),
         bound_enumeration: ty.enumeration.declaration(),
-        container: kept_container(ty.kept_container.declaration(), ty.container.as_ref()),
+        container: ty.kept_container.declaration(),
         unpacked_struct: ty.structure.declaration(),
         kind: ty.kind,
         members: &ty.members,
@@ -182,7 +182,7 @@ pub(in crate::ast) fn of_shape(
             .element_type(table)
             .map(|element| table.without_keyword(element)),
         bound_enumeration: shape.enumeration_declaration(),
-        container: kept_container(shape.container_declaration(), shape.container.as_ref()),
+        container: shape.container_declaration(),
         unpacked_struct: shape.structure_declaration(),
         kind,
         members: &shape.members,
@@ -205,24 +205,6 @@ pub(in crate::ast) fn of_shape(
         .iter()
         .map(|dimension| (&dimension.left, &dimension.right));
     parts.intern(table, functions, env, unpacked)
-}
-
-/// The container type (IEEE 1800-2023 7.5, 7.10, 7.8) a type is, or whose
-/// elements it has: the one it keeps, which debug builds check against the
-/// field, or else the field.
-fn kept_container<'a>(
-    kept: Option<&'a Arc<ContainerType>>,
-    field: Option<&'a Arc<ContainerType>>,
-) -> Option<&'a Arc<ContainerType>> {
-    let Some(kept) = kept else {
-        return field;
-    };
-    debug_assert_eq!(
-        Some(&**kept),
-        field.map(|container| &**container),
-        "the container a type keeps is not that of its field"
-    );
-    Some(kept)
 }
 
 /// What a type is made of, from a [`Type`] or a [`VariableDimensions`].
