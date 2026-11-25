@@ -3257,7 +3257,7 @@ impl InterfaceDecl {
             },
             native::BodyItemKind::Covergroup(_) => {
                 return Err(unsupported(format!(
-                    "task, class, or verification declaration in interface `{}`",
+                    "covergroup declared in an interface (`{}`; IEEE 1800-2023 19.3)",
                     self.name
                 )));
             }

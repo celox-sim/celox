@@ -889,6 +889,15 @@ fn schedule_sources_collecting(
     // Level-sensitive always blocks in a static combinational loop may
     // converge as event processes. Demote the participating blocks and retry;
     // the runtime then evaluates convergence using their authored sensitivity.
+    // Whether any module or package of the design can construct a
+    // covergroup: read from the analyses, whose subroutine lists hold a
+    // constructor wherever one can be called (see
+    // `sv::ir::Module::constructs_covergroup`).
+    let no_covergroups = !constructs_covergroups(
+        discovery_analyses.values().chain(analyses.values()),
+        &analyzed[&top].packages,
+        &design,
+    );
     let no_demotions = HashSet::default();
     let mut demoted: HashMap<ModuleId, HashSet<usize>> = HashMap::default();
     let mut trace = trace;
@@ -945,6 +954,7 @@ fn schedule_sources_collecting(
                         foreign_references: foreign_references
                             .get(&module_id)
                             .unwrap_or(&no_foreign_references),
+                        no_covergroups,
                     },
                 },
                 discovery_analysis,
@@ -1287,6 +1297,21 @@ fn demote_level_lists(
         }
     }
     changed
+}
+
+/// Whether a module of `analyses` or the state of a package of `packages`
+/// can construct a covergroup (IEEE 1800-2023 19.3). A design in which none
+/// can has no covergroup instance.
+pub(super) fn constructs_covergroups<'a>(
+    mut analyses: impl Iterator<Item = &'a sv::ir::Ir>,
+    packages: &sv::Packages,
+    design: &sv::Design,
+) -> bool {
+    analyses.any(|ir| {
+        ir.modules()
+            .iter()
+            .any(sv::ir::Module::constructs_covergroup)
+    }) || packages.states_construct_covergroups(design)
 }
 
 /// The overrides that the module classes of `analyses` export (see

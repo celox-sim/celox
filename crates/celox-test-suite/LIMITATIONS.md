@@ -1763,6 +1763,38 @@ local with elements missing (`sv_container_returns_in_instance_functions`, see
 the [probe](verification/repros/sv_container_returns_in_instance_functions_xezim.json)).
 No assertions or exclusions are weakened.
 
+### Covergroups
+
+The 5 `covergroup::*` cases check what IEEE 1800-2023 fixes of a covergroup
+without items: a variable of a covergroup type holds a handle or `null`
+(19.3), `new` and `sample` take the arguments of the covergroup and of its
+sample method, by position, by name and by default (19.3, 19.8.1), each
+element of an array holds its own instance, an embedded covergroup is
+constructed by the `new` method of its class (19.4), and a shallow copy has
+none (8.12). Celox passes all of them on every backend. No coverage value is
+compared: the coverage of a covergroup without items is a zero-denominator
+case the tools need not agree on.
+
+Verilator 5.054 passes the four cases that construct and sample, and keeps
+the embedded covergroup in a shallow copy
+(`covergroup::shallow_copy_has_no_embedded_covergroup` reads the handle of the
+copy as not `null`), where 8.12 gives the new object a `null` handle. xezim
+0.11.4 keeps it too, and compares a covergroup variable that nothing assigned
+with `null` as `x` (`covergroup::handles_are_null_until_constructed`,
+`covergroup::embedded_covergroup_is_constructed_by_new`); it passes the other
+two cases. Icarus 13.0 compiles none of the cases: it has no covergroups
+("Invalid module item", "Invalid class item"). All of these remain executed
+evidence in the [Verilator report](verification/sv/verilator/covergroup.json),
+the [xezim report](verification/sv/xezim/covergroup.json) and the
+[Icarus report](verification/sv/icarus/covergroup.json).
+
+The designs that the standard makes illegal (a sample argument named as a
+covergroup argument, 19.8.1; an `output` argument, 19.3; an embedded
+covergroup assigned outside `new`, 19.4) are tested on Celox only. Verilator
+5.054 rejects all three with diagnostics that the adapter has not reviewed as
+language rejections, Icarus cannot parse them and xezim 0.11.4 accepts all
+three, so each would need a reviewed exclusion before it can be shared.
+
 ### Semaphores
 
 The 3 `semaphores::*` cases check semaphores (IEEE 1800-2023 15.3): a semaphore

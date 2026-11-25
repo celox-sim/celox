@@ -1090,6 +1090,14 @@
     "sv_dynamic_arrays_to_fixed_subarrays": {
       "title": "A dynamic array assigned to an element of a fixed-size array of fixed-size arrays is lost: with typedef int pair_t [2], pair_t a [3] and int d [] = '{4, 5}, a[1] = d leaves a[1][1] at 0",
       "standard": "IEEE 1800-2023 7.6, 7.4.5"
+    },
+    "sv_covergroup_variables_start_unknown": {
+      "title": "A covergroup variable that nothing assigned is not null: with covergroup cg and cg a, a == null is x until a is assigned, as is the comparison of the embedded covergroup variable of an object whose constructor did not construct it",
+      "standard": "IEEE 1800-2023 19.3, 19.4, 6.8"
+    },
+    "sv_shallow_copy_keeps_embedded_covergroup": {
+      "title": "A shallow copy keeps the embedded covergroup of the object it copies: after b = new a, b.cg == a.cg, where the handle of the new object is null",
+      "standard": "IEEE 1800-2023 8.12"
     }
   },
   "cases": [
@@ -5810,6 +5818,30 @@
       "classification": "xezim_bug",
       "bug": "sv_dynamic_arrays_to_fixed_subarrays",
       "note": "a is pair_t [3] with typedef int pair_t [2], and d = '{4, 5} has as many equivalent elements as a[1], so a[1] = d assigns them (7.6) and a[1][1] is 5. xezim 0.11.4 leaves a[1][1] at 0 (assert_eq element: expected 0x5, got 0x0); the assignments of d and q to whole variables in the same case (f0, f1, g0, g1, from_queue) pass, as does the wide case containers::fixed_size_arrays_take_wide_dynamic_array_elements."
+    },
+    {
+      "suite": "sv",
+      "name": "covergroup::handles_are_null_until_constructed",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_covergroup_variables_start_unknown",
+      "note": "q[0] = a == null reads the covergroup variable a before anything assigns it. A covergroup variable holds a handle (19.3), whose value without an initializer is null (6.8), so the comparison is 1. xezim 0.11.4 gives x (the run reads q with unknown bits; a probe of the same statements displays a == null as x before new, and a != null, a == b after b = a and b == null after b = null as 1), so only the never-assigned variable is wrong."
+    },
+    {
+      "suite": "sv",
+      "name": "covergroup::embedded_covergroup_is_constructed_by_new",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_covergroup_variables_start_unknown",
+      "note": "bare is constructed with new(0), whose constructor does not assign the embedded covergroup variable cg, so bare.cg is null (19.4, 6.8), q[1] = bare.cg == null is 1 and q[3] = made.cg != bare.cg is 1. xezim 0.11.4 gives x for both (the run reads q with unknown bits; a probe displays bare.ecg == null and made.ecg != bare.ecg as x, and made.ecg != null as 1)."
+    },
+    {
+      "suite": "sv",
+      "name": "covergroup::shallow_copy_has_no_embedded_covergroup",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_shallow_copy_keeps_embedded_covergroup",
+      "note": "b = new a is a shallow copy of an object with an embedded covergroup. 8.12 does not copy an embedded covergroup: the handle of the new object is null, so q[1] = b.cg == null is 1 and q is 7. xezim 0.11.4 reads 5: the copy holds the handle of the original (a probe displays copy.ecg == null as 0 and copy.ecg == made.ecg as 1). Verilator 5.054 keeps the handle in the copy too."
     }
   ]
 }

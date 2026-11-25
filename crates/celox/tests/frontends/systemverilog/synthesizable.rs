@@ -69,11 +69,24 @@ fn task_timing_control_is_rejected() {
 
 #[test]
 fn unsupported_constructs_name_their_tracking_issue() {
-    {
-        let (source, issue) = (
+    for (source, issue) in [
+        (
             "module Top(input logic a, b, output logic y); tran g(y, a); endmodule",
             457,
-        );
+        ),
+        // Every construct of a covergroup that is not supported names the
+        // issue of clause 19.
+        (
+            "module Top(input logic clk, a); covergroup cg; coverpoint a; endgroup cg c; \
+             always @(posedge clk) begin if (c == null) c = new; c.sample(); end endmodule",
+            4294,
+        ),
+        (
+            "interface I; covergroup cg; endgroup endinterface \
+             module Top(input logic a, output logic y); I i(); assign y = a; endmodule",
+            4294,
+        ),
+    ] {
         let error = Simulator::from_sv_sources(vec![(source, Path::new("tracking.sv"))], "Top")
             .build_cranelift()
             .expect_err("the construct must be rejected")

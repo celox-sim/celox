@@ -257,6 +257,46 @@ pub(in crate::ast) fn subroutine_argument_names(
             names.insert(qualified.clone(), params);
             shapes.insert(qualified, param_shapes);
         }
+        // A covergroup the item declares is a type of the scope (IEEE
+        // 1800-2023 19.3), whose header binds here, where it is declared.
+        if let celox_sv_syntax::BodyItemKind::Covergroup(id) =
+            tree.declarations().body_item(item.id).kind
+            && crate::ast::covergroups::place(tree, id) == crate::ast::covergroups::Place::Scope
+        {
+            let tree = &item.enter(tree);
+            let context = PackedDimensions::new(HashMap::default(), &item.env, &item_aliases);
+            let model = crate::ast::covergroups::declare(
+                tree,
+                session,
+                id,
+                Some(item.scope_name()),
+                &context,
+            )?;
+            if model.rejection.is_none() {
+                let handle = classes::handle(&mut session.types, &model.name);
+                for (name, formals) in crate::ast::covergroups::signatures(&model, &handle) {
+                    directions.insert(
+                        name.clone(),
+                        formals.iter().map(|(_, direction, _)| *direction).collect(),
+                    );
+                    shapes.insert(
+                        name.clone(),
+                        formals
+                            .iter()
+                            .map(|(_, _, r#type)| {
+                                bound_dimensions_from_type(
+                                    &scoped_type(r#type.clone(), &item.env),
+                                    &tree.functions,
+                                    &mut session.types,
+                                    &item.env,
+                                )
+                            })
+                            .collect(),
+                    );
+                    names.insert(name, formals.into_iter().map(|(name, ..)| name).collect());
+                }
+            }
+        }
         for class in classes::item_classes(item.id, tree, session) {
             let tree = &item.enter(tree);
             let aliases = item.type_aliases(type_aliases);
@@ -329,6 +369,37 @@ pub(in crate::ast) fn subroutine_argument_names(
                     qualified,
                     params.into_iter().map(|(name, ..)| name).collect(),
                 );
+            }
+            // The subroutines of the covergroups embedded in the class (IEEE
+            // 1800-2023 19.4) take its object first.
+            for model in layout
+                .iter()
+                .flat_map(|layout| &layout.covergroups)
+                .filter(|model| {
+                    model.owner.as_deref() == Some(class.as_str()) && model.rejection.is_none()
+                })
+            {
+                for (name, formals) in crate::ast::covergroups::signatures(model, &handle) {
+                    directions.insert(
+                        name.clone(),
+                        formals.iter().map(|(_, direction, _)| *direction).collect(),
+                    );
+                    shapes.insert(
+                        name.clone(),
+                        formals
+                            .iter()
+                            .map(|(_, _, r#type)| {
+                                bound_dimensions_from_type(
+                                    &scoped_type(r#type.clone(), &env),
+                                    &tree.functions,
+                                    &mut session.types,
+                                    &env,
+                                )
+                            })
+                            .collect(),
+                    );
+                    names.insert(name, formals.into_iter().map(|(name, ..)| name).collect());
+                }
             }
             for method in super::randomization::RANDOMIZATION_METHODS {
                 let qualified = item.name(&classes::Class::subroutine_name(&class, method));
