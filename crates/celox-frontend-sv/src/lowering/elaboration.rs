@@ -116,7 +116,7 @@ pub(crate) fn elaborate_instances(
     // Stateful lowering guards activation, so time alone (or an unrelated
     // input) cannot reevaluate a time-only actual.
     let mut port_assignments = Vec::new();
-    let tables = procedural::ModuleTables::new(&lowered.source);
+    let tables = procedural::ModuleTables::new(&lowered.source, false);
     {
         let mut pm = procedural::ProcModule::new(
             &lowered.source,

@@ -180,6 +180,10 @@ fn resolve(
         }
         return Some(ty);
     }
+    // A coverage query of a covergroup is a `real` (IEEE 1800-2023 19.8).
+    if let Some(ty) = covergroups::result_type(tree, session, id, native, dims) {
+        return Some(ty);
+    }
     if let Some(ty) = builtins::result(tree, session, id, native, dims) {
         return Some(ty);
     }

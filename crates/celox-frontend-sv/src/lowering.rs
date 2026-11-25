@@ -417,6 +417,11 @@ struct SharedAlways<'a> {
     temporaries: bool,
     /// The module's signals that hierarchical names in other modules denote.
     foreign_references: &'a HashSet<String>,
+    /// No module or package of the design can construct a covergroup, so
+    /// the design has no covergroup instance and `$get_coverage` is 100
+    /// (IEEE 1800-2023 19.11). False when the lowering does not know the
+    /// whole design, which then asks the heap.
+    no_covergroups: bool,
 }
 
 impl Default for SharedAlways<'_> {
@@ -426,6 +431,7 @@ impl Default for SharedAlways<'_> {
         Self {
             temporaries: false,
             foreign_references: &EMPTY,
+            no_covergroups: false,
         }
     }
 }

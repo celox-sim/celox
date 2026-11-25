@@ -644,10 +644,10 @@ pub enum SystemTask {
     /// the precision, the suffix and the minimum field width that `%t`
     /// reports with until the next call.
     Timeformat,
-    /// `$set_coverage_db_name` (40.3.2.7); with no coverage database the
+    /// `$set_coverage_db_name` (19.9); with no coverage database the
     /// analyzer drops the call.
     SetCoverageDbName,
-    /// `$load_coverage_db` (40.3.2.7); with no coverage database the
+    /// `$load_coverage_db` (19.9); with no coverage database the
     /// analyzer drops the call.
     LoadCoverageDb,
     /// `$fatal` (20.10).
@@ -1485,6 +1485,88 @@ pub enum ObjectOp {
     /// The `%p` text of a container of unpacked structures, see
     /// [`AggregatePattern`].
     Pattern(AggregatePattern),
+    /// An operation on covergroup coverage, see [`CoverageOp`].
+    Coverage(CoverageOp),
+}
+
+/// An operation on the coverage of covergroups (IEEE 1800-2023 clause 19),
+/// which the heap of the simulator keeps. A covergroup type is named by its
+/// key (`celox_heap::coverage::type_key`), an instance by the handle of the
+/// object its `new` returns. No operation reads or writes simulation state
+/// or draws a random number.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CoverageOp {
+    /// Whether the type of the key in the argument is registered.
+    Registered,
+    /// Register the type of the key in the argument with this descriptor,
+    /// unless a type is registered under the key.
+    Register(std::sync::Arc<celox_heap::coverage::TypeDescriptor>),
+    /// A new instance of the type of the key in the argument: the handle of
+    /// a new object of `class` with `size` zeroed bytes, whose handle
+    /// properties are at the given offsets. Unlike [`ObjectOp::New`], the
+    /// object's random state is not seeded, so constructing a covergroup
+    /// draws no random number (18.14.1).
+    New {
+        class: u32,
+        size: u32,
+        handles: Vec<(u32, HandleProperty)>,
+    },
+    /// Build the bins of the instance in the argument from what its
+    /// construction handed over: the number of warnings.
+    Build,
+    /// Whether the instance in the argument is built and collecting; a
+    /// `null` handle is not (19.4).
+    Sampling,
+    /// Count the sample in progress in the bins of the instance in the
+    /// argument: the number of illegal bins hit.
+    SampleEnd,
+    /// What `get_inst_coverage` gives (19.8) for the item in the second
+    /// argument of the instance in the first; item 0 is the covergroup.
+    InstCoverage { what: CoverageQuery },
+    /// What `get_coverage` gives (19.8) for the item in the second argument
+    /// of the type of the key in the first.
+    TypeCoverage { what: CoverageQuery },
+    /// What `$get_coverage` gives (19.9): the coverage of every covergroup
+    /// type, as a `real`. It has no argument.
+    Overall,
+}
+
+/// Which result of a coverage query (IEEE 1800-2023 19.8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CoverageQuery {
+    /// The coverage in percent, a `real`.
+    Real,
+    /// The number of covered bins, an `int`.
+    Covered,
+    /// The number of bins, an `int`.
+    Total,
+}
+
+impl CoverageOp {
+    /// The width and signedness of the result.
+    pub fn result_type(&self) -> (usize, bool) {
+        match self {
+            Self::Registered | Self::Sampling => (1, false),
+            Self::Register(_) | Self::New { .. } | Self::Build | Self::SampleEnd => (32, false),
+            Self::InstCoverage { what } | Self::TypeCoverage { what } => match what {
+                CoverageQuery::Real => (64, false),
+                CoverageQuery::Covered | CoverageQuery::Total => (32, true),
+            },
+            Self::Overall => (64, false),
+        }
+    }
+
+    /// Whether the result is a `real`.
+    pub fn is_real(&self) -> bool {
+        matches!(
+            self,
+            Self::InstCoverage {
+                what: CoverageQuery::Real
+            } | Self::TypeCoverage {
+                what: CoverageQuery::Real
+            } | Self::Overall
+        )
+    }
 }
 
 /// The `%p` text of a container whose elements are unpacked structures
@@ -1661,6 +1743,7 @@ impl ObjectOp {
             Self::Load(field) => (field.width as usize, field.signed),
             Self::Unbox(record) => (record.width(), false),
             Self::Stream(op) => op.result_type(),
+            Self::Coverage(op) => op.result_type(),
             Self::New { .. }
             | Self::ClassOf
             | Self::Store(_)
@@ -1716,6 +1799,17 @@ impl fmt::Display for ObjectOp {
             Self::Box(_) => "structure record",
             Self::Unbox(_) => "structure record read",
             Self::NewEvent => "new event",
+            Self::Coverage(op) => match op {
+                CoverageOp::Registered => "covergroup type query",
+                CoverageOp::Register(_) => "covergroup type registration",
+                CoverageOp::New { .. } => "covergroup new",
+                CoverageOp::Build => "covergroup construction",
+                CoverageOp::Sampling => "covergroup sampling query",
+                CoverageOp::SampleEnd => "covergroup sample",
+                CoverageOp::InstCoverage { .. } => "covergroup get_inst_coverage",
+                CoverageOp::TypeCoverage { .. } => "covergroup get_coverage",
+                CoverageOp::Overall => "$get_coverage",
+            },
         })
     }
 }

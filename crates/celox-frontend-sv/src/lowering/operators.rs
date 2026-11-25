@@ -229,7 +229,9 @@ pub(super) fn lower_bit_vector_function_slt<A: std::hash::Hash + Eq + Clone>(
     use sv::ir::SystemFunction;
     let (width, signed) = function.result_type()?;
     let result = match function {
-        // The analyzer folds coverage calls to literals; none reach here.
+        // The analyzer folds the code coverage calls to literals, and
+        // `$get_coverage` is a coverage operation of the heap; none reach
+        // here.
         SystemFunction::CoverageControl
         | SystemFunction::CoverageGetMax
         | SystemFunction::CoverageGet

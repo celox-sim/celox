@@ -32,6 +32,13 @@ pub enum AnalyzerWarning {
         name: String,
         site: Option<SourceSpan>,
     },
+    /// A call of `$set_coverage_db_name` or `$load_coverage_db` (`task`),
+    /// which saves or loads nothing: there is no coverage database (IEEE
+    /// 1800-2023 19.9).
+    NoCoverageDatabase {
+        task: &'static str,
+        site: Option<SourceSpan>,
+    },
 }
 
 pub(crate) fn append(
@@ -107,6 +114,31 @@ fn functions(tree: &SyntaxTree, range: celox_sv_syntax::TokenRange) -> Vec<Analy
     warnings
 }
 
+/// The names of the coverage database tasks (IEEE 1800-2023 19.9).
+pub(crate) const COVERAGE_DATABASE_TASKS: [&str; 2] =
+    ["$set_coverage_db_name", "$load_coverage_db"];
+
+/// The calls of the coverage database tasks in `range` (IEEE 1800-2023
+/// 19.9), which have no database to name or load.
+fn coverage_databases(
+    tree: &SyntaxTree,
+    range: celox_sv_syntax::TokenRange,
+) -> Vec<AnalyzerWarning> {
+    let mut warnings = Vec::new();
+    for (tokens, task) in &tree.spans().coverage_database_tasks {
+        if range.start <= tokens.start && tokens.end <= range.end {
+            append(
+                &mut warnings,
+                [AnalyzerWarning::NoCoverageDatabase {
+                    task: COVERAGE_DATABASE_TASKS[*task],
+                    site: super::procedural::source_span(*tokens, tree),
+                }],
+            );
+        }
+    }
+    warnings
+}
+
 pub(crate) fn components(tree: &SyntaxTree) -> HashMap<String, Vec<AnalyzerWarning>> {
     let mut warnings = HashMap::default();
     for unit in tree.declarations().all_units() {
@@ -116,12 +148,11 @@ pub(crate) fn components(tree: &SyntaxTree) -> HashMap<String, Vec<AnalyzerWarni
                 | celox_sv_syntax::UnitKind::Program
                 | celox_sv_syntax::UnitKind::Interface
         ) {
-            append(
-                warnings
-                    .entry(super::instances::normalize_identifier(&unit.name.spelling))
-                    .or_default(),
-                functions(tree, unit.tokens),
-            );
+            let warnings = warnings
+                .entry(super::instances::normalize_identifier(&unit.name.spelling))
+                .or_default();
+            append(warnings, functions(tree, unit.tokens));
+            append(warnings, coverage_databases(tree, unit.tokens));
         }
     }
     warnings
@@ -135,6 +166,7 @@ pub(crate) fn packages(tree: &SyntaxTree) -> Vec<AnalyzerWarning> {
         .filter(|unit| unit.kind == celox_sv_syntax::UnitKind::Package)
     {
         append(&mut warnings, functions(tree, unit.tokens));
+        append(&mut warnings, coverage_databases(tree, unit.tokens));
     }
     // Compilation-unit functions have no enclosing design unit.
     for function in &native.subroutines {
@@ -142,6 +174,7 @@ pub(crate) fn packages(tree: &SyntaxTree) -> Vec<AnalyzerWarning> {
             unit.tokens.start <= function.tokens.start && function.tokens.end <= unit.tokens.end
         }) {
             append(&mut warnings, functions(tree, function.tokens));
+            append(&mut warnings, coverage_databases(tree, function.tokens));
         }
     }
     warnings
@@ -149,11 +182,11 @@ pub(crate) fn packages(tree: &SyntaxTree) -> Vec<AnalyzerWarning> {
 
 /// Declaration warnings for a complete compilation unit.
 pub(crate) fn source(tree: &SyntaxTree) -> Vec<AnalyzerWarning> {
-    functions(
-        tree,
-        celox_sv_syntax::TokenRange {
-            start: 0,
-            end: tree.declarations().tokens.len(),
-        },
-    )
+    let range = celox_sv_syntax::TokenRange {
+        start: 0,
+        end: tree.declarations().tokens.len(),
+    };
+    let mut warnings = functions(tree, range);
+    append(&mut warnings, coverage_databases(tree, range));
+    warnings
 }

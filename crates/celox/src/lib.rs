@@ -75,6 +75,12 @@ pub use celox_frontend_sv::{
     WarningLocation as SvWarningLocation,
 };
 pub use celox_frontend_veryl::{FrontendDiagnostic, LoweringPhase, ParserError};
+/// The functional coverage of covergroups (IEEE 1800-2023 clause 19), as
+/// [`Simulator::coverage`] and [`Simulation::coverage`] report it.
+pub use celox_heap::coverage::{
+    BinReport, BinReportKind, CoverItemKind, CoverItemReport, CoverageReport,
+    CovergroupInstanceReport, CovergroupReport,
+};
 pub use celox_runtime::{
     BaselineRecord, DesignReflection, NbaRecord, ProcessRecord, ReflectionScope, ReflectionScopeId,
     ReflectionSignal, ReflectionSignalId, ScheduleRecord, ScheduledEvent, SignalDirection,
