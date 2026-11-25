@@ -222,6 +222,9 @@ impl BodyBuilder<'_, '_, '_> {
                     defined.insert(*id);
                 }
                 Stmt::WaitFork | Stmt::DisableFork => children = true,
+                // A fork its children outlive leaves them with the
+                // branch instead of the process that runs the block.
+                Stmt::Fork { join, .. } if *join != celox_design::ForkJoin::All => children = true,
                 Stmt::Call { name, .. } => calls.push(name.clone()),
                 _ => {}
             });
@@ -250,12 +253,15 @@ impl BodyBuilder<'_, '_, '_> {
         let mut branch = vec![
             assign(
                 &process,
-                events::call(celox_design::ProcessOp::SelfHandle, Vec::new()),
+                events::call(celox_design::ProcessOp::SelfHandleInternal, Vec::new()),
             ),
             assign(&armed, Expr::Literal("1'b1".into())),
         ];
         branch.extend(body);
         branch.push(assign(&armed, Expr::Literal("1'b0".into())));
+        // Release the handle, so the heap collects it and its activation
+        // may be reused: it names the branch only while it runs.
+        branch.push(assign(&process, Expr::Literal("32'b0".into())));
         vec![Stmt::Fork {
             join: celox_design::ForkJoin::All,
             branches: vec![branch],
@@ -281,11 +287,16 @@ impl BodyBuilder<'_, '_, '_> {
             then_body: vec![
                 Stmt::Eval(events::call(
                     celox_design::ProcessOp::Kill,
-                    vec![Expr::Ident(process)],
+                    vec![Expr::Ident(process.clone())],
                 )),
                 Stmt::Assign {
                     lhs: LValue::Ident(armed),
                     rhs: Expr::Literal("1'b0".into()),
+                    nonblocking: false,
+                },
+                Stmt::Assign {
+                    lhs: LValue::Ident(process),
+                    rhs: Expr::Literal("32'b0".into()),
                     nonblocking: false,
                 },
             ],
@@ -596,6 +607,131 @@ fn scan_context(
     }
 }
 
+/// Take the branch off every block no elaborated `disable` names from
+/// outside it: token discovery also sees `disable` statements of
+/// unselected generate branches, which elaborate to nothing, and a
+/// wrapper without a target only adds a suspension (9.6.2). The
+/// branch's first two statements record its process, so the rest of
+/// the branch is the block again.
+pub(in crate::ast) fn unwrap_without_elaborated_target<'a>(
+    disables: &mut ExternalDisables,
+    bodies: impl Iterator<Item = &'a mut Vec<Stmt>>,
+) {
+    let targets: HashSet<&str> = disables.targets.iter().map(String::as_str).collect();
+    let unwanted: HashSet<String> = disables
+        .blocks
+        .iter()
+        .filter(|label| !targets.contains(label.as_str()))
+        .cloned()
+        .collect();
+    if unwanted.is_empty() {
+        return;
+    }
+    for body in bodies {
+        *body = unwrap_stmts(std::mem::take(body), &unwanted, disables);
+    }
+    disables.blocks.retain(|label| !unwanted.contains(label));
+    disables.calls.retain(|label, _| !unwanted.contains(label));
+}
+
+/// `stmts` with the branches of the blocks in `unwanted` replaced by
+/// their bodies.
+fn unwrap_stmts(
+    stmts: Vec<Stmt>,
+    unwanted: &HashSet<String>,
+    disables: &ExternalDisables,
+) -> Vec<Stmt> {
+    let mut output = Vec::new();
+    for stmt in stmts {
+        if let Some(label) = branch_label(&stmt, disables)
+            && unwanted.contains(&label)
+        {
+            let Stmt::Fork { branches, .. } = stmt else {
+                unreachable!("a branch is a fork");
+            };
+            let mut branch = branches.into_iter().next().unwrap_or_default();
+            let body = if branch.len() > 2 {
+                branch.split_off(2)
+            } else {
+                Vec::new()
+            };
+            output.extend(unwrap_stmts(body, unwanted, disables));
+            continue;
+        }
+        output.push(match stmt {
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => Stmt::If {
+                condition,
+                then_body: unwrap_stmts(then_body, unwanted, disables),
+                else_body: unwrap_stmts(else_body, unwanted, disables),
+            },
+            Stmt::Case {
+                kind,
+                selector,
+                items,
+                default,
+            } => Stmt::Case {
+                kind,
+                selector,
+                items: items
+                    .into_iter()
+                    .map(|item| crate::procedural::CaseItemBase {
+                        labels: item.labels,
+                        body: unwrap_stmts(item.body, unwanted, disables),
+                    })
+                    .collect(),
+                default: default.map(|body| unwrap_stmts(body, unwanted, disables)),
+            },
+            Stmt::Loop {
+                kind,
+                init,
+                condition,
+                step,
+                body,
+            } => Stmt::Loop {
+                kind,
+                init: unwrap_stmts(init, unwanted, disables),
+                condition,
+                step: unwrap_stmts(step, unwanted, disables),
+                body: unwrap_stmts(body, unwanted, disables),
+            },
+            Stmt::Fork { join, branches } => Stmt::Fork {
+                join,
+                branches: branches
+                    .into_iter()
+                    .map(|branch| unwrap_stmts(branch, unwanted, disables))
+                    .collect(),
+            },
+            Stmt::Block { id, body } => Stmt::Block {
+                id,
+                body: unwrap_stmts(body, unwanted, disables),
+            },
+            Stmt::DelayedNonblocking {
+                control,
+                assignment,
+            } => Stmt::DelayedNonblocking {
+                control: Box::new(
+                    unwrap_stmts(vec![*control], unwanted, disables)
+                        .into_iter()
+                        .next()
+                        .unwrap(),
+                ),
+                assignment: Box::new(
+                    unwrap_stmts(vec![*assignment], unwanted, disables)
+                        .into_iter()
+                        .next()
+                        .unwrap(),
+                ),
+            },
+            stmt => stmt,
+        });
+    }
+    output
+}
+
 /// Whether `expr` calls a subroutine in `spawns`.
 fn expr_spawns(expr: &Expr, spawns: &HashSet<String>) -> bool {
     let mut calls = Vec::new();
@@ -646,33 +782,18 @@ pub(in crate::ast) fn calls_subroutine_that_needs_its_process(
     })
 }
 
-/// Whether `expr` asks for the process that evaluates it (`process::self()`).
+/// Whether `expr` asks for the process that evaluates it
+/// (`process::self()`), wherever in its subtrees it occurs: in a bit or
+/// part selector, an `inside` set item, a concatenation count and the
+/// like, which the call visitor already walks.
 fn calls_self_handle(expr: &Expr) -> bool {
     let mut found = false;
-    let mut pending = vec![expr];
-    while let Some(expr) = pending.pop() {
-        match expr {
-            Expr::Call { callee, args, .. } => {
-                found |= matches!(
-                    callee,
-                    Callee::System(SystemFunction::Process(celox_design::ProcessOp::SelfHandle))
-                );
-                pending.extend(args.iter().flatten());
-            }
-            Expr::Select { expr, .. } | Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => {
-                pending.push(expr)
-            }
-            Expr::Concat(parts) | Expr::RepeatConcat { parts, .. } => pending.extend(parts),
-            Expr::Binary { left, right, .. } => pending.extend([&**left, &**right]),
-            Expr::Mux {
-                condition,
-                then_expr,
-                else_expr,
-            } => pending.extend([&**condition, &**then_expr, &**else_expr]),
-            Expr::Inside { expr, .. } => pending.push(expr),
-            Expr::Ident(_) | Expr::Literal(_) => {}
-        }
-    }
+    const_functions::visit_expr_calls(expr, &mut |callee, _| {
+        found |= matches!(
+            callee,
+            Callee::System(SystemFunction::Process(celox_design::ProcessOp::SelfHandle))
+        );
+    });
     found
 }
 
@@ -816,6 +937,52 @@ mod tests {
                 "{body}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn blocks_with_detached_forks_or_self_queries_stay_unsupported_targets() {
+        for source in [
+            // A fork its children outlive, inside the block itself.
+            "module Top; bit done; initial begin : work \
+             fork #5 done = 1; join_none #1; end \
+             initial #10 disable work; endmodule",
+            "module Top; bit done; initial begin : work \
+             fork #5 done = 1; join_any #1; end \
+             initial #10 disable work; endmodule",
+            // The process, asked for in a bit selector of the block.
+            "module Top; process p; bit [3:0] bits; int q; \
+             initial begin p = process::self(); \
+             begin : work q = bits[process::self() == p]; #5; end end \
+             initial #1 disable work; endmodule",
+            // The process, in an `inside` set item of the block.
+            "module Top; process p; bit q; \
+             initial begin p = process::self(); \
+             begin : work q = p inside {process::self()}; #5; end end \
+             initial #1 disable work; endmodule",
+        ] {
+            let error = analyze(source).unwrap_err();
+            assert!(
+                error.to_string().contains("disable statement"),
+                "{source}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_disable_in_an_unselected_generate_branch_wraps_nothing() {
+        let ir = analyze(
+            "module Top; initial begin : work #5; end \
+             if (0) begin initial disable work; end endmodule",
+        )
+        .unwrap();
+        let module = &ir.modules()[0];
+        assert!(
+            !module
+                .signals()
+                .iter()
+                .any(|signal| signal.name().starts_with("disable%")),
+            "no block runs as a branch"
+        );
     }
 
     #[test]

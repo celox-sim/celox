@@ -359,7 +359,7 @@ impl BodyBuilder<'_, '_, '_> {
                                         assign(
                                             handle,
                                             events::call(
-                                                celox_design::ProcessOp::SelfHandle,
+                                                celox_design::ProcessOp::SelfHandleInternal,
                                                 Vec::new(),
                                             ),
                                         ),

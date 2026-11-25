@@ -101,7 +101,25 @@ impl ScopeElaboration<'_> {
         // The blocks a `disable` ends from outside them keep their process
         // in variables of the scope (IEEE 1800-2023 9.6.2); a `disable` of
         // any other name outside its block stays unsupported.
-        let disables = std::mem::take(&mut body_state.disables);
+        let mut disables = std::mem::take(&mut body_state.disables);
+        // A `disable` in an unselected generate branch elaborates to
+        // nothing: take the branch off a block only it names.
+        procedural::external_disables::unwrap_without_elaborated_target(
+            &mut disables,
+            self.comb_processes
+                .iter_mut()
+                .map(|process| &mut process.body)
+                .chain(
+                    self.ff_processes
+                        .iter_mut()
+                        .map(|process| &mut process.body),
+                )
+                .chain(
+                    self.initial_processes
+                        .iter_mut()
+                        .map(|process| &mut process.body),
+                ),
+        );
         // A subroutine a branch calls may need the process that runs the
         // block, which only the lowered subroutines show (9.6.1, 9.6.3).
         let (needs_their_process, spawns_detached) =
