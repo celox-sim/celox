@@ -83,10 +83,19 @@ class NoModuleIssueTests(unittest.TestCase):
     def test_listed_files_declare_no_module(self):
         import re
         root = Path(os.environ["SV_TESTS_ROOT"]).resolve()
+        checked = 0
         for case, issue in self.issues.items():
             if not issue.get("no_module"):
                 continue
+            # Each daily job generates only its own group (cores jobs never
+            # generate this main-group case), so an absent case is not this
+            # checkout's to check; a present case's listed files must exist.
+            if not (root / "tests" / case).is_file():
+                continue
+            checked += 1
             files = self.run.case_metadata(root / "tests" / case)["files"].split()
             for source in files:
                 text = (root / source).read_text() if not Path(source).is_absolute() else Path(source).read_text()
                 self.assertIsNone(re.search(r"^\s*module\b", text, re.M), f"{case}: {source} declares a module")
+        if not checked:
+            self.skipTest("no reviewed no-module case is generated in this checkout")
