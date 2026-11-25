@@ -263,7 +263,6 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         &parallel_ff_units,
         &split_commits,
         &clocks.topological_clocks,
-        &clock_nets,
         &counted,
         &occurrence_probes,
         &declaration_probes,

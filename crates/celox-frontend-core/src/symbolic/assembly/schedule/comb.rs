@@ -319,7 +319,6 @@ pub(super) fn inline_unobserved_nets(
     parallel_ff_units: &FfParts,
     split_commits: &SplitCommits,
     topological_clocks: &[AbsoluteAddr],
-    clock_nets: &HashSet<AbsoluteAddr>,
     counted: &BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>>,
     occurrence_probes: &[(VarAtomBase<AbsoluteAddr>, AbsoluteAddr)],
     declaration_probes: &[(VarAtomBase<AbsoluteAddr>, AbsoluteAddr)],
@@ -387,7 +386,6 @@ pub(super) fn inline_unobserved_nets(
                     .events
                     .keys()
                     .chain(topological_clocks)
-                    .chain(clock_nets)
                     .copied()
                     .collect(),
             },

@@ -52,14 +52,14 @@ pub(super) fn pinned_nets(
             }
         }
     }
-    // The scheduler judges an event and every signal of its domain.
+    // The event itself and its source must be materialized. Other aliases
+    // are ordinary copies whose consumers determine whether they stay live.
     pinned.extend(
-        clock_domains
+        units
+            .events
             .iter()
-            .filter(|(alias, canonical)| {
-                units.events.contains(*alias) || units.events.contains(*canonical)
-            })
-            .flat_map(|(alias, canonical)| [*alias, *canonical]),
+            .filter_map(|event| clock_domains.get(event))
+            .copied(),
     );
     pinned.extend(units.events);
     // The runtime reads what waits watch and what it samples.
