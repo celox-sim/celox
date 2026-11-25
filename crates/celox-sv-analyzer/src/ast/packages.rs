@@ -1365,8 +1365,7 @@ pub(super) fn analyze_package_with_symbols(
             types: std::mem::take(&mut session.types),
         });
         session.types = publication.0;
-        let ir = ir?;
-        ir.modules().first().cloned()
+        ir?.into_modules().into_iter().next()
     };
     let qualified = |item: &String| format!("{name}::{item}");
     let mut names: HashMap<String, String> = own
