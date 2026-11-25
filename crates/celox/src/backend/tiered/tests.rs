@@ -1592,3 +1592,70 @@ fn promotes_a_program_with_function_units(baseline: bool) {
         assert_eq!(sim.get_as::<u32>(y), factorial, "fact({n})");
     }
 }
+
+/// A compiled testbench inlines the compiled scheduler, whose larger
+/// bodies the native image calls as scheduler callees. While the tiered
+/// backend is still interpreting (promotion gated off), running the
+/// testbench must execute those callees in the interpreter instead of
+/// dispatching their placeholder indices through the DPI table.
+#[test]
+fn interpreted_testbench_runs_outlined_scheduler_callees() {
+    use std::fmt::Write as _;
+    let mut code = String::from(
+        "module Dut (clk: input clock, q0: output logic<32>, q127: output logic<32>) {\n",
+    );
+    for index in 0..128 {
+        let _ = writeln!(code, "    var c{index}: logic<32>;");
+    }
+    code.push_str("    always_ff (clk) {\n");
+    for index in 0..128 {
+        let _ = writeln!(
+            code,
+            "        c{index} = c{index} + 32'd1 + (c{} >> 3);",
+            (index + 1) % 128
+        );
+    }
+    code.push_str("    }\n");
+    for index in 0..128 {
+        let _ = writeln!(
+            code,
+            "    var w{index}: logic<32>; assign w{index} = c{index} ^ (c{} << 2);",
+            (index + 7) % 128
+        );
+    }
+    code.push_str("    assign q0 = w0; assign q127 = w127;\n}\n");
+    code.push_str(
+        r#"
+#[test(Top)]
+module Top {
+    inst clk: $tb::clock_gen #(period: 2);
+    var q0: logic<32>;
+    var q127: logic<32>;
+    inst dut: Dut (clk: clk, q0: q0, q127: q127);
+    initial {
+        clk.next(4);
+        $assert(q0 != 32'd0 && q127 != 32'd0, "counters must advance: q0=%d q127=%d", q0, q127);
+        $finish();
+    }
+}
+"#,
+    );
+    let gate = Gate::closed();
+    let worker_gate = gate.0.clone();
+    let mut sim: Simulator<TieredBackend> = SimulatorBuilder::<Simulator>::new(&code, "Top")
+        .hotspot_jit(false)
+        .build_tiered_with_compiler(move |laid_out, options, cancel| {
+            wait_for_gate_or_cancel(&worker_gate, cancel)?;
+            let image = NativeBackend::compile_image(laid_out, options)?;
+            let shared = unsafe { SharedNativeCode::from_image(image)? };
+            Ok(CompiledCode::Native(Arc::new(shared)))
+        })
+        .unwrap();
+    assert!(!sim.is_compiled());
+    let tb = crate::testbench::compile_initial_testbench(&sim).unwrap();
+    assert_eq!(
+        crate::testbench::run_compiled_testbench_to_finish(&mut sim, &tb),
+        crate::TestResult::Pass
+    );
+    assert!(!sim.is_compiled());
+}
