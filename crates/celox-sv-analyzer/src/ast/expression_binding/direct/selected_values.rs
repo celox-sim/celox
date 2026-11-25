@@ -494,7 +494,7 @@ pub(super) fn property_place(
     session: &mut Session,
     dimensions: &PackedDimensions,
 ) -> Converted<ObjectPlace> {
-    objects::check_writable(&property, dimensions)?;
+    objects::check_writable(&property, dimensions, &session.types)?;
     let handle = objects::receiver(tree, session, receiver, native, dimensions)?;
     Ok(ObjectPlace::Property {
         field: property.field,

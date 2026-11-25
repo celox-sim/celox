@@ -15,6 +15,7 @@ mod calls;
 mod classify;
 mod comb_process;
 mod containers;
+mod coverage;
 mod delays;
 mod dpi;
 mod dpi_builtins;

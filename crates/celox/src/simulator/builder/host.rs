@@ -907,6 +907,8 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
 /// distinct widths, by which the injection finds them.
 #[cfg(test)]
 mod call_consumer_tests;
+#[cfg(test)]
+mod covergroup_tests;
 /// The compiled scheduler's skipped settles in designs whose domains make
 /// opaque calls or whose combinational processes capture.
 #[cfg(test)]

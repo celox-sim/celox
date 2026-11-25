@@ -128,6 +128,17 @@ pub enum AnalyzerError {
     /// (IEEE 1800-2023 8.19).
     #[error("assignment to const class property `{owner}::{name}`")]
     ConstPropertyAssignment { owner: String, name: String },
+    /// A covergroup declaration or a use of a covergroup that the standard
+    /// makes illegal (IEEE 1800-2023 clause 19); the text names the rule and
+    /// its clause.
+    #[error("invalid covergroup: {0}")]
+    InvalidCovergroup(String),
+    /// An embedded covergroup variable is assigned only in the `new` method
+    /// of the class that declares the covergroup (IEEE 1800-2023 19.4).
+    #[error(
+        "assignment to embedded covergroup `{owner}::{name}` outside the constructor of `{owner}` (IEEE 1800-2023 19.4)"
+    )]
+    CovergroupAssignment { owner: String, name: String },
     /// A class member is inaccessible from the lexical scope (IEEE 1800-2023 8.18).
     #[error("{visibility} class member `{owner}::{name}` is not accessible from this scope")]
     InaccessibleClassMember {
@@ -457,6 +468,9 @@ const UNSUPPORTED_CONSTRUCT_ISSUES: &[(&str, u32)] = &[
     ("non-integer module parameter override", 461),
     ("nonconstant module parameter override", 461),
     ("package net", 1146),
+    // The umbrella of what is left of clause 19: every construct name that
+    // starts with `covergroup`. A more specific entry goes before it.
+    ("covergroup", 4294),
 ];
 
 impl AnalyzerError {

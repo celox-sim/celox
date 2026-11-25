@@ -79,6 +79,8 @@ mod binary_file_io;
 mod class;
 #[path = "frontends/systemverilog/corpus.rs"]
 mod corpus;
+#[path = "frontends/systemverilog/covergroup.rs"]
+mod covergroup;
 #[path = "frontends/systemverilog/file_core.rs"]
 mod file_core;
 #[path = "frontends/systemverilog/file_io.rs"]

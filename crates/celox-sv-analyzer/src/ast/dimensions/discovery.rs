@@ -281,9 +281,7 @@ fn variables(
         return Ok(());
     };
     publish_enum_constants(declaration.data_type, &base, tree, session, context)?;
-    for variable in declaration.variables.iter().filter(|variable| {
-        type_binding::ordinary_variable(variable, declaration.data_type, tree.declarations())
-    }) {
+    for variable in &declaration.variables {
         let ty = type_with_dimensions(base.clone(), &variable.dimensions, tree, session, context)?;
         publish_shape(
             tree,

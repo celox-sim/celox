@@ -83,6 +83,11 @@ impl Ranges {
         }
     }
 
+    /// Whether there is no range.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.sorted.is_empty()
+    }
+
     /// Input positions of the ranges for which `keep` holds, in input order.
     fn matching(&self, start: usize, keep: impl Fn(TokenRange) -> bool) -> Vec<usize> {
         let count = self
@@ -148,6 +153,18 @@ pub(crate) struct Spans {
     /// What follows the name of each covergroup, for the analyses that walk
     /// the arenas themselves.
     pub covergroups: CovergroupInteriors,
+    /// The covergroup declarations by where they are declared.
+    pub covergroup_index: crate::ast::CovergroupIndex,
+    /// The expressions and types of the formals of the covergroups and of
+    /// their sample methods (IEEE 1800-2023 19.3, 19.8.1): the part of what
+    /// follows the name of a covergroup whose names the scope that declares
+    /// it resolves, as it binds the formals. `expressions` and `types` have
+    /// none of them.
+    pub covergroup_formals: (Starts<ExprId>, Starts<TypeId>),
+    /// The names of the coverage database tasks (IEEE 1800-2023 19.9) the
+    /// file calls, in arena order, each with which of
+    /// `crate::ast::COVERAGE_DATABASE_TASKS` it is.
+    pub coverage_database_tasks: Vec<(TokenRange, usize)>,
     pub(super) text: SourceText,
 }
 
@@ -247,6 +264,50 @@ impl Spans {
             imports: crate::ast::imports::Facts::new(native),
             classes: crate::ast::ClassIndex::new(native),
             static_references: crate::ast::static_reference_candidates(native),
+            covergroup_index: crate::ast::CovergroupIndex::new(native),
+            covergroup_formals: {
+                // A file without covergroup formals pays nothing.
+                let formals = Ranges::new(
+                    native
+                        .covergroups
+                        .iter()
+                        .flat_map(crate::ast::covergroup_formal_ports)
+                        .map(|port| port.tokens),
+                );
+                if formals.is_empty() {
+                    (
+                        Starts::new(std::iter::empty()),
+                        Starts::new(std::iter::empty()),
+                    )
+                } else {
+                    (
+                        Starts::new(
+                            native
+                                .expression_nodes()
+                                .map(|(id, node)| (id, node.tokens))
+                                .filter(|(_, tokens)| formals.covers(tokens.start)),
+                        ),
+                        Starts::new(
+                            native
+                                .type_nodes()
+                                .map(|(id, node)| (id, node.tokens))
+                                .filter(|(_, tokens)| formals.covers(tokens.start)),
+                        ),
+                    )
+                }
+            },
+            coverage_database_tasks: native
+                .expression_nodes()
+                .filter_map(|(_, node)| match &node.kind {
+                    celox_sv_syntax::ExprKind::Name(name) if name.spelling.starts_with('$') => {
+                        crate::ast::COVERAGE_DATABASE_TASKS
+                            .iter()
+                            .position(|task| *task == name.spelling)
+                            .map(|task| (node.tokens, task))
+                    }
+                    _ => None,
+                })
+                .collect(),
             covergroups,
             text: SourceText::new(native),
         }

@@ -119,6 +119,8 @@ impl ProcModule<'_> {
                 sv::ir::ObjectOp::Load(field) if field.real => {
                     Some(if field.width == 32 { P::F32 } else { P::F64 })
                 }
+                // A coverage of a covergroup (19.8, 19.9).
+                sv::ir::ObjectOp::Coverage(op) if op.is_real() => Some(P::F64),
                 _ => None,
             },
             _ => floating::precision(expr, self.variables, self.name_to_id),

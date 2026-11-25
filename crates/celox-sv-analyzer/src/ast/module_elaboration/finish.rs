@@ -52,6 +52,11 @@ impl ScopeElaboration<'_> {
                     .collect()
             },
             class_member_types: classes::specializations::export_member_types(syntax_tree, session),
+            covergroups: {
+                let mut models: Vec<_> = session.covergroups.values().cloned().collect();
+                models.sort_by(|left, right| left.name.cmp(&right.name));
+                models
+            },
             inline_randomizations,
             // A scope exports no other instance's subroutines.
             hierarchical_subroutines: Vec::new(),
@@ -122,6 +127,37 @@ impl ScopeElaboration<'_> {
         })
     }
 
+    /// Drops the subroutines of the covergroup types that the scope's own
+    /// code does not reach, with their locals. A package and a compilation
+    /// unit make the subroutines of every covergroup they declare (IEEE
+    /// 1800-2023 19.3) for the scopes that use the types, which take them
+    /// from the symbols the scope exports. The module of the scope itself
+    /// holds the state of its variables and needs those its own code calls:
+    /// the handles among the locals of the others would be state of every
+    /// design that uses a variable of the package, also of one that
+    /// constructs no covergroup.
+    pub(super) fn drop_unreached_covergroup_subroutines(&mut self) {
+        if !(self.is_package || self.export_symbols)
+            || !self
+                .subroutines
+                .iter()
+                .any(|subroutine| covergroups::is_class(&subroutine.name))
+        {
+            return;
+        }
+        let reached = self.reached_covergroup_subroutines();
+        let mut dropped = HashSet::default();
+        self.subroutines.retain(|subroutine| {
+            let keep = !covergroups::is_class(&subroutine.name)
+                || reached.contains(subroutine.name.as_str());
+            if !keep {
+                dropped.extend(subroutine_locals(subroutine));
+            }
+            keep
+        });
+        self.locals.retain(|local| !dropped.contains(&local.name));
+    }
+
     /// Adds the subroutines, locals and DPI imports of the packages the scope
     /// uses. Returns the package parameters it sees.
     pub(super) fn lower_imported(&mut self) -> Vec<Parameter> {
@@ -146,6 +182,23 @@ impl ScopeElaboration<'_> {
             // `Packages::build_design_subroutines`).
             let design = self.imported.design_subroutines.0.clone();
             let reachable = self.reachable_imports(&imported, design.as_deref(), &known);
+            // The locals of the imported subroutines come with the scope
+            // whether it calls them or not, but those of the subroutines
+            // of the covergroup types it does not reach: a package makes
+            // them for every covergroup it declares (IEEE 1800-2023 19.3),
+            // and the handles among them would be state of every scope
+            // that imports the package, also one that uses no covergroup.
+            let unreached_locals: HashSet<String> = self
+                .imported
+                .subroutines
+                .iter()
+                .filter(|subroutine| {
+                    covergroups::is_class(&subroutine.name)
+                        && !reachable.contains(subroutine.name.as_str())
+                        && !known.contains(subroutine.name.as_str())
+                })
+                .flat_map(|subroutine| subroutine_locals(subroutine))
+                .collect();
             let mut missing = self
                 .imported
                 .subroutines
@@ -211,7 +264,9 @@ impl ScopeElaboration<'_> {
                 .imported
                 .locals
                 .iter()
-                .filter(|local| known.insert(local.name.as_str()))
+                .filter(|local| {
+                    !unreached_locals.contains(&local.name) && known.insert(local.name.as_str())
+                })
                 .map(|local| (**local).clone())
                 .collect::<Vec<_>>();
             if let Some(design) = &design {

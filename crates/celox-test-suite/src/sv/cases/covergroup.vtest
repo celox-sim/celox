@@ -1,0 +1,101 @@
+(group covergroup (category sequential))
+
+; IEEE 1800-2023 19.3: a covergroup is a type, and a variable of it holds a
+; handle of an instance that `new` creates, or `null`.
+(case handles_are_null_until_constructed
+ (source "handles.sv" #"module Top(output bit [3:0] q);
+ covergroup cg; endgroup
+ cg a, b;
+ initial begin
+  q[0] = a == null;
+  a = new;
+  q[1] = a != null;
+  b = a;
+  q[2] = a == b;
+  b = null;
+  q[3] = b == null && a != null;
+  a.sample();
+ end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq q 15))
+
+; 19.3, 19.8.1: `new` takes the arguments of the covergroup, by position or
+; by name, an omitted one its default, and `sample` those of the sample
+; method it is declared with.
+(case arguments_of_new_and_of_sample
+ (source "arguments.sv" #"module Top(output bit [2:0] q);
+ covergroup cg(int lo, int hi = 3) with function sample(bit [3:0] v, bit on = 1); endgroup
+ cg a = new(1);
+ cg b = new(.hi(2), .lo(0));
+ cg c = new(4, 5);
+ initial begin
+  a.sample(4'd1);
+  b.sample(.v(4'd2), .on(0));
+  c.sample(4'd3, 1);
+  q[0] = a != null;
+  q[1] = b != null && b != a;
+  q[2] = c != null && c != b;
+ end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq q 7))
+
+; 19.3: each element of an array of covergroup variables holds its own
+; instance.
+(case arrays_of_covergroup_variables
+ (source "arrays.sv" #"module Top(output bit [2:0] q);
+ covergroup cg; endgroup
+ cg all[3];
+ initial begin
+  q[0] = all[0] == null && all[2] == null;
+  foreach (all[i]) all[i] = new();
+  foreach (all[i]) all[i].sample();
+  q[1] = all[0] != null && all[1] != null && all[2] != null;
+  q[2] = all[0] != all[1] && all[1] != all[2] && all[0] != all[2];
+ end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq q 7))
+
+; 19.4: a covergroup embedded in a class is a variable of the class that
+; its constructor assigns: `null` in an object whose constructor did not.
+(case embedded_covergroup_is_constructed_by_new
+ (source "embedded.sv" #"module Top(output bit [3:0] q);
+ class C;
+  int hits;
+  covergroup cg; endgroup
+  function new(bit make); if (make) cg = new; endfunction
+  function void hit(); hits++; cg.sample(); endfunction
+ endclass
+ C made, bare;
+ initial begin
+  made = new(1);
+  bare = new(0);
+  q[0] = made.cg != null;
+  q[1] = bare.cg == null;
+  made.hit();
+  made.cg.sample();
+  q[2] = made.hits == 1;
+  q[3] = made.cg != bare.cg;
+ end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq q 15))
+
+; 8.12: a shallow copy does not copy an embedded covergroup; the handle of
+; the new object is `null`.
+(case shallow_copy_has_no_embedded_covergroup
+ (source "copy.sv" #"module Top(output bit [2:0] q);
+ class C;
+  int v;
+  covergroup cg; endgroup
+  function new(); cg = new; endfunction
+ endclass
+ C a, b;
+ initial begin
+  a = new;
+  a.v = 5;
+  b = new a;
+  q[0] = a.cg != null;
+  q[1] = b.cg == null;
+  q[2] = b.v == 5;
+ end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq q 7))
