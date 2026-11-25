@@ -132,6 +132,80 @@ impl std::hash::Hash for Spelling {
     fn hash<H: std::hash::Hasher>(&self, _: &mut H) {}
 }
 
+/// The typedef that names an enumeration, struct or union type, and the
+/// elaborated scope that declares it, which the declaration of the type
+/// keeps. It does not tell types apart: the declaration does (IEEE
+/// 1800-2023 6.22.1), and one declaration may be named by a typedef in one
+/// type and not in another (`typedef type(v) t`). It is one pointer.
+#[derive(Debug, Clone, Default)]
+pub(super) struct Naming(Option<Arc<NamingParts>>);
+
+#[derive(Debug, Clone, Default, PartialEq)]
+struct NamingParts {
+    /// The identity of the typedef that names the type.
+    declaration: Option<Arc<str>>,
+    /// How `$typename` writes the name of the typedef.
+    name: Option<TypedefName>,
+    /// The elaborated scope that declares the type or its typedef: an
+    /// analysis of a module, interface or program (see [`SpellingParts`]).
+    scope: Option<Arc<str>>,
+}
+
+impl Naming {
+    /// The naming of a type declared in elaborated scope `scope`, which no
+    /// typedef names yet.
+    pub(super) fn declared_in(scope: Option<Arc<str>>) -> Self {
+        Self(scope.map(|scope| {
+            Arc::new(NamingParts {
+                scope: Some(scope),
+                ..NamingParts::default()
+            })
+        }))
+    }
+
+    /// The naming after the typedef whose identity is `declaration` and
+    /// whose `$typename` name is `name`, declared in elaborated scope
+    /// `scope`.
+    pub(super) fn named(
+        declaration: Arc<str>,
+        name: Option<TypedefName>,
+        scope: Option<Arc<str>>,
+    ) -> Self {
+        Self(Some(Arc::new(NamingParts {
+            declaration: Some(declaration),
+            name,
+            scope,
+        })))
+    }
+
+    /// The identity of the typedef that names the type.
+    pub(super) fn declaration(&self) -> Option<&str> {
+        self.0.as_deref()?.declaration.as_deref()
+    }
+
+    /// How `$typename` writes the name of the typedef.
+    pub(super) fn name_of(&self) -> Option<&TypedefName> {
+        self.0.as_deref()?.name.as_ref()
+    }
+
+    /// The elaborated scope that declares the type.
+    pub(super) fn scope(&self) -> Option<&str> {
+        self.0.as_deref()?.scope.as_deref()
+    }
+}
+
+impl PartialEq for Naming {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for Naming {}
+
+impl std::hash::Hash for Naming {
+    fn hash<H: std::hash::Hasher>(&self, _: &mut H) {}
+}
+
 /// The name of a typedef, prefixed with the scope that declares it (rule f).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum TypedefName {

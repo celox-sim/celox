@@ -579,6 +579,7 @@ fn bind_in_mode(
                     let Some(mut ty) = unpacked_structs::native_type(
                         &tree.functions,
                         owner,
+                        scope.clone(),
                         fields,
                         &context.const_env,
                     ) else {
@@ -615,6 +616,7 @@ fn bind_in_mode(
                 else {
                     return Ok(None);
                 };
+                let keyword = (!soft && !tagged).then_some(if union { "union" } else { "struct" });
                 let Some(mut ty) = packed_structs::native_type(
                     tree,
                     if tagged {
@@ -627,7 +629,7 @@ fn bind_in_mode(
                         packed_structs::AggregateKind::Struct
                     },
                     signed,
-                    owner,
+                    packed_structs::AggregateDeclaration::new(owner, keyword, scope.clone()),
                     fields,
                     ranges,
                     &context.const_env,
@@ -694,7 +696,7 @@ fn packed_form(
         tree,
         packed_structs::AggregateKind::Struct,
         false,
-        Arc::from(aggregate.identity()),
+        packed_structs::AggregateDeclaration::new(Arc::from(aggregate.identity()), None, None),
         fields,
         Vec::new(),
         env,
