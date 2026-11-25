@@ -377,18 +377,22 @@ fn partition_fanout_boundaries<A: Clone + Eq + Hash>(
 /// Cut a combinational schedule into partitions of about
 /// `partitioning.target_cost`, or `None` when it would be one.
 pub(super) fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
-    prepared: &PreparedSchedule<Addr>,
+    prepared: &mut PreparedSchedule<Addr>,
     arena: &SLTNodeArena<Addr>,
     var_widths: &HashMap<Addr, usize>,
     unpacked_element_widths: &HashMap<Addr, usize>,
     partitioning: SettlePartitioning<Addr>,
+    four_state: bool,
 ) -> Option<(PartitionPlan<Addr>, Addr)> {
+    let held = local_fanout::group_mux_readers(
+        prepared,
+        arena,
+        &partitioning,
+        var_widths,
+        unpacked_element_widths,
+        four_state,
+    );
     let input = &prepared.input;
-    // A captured value or a pre-lowered node is materialized at one place
-    // and reused at a later one through the lowering cache, which a
-    // partition boundary between them would clear: no partition starts
-    // within the work from the first to the last that lowers it.
-    let held = held_work(prepared, arena);
     // Whole-variable copies, by target.
     let mut copy_source: HashMap<Addr, Addr> = HashMap::default();
     for work in &prepared.scheduled_work {
