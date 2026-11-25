@@ -151,14 +151,7 @@ impl BodyBuilder<'_, '_, '_> {
             Some(&self.dims),
         )?;
         let mut stmts = Vec::new();
-        let declarations = self.syntax().declarations();
-        for (mut signal, assignment) in
-            signals
-                .into_iter()
-                .zip(native.variables.iter().filter(|variable| {
-                    type_binding::ordinary_variable(variable, native.data_type, declarations)
-                }))
-        {
+        for (mut signal, assignment) in signals.into_iter().zip(native.variables.iter()) {
             if signal.r#type.is_unpacked_struct_in(&self.session.types)
                 && !signal.r#type.unpacked_ranges.is_empty()
             {

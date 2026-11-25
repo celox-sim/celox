@@ -385,6 +385,20 @@ impl ProcModule<'_> {
                 for stmt in subroutine.body.iter().chain(&subroutine.sensitivity_body) {
                     stmt.walk(&mut |stmt| {
                         statements += 1;
+                        // The registration of a covergroup type holds its
+                        // whole descriptor: it is in the one function that
+                        // makes it, never in each of its callers.
+                        if let sv::ir::Stmt::Eval(sv::ir::Expr::Call {
+                            callee: sv::ir::Callee::Object(op),
+                            ..
+                        }) = stmt
+                            && matches!(
+                                **op,
+                                sv::ir::ObjectOp::Coverage(sv::ir::CoverageOp::Register(_))
+                            )
+                        {
+                            statements += OUT_OF_LINE_STATEMENTS;
+                        }
                         stmt_calls(stmt, &mut calls)
                     });
                 }

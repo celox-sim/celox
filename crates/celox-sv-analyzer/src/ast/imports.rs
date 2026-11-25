@@ -152,7 +152,15 @@ impl ScopeImports {
             );
         }
         let spans = tree.spans();
-        for id in spans.expressions.within(&ranges) {
+        // The formals of a covergroup name packages as the rest of the
+        // scope does (see `CovergroupFormals`).
+        let formals = CovergroupFormals::of(tree, &ranges);
+        for id in spans
+            .expressions
+            .within(&ranges)
+            .into_iter()
+            .chain(formals.expressions.iter().copied())
+        {
             let expression = native.expression(id);
             if !in_ranges(expression.tokens.start, &ranges) {
                 continue;
@@ -194,7 +202,12 @@ impl ScopeImports {
                 }
             }
         }
-        for id in spans.types.within(&ranges) {
+        for id in spans
+            .types
+            .within(&ranges)
+            .into_iter()
+            .chain(formals.types.iter().copied())
+        {
             let ty = native.data_type(id);
             if in_ranges(ty.tokens.start, &ranges)
                 && let celox_sv_syntax::DataTypeKind::Named(path) = &ty.kind
@@ -326,6 +339,25 @@ fn type_alias_scopes(tree: &SyntaxTree, blocks: &[GenerateScope]) -> NameRanges 
     let scope_end = tree.root_unit().map_or(usize::MAX, |unit| unit.tokens.end);
     let mut out_of_block = None;
     for id in items {
+        // A covergroup declares a type of its name (19.3), which qualifies
+        // its static method as a class does (19.8).
+        if let BodyItemKind::Covergroup(id) = native.body_item(id).kind {
+            if tree.spans().covergroup_index.place(id) != super::covergroups::Place::Scope {
+                continue;
+            }
+            let covergroup = native.covergroup(id);
+            let end = blocks
+                .iter()
+                .filter(|block| block.contains(covergroup.tokens.start))
+                .map(|block| block.end)
+                .fold(scope_end, usize::min);
+            result.add(
+                normalize_identifier(&covergroup.name.spelling),
+                covergroup.header.end,
+                end,
+            );
+            continue;
+        }
         let BodyItemKind::TypeAlias(id) = native.body_item(id).kind else {
             continue;
         };
@@ -586,6 +618,59 @@ fn in_ranges(offset: usize, ranges: &[celox_sv_syntax::TokenRange]) -> bool {
     let next = ranges.partition_point(|range| range.start <= offset);
     next > 0 && offset < ranges[next - 1].end
 }
+/// The expressions and types of the formals of the covergroups in the
+/// ranges of a scope, and of their sample methods (IEEE 1800-2023 19.3,
+/// 19.8.1). Nothing else of what follows the name of a covergroup is the
+/// scope's to bind, so the scans of its expressions and types select none
+/// of it (see `Spans::covergroups`); the formals are bound in the scope
+/// that declares the covergroup, so the names their types and defaults
+/// read resolve there, through its imports too (26.3). A default is
+/// evaluated in the scope that declares the covergroup (13.5.3), so a name
+/// in it is no formal, also when a formal has the name.
+#[derive(Default)]
+struct CovergroupFormals {
+    expressions: Vec<celox_sv_syntax::ExprId>,
+    types: Vec<celox_sv_syntax::TypeId>,
+}
+
+impl CovergroupFormals {
+    fn of(tree: &SyntaxTree, ranges: &[celox_sv_syntax::TokenRange]) -> Self {
+        let native = tree.declarations();
+        // A file without covergroups pays nothing.
+        if native.covergroups.is_empty() {
+            return Self::default();
+        }
+        let ports: Vec<_> = native
+            .covergroups
+            .iter()
+            .filter(|covergroup| in_ranges(covergroup.tokens.start, ranges))
+            .flat_map(super::covergroups::formal_ports)
+            .map(|port| port.tokens)
+            .collect();
+        if ports.is_empty() {
+            return Self::default();
+        }
+        let within = |tokens: celox_sv_syntax::TokenRange| {
+            ports
+                .iter()
+                .any(|port| port.start <= tokens.start && tokens.start < port.end)
+        };
+        let (expressions, types) = &tree.spans().covergroup_formals;
+        Self {
+            expressions: expressions
+                .within(&ports)
+                .into_iter()
+                .filter(|id| within(native.expression(*id).tokens))
+                .collect(),
+            types: types
+                .within(&ports)
+                .into_iter()
+                .filter(|id| within(native.data_type(*id).tokens))
+                .collect(),
+        }
+    }
+}
+
 /// Whole-file facts the reference collection selects from, built once per
 /// file so each scope costs what its own token ranges contain.
 #[derive(Debug)]
@@ -673,7 +758,16 @@ pub(super) fn unqualified_names(tree: &SyntaxTree) -> HashMap<String, Vec<usize>
     // import makes visible (IEEE 1800-2023 8.23, 26.3), while a package name
     // binds nothing.
     let spans = tree.spans();
-    for id in spans.expressions.within(&ranges) {
+    // The types and defaults of the formals of a covergroup name what the
+    // scope sees, a wildcard-imported name among it (see
+    // `CovergroupFormals`).
+    let formals = CovergroupFormals::of(tree, &ranges);
+    for id in spans
+        .expressions
+        .within(&ranges)
+        .into_iter()
+        .chain(formals.expressions.iter().copied())
+    {
         let expression = native.expression(id);
         if let ExprKind::Name(name) = &expression.kind
             && !pattern_keys.contains(&expression.tokens.start)
@@ -681,7 +775,12 @@ pub(super) fn unqualified_names(tree: &SyntaxTree) -> HashMap<String, Vec<usize>
             add(&name.spelling, expression.tokens.start);
         }
     }
-    for id in spans.types.within(&ranges) {
+    for id in spans
+        .types
+        .within(&ranges)
+        .into_iter()
+        .chain(formals.types.iter().copied())
+    {
         let ty = native.data_type(id);
         if let DataTypeKind::Named(path) = &ty.kind
             && let Some(name) = path.first()

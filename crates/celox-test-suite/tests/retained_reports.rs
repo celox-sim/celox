@@ -1410,6 +1410,24 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "compile",
                             "Constraint declarations not supported",
                         ),
+                        ("icarus", "covergroup::handles_are_null_until_constructed") => {
+                            ("compile_error", "compile", "Invalid module item")
+                        }
+                        ("icarus", "covergroup::arguments_of_new_and_of_sample") => {
+                            ("compile_error", "compile", "Invalid module item")
+                        }
+                        ("icarus", "covergroup::arrays_of_covergroup_variables") => {
+                            ("compile_error", "compile", "Invalid module item")
+                        }
+                        ("icarus", "covergroup::embedded_covergroup_is_constructed_by_new") => {
+                            ("compile_error", "compile", "Invalid class item")
+                        }
+                        ("icarus", "covergroup::shallow_copy_has_no_embedded_covergroup") => {
+                            ("compile_error", "compile", "Invalid class item")
+                        }
+                        ("verilator", "covergroup::shallow_copy_has_no_embedded_covergroup") => {
+                            ("mismatch", "execute", "assert_eq q: expected 0x7, got 0x5")
+                        }
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

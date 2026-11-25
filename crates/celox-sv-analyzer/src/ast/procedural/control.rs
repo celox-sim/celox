@@ -2412,6 +2412,16 @@ impl BodyBuilder<'_, '_, '_> {
                                 before: order,
                             };
                             for mut statement in self.subroutine_call_statement(*call)? {
+                                // The handle of a covergroup would be
+                                // sampled as the arguments are, which a
+                                // handle cannot be (19.8.1).
+                                if matches!(&statement, Stmt::Call { name, .. }
+                                    if covergroups::is_sampler(name))
+                                {
+                                    return Err(unsupported(
+                                        "covergroup sample call in a sequence match item (IEEE 1800-2023 19.8.1)",
+                                    ));
+                                }
                                 self.sample_call_arguments(
                                     &mut statement,
                                     here,

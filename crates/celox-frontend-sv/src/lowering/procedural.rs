@@ -61,6 +61,9 @@ pub(super) struct ProcModule<'a> {
     /// The extern functions the module calls.
     pub externs: Externs,
     pub four_state: bool,
+    /// The design is known to construct no covergroup, so `$get_coverage`
+    /// is 100 without asking the heap (IEEE 1800-2023 19.11).
+    pub no_covergroups: bool,
     /// The module is a program (IEEE 1800-2023 24.3): its kernels honour
     /// `$exit` (24.7).
     pub program: bool,
@@ -154,10 +157,12 @@ pub(super) struct ModuleTables {
     subroutines: Arc<HashMap<String, sv::ir::Subroutine>>,
     written_names: Arc<super::WrittenNames>,
     constant_functions: sv::RuntimeConstantTable,
+    /// See [`ProcModule::no_covergroups`].
+    no_covergroups: bool,
 }
 
 impl ModuleTables {
-    pub fn new(module: &sv::ir::Module) -> Self {
+    pub fn new(module: &sv::ir::Module, no_covergroups: bool) -> Self {
         let subroutines: HashMap<String, sv::ir::Subroutine> = module
             .subroutines()
             .iter()
@@ -175,6 +180,7 @@ impl ModuleTables {
         };
         let written_names = super::WrittenNames::of(&calls, subroutines.values());
         Self {
+            no_covergroups,
             written_names: Arc::new(written_names),
             subroutines: Arc::new(subroutines),
             constant_functions: sv::RuntimeConstantFunctions::table(module),
@@ -304,6 +310,7 @@ impl<'a> ProcModule<'a> {
             dpi_imports,
             externs: Externs::default(),
             four_state,
+            no_covergroups: tables.no_covergroups,
             program: module.is_program(),
             created: Vec::new(),
             temp_counter: 0,

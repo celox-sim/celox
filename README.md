@@ -200,8 +200,9 @@ Celox is under active development. Its focus is design-level testing of RTL
 written in Veryl or SystemVerilog. For SystemVerilog, Celox follows
 IEEE Std 1800-2023: the
 [conformance and deviations page](https://celox-sim.github.io/celox/guide/systemverilog-reference)
-lists unsupported features (such as `bind`, checkers, covergroups,
-clocking blocks, `specify` blocks, and UDPs), partially supported subsets,
+lists unsupported features (such as `bind`, checkers, clocking blocks,
+`specify` blocks, UDPs, and covergroup constructs beyond the supported
+subset), partially supported subsets,
 intentional deviations, and implementation-defined choices. Valid IEEE
 1800-2023 code not listed there is expected to follow the standard (and
 unimplemented constructs are rejected with an `Unsupported` diagnostic rather

@@ -50,6 +50,11 @@ pub enum StateError {
         "state files do not record class objects or dynamic containers; `{0}` holds one, use a checkpoint instead"
     )]
     Objects(String),
+    /// The design constructed a covergroup, whose coverage state files do
+    /// not record: saving would lose it, and loading would leave the
+    /// coverage of the abandoned run beside the loaded state.
+    #[error("state files do not record covergroup coverage; use a checkpoint instead")]
+    Coverage,
 }
 
 /// Differences between a state file and the design it is loaded into.
@@ -382,6 +387,11 @@ impl<B: SimBackend> Simulator<B> {
         if !self.components.is_empty() {
             return Err(CheckpointError::ExternalComponents.into());
         }
+        // The coverage of a covergroup is cumulative (IEEE 1800-2023
+        // 19.11): a state without it would report other numbers.
+        if self.backend.heap().has_coverage() {
+            return Err(StateError::Coverage);
+        }
         if self.dirty {
             self.eval_comb_checked().map_err(StateError::Runtime)?;
             self.dirty = false;
@@ -398,6 +408,9 @@ impl<B: SimBackend> Simulator<B> {
     /// fire for the jump to the loaded state. A schedule in the file is
     /// ignored. An attached VCD writer records the loaded values as changes
     /// at the next dump.
+    ///
+    /// Fails with [`StateError::Coverage`] once a covergroup was
+    /// constructed: the file has no coverage to put in its place.
     pub fn load_state(&mut self, file: &StateFile) -> Result<(), StateError> {
         self.load_state_at_time(file, 0)
     }
@@ -411,6 +424,12 @@ impl<B: SimBackend> Simulator<B> {
     ) -> Result<(), StateError> {
         if !self.components.is_empty() {
             return Err(CheckpointError::ExternalComponents.into());
+        }
+        // The file was saved without coverage (`Self::prepare_save_state`),
+        // and the instances and samples of this run would stay beside its
+        // state.
+        if self.backend.heap().has_coverage() {
+            return Err(StateError::Coverage);
         }
         self.check_host_restore_support()?;
         // Evaluating the loaded state can still fail (an oscillating

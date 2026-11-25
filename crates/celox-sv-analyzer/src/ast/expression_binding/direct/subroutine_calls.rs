@@ -196,9 +196,6 @@ pub(super) fn enter_call(
         return Ok(None);
     }
     let Some(name) = bound_callable_name(tree, session, *expression, native, dimensions)? else {
-        if let ExprKind::Member { expression, .. } = &native.expression(*expression).kind {
-            objects::reject_covergroup(tree, session, *expression, native, dimensions)?;
-        }
         // `h.m()` of a class that declares no `m` (8.5).
         objects::check_member_declared(tree, session, *expression, native, dimensions)?;
         // A dotted name that calls nothing of the scope is a hierarchical
@@ -380,10 +377,9 @@ fn enter_system_call(
         // no-coverage results (40.3.2): `SV_COV_NOCOV
         // (0), `SV_COV_ERROR (-1) for bad arguments,
         // and `SV_COV_OK (1) for operations with
-        // nothing to do. $get_coverage is 100.0 on a
-        // design without covergroup instances
-        // (19.11), which is every design Celox
-        // elaborates. The scope and name arguments
+        // nothing to do. $get_coverage is the coverage
+        // of the covergroups of the design (19.9),
+        // bound below. The scope and name arguments
         // name a hierarchy or a database, not a
         // value, so they are not bound; the
         // selectors before them are constant
@@ -472,15 +468,10 @@ fn enter_system_call(
             )));
         }
         if function == SystemFunction::GetCoverage {
-            // The covergroups of a design are not
-            // elaborated, so its coverage is known
-            // only without any (19.11).
-            if native.tokens.iter().any(|token| token.text == "covergroup") {
-                return Err(unsupported(
-                    "`$get_coverage` in a source that declares a covergroup",
-                ));
-            }
-            values.push(Expr::Literal("100.0".into()));
+            // The coverage of every covergroup type of the
+            // design (19.9), which the heap computes: 100
+            // without any (19.11).
+            values.push(crate::ast::covergroups::overall());
             return Ok(None);
         }
         let Some(result) = result else {

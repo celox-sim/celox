@@ -104,13 +104,7 @@ pub(in crate::ast) fn initial_processes_from_scope(
                     return Err(unsupported("opaque declaration initializer"));
                 }
             };
-            for variable in declaration.variables.iter().filter(|variable| {
-                type_binding::ordinary_variable(
-                    variable,
-                    declaration.data_type,
-                    tree.declarations(),
-                )
-            }) {
+            for variable in &declaration.variables {
                 let name = instances::normalize_identifier(&variable.name.spelling);
                 if let Some(value) = variable.value {
                     assignments.push((name, Some(value), None));

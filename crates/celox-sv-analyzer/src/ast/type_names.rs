@@ -759,6 +759,13 @@ fn declared_class_name(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
 ) -> Converted<String> {
+    // A covergroup type is a reserved class name that no source spells, and
+    // 20.6.1 has no rule for the name of one.
+    if covergroups::is_class(class) {
+        return Err(unsupported(
+            "covergroup type as the operand of `$typename` (IEEE 1800-2023 19.3, 20.6.1)",
+        ));
+    }
     let generic = classes::specializations::lookup(session, class)
         .or_else(|| session.foreign.specialization(class))
         .map_or_else(
