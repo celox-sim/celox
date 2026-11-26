@@ -250,13 +250,22 @@ impl Ff<'_, '_> {
             Equal | CaseEqual => {
                 let left = self.handle(&args[0])?;
                 let right = self.handle(&args[1])?;
+                // Records of 4-state elements compare by their values; in
+                // two-state simulation they hold no X or Z bits, so equal
+                // ones share a handle.
+                let records = match args.get(2) {
+                    Some(records) if self.m.four_state => {
+                        self.integer_of_width(records, 64, false)?
+                    }
+                    _ => zero,
+                };
                 let raw = self.heap_call(
                     code(if op == Equal {
                         heap::EQUAL
                     } else {
                         heap::CASE_EQUAL
                     }),
-                    &[left, right],
+                    &[left, right, records],
                 );
                 let one = self.constant64(1);
                 let mask = self.b.alloc_bit(64, false);
