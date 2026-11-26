@@ -1,6 +1,7 @@
 use super::*;
 use crate::ast::ConstEnv;
 
+mod clocking;
 mod covergroups;
 mod enum_declarations;
 

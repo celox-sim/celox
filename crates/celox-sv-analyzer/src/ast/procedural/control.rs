@@ -1198,6 +1198,13 @@ impl BodyBuilder<'_, '_, '_> {
                     StatementKind::Unconverted { category, .. } if category == "randsequence" => {
                         output.extend(self.randsequence(id)?)
                     }
+                    // `##N` before a statement (14.11) waits for clocking
+                    // block events of the default clocking (14.12).
+                    StatementKind::Unconverted { category, .. } if category == "clocking drive" => {
+                        return Err(unsupported(
+                            "cycle delay `##` (IEEE 1800-2023 14.11) and default clocking (14.12)",
+                        ));
+                    }
                     _ => output.extend(self.native_statement_leaf(&native.statement(id).kind)?),
                 },
                 Job::EndScope => self.pop_scope(),

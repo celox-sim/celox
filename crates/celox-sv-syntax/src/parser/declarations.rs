@@ -735,6 +735,18 @@ impl Parser<'_> {
                 frames.push(frame);
                 continue;
             }
+            // A clocking declaration is one item, read through its
+            // `endclocking` (IEEE 1800-2023 14.3).
+            if frame.delimiters.is_empty() && !frame.typed_scope() && self.clocking_start() {
+                let start = self.at;
+                let id = self.clocking_declaration()?;
+                frame.record(self, start, BodyItemKind::Clocking(id))?;
+                frame.conditional = frame.builder.active();
+                frame.prototype = false;
+                frame.item_start = true;
+                frames.push(frame);
+                continue;
+            }
             // A covergroup is one item, whose parser reads it through its
             // `endgroup` (IEEE 1800-2023 19.3).
             if frame.delimiters.is_empty() && self.peek() == "covergroup" {

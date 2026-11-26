@@ -206,10 +206,27 @@ impl<B: SimBackend> SimulationState<B> {
             let ready = self.take_ready_processes(current_time);
             if ready.is_empty() && self.process_state.ready.is_empty() {
                 executor.try_observed_deferred_assertions(current_time)?;
+                let observed = !self.process_state.observed.is_empty();
                 self.run_observed_assertions(executor, current_time)?;
+                // What the Observed region's processes wrote, such as the
+                // values a clocking block samples there (14.13), settles and
+                // wakes the processes waiting for it, also when only logic
+                // reads it: a clocking block of a named event waits through
+                // no signal.
+                if observed {
+                    self.charge_pass()?;
+                    self.step_round(executor, current_time, Vec::new(), Vec::new(), false, false)?;
+                }
+                // The processes that the Observed region woke, such as those
+                // that wait for a clocking block event (14.10), run in the
+                // active region set before the reactive region set does
+                // (IEEE 1800-2023 4.5).
+                if !self.process_state.ready.is_empty() {
+                    continue;
+                }
                 // The active region set is empty: the reactive region set
                 // runs, and the design activity it creates runs in the active
-                // region set again (IEEE 1800-2023 4.5).
+                // region set again (4.5).
                 if !self.reactive_pending() {
                     break;
                 }

@@ -362,6 +362,15 @@ impl BodyBuilder<'_, '_, '_> {
                 timing_control,
                 repeat_count,
             } => {
+                if *nonblocking {
+                    clocking::reject_drive(
+                        *left,
+                        self.syntax().declarations(),
+                        &self.tree,
+                        self.session,
+                        &self.dims,
+                    )?;
+                }
                 if timing.is_some() {
                     return self.intra_assignment(
                         operator,
@@ -437,6 +446,13 @@ impl BodyBuilder<'_, '_, '_> {
                 if control.is_some() {
                     return Err(unsupported("delayed nonblocking event trigger"));
                 }
+                clocking::reject_block_use(
+                    *target,
+                    self.syntax().declarations(),
+                    &self.tree,
+                    self.session,
+                    &self.dims,
+                )?;
                 if !events::is_handle(
                     &self.tree,
                     self.session,

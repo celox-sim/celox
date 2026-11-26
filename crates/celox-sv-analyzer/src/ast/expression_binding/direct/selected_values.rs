@@ -67,6 +67,14 @@ pub(in crate::ast::expression_binding) fn path(
         virtual_interfaces::member(session, &ty, &member)?;
         return Ok((vec![virtual_interfaces::template(&ty.key(), &member)], None));
     }
+    // A clockvar reads the value its clocking block sampled (14.13).
+    if let Some((block, var, members)) =
+        clocking::clockvar_path(root, native, tree, session, dimensions)
+    {
+        let mut parts = vec![clocking::read(&block, &var, dimensions)?];
+        parts.extend(members);
+        return Ok((parts, None));
+    }
     // A static class property is a variable of the module.
     if let Some(variable) = objects::static_property(tree, session, root, native, dimensions)? {
         return Ok((vec![variable], None));

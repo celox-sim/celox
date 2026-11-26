@@ -512,6 +512,42 @@ pub(super) fn signals_from_body_item(
         primitives::signals(gate, primitive, selected_name, signals);
         return Ok(());
     }
+    // The event, the time and the sampled values of a clocking block.
+    if let BodyItemKind::Clocking(clocking) = owner.kind {
+        clocking::check_scope(tree, clocking)?;
+        let Some(block) = clocking::block(native, clocking)? else {
+            return Ok(());
+        };
+        let inputs = || block.vars.iter().filter(|var| var.input.is_some());
+        let ports = if inputs().any(|var| !signals.iter().any(|signal| signal.name() == var.name)) {
+            ports_from_scope(tree, session, env, aliases, None)?
+        } else {
+            Vec::new()
+        };
+        let missing =
+            inputs().any(|var| clocking::signal_type(&var.name, &ports, signals).is_none());
+        // A query of one variable knows no variables declared before.
+        let declared = if missing && selected_name.is_some() {
+            signals_from_scope(tree, session, env, aliases)?
+        } else {
+            Vec::new()
+        };
+        let declared = if declared.is_empty() {
+            &signals[..]
+        } else {
+            &declared[..]
+        };
+        let declared = clocking::signals(
+            native,
+            clocking,
+            selected_name,
+            &ports,
+            declared,
+            &mut session.types,
+        )?;
+        signals.extend(declared);
+        return Ok(());
+    }
     let payload = match owner.kind {
         BodyItemKind::Data(id) => match native.data_declaration(id) {
             DataDeclaration::Variables(value) | DataDeclaration::Constructed(value) => {

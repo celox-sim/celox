@@ -6,6 +6,7 @@ use crate::{Error, IncludePolicy, Options, Preprocessor, SourceMap, Token, Token
 mod assignments;
 mod body;
 mod classes;
+mod clocking;
 mod constraints;
 mod coverage;
 #[cfg(test)]
@@ -77,6 +78,7 @@ pub struct Declarations {
     /// Every covergroup declaration (IEEE 1800-2023 19.3), by
     /// [`CovergroupId`].
     pub covergroups: Vec<CovergroupDeclaration>,
+    pub clockings: Vec<ClockingDeclaration>,
     /// The select expressions of the cross bins of every covergroup
     /// (19.6.1), by [`SelectId`].
     pub coverage_selects: Vec<SelectExpr>,
@@ -148,6 +150,7 @@ impl Declarations {
             modport_declarations: Vec::new(),
             assertion_declarations: Vec::new(),
             covergroups: Vec::new(),
+            clockings: Vec::new(),
             coverage_selects: Vec::new(),
             nettypes: Vec::new(),
             sequences: Vec::new(),
@@ -185,6 +188,7 @@ impl Declarations {
         let modport_declarations = parser.modport_declarations;
         let assertion_declarations = parser.assertion_declarations;
         let covergroups = parser.covergroups;
+        let clockings = parser.clockings;
         let coverage_selects = parser.coverage_selects;
         let nettypes = parser.nettypes;
         let lets = parser.lets;
@@ -216,6 +220,7 @@ impl Declarations {
             modport_declarations,
             assertion_declarations,
             covergroups,
+            clockings,
             coverage_selects,
             nettypes,
             lets,
@@ -310,6 +315,11 @@ impl Declarations {
 
     pub fn assertion_declaration(&self, id: AssertionDeclarationId) -> &AssertionDeclaration {
         &self.assertion_declarations[id.0]
+    }
+
+    /// Resolve a clocking declaration handle.
+    pub fn clocking(&self, id: ClockingId) -> &ClockingDeclaration {
+        &self.clockings[id.0]
     }
 
     /// Resolve a covergroup declaration handle.
@@ -462,6 +472,7 @@ struct Parser<'a> {
     modport_declarations: Vec<ModportDeclaration>,
     assertion_declarations: Vec<AssertionDeclaration>,
     covergroups: Vec<CovergroupDeclaration>,
+    clockings: Vec<ClockingDeclaration>,
     coverage_selects: Vec<SelectExpr>,
     nettypes: Vec<NettypeDeclaration>,
     sequences: Vec<Sequence>,

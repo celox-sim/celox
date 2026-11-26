@@ -1662,8 +1662,8 @@ fn unsupported_coverpoint_constructs_are_rejected_where_used() {
 
 #[test]
 fn coverpoint_of_a_clocking_block_signal_is_rejected() {
-    // 19.5 allows a signal of a clocking block as a coverpoint. Clocking
-    // blocks are not supported, so such a design does not analyze.
+    // 19.5 allows a signal of a clocking block as a coverpoint, a clockvar
+    // whose type a covergroup expression does not yet take.
     let error = rejected(
         "",
         "bit clk; bit [1:0] d; clocking cb @(posedge clk); input d; endclocking \
