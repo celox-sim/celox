@@ -458,6 +458,13 @@ pub(crate) fn resolved_type(r#type: &crate::ir::Type, constants: &ConstEnv) -> O
     {
         return Some(MemberType::Handle(events::CLASS.to_owned()));
     }
+    // A string variable, a value of its own type (6.16).
+    if r#type.kind() == crate::ir::TypeKind::String
+        && r#type.unpacked_ranges().is_empty()
+        && r#type.container().is_none()
+    {
+        return super::type_binding::builtin_type("string", None).map(MemberType::Value);
+    }
     let kind = match r#type.kind() {
         crate::ir::TypeKind::Bit => TypeKind::Bit,
         crate::ir::TypeKind::Logic => TypeKind::Logic,
