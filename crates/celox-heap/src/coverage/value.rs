@@ -18,6 +18,8 @@ pub(crate) trait Key: Clone + Ord + std::fmt::Debug {
     fn quotient(&self, per: &Self) -> u64;
     /// The bits of the key that `care` has set.
     fn masked(&self, care: &Self) -> Self;
+    /// The bits of the key.
+    fn bits(&self) -> BigUint;
 }
 
 impl Key for u64 {
@@ -32,6 +34,10 @@ impl Key for u64 {
     fn masked(&self, care: &Self) -> Self {
         self & care
     }
+
+    fn bits(&self) -> BigUint {
+        BigUint::from(*self)
+    }
 }
 
 impl Key for BigUint {
@@ -45,6 +51,10 @@ impl Key for BigUint {
 
     fn masked(&self, care: &Self) -> Self {
         self & care
+    }
+
+    fn bits(&self) -> BigUint {
+        self.clone()
     }
 }
 
@@ -295,6 +305,60 @@ impl Matcher {
             overlaps: found,
         }
     }
+
+    /// Call `mark` with each bin that holds a value of the keys
+    /// `low..=high` of a coverpoint of `width` bits, as often as it is found
+    /// to. A value of an ignore or illegal bin is one of no other bin; what
+    /// such a bin takes as a wildcard pattern is not known here and stays a
+    /// value of the bins that hold it: whether an ignore or illegal bin
+    /// takes a value of the keys so is what this returns.
+    pub(crate) fn holding(
+        &self,
+        width: u32,
+        low: &BigUint,
+        high: &BigUint,
+        mark: &mut dyn FnMut(u32),
+    ) -> bool {
+        match self {
+            Self::Narrow(matcher) => matcher.holding(width, low, high, mark),
+            Self::Wide(matcher) => matcher.holding(width, low, high, mark),
+        }
+    }
+
+    /// Call `mark` with each bin that holds the value of bits `value` with
+    /// the x and z bits `mask`, of which there are some.
+    pub(crate) fn holding_exact(&self, value: &BigUint, mask: &BigUint, mark: &mut dyn FnMut(u32)) {
+        match self {
+            Self::Narrow(matcher) => {
+                matcher.exact_hits(&u64::from_bits(value), &u64::from_bits(mask), mark)
+            }
+            Self::Wide(matcher) => matcher.exact_hits(value, mask, mark),
+        }
+    }
+}
+
+/// The lowest key from `low` on, of a type of `width` bits, whose bits are
+/// those of `value` where `care` has a bit set.
+fn lowest_match(low: &BigUint, value: &BigUint, care: &BigUint, width: u32) -> Option<BigUint> {
+    if &(low & care) == value {
+        return Some(low.clone());
+    }
+    // A higher key has a 1 where `low` has a 0, the bits of `low` above
+    // that bit and the lowest bits there are below it. The lowest such bit
+    // gives the lowest key: the others have a 1 above it where it has the 0
+    // of `low`.
+    for bit in 0..u64::from(width) {
+        if low.bit(bit) || (care.bit(bit) && !value.bit(bit)) {
+            continue;
+        }
+        let above = |bits: &BigUint| (bits >> (bit + 1)) << (bit + 1);
+        if above(&(low & care)) != above(value) {
+            continue;
+        }
+        let below = value & ones(bit as u32);
+        return Some(above(low) | (BigUint::from(1u8) << bit) | below);
+    }
+    None
 }
 
 /// A run of keys that the same bins hold.
@@ -578,6 +642,90 @@ impl<K: Key> MatcherOf<K> {
                 }
             }
         }
+    }
+
+    /// See [`Matcher::holding`].
+    fn holding(
+        &self,
+        width: u32,
+        low: &BigUint,
+        high: &BigUint,
+        mark: &mut dyn FnMut(u32),
+    ) -> bool {
+        if low > high {
+            return false;
+        }
+        let (first, last) = (K::from_bits(low), K::from_bits(high));
+        let start = self
+            .segments
+            .partition_point(|segment| segment.high < first);
+        let meeting = self.segments[start..]
+            .iter()
+            .take_while(|segment| segment.low <= last);
+        // The runs of the keys that no ignore or illegal bin holds.
+        let mut kept: Vec<(BigUint, BigUint)> = Vec::new();
+        let mut from = Some(low.clone());
+        for segment in meeting {
+            if !segment.removed {
+                let first = segment.first as usize;
+                for &bin in &self.hits[first..first + segment.count as usize] {
+                    mark(bin);
+                }
+                continue;
+            }
+            let Some(start) = from.take() else {
+                break;
+            };
+            let (removed_low, removed_high) = (segment.low.bits(), segment.high.bits());
+            if removed_low > start {
+                kept.push((start, removed_low - 1u8));
+            }
+            if removed_high < *high {
+                from = Some(removed_high + 1u8);
+            }
+        }
+        if let Some(start) = from {
+            kept.push((start, high.clone()));
+        }
+        if let Some(auto) = &self.auto {
+            let index = |key: &BigUint| {
+                if auto.bins == 1 {
+                    0
+                } else {
+                    K::from_bits(key)
+                        .quotient(&auto.per)
+                        .min(u64::from(auto.bins - 1)) as u32
+                }
+            };
+            // The bins of the runs are in order, and one bin may be that of
+            // the end of a run and of the start of the next.
+            let mut next = 0;
+            for (low, high) in &kept {
+                for bin in index(low).max(next)..=index(high) {
+                    mark(auto.first + bin);
+                }
+                next = index(high) + 1;
+            }
+        }
+        let mut last_bin = None;
+        let mut removed = false;
+        for wild in &self.wild {
+            if wild.removes && removed || !wild.removes && last_bin == Some(wild.bin) {
+                continue;
+            }
+            let (value, care) = (wild.value.bits(), wild.care.bits());
+            if kept.iter().any(|(low, high)| {
+                lowest_match(low, &value, &care, width).is_some_and(|key| key <= *high)
+            }) {
+                if wild.removes {
+                    removed = true;
+                } else {
+                    last_bin = Some(wild.bin);
+                    mark(wild.bin);
+                }
+            }
+        }
+        removed
     }
 
     /// Call `hit` with each bin that holds the value of bits `value` with
