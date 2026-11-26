@@ -24,10 +24,6 @@ const TEMPORAL: &[&str] = &[
     "throughout",
     "within",
     "intersect",
-    "until",
-    "s_until",
-    "until_with",
-    "s_until_with",
     "strong",
     "weak",
     "nexttime",
@@ -51,6 +47,9 @@ const TEMPORAL: &[&str] = &[
 /// (16.13): with a cycle delay, the words that make a sequence of what would
 /// otherwise be a Boolean expression.
 const SEQUENCE_WORDS: &[&str] = &["or", "and", "intersect", "throughout", "@"];
+
+/// The until operators (16.12.12).
+const UNTIL_WORDS: &[&str] = &["until", "s_until", "until_with", "s_until_with"];
 
 /// The most Boolean operands of one property specification.
 const MAX_SEQUENCE_OPERANDS: usize = 1024;
@@ -132,11 +131,41 @@ impl Parser<'_> {
         } else {
             None
         };
+        if !sequence && self.peek() == "(" && self.group_holds_until() {
+            let until = self.parenthesized_until(None, false, &locals)?;
+            return Ok(PropertySpec {
+                clock,
+                disable,
+                ..until
+            });
+        }
         let first = self.sequence_expr()?;
+        if !sequence && let Some(until) = self.until_property(None, &first, false, &locals)? {
+            return Ok(PropertySpec {
+                clock,
+                disable,
+                ..until
+            });
+        }
         let (antecedent, consequent) = if !sequence && matches!(self.peek(), "|->" | "|=>") {
             let next = self.peek() == "|=>";
             self.at += 1;
+            if self.peek() == "(" && self.group_holds_until() {
+                let until = self.parenthesized_until(Some(&first), next, &locals)?;
+                return Ok(PropertySpec {
+                    clock,
+                    disable,
+                    ..until
+                });
+            }
             let consequent = self.sequence_expr()?;
+            if let Some(until) = self.until_property(Some(&first), &consequent, next, &locals)? {
+                return Ok(PropertySpec {
+                    clock,
+                    disable,
+                    ..until
+                });
+            }
             // `|=>` is `|-> ##1` (16.12.7).
             let consequent = if next {
                 SequenceExpr::Concat {
@@ -184,6 +213,7 @@ impl Parser<'_> {
                 condition,
                 equivalent,
                 sequence: None,
+                until: None,
             });
         }
         let condition = consequent
@@ -204,7 +234,119 @@ impl Parser<'_> {
             condition,
             equivalent: None,
             sequence: Some(id),
+            until: None,
         })
+    }
+
+    /// The until property (16.12.12) whose left operand is `left`, when an
+    /// until operator follows it: the property, or the consequent of `|->`
+    /// or, `next`, `|=>` with antecedent `antecedent`. The clock and
+    /// `disable iff` are the caller's. Its operands are Boolean, of a
+    /// declaration without local variables; an until binds looser than the
+    /// sequence operators and tighter than an implication (Table 16-3).
+    fn until_property(
+        &mut self,
+        antecedent: Option<&SequenceExpr>,
+        left: &SequenceExpr,
+        next: bool,
+        locals: &[SequenceLocal],
+    ) -> Result<Option<PropertySpec>> {
+        let (strong, overlapping) = match self.peek() {
+            word if !UNTIL_WORDS.contains(&word) => return Ok(None),
+            "until" => (false, false),
+            "s_until" => (true, false),
+            "until_with" => (false, true),
+            "s_until_with" => (true, true),
+            _ => unreachable!("an until operator"),
+        };
+        self.at += 1;
+        let right = self.sequence_expr()?;
+        let operands = [Some(left), antecedent, Some(&right)];
+        if !locals.is_empty()
+            || operands
+                .iter()
+                .flatten()
+                .any(|operand| operand.boolean().is_none())
+        {
+            return Err(
+                self.unsupported("until property of operands other than Boolean expressions")
+            );
+        }
+        self.until_ends()?;
+        Ok(Some(PropertySpec {
+            clock: None,
+            disable: None,
+            antecedent: antecedent.and_then(SequenceExpr::boolean),
+            condition: left.boolean().expect("a Boolean left operand"),
+            equivalent: None,
+            sequence: None,
+            until: Some(UntilSpec {
+                release: right.boolean().expect("a Boolean right operand"),
+                strong,
+                overlapping,
+                next,
+            }),
+        }))
+    }
+
+    /// An until property in parentheses (see [`Self::until_property`]).
+    fn parenthesized_until(
+        &mut self,
+        antecedent: Option<&SequenceExpr>,
+        next: bool,
+        locals: &[SequenceLocal],
+    ) -> Result<PropertySpec> {
+        // Each parenthesis nests as a group of a sequence does.
+        self.enter_sequence()?;
+        self.expect("(")?;
+        let until = if self.peek() == "(" && self.group_holds_until() {
+            self.parenthesized_until(antecedent, next, locals)?
+        } else {
+            let left = self.sequence_expr()?;
+            match self.until_property(antecedent, &left, next, locals)? {
+                Some(until) => until,
+                None => {
+                    return Err(self.unsupported(
+                        "until property as an operand of a sequence or property operator",
+                    ));
+                }
+            }
+        };
+        self.expect(")")?;
+        self.sequence_depth -= 1;
+        self.until_ends()?;
+        Ok(until)
+    }
+
+    /// An until property ends the property: it is no operand of another
+    /// property operator here.
+    fn until_ends(&self) -> Result<()> {
+        if matches!(self.peek(), ")" | ";") {
+            return Ok(());
+        }
+        Err(self.unsupported("until property as an operand of a sequence or property operator"))
+    }
+
+    /// Whether the parenthesis at the cursor holds an until operator, also
+    /// in parentheses of its own.
+    fn group_holds_until(&self) -> bool {
+        let mut depth = 0usize;
+        let mut offset = 0;
+        loop {
+            match self.nth(offset) {
+                "" => return false,
+                "(" | "[" | "{" => depth += 1,
+                ")" | "]" | "}" => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return false;
+                    }
+                }
+                word if depth >= 1 && UNTIL_WORDS.contains(&word) => return true,
+                _ => {}
+            }
+            offset += 1;
+        }
     }
 
     /// A sequence expression of the supported subset of Syntax 16-3: `or`
@@ -312,6 +454,11 @@ impl Parser<'_> {
                 clock,
                 sequence: Box::new(sequence),
             });
+        }
+        if self.peek() == "(" && self.group_holds_until() {
+            return Err(
+                self.unsupported("until property as an operand of a sequence or property operator")
+            );
         }
         if self.peek() == "(" && self.group_holds_sequence() {
             self.enter_sequence()?;
@@ -697,10 +844,14 @@ impl Parser<'_> {
     ) -> Vec<(ExprId, AssertionDeclarationId)> {
         let names = &*self.visible_names(spec, names);
         let operands = match spec.sequence {
-            None => [spec.antecedent, Some(spec.condition)]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>(),
+            None => [
+                spec.antecedent,
+                Some(spec.condition),
+                spec.until.map(|until| until.release),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>(),
             Some(sequence) => {
                 let sequence = &self.sequences[sequence.0];
                 sequence
@@ -921,6 +1072,19 @@ impl Parser<'_> {
             return Ok(result);
         }
         let mut result = spec;
+        if let Some(until) = spec.until {
+            if let Some(operand) = [spec.antecedent, Some(spec.condition), Some(until.release)]
+                .into_iter()
+                .flatten()
+                .find(|&operand| self.instance(operand, names).is_some())
+            {
+                return Err(self.unsupported_at(
+                    self.expressions[operand.0].tokens,
+                    "instance of a named sequence or property as an operand of an until property",
+                ));
+            }
+            return Ok(result);
+        }
         if let Some(equivalent) = spec.equivalent
             && let Some(operand) = [spec.condition, equivalent]
                 .into_iter()
@@ -1006,15 +1170,16 @@ impl Parser<'_> {
             result.condition = inner.condition;
             result.equivalent = inner.equivalent;
             result.sequence = inner.sequence;
+            result.until = inner.until;
             // An explicit leading clock of the instance overrides the
             // incoming one (16.16.1).
             result.clock = inner.clock.or(spec.clock);
             return Ok(result);
         }
-        if inner.antecedent.is_some() || inner.sequence.is_some() {
+        if inner.antecedent.is_some() || inner.sequence.is_some() || inner.until.is_some() {
             return Err(self.unsupported_at(
                 tokens,
-                format!("implication or sequence over cycles `{name}` as the consequent of an implication"),
+                format!("implication, sequence over cycles or until property `{name}` as the consequent of an implication"),
             ));
         }
         if let Some(clock) = inner.clock

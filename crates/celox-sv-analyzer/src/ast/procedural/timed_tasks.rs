@@ -729,13 +729,12 @@ fn concurrent_actions(
     let mut actions = Vec::new();
     for body in bodies(subroutines, comb, ff, processes) {
         for statement in body {
-            statement.walk(&mut |statement| {
-                if let Stmt::If {
+            statement.walk(&mut |statement| match statement {
+                Stmt::If {
                     then_body,
                     else_body,
                     ..
-                } = statement
-                {
+                } => {
                     for branch in [then_body, else_body] {
                         if let [Stmt::AssertionRegion { reactive: true }, action @ ..] =
                             branch.as_slice()
@@ -744,6 +743,15 @@ fn concurrent_actions(
                         }
                     }
                 }
+                // The action of each attempt that passed or failed, which
+                // the monitor runs in a loop (see `assertions::ACTION_LOOP`).
+                Stmt::Loop { init, body, .. }
+                    if matches!(init.first(), Some(Stmt::Local { name, .. })
+                        if name.starts_with(super::assertions::ACTION_LOOP)) =>
+                {
+                    actions.push(body);
+                }
+                _ => {}
             });
         }
     }

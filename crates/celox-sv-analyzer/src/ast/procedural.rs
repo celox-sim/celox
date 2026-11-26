@@ -37,6 +37,7 @@ pub(crate) mod static_references;
 pub(in crate::ast) mod subroutines;
 pub(super) mod timed_tasks;
 mod timing;
+mod until;
 use crate::procedural::{
     CaseItemBase, CaseKind, CaseLabel, EventEdge, EventItemBase, LoopKind, ParamDirection,
     SystemTaskArg,
@@ -366,6 +367,10 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
     /// `assertions::DisableHistory`), and those that count the ticks of each
     /// clock of a multiclocked sequence (see `multiclock`).
     pub(super) disable_watchers: Vec<Vec<Stmt>>,
+    /// The bodies of the final procedures that a concurrent assertion
+    /// needs: those that fail the attempts of a strong until property
+    /// still pending when the simulation ends (see `until`).
+    pub(super) assertion_finals: Vec<Vec<Stmt>>,
     pub(super) sensitivity_body: Vec<Stmt>,
     /// The name of the subroutine whose body this is, which the names of
     /// its variables carry (see [`Self::declare_static`], [`Self::declare`]).
@@ -833,6 +838,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             return_chandle: None,
             sensitivity_body: Vec::new(),
             disable_watchers: Vec::new(),
+            assertion_finals: Vec::new(),
             owner: None,
             owned_locals: 0,
             named_blocks: Vec::new(),

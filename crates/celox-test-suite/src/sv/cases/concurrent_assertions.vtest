@@ -466,3 +466,103 @@ endmodule"#)
  (top Top) (run_until 200)
  (assert_eq r1 1) (assert_eq r2 1) (assert_eq r3 2) (assert_eq r4 2)
  (assert_eq t1 15) (assert_eq nb 20))
+
+; IEEE 1800-2023 16.12.12: an until property of Boolean operands holds while
+; its left operand holds at each tick from the start of the attempt, until a
+; tick where its right operand holds, the left one too there in the
+; overlapping forms. It fails at the first tick before that where the left
+; operand does not hold; an attempt still pending when the run stops has
+; neither passed nor failed. As the consequent of `|->` or `|=>` it starts
+; at the antecedent's tick or the next. An attempt is disabled when the
+; `disable iff` condition holds from its start to its end (16.12). Bit `t`
+; of each vector is the value at tick `t`.
+(case until_properties
+ (source "until.sv" #"module Top(output int p1, f1, p2, f2, p3, f3, p4, f4,
+  output int i1, i2, i3, i4, n1, n2, n3, n4, dp, df, ep, ef);
+ bit clk, d;
+ int t;
+ bit [15:0] av = 16'hfcf7, bv = 16'h02c4, cv = 16'h8b2d, dv = 16'h1020;
+ bit a, b, c;
+ always @(posedge clk) t <= t + 1;
+ assign a = av[t];
+ assign b = bv[t];
+ assign c = cv[t];
+ assert property (@(posedge clk) a until b) p1++; else f1++;
+ assert property (@(posedge clk) a s_until b) p2++; else f2++;
+ assert property (@(posedge clk) a until_with b) p3++; else f3++;
+ assert property (@(posedge clk) a s_until_with b) p4++; else f4++;
+ assert property (@(posedge clk) c |-> a until b) else i1++;
+ assert property (@(posedge clk) c |-> a s_until b) else i2++;
+ assert property (@(posedge clk) c |-> a until_with b) else i3++;
+ assert property (@(posedge clk) c |-> a s_until_with b) else i4++;
+ assert property (@(posedge clk) c |=> a until b) else n1++;
+ assert property (@(posedge clk) c |=> a s_until b) else n2++;
+ assert property (@(posedge clk) c |=> a until_with b) else n3++;
+ assert property (@(posedge clk) c |=> a s_until_with b) else n4++;
+ assert property (@(posedge clk) disable iff (d) a until b) dp++; else df++;
+ assert property (@(posedge clk) disable iff (d) a s_until_with b) ep++; else ef++;
+ initial for (int i = 0; i < 16; i++) begin d = dv[i]; #1 clk = 1; #1 clk = 0; end
+endmodule"#)
+ (top Top) (run_until 33)
+ (assert_eq p1 8) (assert_eq f1 2) (assert_eq p2 8) (assert_eq f2 2)
+ (assert_eq p3 7) (assert_eq f3 3) (assert_eq p4 7) (assert_eq f4 3)
+ (assert_eq i1 2) (assert_eq i2 2) (assert_eq i3 3) (assert_eq i4 3)
+ (assert_eq n1 1) (assert_eq n2 1) (assert_eq n3 2) (assert_eq n4 2)
+ (assert_eq dp 6) (assert_eq df 2) (assert_eq ep 5) (assert_eq ef 3))
+
+; IEEE 1800-2023 16.12.12, F.5.3.1: a strong until property requires that
+; its right operand holds at some tick, so the attempts still pending when
+; the simulation ends fail then; the weak forms' do not.
+(case strong_until_pending_at_finish
+ (source "until_finish.sv" #"module Top(output int f1, f2, f3, f4);
+ bit clk;
+ int t;
+ bit [15:0] av = 16'hfcf7, bv = 16'h02c4;
+ bit a, b;
+ always @(posedge clk) t <= t + 1;
+ assign a = av[t];
+ assign b = bv[t];
+ assert property (@(posedge clk) a until b) else f1++;
+ assert property (@(posedge clk) a s_until b) else f2++;
+ assert property (@(posedge clk) a until_with b) else f3++;
+ assert property (@(posedge clk) a s_until_with b) else begin
+  f4++;
+  if (f4 == 9) $display("last at %0d", $time);
+ end
+ initial begin
+  repeat (16) begin #1 clk = 1; #1 clk = 0; end
+  $finish;
+ end
+endmodule"#)
+ (top Top) (run_to_finish)
+ (assert_eq f1 2) (assert_eq f2 8) (assert_eq f3 3) (assert_eq f4 9)
+ (expect_output "last at 32\n"))
+
+; IEEE 1800-2023 16.12.12, 16.12: a named property whose declaration holds
+; its clock and `disable iff`, and an until consequent: a valid that rises
+; must stay asserted up to and including the tick its ready holds.
+(case named_until_property
+ (source "until_named.sv" #"module Top(output int failed);
+ bit clk, rst_n, valid, ready;
+ property valid_held;
+  @(posedge clk) disable iff (!rst_n)
+  $rose(valid) |-> valid s_until_with ready;
+ endproperty : valid_held
+ HELD: assert property (valid_held) else failed++;
+ initial begin
+  // Held until ready: passes. Dropped before ready: fails. Dropped while
+  // in reset: disabled.
+  {rst_n, valid, ready} = 3'b100; #1 clk = 1; #1 clk = 0;
+  {rst_n, valid, ready} = 3'b110; #1 clk = 1; #1 clk = 0;
+  {rst_n, valid, ready} = 3'b110; #1 clk = 1; #1 clk = 0;
+  {rst_n, valid, ready} = 3'b111; #1 clk = 1; #1 clk = 0;
+  {rst_n, valid, ready} = 3'b100; #1 clk = 1; #1 clk = 0;
+  {rst_n, valid, ready} = 3'b110; #1 clk = 1; #1 clk = 0;
+  {rst_n, valid, ready} = 3'b100; #1 clk = 1; #1 clk = 0;
+  {rst_n, valid, ready} = 3'b110; #1 clk = 1; #1 clk = 0;
+  {rst_n, valid, ready} = 3'b010; #1 clk = 1; #1 clk = 0;
+  {rst_n, valid, ready} = 3'b100; #1 clk = 1; #1 clk = 0;
+ end
+endmodule"#)
+ (top Top) (run_until 21)
+ (assert_eq failed 1))

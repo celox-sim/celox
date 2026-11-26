@@ -1393,6 +1393,25 @@ pub struct PropertySpec {
     /// implication of two, which `antecedent` and `condition` do not
     /// describe. `condition` is then its last step's expression.
     pub sequence: Option<SequenceId>,
+    /// `condition until release` and its strong and overlapping forms
+    /// (IEEE 1800-2023 16.12.12), the property or the consequent of an
+    /// implication with the Boolean `antecedent`.
+    pub until: Option<UntilSpec>,
+}
+
+/// The right operand and the form of an until property (IEEE 1800-2023
+/// 16.12.12) of Boolean operands: `condition` holds at every tick from the
+/// start of the attempt to `release`, the tick of `release` included in an
+/// overlapping form (`until_with`, `s_until_with`), and a strong form
+/// (`s_until`, `s_until_with`) requires that `release` holds at some tick.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UntilSpec {
+    pub release: ExprId,
+    pub strong: bool,
+    pub overlapping: bool,
+    /// Whether the property is the consequent of `|=>`, so it starts at
+    /// the tick after that of the antecedent (16.12.7).
+    pub next: bool,
 }
 
 /// Linear sequence handle.
