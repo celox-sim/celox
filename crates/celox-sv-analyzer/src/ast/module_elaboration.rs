@@ -153,6 +153,9 @@ impl Module {
             }
             let declarations_only = symbols.declarations_only;
             let export_symbols = export_symbols || session.foreign.has_templates();
+            // The specializations the scope asks of package class templates
+            // are made once it ends, all in one analysis of each package.
+            let wait = std::mem::replace(&mut session.foreign_requests_wait, true);
             let result = Self::from_selected_scope_once(
                 syntax_tree,
                 session,
@@ -163,19 +166,24 @@ impl Module {
                 export_symbols,
                 header_ports,
             );
-            if let Ok(module) = &result
-                && !declarations_only
-                && let Some(symbols) = &module.symbols
-            {
-                classes::foreign::finish(syntax_tree, session, symbols)?;
-            }
-            if let Ok(module) = &result
-                && !declarations_only
-            {
-                virtual_interface_calls::check_outward(session, module)?;
-            }
-            if session.foreign.revision() == revision {
-                return result;
+            session.foreign_requests_wait = wait;
+            // Unless the scope saw no names of those, and is analyzed again
+            // with them.
+            if !classes::foreign::build_requested(session) {
+                if let Ok(module) = &result
+                    && !declarations_only
+                    && let Some(symbols) = &module.symbols
+                {
+                    classes::foreign::finish(syntax_tree, session, symbols)?;
+                }
+                if let Ok(module) = &result
+                    && !declarations_only
+                {
+                    virtual_interface_calls::check_outward(session, module)?;
+                }
+                if session.foreign.revision() == revision {
+                    return result;
+                }
             }
             session.classes.clear();
             session.class_specializations.clear();
