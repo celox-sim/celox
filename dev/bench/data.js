@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795713869668,
+  "lastUpdate": 1795714822918,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -468731,6 +468731,32 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-veryl-tiered-x86_64/heliodor_suite_71v_linux_boot_end_to_end",
             "unit": "ms",
             "value": 162746.761047
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "48605b053d90f0d2fd3c0b29659f2aff686768e3",
+          "message": "refactor(sv): read the container type of a type from its declaration (#4641)",
+          "timestamp": "2026-11-25T10:43:42Z",
+          "url": "https://github.com/celox-sim/celox/commit/48605b053d90f0d2fd3c0b29659f2aff686768e3"
+        },
+        "date": 1795714822918,
+        "cpu": "AMD EPYC 9V45",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-veryl-tiered-x86_64/heliodor_suite_66_smp_linux_boot_4hart_end_to_end",
+            "unit": "ms",
+            "value": 2180324.299457
           }
         ]
       }
