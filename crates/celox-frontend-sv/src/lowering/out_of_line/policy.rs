@@ -578,9 +578,6 @@ impl ProcModule<'_> {
                 if param.direction.is_reference() && !param.leaves.is_empty() {
                     note(Reason::RefFormal);
                 }
-                if !param.leaves.is_empty() {
-                    note(Reason::Other("unpacked structure formal".to_string()));
-                }
             }
         }
         // What the body does, and the bodies of the subroutines it calls,
