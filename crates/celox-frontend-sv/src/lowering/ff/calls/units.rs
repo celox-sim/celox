@@ -286,6 +286,7 @@ impl Ff<'_, '_> {
             resume: resume_slot,
             calls: Vec::new(),
             omitted: omitted_slot,
+            import: None,
         });
         functions.by_name.insert(key.to_string(), index);
         functions.lowering += 1;

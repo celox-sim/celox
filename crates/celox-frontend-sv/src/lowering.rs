@@ -238,7 +238,7 @@ impl SvVariable {
 #[derive(Clone)]
 pub(crate) struct LoweredSvModule {
     edge_schedule: ff_graph::EdgeSchedule,
-    source: sv::ir::Module,
+    source: std::sync::Arc<sv::ir::Module>,
     implicit_nets_allowed: bool,
     pub sim_module: SimModule,
     variables: HashMap<SourceVarId, SvVariable>,
@@ -270,6 +270,9 @@ pub(crate) struct LoweredSvModule {
     interconnect_element_resolutions: HashMap<String, HashMap<usize, sv::ast::NetResolution>>,
     /// The calls the lowering inlined, when the recursion report is written.
     calls: Option<recursion::CallGraph>,
+    /// The function sites of the units the module's kernels call, which
+    /// each kernel that calls one lists after its own.
+    unit_sites: procedural::FunctionSites,
 }
 
 #[derive(Clone)]

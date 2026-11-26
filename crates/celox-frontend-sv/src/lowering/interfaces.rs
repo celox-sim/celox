@@ -78,7 +78,7 @@ fn interface_signatures_collecting(
             )?;
             Ok(InterfaceSignature {
                 name: prototype.name,
-                module: lowered.source,
+                module: std::sync::Arc::unwrap_or_clone(lowered.source),
                 modports: prototype.modports,
                 parameters: prototype.parameters,
                 driven: prototype.driven,

@@ -6190,3 +6190,96 @@ endmodule
         sim.run_until(5).unwrap();
     }
 }
+
+#[test]
+fn package_initializers_call_the_units_of_the_root() {
+    // The initializer of `early` calls `twice`, which `Top` calls too: the
+    // package's state module calls `Top`'s unit instead of lowering its
+    // own, and the unit's host request (the `$sformatf`) and its store of
+    // the package's `count` serve both callers.
+    let source = r#"`timescale 1ns/1ns
+package p;
+    int count = 0;
+    function automatic int twice(int v);
+        string s;
+        s = $sformatf("%0d", 2 * v);
+        count = count + 1;
+        return s.atoi();
+    endfunction
+    int seed = 21;
+    int early = twice(seed);
+endpackage
+module Top(output int a, output int b, output int c);
+    import p::*;
+    int k = 5;
+    initial begin
+        #1 a = twice(k);
+        b = early;
+        c = count;
+    end
+endmodule
+"#;
+    same_as_inlined(source, 1, 2, &["a", "b", "c"]);
+}
+
+#[test]
+fn package_initializers_dispatch_through_the_root() {
+    // `Top`'s dispatcher of `name` also selects `Top`'s own class, which
+    // the package never sees: the package's objects take the arm they take
+    // in the package's own dispatcher, so the package calls `Top`'s units.
+    let source = r#"`timescale 1ns/1ns
+package p;
+    class base;
+        virtual function int name();
+            return 1;
+        endfunction
+    endclass
+    function automatic int describe(base b, int scale);
+        return b.name() * scale;
+    endfunction
+    int scale = 10;
+    base first = new;
+    int early = describe(first, scale);
+endpackage
+module Top(output int a, output int b);
+    import p::*;
+    class derived extends base;
+        virtual function int name();
+            return 2;
+        endfunction
+    endclass
+    initial begin
+        derived d = new;
+        #1 a = describe(d, scale);
+        b = early;
+    end
+endmodule
+"#;
+    same_as_default(source, 1, 6, 2, &["a", "b"]);
+}
+
+#[test]
+fn package_initializers_keep_units_that_report_their_scope() {
+    // A report of a unit has the scope of the instance whose copy runs:
+    // the initializer's call of `checked` keeps the package's own unit, so
+    // its warning names the package's scope, as inlined.
+    let source = r#"`timescale 1ns/1ns
+package p;
+    function automatic int checked(int v);
+        if (v > 2) $warning("big %0d", v);
+        return v + 1;
+    endfunction
+    int seed = 3;
+    int early = checked(seed);
+endpackage
+module Top(output int a, output int b);
+    import p::*;
+    int k = 4;
+    initial begin
+        #1 a = checked(k);
+        b = early;
+    end
+endmodule
+"#;
+    same_as_inlined(source, 2, 2, &["a", "b"]);
+}

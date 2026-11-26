@@ -84,7 +84,14 @@ impl Ff<'_, '_> {
             self.record_outcome(name, Outcome::Inlined(reason));
             return Ok(None);
         }
-        let index = match functions.by_name.get(&key).copied() {
+        let known = functions.by_name.get(&key).copied();
+        // A process kernel, or a unit, may call the root's function instead
+        // of lowering one (see `out_of_line::Home`).
+        let process = self.kernel.is_some() || self.frame.is_some();
+        let index = match known.or_else(|| {
+            self.m
+                .import_function(name, subroutine, &key, places, process)
+        }) {
             Some(index) => index,
             None => match self.lower_function(name, &key, places) {
                 Ok(index) => index,
