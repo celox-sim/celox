@@ -1805,6 +1805,7 @@ pub struct CombProcess {
     sensitivity_body: Vec<Stmt>,
     explicit_sensitivity: Option<Vec<EventItem>>,
     drive_strength: Option<DriveStrength>,
+    three_state_gate: bool,
 }
 
 /// The strengths a driver drives its 0 and its 1 with (IEEE 1800-2023
@@ -1835,6 +1836,14 @@ impl CombProcess {
     /// The drive strength the continuous assignment or gate states.
     pub fn drive_strength(&self) -> Option<DriveStrength> {
         self.drive_strength
+    }
+
+    /// Whether the process is a three-state gate (`bufif0`, `bufif1`,
+    /// `notif0` or `notif1`), whose net keeps the single-driver rule
+    /// because its L and H outputs resolve by strength (28.12.2), which
+    /// is not modelled for such a gate.
+    pub fn is_three_state_gate(&self) -> bool {
+        self.three_state_gate
     }
 
     /// Where an `always` procedure is written, as a process.
@@ -1870,6 +1879,7 @@ impl CombProcess {
             sensitivity_body: Vec::new(),
             explicit_sensitivity: None,
             drive_strength: None,
+            three_state_gate: false,
             kind,
             condition,
             assignments,
@@ -2928,6 +2938,7 @@ impl From<ast::CombProcess> for CombProcess {
         result.site = process.site().cloned();
         result.process_site = process.process_site().cloned();
         result.drive_strength = process.drive_strength();
+        result.three_state_gate = process.is_three_state_gate();
         result.sensitivity_body = process
             .sensitivity_body()
             .iter()

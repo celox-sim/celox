@@ -267,6 +267,16 @@ fn other_drivers_stay_rejected() {
             "module Top(input logic a, b, output wand y); assign (pull1, pull0) y = a; assign y = b; endmodule",
             "multiple net drivers",
         ),
+        // A three-state gate outputs L or H, which another driver meets by
+        // strength (28.6, 28.12.2).
+        (
+            "module Top(input logic a, b, ea, eb, output wire y); bufif1 (y, a, ea); notif0 (y, b, eb); endmodule",
+            "multiple net drivers",
+        ),
+        (
+            "module Top(input logic a, b, e, output wire y); bufif0 (y, a, e); assign y = b; endmodule",
+            "multiple net drivers",
+        ),
         // One assignment that drives a bit twice.
         (
             "module Top(output wire [7:0] q); assign {q[7:0], q[3:0]} = 12'habc; endmodule",
