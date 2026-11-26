@@ -336,6 +336,12 @@ Celox intentionally accepts the following non-standard constructs and compatibil
   reporting an `implicit_static_initializer` warning (`warn` by default,
   `error` in strict mode). In an `always` procedure, a run-time initializer
   without `static` or `automatic` is rejected.
+- **Semicolons after an `` `include `` filename (22.4).** IEEE 1800-2023 22.4
+  allows only white space or a comment on the line of an `` `include ``
+  directive after its filename. Celox ignores semicolons there
+  (`` `include "uvm_macros.svh"; ``), as other simulators do, and reports an
+  `include_trailing_semicolon` warning (`warn` by default, `error` in strict
+  mode). Any other text after the filename is rejected.
 - **Default time scales when explicit time scales are mixed (3.14.2.3).**
   Instead of rejecting designs where only some elements specify or inherit a
   time scale, Celox reports a `mixed_timescale` warning (`error` in strict

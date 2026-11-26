@@ -50,6 +50,24 @@ pub struct Preprocessed {
     /// not belong in the expanded parser stream. Conservative source-policy
     /// checks can inspect uninvoked definitions without changing parser tokens.
     pub observations: Vec<Token>,
+    /// The non-standard source the preprocessor accepted, in source order.
+    pub warnings: Vec<PreprocessWarning>,
+}
+
+/// Non-standard source that the preprocessor accepts, with what it does
+/// instead (see [`PreprocessWarning`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreprocessWarningKind {
+    /// Semicolons after the filename of an `` `include `` directive, which
+    /// IEEE 1800-2023 22.4 does not allow on its line: they are ignored.
+    IncludeTrailingSemicolon,
+}
+
+/// Non-standard source that the preprocessor accepted, at `span`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreprocessWarning {
+    pub kind: PreprocessWarningKind,
+    pub span: Span,
 }
 
 impl Preprocessed {
@@ -85,6 +103,7 @@ impl Preprocessed {
     fn merge(&mut self, other: Self) {
         self.tokens.extend(other.tokens);
         self.observations.extend(other.observations);
+        self.warnings.extend(other.warnings);
     }
 
     /// Active text including source macro definitions and undefinitions. This
@@ -396,9 +415,13 @@ impl Preprocessor {
                     } else {
                         take_line(&mut tokens)
                     };
-                    if active {
+                    let line = if active {
+                        let line = without_trailing_semicolons(line, &mut output.warnings);
                         self.validate_include(&line, origin)?;
-                    }
+                        line
+                    } else {
+                        line
+                    };
                     if active && self.options.includes == IncludePolicy::Read {
                         if include_depth >= MAX_INCLUDE_DEPTH {
                             return Err(self.error(origin, "include nesting limit exceeded"));
@@ -1135,6 +1158,41 @@ fn skip_trivia(tokens: &[Token], mut at: usize) -> usize {
     }
     at
 }
+/// The line of an `` `include `` directive without the semicolons after its
+/// filename, which IEEE 1800-2023 22.4 does not allow there but some
+/// testbenches write (`` `include "uvm_macros.svh"; ``): the first of them
+/// is reported in `warnings`. A line that has anything else after the
+/// semicolons keeps them, and so fails as any other text there does.
+fn without_trailing_semicolons(
+    line: Vec<Token>,
+    warnings: &mut Vec<PreprocessWarning>,
+) -> Vec<Token> {
+    let significant: Vec<usize> = line
+        .iter()
+        .enumerate()
+        .filter(|(_, token)| !token.is_trivia())
+        .map(|(index, _)| index)
+        .collect();
+    let semicolons = significant
+        .iter()
+        .rev()
+        .take_while(|&&index| line[index].text == ";")
+        .count();
+    if semicolons == 0 || semicolons == significant.len() {
+        return line;
+    }
+    let first = significant[significant.len() - semicolons];
+    warnings.push(PreprocessWarning {
+        kind: PreprocessWarningKind::IncludeTrailingSemicolon,
+        span: line[first].origin.spelling,
+    });
+    line.into_iter()
+        .enumerate()
+        .filter(|(index, token)| *index < first || token.is_trivia())
+        .map(|(_, token)| token)
+        .collect()
+}
+
 fn significant(tokens: &[Token]) -> Vec<&Token> {
     tokens.iter().filter(|t| !t.is_trivia()).collect()
 }

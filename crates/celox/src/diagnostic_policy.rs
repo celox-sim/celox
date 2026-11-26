@@ -26,7 +26,7 @@ pub enum DiagnosticLevel {
 /// diagnostic severity at all. The `[compatibility]` opt-in of the same
 /// name selects per-block temporaries, which changes simulation
 /// results, so it is controlled by that boolean, never by a level.
-pub(crate) const STRICT_CODES: [&str; 11] = [
+pub(crate) const STRICT_CODES: [&str; 12] = [
     "mixed_timescale",
     "duplicate_module",
     "interface_array_query",
@@ -38,6 +38,7 @@ pub(crate) const STRICT_CODES: [&str; 11] = [
     "packed_to_unpacked_assignment",
     "nonstandard_force_target",
     "psprintf_alias",
+    "include_trailing_semicolon",
 ];
 
 /// Overrides keyed by the code shown in a compilation diagnostic.

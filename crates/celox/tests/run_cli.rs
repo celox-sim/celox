@@ -1631,3 +1631,44 @@ fn sv_cdsp_exposes_live_waveforms_and_controls_simulation() {
     let result = server.0.wait().unwrap();
     assert!(result.success(), "{}", log.join().unwrap());
 }
+
+#[test]
+fn include_trailing_semicolons_warn_by_default_and_error_in_strict_mode() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("value.svh"), "`define VALUE 7\n").unwrap();
+    let top = directory.path().join("top.sv");
+    std::fs::write(
+        &top,
+        "`include \"value.svh\";\nmodule Top; initial begin $display(\"%0d\", `VALUE); $finish; end endmodule\n",
+    )
+    .unwrap();
+    for (extra, success, warning) in [
+        (&[][..], true, true),
+        (
+            &["--diagnostic", "include_trailing_semicolon=allow"][..],
+            true,
+            false,
+        ),
+        (&["--strict"][..], false, false),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_celox"))
+            .arg("run")
+            .arg(&top)
+            .arg("-I")
+            .arg(directory.path())
+            .args(["--top", "Top", "--backend", "interpreter"])
+            .args(extra)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.success(), success, "{extra:?}: {output:?}");
+        assert_eq!(
+            stderr.contains("include_trailing_semicolon"),
+            warning || !success,
+            "{extra:?}: {stderr}"
+        );
+        if success {
+            assert_eq!(output.stdout, b"7\n", "{extra:?}: {output:?}");
+        }
+    }
+}

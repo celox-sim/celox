@@ -138,6 +138,11 @@ pub enum FrontendWarningKind {
         bin: String,
         detail: String,
     },
+    /// Semicolons after the filename of an `` `include `` directive, where
+    /// IEEE 1800-2023 22.4 allows only white space or a comment: they are
+    /// ignored.
+    #[error("semicolon after the filename of an `include directive is ignored")]
+    IncludeTrailingSemicolon,
 }
 
 /// Where a warning is in the source.
@@ -154,16 +159,44 @@ pub struct WarningLocation {
 
 impl WarningLocation {
     fn new(path: String, text: Arc<str>, span: &SourceSpan) -> Option<Self> {
-        let before = text.get(..span.start)?;
-        text.get(span.start..span.end)?;
+        Self::at(path, text, span.start, span.end)
+    }
+
+    /// Bytes `start..end` of `text`, the text of file `path`.
+    fn at(path: String, text: Arc<str>, start: usize, end: usize) -> Option<Self> {
+        let before = text.get(..start)?;
+        text.get(start..end)?;
         let line_start = before.rfind('\n').map_or(0, |newline| newline + 1);
         Some(Self {
             line: before.matches('\n').count() + 1,
             column: before[line_start..].chars().count() + 1,
             source: miette::NamedSource::new(&path, text),
-            span: (span.start..span.end).into(),
+            span: (start..end).into(),
             path,
         })
+    }
+}
+
+impl FrontendWarning {
+    /// The warnings of what the preprocessor accepted (see
+    /// [`celox_sv_analyzer::syntax::SourceWarning`]).
+    pub fn preprocessor(warnings: &[celox_sv_analyzer::syntax::SourceWarning]) -> Vec<Self> {
+        warnings
+            .iter()
+            .map(|warning| Self {
+                kind: match warning.kind {
+                    celox_sv_analyzer::syntax::PreprocessWarningKind::IncludeTrailingSemicolon => {
+                        FrontendWarningKind::IncludeTrailingSemicolon
+                    }
+                },
+                location: WarningLocation::at(
+                    warning.path.display().to_string(),
+                    warning.source.clone(),
+                    warning.start,
+                    warning.end,
+                ),
+            })
+            .collect()
     }
 }
 
@@ -304,6 +337,7 @@ impl miette::Diagnostic for FrontendWarning {
             FrontendWarningKind::ForcedArray { .. } => "forced_array",
             FrontendWarningKind::NoCoverageDatabase { .. } => "no_coverage_database",
             FrontendWarningKind::CovergroupBinValue { .. } => "covergroup_bin_value",
+            FrontendWarningKind::IncludeTrailingSemicolon => "include_trailing_semicolon",
         }))
     }
 
@@ -364,6 +398,9 @@ impl miette::Diagnostic for FrontendWarning {
             FrontendWarningKind::CovergroupBinValue { .. } => {
                 "IEEE 1800-2023 19.5.7 compares the values of a bin as values of the type of the coverpoint; write the values that type has, or give the coverpoint a type that has them"
             }
+            FrontendWarningKind::IncludeTrailingSemicolon => {
+                "IEEE 1800-2023 22.4 allows only white space or a comment after the filename; remove the semicolon, or silence with include_trailing_semicolon=allow"
+            }
         }))
     }
 
@@ -379,6 +416,7 @@ impl miette::Diagnostic for FrontendWarning {
             FrontendWarningKind::CovergroupBinValue { .. } => "written here",
             FrontendWarningKind::PackedToUnpackedAssignment => "value assigned here",
             FrontendWarningKind::NonstandardForceTarget => "target selected here",
+            FrontendWarningKind::IncludeTrailingSemicolon => "ignored",
             _ => "called here",
         };
         Some(Box::new(std::iter::once(

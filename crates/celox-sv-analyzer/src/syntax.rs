@@ -6,7 +6,46 @@
 use std::path::Path;
 
 use crate::AnalyzerError;
-pub use celox_sv_syntax::SourceEncoding;
+pub use celox_sv_syntax::{PreprocessWarningKind, SourceEncoding};
+
+/// Source the preprocessor expanded, with the non-standard source it
+/// accepted on the way.
+#[derive(Debug, Clone)]
+pub struct Expanded {
+    pub text: String,
+    pub warnings: Vec<SourceWarning>,
+}
+
+/// Non-standard source that the preprocessor accepted (see
+/// [`celox_sv_syntax::PreprocessWarningKind`]): bytes `start..end` of file
+/// `path`, whose text is `source`.
+#[derive(Debug, Clone)]
+pub struct SourceWarning {
+    pub kind: celox_sv_syntax::PreprocessWarningKind,
+    pub path: std::path::PathBuf,
+    pub source: std::sync::Arc<str>,
+    pub start: usize,
+    pub end: usize,
+}
+
+fn source_warnings(
+    preprocessor: &celox_sv_syntax::Preprocessor,
+    warnings: &[celox_sv_syntax::PreprocessWarning],
+) -> Vec<SourceWarning> {
+    warnings
+        .iter()
+        .map(|warning| {
+            let file = preprocessor.sources.file(warning.span.file);
+            SourceWarning {
+                kind: warning.kind,
+                path: file.path.clone(),
+                source: file.text.clone(),
+                start: warning.span.start,
+                end: warning.span.end,
+            }
+        })
+        .collect()
+}
 
 /// Expand macros and includes using the native preprocessor.
 /// Each call is one compilation unit; source-defined macros do not escape it.
@@ -17,7 +56,7 @@ pub fn preprocess_source(
     path: &Path,
     macros: &[(String, Option<String>)],
     includes: &[&Path],
-) -> Result<String, AnalyzerError> {
+) -> Result<Expanded, AnalyzerError> {
     preprocess_source_with_encoding(code, path, macros, includes, SourceEncoding::default())
 }
 
@@ -28,11 +67,15 @@ pub fn preprocess_source_with_encoding(
     macros: &[(String, Option<String>)],
     includes: &[&Path],
     source_encoding: SourceEncoding,
-) -> Result<String, AnalyzerError> {
-    preprocessor(macros, includes, source_encoding)?
+) -> Result<Expanded, AnalyzerError> {
+    let mut preprocessor = preprocessor(macros, includes, source_encoding)?;
+    let source = preprocessor
         .preprocess(code, path)
-        .map(|source| source.text())
-        .map_err(|error| AnalyzerError::Parse(error.to_string()))
+        .map_err(|error| AnalyzerError::Parse(error.to_string()))?;
+    Ok(Expanded {
+        text: source.text(),
+        warnings: source_warnings(&preprocessor, &source.warnings),
+    })
 }
 
 /// Expand ordered source files as one compilation unit (IEEE 1800-2023 3.12.1).
@@ -43,7 +86,7 @@ pub fn preprocess_sources(
     sources: &[(&str, &Path)],
     macros: &[(String, Option<String>)],
     includes: &[&Path],
-) -> Result<String, AnalyzerError> {
+) -> Result<Expanded, AnalyzerError> {
     preprocess_sources_with_encoding(sources, macros, includes, SourceEncoding::default())
 }
 
@@ -53,9 +96,10 @@ pub fn preprocess_sources_with_encoding(
     macros: &[(String, Option<String>)],
     includes: &[&Path],
     source_encoding: SourceEncoding,
-) -> Result<String, AnalyzerError> {
+) -> Result<Expanded, AnalyzerError> {
     let mut preprocessor = preprocessor(macros, includes, source_encoding)?;
     let mut expanded = String::new();
+    let mut warnings = Vec::new();
     for (code, path) in sources {
         let source = preprocessor
             .preprocess(code, path)
@@ -64,8 +108,12 @@ pub fn preprocess_sources_with_encoding(
         expanded.push_str(&format!("\n`line 1 {:?} 0\n", path.to_string_lossy()));
         expanded.push_str(&source.text());
         expanded.push('\n');
+        warnings.extend(source_warnings(&preprocessor, &source.warnings));
     }
-    Ok(expanded)
+    Ok(Expanded {
+        text: expanded,
+        warnings,
+    })
 }
 
 fn preprocessor(
@@ -305,7 +353,8 @@ mod tests {
             &macros,
             &[],
         )
-        .unwrap();
+        .unwrap()
+        .text;
         assert!(
             expanded
                 .split_whitespace()
@@ -319,7 +368,8 @@ mod tests {
             &macros,
             &[],
         )
-        .unwrap();
+        .unwrap()
+        .text;
         assert!(separate.contains("module Separate"), "{separate}");
         assert!(!separate.contains("module Leaked"), "{separate}");
     }
