@@ -20,10 +20,13 @@
 //!   module's (see [`dispatch_covers`]). The root knows the classes of the
 //!   design that use the package: an object of a class the module knows
 //!   takes the same arm in both;
-//! - none of those bodies makes a runtime event whose output names its
-//!   scope (`%m`, a severity task, an assertion): a unit's events have the
-//!   scope of the instance its copy is in. The scope of a host request's
-//!   format is the calling process's, so those may;
+//! - every runtime event of the root's units the call reaches whose output
+//!   names its scope (a report, a print of `%m`) reports in the scope of
+//!   the caller: a unit's events have the scope of the instance its copy is
+//!   in, so a unit of the root that names its scope receives a token of the
+//!   scope that calls it and raises a copy of the site for the package's
+//!   instance when a state module calls it (see `OutOfLine::scope_callers`).
+//!   The scope of a host request's format is the calling process's;
 //! - the call passes every formal and the result through the frame, its
 //!   `ref` formals bound to properties or automatics of the caller, and
 //!   the caller is a process kernel or a unit;
@@ -60,6 +63,22 @@ pub(in crate::lowering) struct Exported {
     /// The package variables it and its callees may store, by package and
     /// name.
     writes: Vec<(String, String)>,
+    /// How the runtime events of it and its callees name their scope.
+    scope: ScopeUse,
+}
+
+/// How the runtime events of a function and its callees name the scope
+/// that issues them, worst first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ScopeUse {
+    /// Some name the scope of the root: a state module's call would
+    /// report in the root's scope.
+    Root,
+    /// Some name the scope of the caller (see
+    /// `OutOfLine::scope_callers`).
+    Caller,
+    /// None names its scope.
+    None,
 }
 
 /// The function units of the root module that the state modules of the
@@ -74,6 +93,9 @@ pub(crate) struct Home {
     /// The function sites of the root's units, which a kernel that calls
     /// one lists.
     sites: FunctionSites,
+    /// The packages whose state modules the root's units report for (see
+    /// `OutOfLine::scope_callers`).
+    scope_callers: Vec<String>,
     /// Each variable the sites name: its shape, and the package variable it
     /// denotes, if any.
     site_variables: HashMap<SourceVarId, (SvVariable, Option<(String, String)>)>,
@@ -150,6 +172,7 @@ impl Home {
             .iter()
             .map(|(id, package, name)| (*id, (package.clone(), name.clone())))
             .collect();
+        let scope = scope_uses(functions, &sim_module.runtime_event_sites);
         let mut exported = HashMap::default();
         for (position, function) in functions.functions.iter().enumerate() {
             let (Some(index), Some(_)) = (kept.get(position).copied().flatten(), &function.unit)
@@ -204,6 +227,7 @@ impl Home {
                     result,
                     frame_only,
                     writes,
+                    scope: scope[position],
                 },
             );
         }
@@ -247,6 +271,7 @@ impl Home {
             source,
             subroutines,
             sites,
+            scope_callers: functions.scope_callers.clone(),
             site_variables,
         })
     }
@@ -292,8 +317,7 @@ impl HomeLink {
     }
 
     /// Whether the root's counterpart of `subroutine`, the module's, does
-    /// what it does, and its body makes no runtime event that names its
-    /// scope.
+    /// what it does.
     fn covers(&self, subroutine: &sv::ir::Subroutine) -> bool {
         let home = &self.home;
         let Some(counterpart) = self
@@ -303,9 +327,8 @@ impl HomeLink {
             return false;
         };
         let prefix = format!("{}::", self.package);
-        !names_scope(subroutine)
-            && (Normalized::of(subroutine, &prefix) == Normalized::of(counterpart, &prefix)
-                || dispatch_covers(counterpart, subroutine, &prefix, &home.name, &self.package))
+        Normalized::of(subroutine, &prefix) == Normalized::of(counterpart, &prefix)
+            || dispatch_covers(counterpart, subroutine, &prefix, &home.name, &self.package)
     }
 
     /// Whether every subroutine that a lowering of `root` reaches, `root`
@@ -349,6 +372,66 @@ impl HomeLink {
     }
 }
 
+/// How the runtime events of each of `functions` and its callees name
+/// their scope (see [`ScopeUse`]), the module's sites being `sites`.
+///
+/// The default of a class dispatch, inlined or not, reports a class without
+/// an override in the scope of the module that dispatches, which its
+/// message names too (see [`unknown_class_report`]): a state module's call
+/// reaches it only for a class that the root knows no more than the module
+/// does (see [`dispatch_covers`]), whose report differs between the two
+/// modules either way.
+fn scope_uses(functions: &OutOfLine, sites: &[RuntimeEventSite]) -> Vec<ScopeUse> {
+    let own: Vec<ScopeUse> = functions
+        .functions
+        .iter()
+        .map(|function| {
+            let mut used = ScopeUse::None;
+            let instructions = function
+                .unit
+                .iter()
+                .flat_map(|unit| unit.blocks.values())
+                .flat_map(|block| &block.instructions);
+            for instruction in instructions {
+                let SIRInstruction::RuntimeEvent { site_id, .. } = instruction else {
+                    continue;
+                };
+                let site = &sites[*site_id as usize];
+                if site.home.is_some() || !site_names_scope(site) || unknown_class_report(site) {
+                    continue;
+                }
+                used = used.min(if functions.scoped_sites.contains(site_id) {
+                    ScopeUse::Caller
+                } else {
+                    ScopeUse::Root
+                });
+            }
+            used
+        })
+        .collect();
+    // The worst of each function's callees, through any chain of calls:
+    // each use spreads to the callers of the functions that make it.
+    let mut callers: Vec<Vec<usize>> = vec![Vec::new(); own.len()];
+    for (position, function) in functions.functions.iter().enumerate() {
+        for &callee in &function.callees {
+            callers[callee].push(position);
+        }
+    }
+    let mut uses = own.clone();
+    for worst in [ScopeUse::Root, ScopeUse::Caller] {
+        let mut pending: Vec<usize> = (0..own.len()).filter(|&at| own[at] == worst).collect();
+        while let Some(function) = pending.pop() {
+            for &caller in &callers[function] {
+                if uses[caller] > worst {
+                    uses[caller] = worst;
+                    pending.push(caller);
+                }
+            }
+        }
+    }
+    uses
+}
+
 /// The subroutine a function key names: the key itself, or the key without
 /// the places of its `ref` formals (see [`function_key`]).
 fn subroutine_name(key: &str, known: impl Fn(&str) -> bool) -> &str {
@@ -381,67 +464,10 @@ fn callees(subroutine: &sv::ir::Subroutine) -> Vec<String> {
         .collect()
 }
 
-/// Whether a statement of `subroutine`, but the default of a class
-/// dispatch, makes a runtime event whose output names its scope: `%m`, a
-/// severity task, an assertion's report, `$printtimescale`.
-fn names_scope(subroutine: &sv::ir::Subroutine) -> bool {
-    let body = match class_dispatch(subroutine) {
-        Some((_, items, _)) => items.iter().flat_map(|item| &item.body).collect::<Vec<_>>(),
-        None => subroutine.body.iter().collect(),
-    };
-    let mut names = false;
-    for stmt in body {
-        stmt.walk(&mut |stmt| {
-            if let sv::ir::Stmt::SystemTask {
-                task,
-                args,
-                assertion,
-                ..
-            } = stmt
-            {
-                names |= assertion.is_some()
-                    || matches!(
-                        task,
-                        sv::ir::SystemTask::Fatal
-                            | sv::ir::SystemTask::Severity(_)
-                            | sv::ir::SystemTask::Assert
-                            | sv::ir::SystemTask::AssertContinue
-                            | sv::ir::SystemTask::Printtimescale
-                    )
-                    || args.iter().any(|arg| match arg {
-                        sv::ir::SystemTaskArg::Str(text) => formats_scope(text),
-                        sv::ir::SystemTaskArg::Expr(expr) => formats_scope(&format!("{expr:?}")),
-                        sv::ir::SystemTaskArg::Empty => false,
-                    });
-            }
-        });
-    }
-    names
-}
-
-/// Whether `text` holds a `%m` (or `%M`) format.
-fn formats_scope(text: &str) -> bool {
-    let mut chars = text.chars();
-    while let Some(ch) = chars.next() {
-        if ch != '%' {
-            continue;
-        }
-        for spec in chars.by_ref() {
-            if !(spec.is_ascii_digit() || matches!(spec, '-' | '+' | ' ' | '#' | '.')) {
-                if matches!(spec, 'm' | 'M') {
-                    return true;
-                }
-                break;
-            }
-        }
-    }
-    false
-}
-
 /// The parts of a subroutine whose body is one dispatch on the class of an
 /// object (a virtual method's dispatcher, a `$cast`): the selector, the
 /// items and the default.
-fn class_dispatch(
+pub(super) fn class_dispatch(
     subroutine: &sv::ir::Subroutine,
 ) -> Option<(&sv::ir::Expr, &[sv::ir::CaseItem], Option<&[sv::ir::Stmt]>)> {
     let [
@@ -647,6 +673,21 @@ impl std::fmt::Write for Normalized<'_> {
 }
 
 impl ProcModule<'_> {
+    /// The token of the module's scope that its processes pass to a unit
+    /// of the root that reports in the caller's scope (see
+    /// `OutOfLine::scope_callers`): zero for the root, and the package's
+    /// for a state module that calls the root's units.
+    pub(in crate::lowering) fn scope_token(&mut self) -> u64 {
+        self.home_link()
+            .and_then(|link| {
+                link.home
+                    .scope_callers
+                    .iter()
+                    .position(|package| *package == link.package)
+            })
+            .map_or(0, |position| position as u64 + 1)
+    }
+
     /// The link to the root, when the module may call its functions.
     fn home_link(&mut self) -> Option<&mut HomeLink> {
         self.out_of_line()?.home.as_mut()
@@ -771,7 +812,19 @@ impl ProcModule<'_> {
         let home = Arc::clone(&link.home);
         let home_key = link.home_name(key, |key| home.functions.contains_key(key))?;
         let exported = &home.functions[&home_key];
+        // A unit that reports in the caller's scope reports in the module's
+        // only when it knows the module.
+        let token = home
+            .scope_callers
+            .iter()
+            .position(|package| *package == link.package);
+        let scope = match exported.scope {
+            ScopeUse::None => true,
+            ScopeUse::Caller => token.is_some(),
+            ScopeUse::Root => false,
+        };
         if !exported.frame_only
+            || !scope
             || exported.formals.len() != subroutine.params.len()
             || !link.reaches_same(name, &subroutines)
         {

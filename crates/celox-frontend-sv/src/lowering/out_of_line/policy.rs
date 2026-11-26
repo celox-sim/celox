@@ -658,6 +658,7 @@ impl ProcModule<'_> {
                     collect_calls(default, &mut calls);
                 }
             }
+            state.scope = body_names_scope(subroutine);
             for stmt in &subroutine.body {
                 stmt.walk(&mut |stmt| {
                     match stmt {
@@ -990,6 +991,96 @@ pub(super) struct OwnBody {
     reason: Option<Reason>,
     state: ProcessState,
     callees: Vec<String>,
+}
+
+/// Whether a statement of `subroutine` makes a runtime event whose output
+/// names its scope (see [`names_scope`]), but the default of a class
+/// dispatch: the analyzer's report of a class without an override (see
+/// [`unknown_class_report`]), which names the module that dispatches.
+fn body_names_scope(subroutine: &sv::ir::Subroutine) -> bool {
+    let body: Vec<&sv::ir::Stmt> = match home::class_dispatch(subroutine) {
+        Some((_, items, _)) => items.iter().flat_map(|item| &item.body).collect(),
+        None => subroutine.body.iter().collect(),
+    };
+    let mut names = false;
+    for stmt in body {
+        stmt.walk(&mut |stmt| {
+            if let sv::ir::Stmt::SystemTask {
+                task,
+                args,
+                assertion,
+                ..
+            } = stmt
+            {
+                names |= names_scope(*task, args, assertion.is_some());
+            }
+        });
+    }
+    names
+}
+
+/// Whether `site` is the report of the default of a class dispatch, of an
+/// object whose class has no override of the virtual method (the analyzer's
+/// `virtual method ..., as ... dispatches it, has no override ...`).
+pub(in crate::lowering) fn unknown_class_report(site: &RuntimeEventSite) -> bool {
+    matches!(
+        site.kind,
+        celox_design::RuntimeEventKind::Report(celox_design::Severity::Fatal)
+    ) && site.template.as_deref().is_some_and(|template| {
+        template.starts_with("virtual method `")
+            && template.contains("dispatches it, has no override for an object of class")
+    })
+}
+
+/// Whether a call of `task` with `args` makes a runtime event whose output
+/// names the scope that issues it: a report (a message, `$fatal`, an
+/// assertion's), `$printtimescale`, or a print of `%m`. `assertion` is
+/// whether the call is an assertion's action.
+fn names_scope<E: std::fmt::Debug>(
+    task: sv::ir::SystemTask,
+    args: &[sv::ir::SystemTaskArg<E>],
+    assertion: bool,
+) -> bool {
+    assertion
+        || matches!(
+            task,
+            sv::ir::SystemTask::Fatal
+                | sv::ir::SystemTask::Severity(_)
+                | sv::ir::SystemTask::Assert
+                | sv::ir::SystemTask::AssertContinue
+                | sv::ir::SystemTask::Printtimescale
+        )
+        || args.iter().any(|arg| match arg {
+            sv::ir::SystemTaskArg::Str(text) => formats_scope(text),
+            sv::ir::SystemTaskArg::Expr(expr) => formats_scope(&format!("{expr:?}")),
+            sv::ir::SystemTaskArg::Empty => false,
+        })
+}
+
+/// Whether `text` holds a `%m` (or `%M`) format.
+fn formats_scope(text: &str) -> bool {
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            continue;
+        }
+        for spec in chars.by_ref() {
+            if !(spec.is_ascii_digit() || matches!(spec, '-' | '+' | ' ' | '#' | '.')) {
+                if matches!(spec, 'm' | 'M') {
+                    return true;
+                }
+                break;
+            }
+        }
+    }
+    false
+}
+
+/// Whether the output of `site` names the scope that issues it: a report,
+/// which carries the scope, or a print of `%m`.
+pub(in crate::lowering) fn site_names_scope(site: &RuntimeEventSite) -> bool {
+    matches!(site.kind, celox_design::RuntimeEventKind::Report(_))
+        || site.template.as_deref().is_some_and(formats_scope)
 }
 
 /// The lesser of two reasons to stay inlined, the one the report counts.

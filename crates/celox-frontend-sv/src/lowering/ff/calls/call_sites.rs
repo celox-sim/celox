@@ -615,6 +615,27 @@ impl Ff<'_, '_> {
             let value = self.eval(&sv::ir::Expr::Ident(name), None)?;
             args.push((slot, value));
         }
+        // A unit passes on the scope that called it; a kernel, and a unit
+        // that names no scope, pass their module's.
+        if let Some(slot) = function.scope {
+            let width = crate::lowering::out_of_line::SCOPE_TOKEN_WIDTH;
+            let value = self.b.alloc_bit(width, false);
+            match self.frame.as_ref().and_then(|frame| frame.scope) {
+                Some(token) => {
+                    self.b.emit(SIRInstruction::Load(
+                        value,
+                        stable(token),
+                        SIROffset::Static(0),
+                        width,
+                    ));
+                }
+                None => {
+                    let own = self.m.scope_token();
+                    self.b.emit(SIRInstruction::Imm(value, SIRValue::new(own)));
+                }
+            }
+            args.push((slot, value));
+        }
         Ok(args)
     }
 
