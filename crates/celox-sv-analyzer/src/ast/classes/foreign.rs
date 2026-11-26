@@ -1121,6 +1121,7 @@ mod tests {
             automatic: true,
             automatic_locals: Vec::new(),
             // A static local, a variable of the scope now, not a local.
+            result_leaves: Vec::new(),
             persistent_locals: vec!["s%fedcba9876543210@3".into()],
             return_type: None,
             params: vec![SubroutineParamBase {

@@ -224,6 +224,9 @@ fn walk(
     if let Some(result) = &mut subroutine.return_var {
         name(result, rename, seen);
     }
+    for leaf in &mut subroutine.result_leaves {
+        name(leaf, rename, seen);
+    }
     for local in subroutine
         .automatic_locals
         .iter_mut()
