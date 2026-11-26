@@ -740,15 +740,16 @@ mod tests {
     #[test]
     fn drops_the_calls_of_a_dropped_alternative() {
         // The symbolic lowering folds `f(s, 0)`; the imperative alternative
-        // kept for the wait rejects the recursive call, which an unpacked
-        // structure formal keeps from going out of line, and is dropped, and
-        // its calls with it.
+        // kept for the wait rejects the recursive call, which a `ref` formal
+        // of unpacked structure type keeps from going out of line, and is
+        // dropped, and its calls with it.
         let (lines, error) = record(
             "alternative",
             "module Top(input int a, output int r);
                typedef struct { int v; } s_t;
-               function automatic int f(s_t s, int n); if (n == 0) return s.v; return f(s, n - 1); endfunction
-               always_comb begin r = 0; r = f('{v: 0}, 0) + a; end
+               s_t z;
+               function automatic int f(ref s_t s, input int n); if (n == 0) return s.v; return f(s, n - 1); endfunction
+               always_comb begin r = 0; r = f(z, 0) + a; end
                initial wait (r == 5);
              endmodule",
         );

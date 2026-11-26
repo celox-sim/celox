@@ -6384,3 +6384,96 @@ endmodule
         Ok(vec![value(81), value(3)])
     );
 }
+
+#[test]
+fn unpacked_structure_formals() {
+    // A formal of unpacked structure type passed by value is the flat value
+    // of the structure, which the body takes apart into its members and an
+    // output or inout puts back together (IEEE 1800-2023 13.5.1): a unit
+    // passes it as any other formal.
+    let source = r#"module Top(output int a, output int b, output int c, output int d);
+    typedef struct { int x; logic [7:0] y; string s; } rec_t;
+    class Conv;
+        static function void from_int(int v, output rec_t o);
+            o.x = v; o.y = v[7:0] + 1; o.s = $sformatf("v%0d", v);
+        endfunction
+        static function int to_int(input rec_t r);
+            return r.x + r.y + r.s.len();
+        endfunction
+        static function void bump(inout rec_t r, input int by);
+            r.x += by; r.s = {r.s, "+"};
+        endfunction
+    endclass
+    initial begin
+        rec_t r;
+        Conv::from_int(5, r);
+        a = Conv::to_int(r);
+        Conv::bump(r, 3);
+        b = r.x;
+        c = r.s.len();
+        d = r.y;
+    end
+endmodule
+"#;
+    same_as_default(source, 1, 3, 0, &["a", "b", "c", "d"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 0, &["a", "b", "c", "d"]),
+        Ok(vec![value(13), value(8), value(3), value(6)])
+    );
+}
+
+#[test]
+fn recursive_functions_with_unpacked_structure_formals() {
+    // Each activation of a recursive function has its own members of a
+    // structure formal and local, which a value read after the recursive
+    // call still holds (IEEE 1800-2023 13.4.2).
+    let source = r#"module Top(output int a, output int b, output int c, output int d, output int e);
+    typedef struct { int x; logic [7:0] y; string s; } rec_t;
+    function automatic rec_t fold(rec_t acc, int n);
+        rec_t here;
+        if (n == 0) return acc;
+        here = acc;
+        here.x = acc.x + n;
+        here.s = {acc.s, "."};
+        acc = fold(here, n - 1);
+        acc.y = acc.y + here.y;
+        return acc;
+    endfunction
+    function automatic void tick(inout rec_t t, input int n);
+        if (n == 0) return;
+        t.x++;
+        tick(t, n - 1);
+        t.y = t.y + 2;
+    endfunction
+    initial begin
+        rec_t r, f;
+        r = '{5, 8'd6, "v5"};
+        f = fold(r, 3);
+        tick(r, 4);
+        a = f.x;
+        b = f.y;
+        c = f.s.len();
+        d = r.x;
+        e = r.y;
+    end
+endmodule
+"#;
+    for four_state in [false, true] {
+        for backend in backends() {
+            for forced in [false, true] {
+                assert_eq!(
+                    simulate(
+                        source,
+                        four_state,
+                        forced,
+                        backend,
+                        0,
+                        &["a", "b", "c", "d", "e"]
+                    ),
+                    Ok(vec![value(11), value(24), value(5), value(9), value(14)]),
+                    "{backend}, four-state {four_state}, forced {forced}"
+                );
+            }
+        }
+    }
+}
