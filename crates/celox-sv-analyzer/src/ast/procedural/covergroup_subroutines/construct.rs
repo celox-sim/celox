@@ -421,6 +421,20 @@ impl Construction<'_> {
             {
                 continue;
             }
+            // "Only constant expressions (see 11.2.1), global and instance
+            // constants ..., or non-ref arguments to the covergroup are
+            // allowed to be used as variables in a covergroup_expression"
+            // (19.5): a bin value, a `with` filter, a set expression, an
+            // `intersect` list.
+            if model
+                .new_formals
+                .iter()
+                .any(|formal| formal.name == name && formal.direction.is_reference())
+            {
+                return Err(invalid(format!(
+                    "`{name}` in {place} is a ref argument of the covergroup, which a covergroup_expression cannot read (IEEE 1800-2023 19.5)"
+                )));
+            }
             if matches!(name.as_str(), "this" | "super")
                 || model.new_formals.iter().any(|formal| formal.name == name)
             {

@@ -14,6 +14,9 @@ impl ScopeElaboration<'_> {
     ) -> Result<Vec<classes::constraints::InlineRequest>, AnalyzerError> {
         self.locals = Vec::new();
         let mut local_counter = procedural::first_local(syntax_tree, session);
+        // The declarations of the covergroups with `ref` formals (IEEE
+        // 1800-2023 19.3).
+        let mut reference_sites = Vec::new();
         let mut body_state = procedural::BodyState {
             locals: &mut self.locals,
             counter: &mut local_counter,
@@ -106,6 +109,7 @@ impl ScopeElaboration<'_> {
                     .map(|(name, r#type)| Signal::new(name, r#type)),
             );
             ff_processes.extend(sites.edge_procedures);
+            reference_sites = sites.references;
             (subroutines, comb_processes, ff_processes, initial_processes)
         };
         // The blocks a `disable` ends from outside them keep their process
@@ -292,6 +296,20 @@ impl ScopeElaboration<'_> {
                     &mut body_state,
                     self.is_package || self.export_symbols,
                 )?);
+            pass_covergroup_references(
+                syntax_tree,
+                session,
+                &reference_sites,
+                Bodies {
+                    subroutines: &mut self.subroutines,
+                    comb: &mut self.comb_processes,
+                    ff: &mut self.ff_processes,
+                    initial: &mut self.initial_processes,
+                },
+                &self.signals,
+                &self.ports,
+                &self.subroutine_directions,
+            )?;
         }
         // The functions of UVM's C library that Celox provides report
         // through the UVM package (see `procedural::dpi_reports`).
@@ -519,4 +537,79 @@ impl ScopeElaboration<'_> {
             .flat_map(|process| process.assignments().iter().cloned())
             .collect()
     }
+}
+
+/// The subroutines and processes of a scope.
+struct Bodies<'a> {
+    subroutines: &'a mut Vec<Subroutine>,
+    comb: &'a mut Vec<CombProcess>,
+    ff: &'a mut Vec<FfProcess>,
+    initial: &'a mut Vec<InitialProcess>,
+}
+
+/// `sample()` of the covergroups with `ref` formals through the variables
+/// of `sites`, the declarations of the scope that construct their
+/// instances, gets the actuals of the declaration in `bodies`, no such
+/// actual is a net of `signals` or `ports`, and nothing else writes such a
+/// variable (IEEE 1800-2023 13.5.2, 19.3; see
+/// `procedural::covergroup_sites::pass_references`). A scope without such a
+/// covergroup type looks at nothing.
+#[allow(clippy::too_many_arguments)]
+fn pass_covergroup_references(
+    syntax_tree: &AnalysisContext<'_>,
+    session: &Session,
+    sites: &[procedural::covergroup_sites::ReferenceSite],
+    bodies: Bodies<'_>,
+    signals: &[Signal],
+    ports: &[Port],
+    directions: &lifetimes::Directions,
+) -> Result<(), AnalyzerError> {
+    let references: HashMap<String, usize> = session
+        .covergroups
+        .values()
+        .chain(&scope::imported(syntax_tree).covergroups)
+        .filter(|model| model.has_references())
+        .map(|model| (model.sample_subroutine(), model.references().count()))
+        .collect();
+    if references.is_empty() {
+        return Ok(());
+    }
+    let nets = signals
+        .iter()
+        .filter(|signal| signal.is_net())
+        .map(Signal::name)
+        .chain(ports.iter().filter(|port| port.is_net).map(Port::name))
+        .collect();
+    procedural::covergroup_sites::check_site_actuals(sites, &nets)?;
+    let Bodies {
+        subroutines,
+        comb,
+        ff,
+        initial,
+    } = bodies;
+    procedural::covergroup_sites::pass_references(
+        sites,
+        &|name| references.get(name).copied(),
+        subroutines
+            .iter_mut()
+            .map(|subroutine| &mut subroutine.body)
+            .chain(
+                comb.iter_mut()
+                    .flat_map(|process| [&mut process.body, &mut process.sensitivity_body]),
+            )
+            .chain(ff.iter_mut().map(|process| &mut process.body))
+            .chain(
+                initial
+                    .iter_mut()
+                    .flat_map(|process| [&mut process.body, &mut process.validation_body]),
+            ),
+    )?;
+    procedural::covergroup_sites::check_site_variables(
+        sites,
+        subroutines.iter(),
+        comb,
+        ff,
+        initial,
+        directions,
+    )
 }

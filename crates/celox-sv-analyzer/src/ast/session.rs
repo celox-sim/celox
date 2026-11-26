@@ -134,6 +134,10 @@ pub(crate) struct Session {
     /// of such a type adds the instance to them instead of forking.
     pub(super) covergroup_instance_lists:
         HashMap<String, crate::ast::procedural::covergroup_sites::InstanceList>,
+    /// What messages name the subroutines `new` and `sample` of the
+    /// covergroup types the scope uses by, by the names of the subroutines,
+    /// which no source spells (see `covergroups::in_covergroup_terms`).
+    pub(super) covergroup_names: HashMap<String, covergroups::Named>,
 }
 
 impl Session {

@@ -515,3 +515,105 @@ endmodule
     #[cfg(feature = "wasm-runtime")]
     case!(wasm, build_wasm);
 }
+
+/// The instances of covergroups with `ref` formals that declarations
+/// construct (IEEE 1800-2023 19.3) read the variables of their actuals:
+/// a simulation restored from a checkpoint samples the same variables as
+/// the one that took it, at the clocking event and through `sample()`.
+mod covergroup_references {
+    use std::path::Path;
+    const SOURCE: &str = r#"`timescale 1ns/1ns
+module Top;
+    bit clk = 0;
+    bit [3:0] q = 0;
+    always #5 clk = ~clk;
+    always_ff @(posedge clk) q <= q + 4'd1;
+    logic [3:0] up, down;
+    assign up = q;
+    assign down = 4'd15 - q;
+    covergroup cg(ref logic [3:0] v) @(posedge clk); coverpoint v { bins b[] = {[0:15]}; } endgroup
+    cg a = new(up), b = new(down);
+    covergroup plain(ref logic [3:0] v); coverpoint v { bins b[] = {[0:15]}; } endgroup
+    plain p = new(down);
+    always @(negedge clk) p.sample();
+endmodule
+"#;
+    /// The hits of each bin of each instance of each covergroup type of
+    /// `report` that was hit.
+    fn hits(report: &celox::CoverageReport) -> Vec<(String, Vec<Vec<(String, u64)>>)> {
+        report
+            .covergroups
+            .iter()
+            .map(|group| {
+                (
+                    group.name.clone(),
+                    group
+                        .instances
+                        .iter()
+                        .map(|instance| {
+                            instance
+                                .items
+                                .iter()
+                                .flat_map(|item| &item.bins)
+                                .filter(|bin| bin.hits != 0)
+                                .map(|bin| (bin.name.clone(), bin.hits))
+                                .collect()
+                        })
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+    fn bins(values: std::ops::Range<u64>) -> Vec<(String, u64)> {
+        values.map(|value| (format!("b[{value}]"), 1)).collect()
+    }
+    macro_rules! case {
+        ($name:ident, $build:ident) => {
+            #[test]
+            fn $name() {
+                let build = || {
+                    celox::Simulation::from_sv_sources(
+                        vec![(SOURCE, Path::new("references.sv"))],
+                        "Top",
+                    )
+                    .$build()
+                    .unwrap()
+                };
+                let mut source = build();
+                source.run_until(22).unwrap();
+                let checkpoint = source.checkpoint().unwrap();
+                let bytes = checkpoint.to_bytes().unwrap();
+                source.run_until(62).unwrap();
+                let expected = source.coverage();
+                // Rising edges at 5, ..., 55 see q = 0..5; falling ones at
+                // 10, ..., 60 see q = 1..6.
+                assert_eq!(
+                    hits(&expected),
+                    [
+                        ("Top.cg".to_owned(), vec![bins(0..6), bins(10..16)]),
+                        ("Top.plain".to_owned(), vec![bins(9..15)]),
+                    ]
+                );
+                let mut restored = build();
+                // SAFETY: unchanged bytes from the same build's checkpoint encoder.
+                let decoded = unsafe { restored.checkpoint_from_bytes(&bytes) }.unwrap();
+                restored.restore(&decoded).unwrap();
+                assert_eq!(restored.time(), 22);
+                restored.run_until(62).unwrap();
+                assert_eq!(restored.coverage(), expected);
+                source.restore(&checkpoint).unwrap();
+                source.run_until(62).unwrap();
+                assert_eq!(source.coverage(), expected);
+            }
+        };
+    }
+    case!(interpreter, build_interpreter);
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    case!(native, build_native);
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    case!(tiered, build_tiered);
+    #[cfg(feature = "cranelift")]
+    case!(cranelift, build_cranelift);
+    #[cfg(feature = "wasm-runtime")]
+    case!(wasm, build_wasm);
+}

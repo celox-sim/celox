@@ -293,7 +293,11 @@ impl Module {
                 scope.bodies(syntax_tree, session, array_initial_processes)?;
             scope.rename_imported_calls();
             scope.hoist_call_actuals();
-            scope.validate_bodies()?;
+            // What checks the calls and the bodies of the subroutines of
+            // covergroups reports in the terms of the covergroups.
+            scope.validate_bodies().map_err(|error| {
+                crate::ast::covergroups::in_covergroup_terms(error, &session.covergroup_names)
+            })?;
             scope.reject_package_samplers()?;
             let assignments = scope.assignments();
             let symbols = scope.symbols(syntax_tree, session, inline_randomizations);

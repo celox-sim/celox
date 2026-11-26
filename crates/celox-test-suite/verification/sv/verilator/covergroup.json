@@ -409,6 +409,28 @@
     },
     {
       "category": "Sequential",
+      "detail": "covergroup::reference_arguments_are_read_at_each_sample at 1315:2: expect_output: expected [54, 32, 50, 52, 10, 52, 32, 50, 52, 10, 51, 55, 46, 53, 48, 32, 49, 50, 46, 53, 48, 10], got [48, 32, 48, 10, 48, 32, 48, 10, 51, 55, 46, 53, 48, 32, 49, 50, 46, 53, 48, 10]",
+      "expectation": "Simulation",
+      "name": "covergroup::reference_arguments_are_read_at_each_sample",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "covergroup::reference_arguments_track_their_actuals at 1287:2: expect_output: expected [55, 32, 51, 50, 10, 54, 32, 51, 50, 10, 49, 56, 46, 55, 53, 32, 49, 50, 46, 53, 48, 10], got [48, 32, 48, 10, 48, 32, 48, 10, 49, 56, 46, 55, 53, 32, 49, 50, 46, 53, 48, 10]",
+      "expectation": "Simulation",
+      "name": "covergroup::reference_arguments_track_their_actuals",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
       "name": "covergroup::sample_arguments_are_the_sampled_values",

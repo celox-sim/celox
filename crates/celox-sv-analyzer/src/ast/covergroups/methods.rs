@@ -126,6 +126,40 @@ fn actuals(
     ))
 }
 
+/// `error` of an actual of a `ref` formal of `new` of `model`, which names
+/// the subroutine that constructs an instance, as an error of the
+/// covergroup: what 13.5.2 does not allow to pass by reference is an
+/// invalid covergroup, and what the analysis does not support a rejection
+/// of a covergroup construct.
+fn reference_actual(error: AnalyzerError, model: &Covergroup) -> AnalyzerError {
+    let name = model.new_subroutine();
+    match error {
+        AnalyzerError::InvalidRefArgument {
+            subroutine,
+            argument,
+            detail,
+        } if subroutine == name => invalid(format!(
+            "the actual of ref argument `{argument}` of covergroup `{}`: {detail}",
+            model.display
+        )),
+        AnalyzerError::Unsupported(text)
+            if text.starts_with(&format!("ref argument of `{name}` ")) =>
+        {
+            let what = &text[format!("ref argument of `{name}` ").len()..];
+            unsupported(format!(
+                "covergroup ref argument {what} (IEEE 1800-2023 13.5.2, 19.3)"
+            ))
+        }
+        AnalyzerError::Unsupported(text) if text.ends_with("as a ref or const ref argument") => {
+            unsupported(format!(
+                "covergroup ref argument bound to a {} (IEEE 1800-2023 13.5.2, 19.3)",
+                text.trim_end_matches(" as a ref or const ref argument")
+            ))
+        }
+        error => error,
+    }
+}
+
 /// `new`, `new()` or `new(arguments)` of covergroup type `class_name`
 /// (19.3): a call of the subroutine that constructs an instance. An
 /// embedded covergroup is constructed in the `new` method of its class
@@ -186,7 +220,14 @@ fn construction(
         });
     }
     let model = model.usable()?;
+    // An instance reads the variables of its `ref` actuals at each sample,
+    // which only the declaration that constructs it names (see
+    // `procedural::covergroup_sites`).
+    if model.has_references() && !site {
+        return Err(outside_a_site());
+    }
     request(session, model);
+    name_subroutines(session, model);
     let name = model.new_subroutine();
     let leading = usize::from(model.owner.is_some());
     let (mut args, arg_order) = actuals(
@@ -198,7 +239,18 @@ fn construction(
         &model.new_formals,
         leading,
         listed(arguments),
-    )?;
+    )
+    .map_err(|error| {
+        in_covergroup_terms(reference_actual(error, model), &session.covergroup_names)
+    })?;
+    for (index, formal) in model.references() {
+        if args[leading + index].is_none() {
+            return Err(unsupported(format!(
+                "covergroup ref argument `{}` that takes its default (IEEE 1800-2023 13.5.3, 19.3)",
+                formal.name
+            )));
+        }
+    }
     if leading == 1 {
         args.insert(0, Some(expression_binding::object_this()));
     }
@@ -532,7 +584,24 @@ pub(in crate::ast) fn sample_statement(
         return Ok(None);
     };
     let model = &*found.model;
+    // The `ref` actuals are those of the declaration that constructs the
+    // instance, which only the variable it declares names: the call takes
+    // none here, and `procedural::covergroup_sites::pass_references` gives
+    // it those of the declaration its handle names, once the declarations
+    // of the scope are bound.
+    let references = model.references().count();
+    if references != 0
+        && !matches!(
+            native
+                .expression(expression_binding::ungroup(handle, native))
+                .kind,
+            ExprKind::Name(_)
+        )
+    {
+        return Err(sampled_elsewhere());
+    }
     request(session, model);
+    name_subroutines(session, model);
     let name = model.sample_subroutine();
     let first = match model.owner {
         Some(_) => owner_object(tree, session, handle, native, dimensions)?,
@@ -545,12 +614,30 @@ pub(in crate::ast) fn sample_statement(
         dimensions,
         &name,
         &model.sample_formals,
-        1,
+        1 + references,
         listed(found.arguments.unwrap_or_default()),
     )
-    .map_err(|error| as_method(error, &name, "sample"))?;
-    args.insert(0, Some(first));
+    .map_err(|error| {
+        as_method(
+            error,
+            &name,
+            &format!("sample` of covergroup `{}", model.display),
+        )
+    })?;
+    args.splice(
+        0..0,
+        std::iter::once(Some(first)).chain((0..references).map(|_| None)),
+    );
     Ok(Some((name, args, arg_order)))
+}
+
+/// The rejection of `sample()` of a covergroup with a `ref` formal through
+/// anything but the variable of the declaration that constructs the
+/// instance (19.3).
+pub(in crate::ast) fn sampled_elsewhere() -> AnalyzerError {
+    unsupported(
+        "covergroup ref argument of an instance sampled through a variable other than its declaration (IEEE 1800-2023 19.3, 19.8)",
+    )
 }
 
 /// The type a member of an option structure of `kind` has (19.10).

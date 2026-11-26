@@ -409,6 +409,28 @@
     },
     {
       "category": "Sequential",
+      "detail": "Icarus build exit status: 8; see <case>/build.log\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Invalid module item.\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:5: error: Invalid module item.\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:6: error: Invalid module item.\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:8: error: Invalid module item.\n",
+      "expectation": "Simulation",
+      "name": "covergroup::reference_arguments_are_read_at_each_sample",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 8; see <case>/build.log\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: error: Invalid module item.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Invalid module item.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:11: error: Invalid module item.\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:13: error: Invalid module item.\n",
+      "expectation": "Simulation",
+      "name": "covergroup::reference_arguments_track_their_actuals",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "Icarus build exit status: 6; see <case>/build.log\n<case>/source_0.sv:2: syntax error\n<case>/source_0.sv:2: error: Invalid module item.\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module item.\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:5: error: Invalid module item.\n",
       "expectation": "Simulation",
       "name": "covergroup::sample_arguments_are_the_sampled_values",
