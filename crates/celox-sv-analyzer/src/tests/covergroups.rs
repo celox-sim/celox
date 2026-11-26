@@ -352,16 +352,8 @@ fn unsupported_covergroup_constructs_are_rejected_where_used() {
             "covergroup block event (IEEE 1800-2023 19.3)",
         ),
         (
-            "covergroup cg(ref int v); endgroup",
-            "covergroup ref argument (IEEE 1800-2023 19.3)",
-        ),
-        (
             "covergroup cg(int v[2]); endgroup",
             "covergroup argument of unpacked type (IEEE 1800-2023 19.3)",
-        ),
-        (
-            "covergroup cg with function sample(ref int v); endgroup",
-            "covergroup ref argument of the sample method (IEEE 1800-2023 19.8.1)",
         ),
         // A `let` is not expanded after the name of a covergroup: one that
         // the default or the type of an argument names is rejected, rather
@@ -3357,12 +3349,6 @@ fn clocking_events_the_analysis_does_not_support_are_rejected_where_used() {
              cg c = new(1);",
             "covergroup sampling event that names an argument of the covergroup (IEEE 1800-2023 19.3)",
         ),
-        // `ref` formals (C14).
-        (
-            "",
-            "bit clk; int v; covergroup cg(ref int r) @(posedge clk); endgroup cg c = new(v);",
-            "covergroup ref argument (IEEE 1800-2023 19.3)",
-        ),
         // An event the analysis does not support in any event control.
         (
             "",
@@ -3756,4 +3742,632 @@ fn constructions_that_would_start_a_sampler_where_no_process_may_start_are_rejec
          function new(); m_obj = new; Cov = new; endfunction endclass MyClass m; initial m = new; endmodule"
     ))
     .unwrap();
+}
+
+/// The calls of `N::$sample` in `stmts`, each with its actuals.
+fn sample_calls(stmts: &[crate::ir::Stmt]) -> Vec<Vec<Option<crate::ir::Expr>>> {
+    let mut found = Vec::new();
+    for stmt in stmts {
+        stmt.walk(&mut |stmt| {
+            if let crate::ir::Stmt::Call { name, args, .. } = stmt
+                && name.ends_with("::$sample")
+            {
+                found.push(args.clone());
+            }
+        });
+    }
+    found
+}
+
+/// The directions of the formals of the subroutine of `module` whose name
+/// ends in `suffix`.
+fn directions(
+    module: &crate::ir::Module,
+    suffix: &str,
+) -> Vec<(String, crate::procedural::ParamDirection)> {
+    let subroutine = module
+        .subroutines()
+        .iter()
+        .find(|subroutine| {
+            subroutine.name.starts_with("$covergroup::") && subroutine.name.ends_with(suffix)
+        })
+        .unwrap_or_else(|| panic!("no subroutine `{suffix}`"));
+    subroutine
+        .params
+        .iter()
+        .map(|param| (param.source_name.clone(), param.direction))
+        .collect()
+}
+
+#[test]
+fn reference_formals_read_the_variables_of_their_declarations() {
+    use crate::ir::Expr;
+    use crate::procedural::ParamDirection::{ConstRef, Input};
+    let ident = |name: &str| Some(Expr::Ident(name.into()));
+    // 19.3: "A ref argument tracks the value of the actual argument as it
+    // changes", and "will be treated the same as a read-only const ref
+    // argument". `N::$new` and `N::$sample` take the `ref` formals as
+    // `const ref` ones, `N::$sample` after the handle and before the
+    // formals of `sample`; an input formal stays a value the instance
+    // keeps. The sampler of each declaration passes its own actuals, an
+    // unpacked array included, and the type has no `N::$spawn`, which no
+    // other `new` could call.
+    let ir = analyze(
+        "module Top; bit clk; logic [3:0] bus_a, bus_b; logic [3:0] bus_event[0:7]; \
+         assign bus_a = 4'd1; assign bus_b = 4'd2; \
+         covergroup cg(ref logic [3:0] v, input int k, const ref logic [3:0] e[0:7]) @(posedge clk); \
+         coverpoint v; coverpoint e[k]; endgroup \
+         cg x = new(bus_a, 1, bus_event), y = new(bus_b, 2, bus_event); \
+         covergroup change(ref logic [3:0] v) @(bus_a); coverpoint v; endgroup \
+         change z = new(bus_b); \
+         endmodule",
+    )
+    .unwrap();
+    let top = module(&ir, "Top");
+    assert_eq!(
+        directions(top, "cg::$new"),
+        [
+            ("v".to_owned(), ConstRef),
+            ("k".to_owned(), Input),
+            ("e".to_owned(), ConstRef)
+        ]
+    );
+    assert_eq!(
+        directions(top, "cg::$sample"),
+        [
+            ("$cg".to_owned(), Input),
+            ("v".to_owned(), ConstRef),
+            ("e".to_owned(), ConstRef)
+        ]
+    );
+    assert!(subroutines_ending(&ir, "::$spawn").is_empty());
+    let handles = site_handles(top);
+    assert_eq!(handles.len(), 3, "{handles:?}");
+    let edge_procedures = edge_samplers(top);
+    let [edges] = edge_procedures.as_slice() else {
+        panic!("{edge_procedures:?}");
+    };
+    assert_eq!(
+        sample_calls(edges.body()),
+        [
+            vec![ident(handles[0]), ident("bus_a"), ident("bus_event")],
+            vec![ident(handles[1]), ident("bus_b"), ident("bus_event")],
+        ]
+    );
+    let processes = samplers(top);
+    let [process] = processes.as_slice() else {
+        panic!("{processes:?}");
+    };
+    assert_eq!(
+        sample_calls(process.body()),
+        [vec![ident(handles[2]), ident("bus_b")]]
+    );
+    // A type without a clocking event, 19.8's example shape: `sample()`
+    // through the variable of the declaration passes the actuals of the
+    // declaration, from any procedure, task, function or method of a class
+    // of the scope, also one bound before the declaration; a type with no
+    // event needs no hidden variable.
+    let ir = analyze(
+        "module Top; int x, y; bit clk; \
+         function automatic void early(); a.sample(); endfunction \
+         covergroup cg(ref int v); coverpoint v; endgroup \
+         cg a = new(x), b = new(y); \
+         task automatic both(); a.sample(); b.sample(); endtask \
+         class K; function void go(); b.sample(); endfunction endclass \
+         always @(posedge clk) a.sample(); \
+         always_comb b.sample(); \
+         final a.sample(); \
+         initial begin both(); early(); end \
+         endmodule",
+    )
+    .unwrap();
+    let top = module(&ir, "Top");
+    assert!(site_handles(top).is_empty());
+    assert!(samplers(top).is_empty() && edge_samplers(top).is_empty());
+    let mut calls = top
+        .subroutines()
+        .iter()
+        .filter(|subroutine| !subroutine.name.starts_with("$covergroup::"))
+        .flat_map(|subroutine| sample_calls(&subroutine.body))
+        .chain(
+            top.ff_processes()
+                .iter()
+                .flat_map(|process| sample_calls(process.body())),
+        )
+        .chain(
+            top.comb_processes()
+                .iter()
+                .flat_map(|process| sample_calls(process.body())),
+        )
+        .chain(
+            top.initial_processes()
+                .iter()
+                .flat_map(|process| sample_calls(process.body())),
+        )
+        .collect::<Vec<_>>();
+    calls.sort_by_key(|args| format!("{args:?}"));
+    calls.dedup();
+    assert_eq!(
+        calls,
+        [vec![ident("a"), ident("x")], vec![ident("b"), ident("y")]]
+    );
+    // A declaration of a generate block, whose actual is an element of an
+    // unpacked array, or a variable of the block.
+    let ir = analyze(
+        "module Top; bit clk; logic [3:0] bus_event[0:7]; \
+         covergroup cg(ref logic [3:0] v) @(posedge clk); coverpoint v; endgroup \
+         for (genvar i = 0; i < 2; i++) begin : g cg c = new(bus_event[i]); end \
+         if (1) begin : h logic [3:0] w; cg c = new(w); end \
+         endmodule",
+    )
+    .unwrap();
+    let top = module(&ir, "Top");
+    let edge_procedures = edge_samplers(top);
+    let [edges] = edge_procedures.as_slice() else {
+        panic!("{edge_procedures:?}");
+    };
+    let calls = sample_calls(edges.body());
+    assert_eq!(calls.len(), 3, "{calls:?}");
+    for (call, index) in calls.iter().zip(["0", "1"]) {
+        let [_, Some(Expr::Select { expr, .. })] = call.as_slice() else {
+            panic!("{call:?}");
+        };
+        assert_eq!(**expr, Expr::Ident("bus_event".into()), "{index}: {call:?}");
+    }
+    assert!(
+        matches!(&calls[2][1], Some(Expr::Ident(name)) if name.starts_with('h') && name.ends_with('w')),
+        "{:?}",
+        calls[2]
+    );
+    // A `ref` formal of an overridden `sample` method is a `const ref` one,
+    // whose actual each call passes, through any handle.
+    let ir = analyze(
+        "module Top; int x; \
+         covergroup sf with function sample(ref int s); coverpoint s; endgroup \
+         sf e = new; sf h; initial begin h = e; e.sample(x); h.sample(x); end endmodule",
+    )
+    .unwrap();
+    assert_eq!(
+        directions(module(&ir, "Top"), "sf::$sample"),
+        [("$cg".to_owned(), Input), ("s".to_owned(), ConstRef)]
+    );
+}
+
+#[test]
+fn reference_formals_outside_declarations_are_rejected() {
+    // Everything else with a `ref` formal is rejected where it is used,
+    // with a text that maps to the tracking issue: a `new` that is not the
+    // initializer of a declaration of a module or a program, `sample()`
+    // through anything but the variable of such a declaration, and a write
+    // of that variable but for its initializer. The methods and options
+    // other than `sample` stay legal through any handle.
+    let types = "bit clk; int x, y; \
+                 covergroup cg(ref int v); coverpoint v; endgroup \
+                 covergroup clocked(ref int v) @(posedge clk); coverpoint v; endgroup ";
+    let outside =
+        "covergroup ref argument outside a declaration with an initializer (IEEE 1800-2023 19.3)";
+    let elsewhere = "covergroup ref argument of an instance sampled through a variable other than its declaration (IEEE 1800-2023 19.3, 19.8)";
+    let written = |variable: &str| {
+        format!(
+            "covergroup ref argument of an instance whose variable `{variable}` is written outside its declaration (IEEE 1800-2023 19.3)"
+        )
+    };
+    for (before, items, text) in [
+        (
+            "",
+            "cg c; initial c = new(x);".to_owned(),
+            outside.to_owned(),
+        ),
+        (
+            "",
+            "clocked c; initial c = new(x);".to_owned(),
+            outside.to_owned(),
+        ),
+        (
+            "",
+            "cg c = new(x); initial c = new(y);".to_owned(),
+            outside.to_owned(),
+        ),
+        (
+            "",
+            "function automatic cg make(); cg c = new(x); return c; endfunction".to_owned(),
+            outside.to_owned(),
+        ),
+        (
+            "",
+            "cg a[2] = '{new(x), new(y)};".to_owned(),
+            outside.to_owned(),
+        ),
+        (
+            "",
+            "class K; cg c; function new(); c = new(x); endfunction endclass K k = new;".to_owned(),
+            outside.to_owned(),
+        ),
+        // Embedded in a class (19.4): constructed by `new` of the class
+        // alone.
+        (
+            "",
+            "class K; int m; covergroup e(ref int v); coverpoint v; endgroup \
+             function new(); e = new(m); endfunction endclass K k = new;"
+                .to_owned(),
+            outside.to_owned(),
+        ),
+        // A type of a package, which a declaration of a module constructs:
+        // a site is a declaration of the scope of its type.
+        (
+            "package p; covergroup pcg(ref int v); coverpoint v; endgroup endpackage",
+            "p::pcg c = new(x);".to_owned(),
+            outside.to_owned(),
+        ),
+        (
+            "",
+            "cg c = new(x); cg d; initial begin d = c; d.sample(); end".to_owned(),
+            elsewhere.to_owned(),
+        ),
+        (
+            "",
+            "cg c = new(x); cg a[2]; initial a[0].sample();".to_owned(),
+            elsewhere.to_owned(),
+        ),
+        (
+            "",
+            "cg c = new(x); function automatic void f(); cg c; c.sample(); endfunction".to_owned(),
+            elsewhere.to_owned(),
+        ),
+        (
+            "",
+            "cg c = new(x); task automatic t(cg c); c.sample(); endtask".to_owned(),
+            elsewhere.to_owned(),
+        ),
+        (
+            "",
+            "cg c; initial c.sample();".to_owned(),
+            elsewhere.to_owned(),
+        ),
+        (
+            "",
+            "for (genvar i = 0; i < 1; i++) begin : g cg c = new(x); end initial g[0].c.sample();"
+                .to_owned(),
+            elsewhere.to_owned(),
+        ),
+        (
+            "",
+            "covergroup cd(ref int v = x); coverpoint v; endgroup cd c = new;".to_owned(),
+            "covergroup ref argument `v` that takes its default (IEEE 1800-2023 13.5.3, 19.3)"
+                .to_owned(),
+        ),
+        (
+            "",
+            "cg c = new(x); initial c = null;".to_owned(),
+            written("c"),
+        ),
+        (
+            "",
+            "cg c = new(x), d = new(y); initial c = d;".to_owned(),
+            written("c"),
+        ),
+        (
+            "",
+            "clocked c = new(x); final c = null;".to_owned(),
+            written("c"),
+        ),
+        (
+            "",
+            "cg c = new(x); task automatic t(output cg h); h = null; endtask initial t(c);"
+                .to_owned(),
+            written("c"),
+        ),
+        (
+            "",
+            "cg c = new(x); function automatic void f(); c = null; endfunction".to_owned(),
+            written("c"),
+        ),
+    ] {
+        let error = rejected(before, &format!("{types}{items}"));
+        assert_eq!(error, AnalyzerError::Unsupported(text), "{before} {items}");
+        assert_eq!(error.tracking_issue(), COVERGROUPS_ISSUE, "{items}");
+    }
+    for items in [
+        "cg c = new(x); cg d; real r; initial begin d = c; r = d.get_inst_coverage(); \
+         r = cg::get_coverage(); d.stop(); d.start(); d.option.weight = 2; \
+         d.set_inst_name(\"n\"); end",
+        "cg c = new(x); cg a[2]; real r; initial begin a[0] = c; r = a[0].get_coverage(); end",
+        "cg c; real r; initial r = c.get_inst_coverage();",
+        // A member of an unpacked structure is a variable (13.5.2).
+        "typedef struct { int m; } s_t; s_t s; cg c = new(s.m); initial c.sample();",
+    ] {
+        let source = format!("module Top; {types}{items} endmodule");
+        analyze(&source).unwrap_or_else(|error| panic!("{items}: {error}"));
+    }
+    // What 13.5.2 does not allow to pass by reference is an invalid
+    // covergroup: a net, a select of one, an expression, a constant, an
+    // actual of another type.
+    for (items, detail) in [
+        ("wire [3:0] w; lg c = new(w);", "is a net"),
+        ("wire [3:0] w[2]; lg c = new(w[0]);", "is a net"),
+        ("logic [3:0] w; lg c = new(w);", ""),
+        ("cg c = new(x + 1);", "only a variable"),
+        ("cg c = new(3);", "only a variable"),
+        (
+            "localparam int P = 1; cg c = new(P);",
+            "a constant is not a variable",
+        ),
+        ("shortint s; cg c = new(s);", "not equivalent"),
+        ("bit [31:0] b; cg c = new(b[3:0]);", "only a variable"),
+    ] {
+        let lg = "covergroup lg(ref logic [3:0] v); coverpoint v; endgroup ";
+        if detail.is_empty() {
+            let source = format!("module Top; {types}{lg}{items} endmodule");
+            analyze(&source).unwrap_or_else(|error| panic!("{items}: {error}"));
+            continue;
+        }
+        let error = rejected("", &format!("{types}{lg}{items}"));
+        let AnalyzerError::InvalidCovergroup(text) = &error else {
+            panic!("{items}: {error:?}");
+        };
+        let display = if items.contains("lg c") {
+            "Top.lg"
+        } else {
+            "Top.cg"
+        };
+        assert!(
+            text.contains(&format!("ref argument `v` of covergroup `{display}`"))
+                && text.contains(detail),
+            "{items}: {text}"
+        );
+    }
+    // What the analysis does not pass by reference anywhere.
+    for (before, items, construct) in [
+        (
+            "module child; int sig; endmodule",
+            "child u(); cg c = new(u.sig);",
+            "covergroup ref argument bound to a structure member or hierarchical name",
+        ),
+        (
+            "",
+            "int q[$]; cg c = new(q[0]);",
+            "covergroup ref argument bound to an element of a dynamic array",
+        ),
+        // A sample reads the actual as the declaration bound it: a
+        // property through the handle, an element at the index, of the
+        // time of the sample, where the reference is the one of `new`.
+        (
+            "",
+            "class K; int m; endclass K k = new; cg c = new(k.m);",
+            "covergroup ref argument bound to a class property or to an element at an index that is not constant",
+        ),
+        (
+            "",
+            "int arr[4]; int i; cg c = new(arr[i]);",
+            "covergroup ref argument bound to a class property or to an element at an index that is not constant",
+        ),
+        // Formals of other types than integral ones and fixed-size arrays
+        // of them.
+        (
+            "",
+            "covergroup sr(ref string s); endgroup string t; sr c = new(t);",
+            "covergroup ref argument of a type that is neither integral nor a fixed-size array",
+        ),
+        (
+            "",
+            "covergroup sq(ref int s[$]); endgroup int t[$]; sq c = new(t);",
+            "covergroup ref argument of a type that is neither integral nor a fixed-size array",
+        ),
+        (
+            "",
+            "typedef struct { int m; } s_t; covergroup ss(ref s_t s); endgroup s_t t; ss c = new(t);",
+            "covergroup ref argument of a type that is neither integral nor a fixed-size array",
+        ),
+    ] {
+        let error = rejected(before, &format!("{types}{items}"));
+        let AnalyzerError::Unsupported(text) = &error else {
+            panic!("{items}: {error:?}");
+        };
+        assert!(text.starts_with(construct), "{items}: {text}");
+        assert_eq!(error.tracking_issue(), COVERGROUPS_ISSUE, "{items}");
+    }
+    // Caliptra's actuals: `logic` variables that continuous assignments
+    // drive, and an unpacked array of them, are variables (6.5).
+    analyze(
+        "module Top; logic [3:0] bus_x; logic [3:0] bus_event[0:7]; bit d; \
+         assign bus_x = {4{d}}; for (genvar i = 0; i < 8; i++) assign bus_event[i] = 4'(i); \
+         covergroup cg(ref logic [3:0] x, ref logic [3:0] e[0:7]); coverpoint x; coverpoint e[3]; endgroup \
+         cg c = new(bus_x, bus_event); initial c.sample(); endmodule",
+    )
+    .unwrap();
+}
+
+#[test]
+fn covergroup_expressions_do_not_read_reference_arguments() {
+    // 19.5: "Only constant expressions (see 11.2.1), global and instance
+    // constants ..., or non-ref arguments to the covergroup are allowed to be
+    // used as variables in a covergroup_expression": a bin value, a bin
+    // array size, a `with` filter over any range (19.5.1.1 evaluates it "at
+    // the time the covergroup instance is constructed"), a set expression
+    // and an `intersect` list. The same with an input argument analyzes;
+    // an option (`expression` in Syntax 19-1) and a guard may read either.
+    let declaration = |direction: &str, items: &str| {
+        format!(
+            "bit clk; int x = 5; int y = 1; int w = 0; int q[4]; \
+             covergroup cg({direction} int r) @(posedge clk); {items} endgroup cg c = new(w);"
+        )
+    };
+    for (items, place) in [
+        (
+            "big: coverpoint x { bins near = {[0:$]} with (item >= r); }",
+            "bin `near` of coverpoint `big`",
+        ),
+        (
+            "sm: coverpoint x { bins near = {[0:15]} with (item >= r); }",
+            "bin `near` of coverpoint `sm`",
+        ),
+        (
+            "big: coverpoint x { bins near = big with (item >= r); }",
+            "bin `near` of coverpoint `big`",
+        ),
+        (
+            "cx: coverpoint x { bins b = {r}; }",
+            "bin `b` of coverpoint `cx`",
+        ),
+        (
+            "cx: coverpoint x { bins b[r] = {[0:7]}; }",
+            "bin `b` of coverpoint `cx`",
+        ),
+        (
+            "cx: coverpoint x { bins b = {[0:7]}; } cy: coverpoint y { bins b = {[0:7]}; } \
+             xy: cross cx, cy { bins s = binsof(cx) intersect {r}; }",
+            "bin `s` of cross `xy`",
+        ),
+    ] {
+        let error = rejected("", &declaration("ref", items));
+        let AnalyzerError::InvalidCovergroup(text) = &error else {
+            panic!("{items}: {error:?}");
+        };
+        assert!(
+            text.contains(&format!("`r` in {place}"))
+                && text.contains(
+                    "is a ref argument of the covergroup, which a covergroup_expression cannot read (IEEE 1800-2023 19.5)"
+                ),
+            "{items}: {text}"
+        );
+        let source = format!("module Top; {} endmodule", declaration("input", items));
+        analyze(&source).unwrap_or_else(|error| panic!("{items}: {error}"));
+    }
+    // A set expression of a `ref` array argument.
+    let error = rejected(
+        "",
+        "bit clk; int x; int q[4]; covergroup cg(ref int s[4]) @(posedge clk); \
+         cx: coverpoint x { bins b[] = s; } endgroup cg c = new(q);",
+    );
+    assert!(
+        matches!(&error, AnalyzerError::InvalidCovergroup(text) if text.contains("`s` in bin `b`")),
+        "{error:?}"
+    );
+    for items in [
+        "option.weight = r; cx: coverpoint x;",
+        "cx: coverpoint x iff (r > 0) { bins b = {[0:7]} iff (r > 1); }",
+    ] {
+        let source = format!("module Top; {} endmodule", declaration("ref", items));
+        analyze(&source).unwrap_or_else(|error| panic!("{items}: {error}"));
+    }
+}
+
+#[test]
+fn errors_of_covergroup_arguments_name_the_covergroup() {
+    // The subroutines of a covergroup are no names of the source: what their
+    // calls and bodies are rejected for names the method and the covergroup.
+    let leaks = |error: &AnalyzerError| error.to_string().contains("$covergroup");
+    // The arguments of `new` and of `sample` (13.5.3, 13.5.4).
+    let types = "int x; covergroup cg(input int k, ref int v) with function sample(int s); \
+                 coverpoint v; coverpoint s; endgroup covergroup pg(input int k); endgroup ";
+    for (items, method, detail) in [
+        ("cg c = new;", "new", "no actual for argument `k`"),
+        (
+            "pg c; initial c = new;",
+            "new",
+            "no actual for argument `k`",
+        ),
+        ("cg c = new(1, x, 2);", "new", "3 actuals for 2 formals"),
+        ("cg c = new(.k(1), .z(x));", "new", "no formal named `z`"),
+        ("cg c = new(.k(1), .k(2), .v(x));", "new", "`k`"),
+        (
+            "cg c = new(1, x); initial c.sample(1, 2);",
+            "sample",
+            "2 actuals for 1 formals",
+        ),
+        (
+            "cg c = new(1, x); initial c.sample();",
+            "sample",
+            "no actual for argument `s`",
+        ),
+    ] {
+        let error = rejected("", &format!("{types}{items}"));
+        let AnalyzerError::InvalidCallArguments {
+            subroutine,
+            detail: found,
+        } = &error
+        else {
+            panic!("{items}: {error:?}");
+        };
+        let display = if items.starts_with("pg") {
+            "Top.pg"
+        } else {
+            "Top.cg"
+        };
+        assert_eq!(
+            *subroutine,
+            format!("{method}` of covergroup `{display}"),
+            "{items}"
+        );
+        assert!(found.contains(detail), "{items}: {found}");
+        assert!(
+            error.to_string().starts_with(&format!(
+                "arguments of `{method}` of covergroup `{display}`: "
+            )),
+            "{items}: {error}"
+        );
+        assert!(!leaks(&error), "{items}: {error}");
+    }
+    // A net passed to a `ref` argument of `sample` (13.5.2), of a covergroup
+    // of the module and of one embedded in a class.
+    for (items, display) in [
+        (
+            "wire [3:0] w; covergroup sf with function sample(ref logic [3:0] s); coverpoint s; \
+             endgroup sf e = new; initial e.sample(w);",
+            "Top.sf",
+        ),
+        (
+            "wire [3:0] w; class K; covergroup kc with function sample(ref logic [3:0] s); \
+             coverpoint s; endgroup function new(); kc = new; endfunction endclass \
+             K k = new; initial k.kc.sample(w);",
+            "K::kc",
+        ),
+    ] {
+        let error = rejected("", items);
+        assert_eq!(
+            error,
+            AnalyzerError::InvalidRefArgument {
+                subroutine: format!("sample` of covergroup `{display}"),
+                argument: "s".into(),
+                detail: "a net cannot be passed by reference (IEEE 1800-2023 13.5.2)".into(),
+            },
+            "{items}"
+        );
+        assert!(!leaks(&error), "{error}");
+    }
+    // An expression of the covergroup that writes a `ref` argument of `new`
+    // through a function: "a covergroup cannot modify any argument to the new
+    // operator, a ref argument will be treated the same as a read-only const
+    // ref argument" (19.3). One of `sample`, which the analysis passes as a
+    // `const ref` argument too, is not supported written.
+    let bump = "function automatic logic [3:0] bump(ref logic [3:0] r); r = r + 1; return r; \
+                endfunction logic [3:0] a; ";
+    let error = rejected(
+        "",
+        &format!(
+            "{bump}covergroup cg(ref logic [3:0] v); coverpoint bump(v); endgroup cg c = new(a);"
+        ),
+    );
+    assert_eq!(
+        error,
+        AnalyzerError::InvalidCovergroup(
+            "ref argument `v` of covergroup `Top.cg` is written by an expression of the covergroup, which cannot modify an argument of `new`: a ref argument is read-only, as a const ref argument is (IEEE 1800-2023 19.3)"
+                .into()
+        )
+    );
+    let error = rejected(
+        "",
+        &format!(
+            "{bump}covergroup sf with function sample(ref logic [3:0] s); coverpoint bump(s); \
+             endgroup sf e = new; initial e.sample(a);"
+        ),
+    );
+    assert_eq!(
+        error,
+        AnalyzerError::Unsupported(
+            "covergroup ref argument `s` of the sample method of `Top.sf` written by an expression of the covergroup (IEEE 1800-2023 19.8.1)"
+                .into()
+        )
+    );
+    assert_eq!(error.tracking_issue(), COVERGROUPS_ISSUE);
 }

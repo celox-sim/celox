@@ -81,8 +81,8 @@ fn instance(
     Ok(instance)
 }
 
-/// The arguments of the covergroup that an instance keeps for its samples
-/// (19.3), as `N::$sample` reads them back.
+/// The input arguments of the covergroup that an instance keeps for its
+/// samples (19.3), as `N::$sample` reads them back.
 #[derive(Default)]
 struct Kept {
     stored: Vec<(usize, Stored)>,
@@ -107,7 +107,12 @@ fn stored_formals(
 ) -> Converted<()> {
     let model = site.model;
     for (index, formal) in model.new_formals.iter().enumerate() {
-        if !read.contains(&formal.name) || kept.stored.iter().any(|(stored, _)| *stored == index) {
+        // A `ref` formal is one of `N::$sample` itself, which reads the
+        // variable at each sample (19.3).
+        if formal.direction.is_reference()
+            || !read.contains(&formal.name)
+            || kept.stored.iter().any(|(stored, _)| *stored == index)
+        {
             continue;
         }
         let ty = &formal.r#type;

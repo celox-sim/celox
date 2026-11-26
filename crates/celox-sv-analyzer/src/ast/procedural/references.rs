@@ -545,6 +545,137 @@ fn stmt_lvalues(stmt: &Stmt) -> &[LValue] {
     }
 }
 
+/// The variable matching `is_target` that statement `stmt` itself writes,
+/// not counting the statements it nests: the target of an assignment, or
+/// an actual of a formal or of a system task that writes it.
+fn stmt_write(
+    stmt: &Stmt,
+    is_target: &dyn Fn(&str) -> bool,
+    directions: &lifetimes::Directions,
+) -> Option<String> {
+    let hit = match stmt {
+        Stmt::Assign { lhs, .. } => is_target(lhs.name()).then(|| lhs.name().to_owned()),
+        Stmt::AssignConcat { parts, .. } => parts
+            .iter()
+            .find(|part| is_target(part.name()))
+            .map(|part| part.name().to_owned()),
+        Stmt::Call { name, args, .. } => written_by_call(
+            &Callee::Subroutine(name.clone()),
+            args,
+            directions,
+            None,
+            is_target,
+        )
+        .map(str::to_owned),
+        Stmt::SystemTask { task, args, .. } => {
+            args.iter()
+                .enumerate()
+                .find_map(|(position, arg)| match arg {
+                    crate::procedural::SystemTaskArg::Expr(expr)
+                        if task.writes_argument(position) =>
+                    {
+                        written_target_in(expr, is_target).map(str::to_owned)
+                    }
+                    _ => None,
+                })
+        }
+        _ => None,
+    };
+    hit.or_else(|| {
+        stmt_exprs(stmt)
+            .into_iter()
+            .find_map(|expr| expr_written_by_call(expr, directions, None, is_target))
+            .or_else(|| {
+                stmt_lvalues(stmt)
+                    .iter()
+                    .find_map(|lhs| lvalue_written_by_call(lhs, directions, None, is_target))
+            })
+            .map(str::to_owned)
+    })
+}
+
+/// The first variable matching `is_target` that a statement or continuous
+/// assignment of the bodies writes, but for the statements `exempt` takes,
+/// with the statements that `procedural` says are procedural writes too
+/// (procedural continuous assignments and forces, which write their
+/// target). A formal of a subroutine hides a variable of its name.
+#[allow(clippy::too_many_arguments)]
+fn first_write<'a>(
+    is_target: &dyn Fn(&str) -> bool,
+    exempt: &dyn Fn(&Stmt) -> bool,
+    procedural: bool,
+    subroutines: impl Iterator<Item = &'a Subroutine>,
+    comb: &[CombProcess],
+    ff: &[FfProcess],
+    processes: &[InitialProcess],
+    directions: &lifetimes::Directions,
+) -> Option<String> {
+    let check_stmts = |stmts: &[Stmt], shadowed: &HashSet<&str>| -> Option<String> {
+        let is_target = |name: &str| !shadowed.contains(name) && is_target(name);
+        let mut hit: Option<String> = None;
+        for stmt in stmts {
+            stmt.walk(&mut |stmt| {
+                if hit.is_some() || exempt(stmt) {
+                    return;
+                }
+                hit = stmt_write(stmt, &is_target, directions).or_else(|| {
+                    procedural
+                        .then(|| {
+                            stmt_lvalues(stmt)
+                                .iter()
+                                .find(|lhs| is_target(lhs.name()))
+                                .map(|lhs| lhs.name().to_owned())
+                        })
+                        .flatten()
+                });
+            });
+            if hit.is_some() {
+                return hit;
+            }
+        }
+        None
+    };
+    let empty = HashSet::default();
+    for process in comb {
+        for assignment in process.assignments() {
+            if is_target(assignment.lhs()) {
+                return Some(assignment.lhs().to_owned());
+            }
+            if let Some(target) =
+                expr_written_by_call(assignment.rhs(), directions, None, is_target).or_else(|| {
+                    lvalue_written_by_call(assignment.lhs_value(), directions, None, is_target)
+                })
+            {
+                return Some(target.to_owned());
+            }
+        }
+        if let Some(hit) = check_stmts(process.body(), &empty) {
+            return Some(hit);
+        }
+    }
+    for process in ff {
+        if let Some(hit) = check_stmts(process.body(), &empty) {
+            return Some(hit);
+        }
+    }
+    for process in processes {
+        if let Some(hit) = check_stmts(process.body(), &empty) {
+            return Some(hit);
+        }
+    }
+    for subroutine in subroutines {
+        let shadowed: HashSet<&str> = subroutine
+            .params
+            .iter()
+            .map(|param| param.name.as_str())
+            .collect();
+        if let Some(hit) = check_stmts(&subroutine.body, &shadowed) {
+            return Some(hit);
+        }
+    }
+    None
+}
+
 /// Check that no statement or continuous assignment in module `module` writes
 /// any of its `const ref` ports (or their unpacked structure members).
 pub(in crate::ast) fn validate_const_ref_ports<'a>(
@@ -568,112 +699,49 @@ pub(in crate::ast) fn validate_const_ref_ports<'a>(
     if const_ports.is_empty() {
         return Ok(());
     }
-    let check_stmts = |stmts: &[Stmt], shadowed: &HashSet<&str>| -> Result<(), AnalyzerError> {
-        let is_target = |name: &str| !shadowed.contains(name) && const_ports.contains(name);
-        let mut hit: Option<String> = None;
-        for stmt in stmts {
-            stmt.walk(&mut |stmt| {
-                if hit.is_some() {
-                    return;
-                }
-                match stmt {
-                    Stmt::Assign { lhs, .. } => {
-                        if is_target(lhs.name()) {
-                            hit = Some(lhs.name().to_owned());
-                        }
-                    }
-                    Stmt::AssignConcat { parts, .. } => {
-                        if let Some(part) = parts.iter().find(|part| is_target(part.name())) {
-                            hit = Some(part.name().to_owned());
-                        }
-                    }
-                    Stmt::Call { name, args, .. } => {
-                        if let Some(target) = written_by_call(
-                            &Callee::Subroutine(name.clone()),
-                            args,
-                            directions,
-                            None,
-                            &is_target,
-                        ) {
-                            hit = Some(target.to_owned());
-                        }
-                    }
-                    Stmt::SystemTask { task, args, .. } => {
-                        for (position, arg) in args.iter().enumerate() {
-                            if task.writes_argument(position)
-                                && let crate::procedural::SystemTaskArg::Expr(expr) = arg
-                                && let Some(target) = written_target_in(expr, &is_target)
-                            {
-                                hit = Some(target.to_owned());
-                                break;
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-                if hit.is_none() {
-                    hit = stmt_exprs(stmt)
-                        .into_iter()
-                        .find_map(|expr| expr_written_by_call(expr, directions, None, &is_target))
-                        .or_else(|| {
-                            stmt_lvalues(stmt).iter().find_map(|lhs| {
-                                lvalue_written_by_call(lhs, directions, None, &is_target)
-                            })
-                        })
-                        .map(str::to_owned);
-                }
-            });
-            if let Some(port) = hit {
-                return Err(AnalyzerError::ConstRefPortAssignment {
-                    module: module.to_owned(),
-                    port,
-                });
-            }
-        }
-        Ok(())
-    };
-    let empty = HashSet::default();
-    let is_const_port = |name: &str| const_ports.contains(name);
-    for process in comb {
-        for assignment in process.assignments() {
-            if const_ports.contains(assignment.lhs()) {
-                return Err(AnalyzerError::ConstRefPortAssignment {
-                    module: module.to_owned(),
-                    port: assignment.lhs().to_owned(),
-                });
-            }
-            if let Some(port) = expr_written_by_call(
-                assignment.rhs(),
-                directions,
-                None,
-                &is_const_port,
-            )
-            .or_else(|| {
-                lvalue_written_by_call(assignment.lhs_value(), directions, None, &is_const_port)
-            }) {
-                return Err(AnalyzerError::ConstRefPortAssignment {
-                    module: module.to_owned(),
-                    port: port.to_owned(),
-                });
-            }
-        }
-        check_stmts(process.body(), &empty)?;
+    match first_write(
+        &|name| const_ports.contains(name),
+        &|_| false,
+        false,
+        subroutines,
+        comb,
+        ff,
+        processes,
+        directions,
+    ) {
+        Some(port) => Err(AnalyzerError::ConstRefPortAssignment {
+            module: module.to_owned(),
+            port,
+        }),
+        None => Ok(()),
     }
-    for process in ff {
-        check_stmts(process.body(), &empty)?;
-    }
-    for process in processes {
-        check_stmts(process.body(), &empty)?;
-    }
-    for subroutine in subroutines {
-        let shadowed: HashSet<&str> = subroutine
-            .params
-            .iter()
-            .map(|param| param.name.as_str())
-            .collect();
-        check_stmts(&subroutine.body, &shadowed)?;
-    }
-    Ok(())
+}
+
+/// The first variable of `variables` that a statement or continuous
+/// assignment of the bodies writes, but for the statements `exempt` takes:
+/// an assignment, a procedural continuous assignment or force of it, or an
+/// actual of an `output`, `inout` or `ref` formal (see
+/// `covergroup_sites::check_site_variables`).
+#[allow(clippy::too_many_arguments)]
+pub(in crate::ast) fn written_variable<'a>(
+    variables: &HashSet<&str>,
+    exempt: &dyn Fn(&Stmt) -> bool,
+    subroutines: impl Iterator<Item = &'a Subroutine>,
+    comb: &[CombProcess],
+    ff: &[FfProcess],
+    processes: &[InitialProcess],
+    directions: &lifetimes::Directions,
+) -> Option<String> {
+    first_write(
+        &|name| variables.contains(name),
+        exempt,
+        true,
+        subroutines,
+        comb,
+        ff,
+        processes,
+        directions,
+    )
 }
 
 /// Record in `error` why statement `stmt` cannot use reference formal

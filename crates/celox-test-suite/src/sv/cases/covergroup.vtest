@@ -1255,3 +1255,61 @@ endmodule"#)
 endmodule"#)
  (top Top) (run_to_finish)
  (expect_output "3 3 3 3 3 3 37.50\n"))
+
+; 19.3: "A ref argument tracks the value of the actual argument as it
+; changes": the instances of two declarations of one type read, at each
+; rising edge, the variables their actuals name, which continuous
+; assignments drive; an input argument keeps the value `new` passed.
+(case reference_arguments_track_their_actuals
+ (source "reference_arguments.sv" #"module Top;
+ bit clk = 0;
+ bit [2:0] q = 0;
+ always #5 clk = ~clk;
+ always_ff @(posedge clk) q <= q + 3'd1;
+ logic [3:0] bus_a, bus_b;
+ assign bus_a = {1'b0, q};
+ assign bus_b = {1'b1, q};
+ covergroup cg(ref logic [3:0] v, input bit [3:0] lo) @(posedge clk);
+  cp: coverpoint v { bins b[] = {[0:15]}; }
+  above: coverpoint v iff (v >= lo) { bins b[] = {[0:15]}; }
+ endgroup
+ cg a = new(bus_a, 4'd1), b = new(bus_b, 4'd10);
+ int covered, total;
+ initial begin
+  #42;
+  void'(a.get_inst_coverage(covered, total)); $display("%0d %0d", covered, total);
+  void'(b.get_inst_coverage(covered, total)); $display("%0d %0d", covered, total);
+  $display("%0.2f %0.2f", a.above.get_inst_coverage(), b.above.get_inst_coverage());
+  $finish;
+ end
+endmodule"#)
+ (top Top) (run_to_finish)
+ (expect_output "7 32\n6 32\n18.75 12.50\n"))
+
+; 19.3, 19.8: a covergroup with ref arguments and no clocking event, sampled
+; by `sample()` through the variables of its declarations, also from a task:
+; each sample reads the variables then, an element of an unpacked array that
+; the instance takes as a whole included.
+(case reference_arguments_are_read_at_each_sample
+ (source "reference_samples.sv" #"module Top;
+ int x, y;
+ logic [3:0] ev[0:3];
+ covergroup cg(ref int v, ref logic [3:0] e[0:3]);
+  cv: coverpoint v { bins b[] = {[0:7]}; }
+  ce: coverpoint e[1] { bins b[] = {[0:15]}; }
+ endgroup
+ cg a = new(x, ev), b = new(y, ev);
+ int covered, total;
+ task automatic both(); a.sample(); b.sample(); endtask
+ initial begin
+  x = 1; y = 5; ev[1] = 3; a.sample(); b.sample();
+  x = 2; y = 6; ev[1] = 4; both();
+  x = 3; ev[1] = 9; a.sample();
+  void'(a.get_inst_coverage(covered, total)); $display("%0d %0d", covered, total);
+  void'(b.get_inst_coverage(covered, total)); $display("%0d %0d", covered, total);
+  $display("%0.2f %0.2f", a.cv.get_inst_coverage(), b.ce.get_inst_coverage());
+  $finish;
+ end
+endmodule"#)
+ (top Top) (run_to_finish)
+ (expect_output "6 24\n4 24\n37.50 12.50\n"))

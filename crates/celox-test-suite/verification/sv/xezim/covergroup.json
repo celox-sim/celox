@@ -409,6 +409,28 @@
     },
     {
       "category": "Sequential",
+      "detail": "the simulation ended before the script did",
+      "expectation": "Simulation",
+      "name": "covergroup::reference_arguments_are_read_at_each_sample",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "covergroup::reference_arguments_track_their_actuals",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
       "name": "covergroup::sample_arguments_are_the_sampled_values",
