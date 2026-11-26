@@ -454,7 +454,11 @@ impl ModuleBinding<'_> {
                         .iter()
                         .filter_map(|signal| Some((signal.name.clone(), signal.aliased.clone()?))),
                 );
-                let bound = instance_symbols(symbols, &names);
+                let mut bound = instance_symbols(symbols, &names);
+                // The instance's processes and subroutines run in it, so
+                // their reports name its scope (IEEE 1800-2023 20.10), as
+                // their `%m` does (21.2.1.5).
+                home_sites(&mut bound, &handle);
                 self.imported
                     .initial_processes
                     .extend(bound.initial_processes.iter().cloned());
@@ -462,6 +466,52 @@ impl ModuleBinding<'_> {
             }
         }
         Ok(())
+    }
+}
+
+/// Mark the sites of `symbols`, the processes and subroutines of interface
+/// instance `handle`, as sites of that instance (see
+/// [`celox_design::SiteHome`]): the scope of the module instance that holds
+/// it, then `handle`, which `%m` names in them with the blocks and
+/// subroutines under it. A site of an interface instance in this one names
+/// that instance under `handle`; one with another home keeps it. A call
+/// through a virtual interface runs a copy of a subroutine of the
+/// interface's definition, which names its instance itself.
+fn home_sites(symbols: &mut crate::ast::scope::ScopeSymbols, handle: &str) {
+    let mark = |stmts: &mut [Stmt]| {
+        crate::procedural::visit_site_homes(stmts, &mut |home| match home {
+            None => {
+                *home = Some(celox_design::SiteHome::Path {
+                    up: Some(0),
+                    down: Vec::new(),
+                    within: Some(handle.to_string()),
+                });
+            }
+            Some(celox_design::SiteHome::Path {
+                up: Some(0),
+                down,
+                within: Some(within),
+            }) if down.is_empty() => {
+                *within = format!("{handle}.{within}");
+            }
+            Some(_) => {}
+        });
+    };
+    for process in &mut symbols.initial_processes {
+        mark(&mut process.body);
+        mark(&mut process.validation_body);
+    }
+    for process in &mut symbols.comb_processes {
+        mark(&mut process.body);
+        mark(&mut process.sensitivity_body);
+    }
+    for process in &mut symbols.ff_processes {
+        mark(&mut process.body);
+    }
+    for subroutine in &mut symbols.subroutines {
+        let subroutine = Arc::make_mut(subroutine);
+        mark(&mut subroutine.body);
+        mark(&mut subroutine.sensitivity_body);
     }
 }
 
