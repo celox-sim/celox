@@ -1184,6 +1184,11 @@ impl Renamer<'_> {
                 })
                 .collect(),
             return_var: subroutine.return_var.map(|name| self.name(&name)),
+            result_leaves: subroutine
+                .result_leaves
+                .iter()
+                .map(|leaf| self.name(leaf))
+                .collect(),
             sensitivity_body: subroutine
                 .sensitivity_body
                 .into_iter()
