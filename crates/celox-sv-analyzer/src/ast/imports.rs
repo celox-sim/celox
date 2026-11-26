@@ -483,6 +483,16 @@ pub(super) fn item_names(id: celox_sv_syntax::BodyItemId, tree: &SyntaxTree) -> 
         }
         // The type a covergroup declares (IEEE 1800-2023 19.3).
         BodyItemKind::Covergroup(id) => add(&native.covergroup(*id).name),
+        // The clocking block a clocking declaration names (14.3); a default
+        // clocking specification names one declared elsewhere (14.12).
+        BodyItemKind::Clocking(id) => {
+            let clocking = native.clocking(*id);
+            if clocking.kind != celox_sv_syntax::ClockingKind::DefaultReference
+                && let Some(name) = &clocking.name
+            {
+                add(name);
+            }
+        }
         // The type a user-defined nettype declares (6.6.7), which Celox
         // keeps unconverted.
         BodyItemKind::Unconverted { category, .. } if category == "nettype" => {

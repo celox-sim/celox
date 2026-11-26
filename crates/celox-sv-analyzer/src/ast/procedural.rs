@@ -63,6 +63,9 @@ struct ScopeEntry {
     source: String,
     unique: Option<String>,
     shadowed_dimensions: Option<VariableDimensions>,
+    /// The marker of the clocking block of the name, which a declaration
+    /// of the name hides with the block (see `clocking::is_block`).
+    shadowed_marker: Option<VariableDimensions>,
     shadowed_constant_type: Option<semantic_types::ConstantType>,
     shadowed_constants: Vec<(String, Option<i128>)>,
     shadowed_literal: Option<String>,
@@ -1070,6 +1073,10 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     self.dims.remove(&entry.source);
                 }
             }
+            if let Some(marker) = entry.shadowed_marker {
+                self.dims
+                    .insert(super::clocking::marker(&entry.source), marker);
+            }
             let signedness = &mut self.dims.expression_signedness;
             match entry.shadowed_static_member {
                 Some(true) => {
@@ -1289,6 +1296,14 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 None
             },
             shadowed_dimensions: self.dims.remove(source),
+            shadowed_marker: {
+                let marker = super::clocking::marker(source);
+                if self.dims.get(&marker).is_some() {
+                    self.dims.remove(&marker)
+                } else {
+                    None
+                }
+            },
             shadowed_constant_type: if self.dims.constant_types.contains_key(source) {
                 self.dims.constant_types.remove(source)
             } else {

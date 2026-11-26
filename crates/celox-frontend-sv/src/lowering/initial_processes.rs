@@ -368,15 +368,21 @@ pub(super) fn lower_initial_processes(
         .collect();
     // Every `initial` kernel of a program instance names the status slot of
     // the first, the instance's identity for `$exit` and its end (IEEE
-    // 1800-2023 24.3, 24.7).
+    // 1800-2023 24.3, 24.7). A program declares no `always` procedure: a
+    // process that repeats is one Celox generates, such as that of a
+    // clocking block (14.13), which never ends and is no part of the
+    // program's end.
     if module.is_program() {
+        let initial = |process: &sv::ir::InitialProcess| {
+            !process.is_initializer() && !process.is_final() && !process.repeats()
+        };
         let program = slots
             .iter()
             .zip(&runtime)
-            .find(|(_, (process, _))| !process.is_initializer() && !process.is_final())
+            .find(|(_, (process, _))| initial(process))
             .map(|(slots, _)| slots.status);
         for (slots, (process, _)) in slots.iter_mut().zip(&runtime) {
-            if !process.is_initializer() && !process.is_final() {
+            if initial(process) {
                 slots.program = program;
             }
         }

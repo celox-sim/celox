@@ -3285,6 +3285,12 @@ impl InterfaceDecl {
                     self.name
                 )));
             }
+            native::BodyItemKind::Clocking(_) => {
+                return Err(unsupported(format!(
+                    "clocking block in interface `{}`",
+                    self.name
+                )));
+            }
             _ => {
                 return Err(unsupported(format!(
                     "nested declaration in interface `{}`",

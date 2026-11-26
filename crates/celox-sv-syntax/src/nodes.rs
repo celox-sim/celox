@@ -810,6 +810,9 @@ pub enum BodyItemKind {
     /// A covergroup declaration (IEEE 1800-2023 19.3) of a design element,
     /// generate block, checker, class or the compilation unit.
     Covergroup(CovergroupId),
+    /// A clocking declaration or a default clocking specification (IEEE
+    /// 1800-2023 14.3, 14.12, 14.14).
+    Clocking(ClockingId),
     Region(Vec<BodyItemId>),
     Block {
         leading_label: Option<Name>,
@@ -1563,6 +1566,89 @@ pub struct AssertionDeclarationId(pub(crate) usize);
 pub enum AssertionDeclarationKind {
     Sequence,
     Property,
+}
+
+/// Stable clocking declaration handle in [`crate::Declarations::clockings`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct ClockingId(pub(crate) usize);
+
+/// A `clocking_declaration` (IEEE 1800-2023 14.3, A.6.11), or the
+/// `default clocking name ;` that makes a clocking block the default
+/// (14.12).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClockingDeclaration {
+    pub kind: ClockingKind,
+    /// Only a default clocking block may be unnamed (14.3).
+    pub name: Option<Name>,
+    /// The clocking event; `None` for a default clocking specification.
+    pub event: Option<TimingControlId>,
+    pub items: Vec<ClockingItem>,
+    pub end_label: Option<Name>,
+    pub tokens: TokenRange,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClockingKind {
+    /// `[ default ] clocking ... endclocking`.
+    Block { default: bool },
+    /// `global clocking ... endclocking` (14.14).
+    Global,
+    /// `default clocking name ;` (14.12), naming a clocking block.
+    DefaultReference,
+}
+
+/// A `clocking_item` (A.6.11).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClockingItem {
+    /// `default default_skew ;`.
+    DefaultSkew {
+        input: Option<ClockingSkew>,
+        output: Option<ClockingSkew>,
+        tokens: TokenRange,
+    },
+    /// `clocking_direction list_of_clocking_decl_assign ;`.
+    Signals {
+        direction: ClockingDirection,
+        signals: Vec<ClockingSignal>,
+        tokens: TokenRange,
+    },
+    /// An `assertion_item_declaration`: a property, sequence or let
+    /// declaration, kept as tokens.
+    Assertion { tokens: TokenRange },
+}
+
+/// A `clocking_direction` (A.6.11) with its skews.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClockingDirection {
+    Input(Option<ClockingSkew>),
+    Output(Option<ClockingSkew>),
+    InputOutput(Option<ClockingSkew>, Option<ClockingSkew>),
+    Inout,
+}
+
+/// A `clocking_skew` (A.6.11): an edge, a delay, or an edge and a delay.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClockingSkew {
+    pub edge: Option<TimingEdge>,
+    pub delay: Option<SkewDelay>,
+    pub tokens: TokenRange,
+}
+
+/// The `delay_control` of a clocking skew.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SkewDelay {
+    /// `#1step` (3.14.3).
+    Step,
+    /// `# delay_value` or `# ( mintypmax_expression )`.
+    Value(ExprId),
+}
+
+/// A `clocking_decl_assign` (A.6.11): `signal_identifier [ = expression ]`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClockingSignal {
+    pub name: Name,
+    pub expression: Option<ExprId>,
+    pub tokens: TokenRange,
 }
 
 /// Stable covergroup handle in [`crate::Declarations::covergroups`].

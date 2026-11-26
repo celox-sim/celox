@@ -28,7 +28,7 @@ Celox は IEEE Std 1800™-2023 が規定する SystemVerilog を実装します
 
 以下の構文や節は未実装であり、コンパイル時に拒否します。
 
-- **検証・設計構造ブロック:** `bind`、`checker`、`config`、clocking ブロックと clocking drive、ユーザー定義プリミティブ（UDP）、`specify` ブロック。covergroup は一部に対応します。[カバーグループ](#covergroups)を参照してください。
+- **検証・設計構造ブロック:** `bind`、`checker`、`config`、ユーザー定義プリミティブ（UDP）、`specify` ブロック。clocking ブロックは一部に対応します。[clocking ブロック](#clocking-blocks)を参照してください。covergroup は一部に対応します。[カバーグループ](#covergroups)を参照してください。
 - **union と配列・コンテナの混在型:** `tagged` union、unpacked union、packed union の代入パターン、`chandle` の固定長 unpacked 配列（`chandle a[4]`、typedef 経由を含む）、動的コンテナの固定長 unpacked 配列（`int a[2][$]`、typedef 経由を含む）、多次元固定長 unpacked 配列を要素とする動的コンテナ（`int a[][2][3]`）。
 - **制御フロー:** `disable fork` 以外の `disable` 文。宣言初期化子、`final`、`always_comb`、`always_ff` 内の `fork`（これらの文脈にはスケジューラ用のプロセス基盤がありません）。
 - **時刻・システムタスク:** `wait_order`、および未実装の IEEE 1800-2023 / Annex D システムタスク・関数。Celox は標準が定義する全タスク・関数名を認識しており、未対応のものは未使用パラメータや関数本体に書かれた場合も含め名前付きで報告します（例: `$q_initialize`）。
@@ -80,7 +80,7 @@ Celox は IEEE Std 1800™-2023 が規定する SystemVerilog を実装します
 
 | 観点 | 対応 | 未対応 |
 | --- | --- | --- |
-| **program 宣言（Clause 24）** | ポートとパラメータを持ちインスタンス化された `program` ブロック（`initial` 手続きは reactive region セットで実行） | モジュール内に入れ子にした program。匿名 program。未インスタンス化 program の暗黙トップ扱い。program 内の clocking ブロック |
+| **program 宣言（Clause 24）** | ポートとパラメータを持ちインスタンス化された `program` ブロック（`initial` 手続きは reactive region セットで実行） | モジュール内に入れ子にした program。匿名 program。未インスタンス化 program の暗黙トップ扱い |
 
 program の region と `$exit` に関する差異は[標準準拠コードに影響する逸脱](#deviations-standard-code)を参照してください。
 
@@ -122,6 +122,14 @@ program の region と `$exit` に関する差異は[標準準拠コードに影
 | **`wait (condition)`** | 一般式、static な virtual interface、およびクラスプロパティ（該当プロパティのストアで再評価。詳細は[イベント実行順序](#timing-semantics)を参照） | static な task 引数・`rand_mode()`・`constraint_mode()` を読む条件。task や副作用のある関数を呼ぶ、または時刻・乱数・mailbox・process を読むクラスプロパティ上の条件 |
 | **fork 共有自動ローカル変数** | fork で共有する自動ローカル変数を監視するイベント式 | グローバル/static への混在依存、外部呼び出し、スクラッチ状態を保持する関数、または関数・シード/plusargs 結果・`$readmemh` などのシステムタスクから監視対象への暗黙書き込みを含む複合イベント式 |
 | **`always_ff` のイベントリスト** | 単一の素の1ビット信号のエッジ（`@(posedge clk)`）、クロックと本体で検査される非同期リセットのエッジの組、および式・メンバ・ビット選択・`edge` イベント（時間付きプロセスとして実行。[実行モデル](#celox-execution-model)参照） | `iff` 修飾子（[#452](https://github.com/celox-sim/celox/issues/452)）。複数ビットのエッジ信号。非同期リセットを伴わない複数エッジ *（素の `always` では同じ形を時間付きプロセスとして実行可能）* |
+
+### clocking ブロック {#clocking-blocks}
+
+| 項目 | 対応 | 未対応 |
+| --- | --- | --- |
+| **宣言（14.3、14.4）** | module、program 内の名前付き clocking ブロック。clocking イベントはエッジ、named event、`iff` ガード付きのいずれも可。ポートとブロックより前に宣言した変数の `input`、`output`、`input ... output`、`inout` clockvar。`default` スキュー。入力スキュー `#1step`、`#0`、定数遅延。出力スキュー `#0`、`#1step`、定数遅延。遅延は整数定数、時間リテラル、固定小数点リテラル（`#0.5`、スコープの時間単位） | `##` サイクル遅延とそれが使う default clocking（14.11、14.12）。`$global_clock`（14.14）。エッジ指定のスキュー。その他の実数定数のスキュー（`real` パラメータの `#D`）。unpacked 構造体、unpacked 配列、コンテナの clockvar。階層式の clockvar（14.5）。clocking ブロック内の property、sequence、`let` 宣言。generate ブロック内と interface 内の clocking ブロック |
+| **イベントとサンプリング（14.10、14.13、14.15）** | `@(cb)`（clocking イベントのタイムスロットの Observed region の後に再開）。入力 clockvar とその選択・メンバの読み出し。clockvar のイベント制御（`@(cb.x)`、`@(posedge cb.x[0])`） | — |
+| **同期ドライブ（14.16）** | — | 同期ドライブ（`cb.x <= e`） |
 
 ### named event と mailbox {#named-events}
 
@@ -217,7 +225,7 @@ covergroup（19 節）は型です。モジュール、program、パッケージ
 | 観点 | 対応 | 未対応 |
 | --- | --- | --- |
 | **宣言（19.3、19.4）** | モジュール、program、パッケージ、コンパイル単位、generate ブロックの covergroup。クラスに埋め込んだ covergroup。covergroup 型の変数 | `covergroup extends`（19.4.1）。interface 内で宣言した covergroup（多くの位置で interface ごとエラーになり、クロッキングイベントを持つものは常にエラーになります）。checker 内やループ generate ブロック内で宣言した covergroup。モジュールが型パラメータとして受け取った covergroup 型の構築とサンプル（そのモジュールで変数は宣言できます） |
-| **カバーポイント（19.5）** | 任意のビット幅の整数型のカバーポイント。ラベル、独自の型、`iff` ガードの有無は問いません | `real` 型のカバーポイント。列挙子に x や z のビットを持つ列挙型のカバーポイント。clocking ブロックの信号のカバーポイント（clocking ブロックは未対応です） |
+| **カバーポイント（19.5）** | 任意のビット幅の整数型のカバーポイント。ラベル、独自の型、`iff` ガードの有無は問いません | `real` 型のカバーポイント。列挙子に x や z のビットを持つ列挙型のカバーポイント。clocking ブロックの clockvar のカバーポイント |
 | **ビン（19.5）** | 19.5.3 の自動ビン（列挙型のものを含む）。値と範囲のビン（`bins b = {0, [1:3], [8:$]};`）。値は、定数、covergroup の引数、それらを引数とする関数呼び出し。ビン配列（`bins b[]`、`bins b[N]`）。オペランドが整数の許容差付きの範囲（`[a +/- b]`、`[a +%- b]`）。`default` と `default[]` のビン。`ignore_bins` と `illegal_bins`。`wildcard` ビン。ビンのガード（`bins b = {1} iff (en);`）。`with` フィルタ（`bins b[] = {[0:255]} with (item % 3 == 0);`、`bins b = cp with (f(item));`）。集合式のビン（`bins b[] = S;`。要素が整数の配列パラメータ、または要素が 64 ビット以下の整数である動的配列・キュー・埋め込み covergroup のクラスの定数配列） | 遷移ビンと `default sequence` のビン（19.5.2）。`bins b[N] = default`（値の分配を規格が定めていません）。ビン配列、`ignore_bins`、`illegal_bins` の `with` フィルタで、値が定数かつ 1,048,576 個を超えるもの（`int` のカバーポイントでの `ignore_bins b = cp with (...)` など。配列でない `bins` のビンでは使えます。[カバレッジ](#coverage)を参照）。ビン配列やそのようなフィルタの下にある、値の範囲が 65,536 個を超えるワイルドカード値。上記以外の形の集合式（代入パターン、連接、パラメータでない固定長配列、文字列・ハンドル・64 ビットを超える要素の配列）。`real` のオペランドを持つ許容差付きの範囲。整数型でないビンの値 |
 | **クロス（19.6）** | カバーポイントと整数型の変数やネット（変数には専用のカバーポイントを作ります）のクロス。ラベルと `iff` ガードの有無は問いません。`binsof(cp)` と `binsof(cp.bin)` の選択式による `bins`、`ignore_bins`、`illegal_bins`。`intersect {...}` の値は、定数、covergroup の引数、それらを引数とする関数呼び出し。`!`、`&&`、`\|\|`、括弧、クロスの識別子（`bins all = X;`）。クロスのビンのガード | 選択式の `with` と `matches`（19.6.1.2）。クロスの集合式と、クロス本体で宣言した関数（19.6.1.3、19.6.1.4）。括弧で囲んだ選択の前の `!`（`!(binsof(a) && binsof(b))`）と条件演算子を使うクロスの集合式（どちらも covergroup の宣言位置でエラーになります）。同じ項目を 2 度挙げるクロス。クロスがクロスしないカバーポイントの `binsof`。括弧を通して 32 段を超えて交互に入れ子になる `&&` と `\|\|`。サンプル時にしかビンに振り分けられない値と交わる `intersect` のリスト（[カバレッジ](#coverage)を参照） |
 | **オプション（19.7、19.7.1）** | 定義内での `option` の全メンバ（19.10 が定めるレベル）。定義内で定数を代入する `type_option` のメンバ: `weight`、`goal`、`comment`（文字列リテラル）、`merge_instances`、`distribute_first`、およびクロッキングイベントのない covergroup では効果のない `strobe`（19.3）。手続きからの、インスタンスとその項目の `option` のメンバ、型とその項目の `type_option` のメンバ（`::` 経由またはインスタンス経由）の読み出しと `=` による代入 | `type_option.real_interval`（real のカバーポイントは未対応）。手続きからの `type_option.strobe` の読み出し。文字列パラメータなど、文字列リテラルでない `type_option.comment`。他の演算子（`+=`、`++`）や `<=` によるメンバへの代入。インクリメントや複合代入が書き込む場所の選択でのメンバの読み出し（`arr[c.cp.option.weight]++`）。構造体全体としての `option` と `type_option`。クロッキングイベントを持つ covergroup の `type_option.strobe = 1`（`covergroup strobe sampling`。Postponed リージョンでのサンプルは行いません） |

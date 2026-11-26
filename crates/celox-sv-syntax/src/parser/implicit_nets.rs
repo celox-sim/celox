@@ -263,6 +263,13 @@ impl Parser<'_> {
                 BodyItemKind::Unconverted { .. } | BodyItemKind::Covergroup(_) => {
                     opaque.push(self.body_items[item.0].tokens)
                 }
+                // A clocking block declares its name; its clockvars name
+                // signals of the scope (IEEE 1800-2023 14.3).
+                BodyItemKind::Clocking(id) => {
+                    if let Some(name) = &self.clockings[id.0].name {
+                        insert(declared, name);
+                    }
+                }
                 // A `defparam` names a parameter of another scope: it
                 // declares nothing and its target is no net (6.10).
                 BodyItemKind::Defparam(_)
