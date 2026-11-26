@@ -6566,3 +6566,39 @@ fn streams_into_handles_and_constrained_scope_randomize_of_enums_are_unsupported
         assert!(error.contains(expected), "{items}: {error}");
     }
 }
+
+sv_backends! {
+    // A type parameter that a class inherits from its base names a class
+    // whose members `P::m` selects (IEEE 1800-2023 8.23, 8.25), as UVM
+    // drivers create responses with `RSP::type_id::create`, here with the
+    // base in a package and in an out-of-block method too; `$unit::` still
+    // names the compilation unit there.
+    fn inherited_type_parameters_qualify_class_members(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+                int unit_value = 30;
+                package p;
+                    class item;
+                        int v;
+                        static function item make(int x); item i = new; i.v = x; return i; endfunction
+                    endclass
+                    class base #(type REQ = int, type RSP = REQ);
+                    endclass
+                endpackage
+                class drv extends p::base #(p::item);
+                    function int run();
+                        RSP r = RSP :: make(7);
+                        return r.v + later() + $unit::unit_value;
+                    endfunction
+                    extern function int later();
+                endclass
+                function int drv::later(); return RSP::make(2).v; endfunction
+                module Top(output int sum);
+                    initial begin drv d; d = new; sum = d.run(); end
+                endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("inherited_type_parameters.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("sum")), BigUint::from(39u8));
+    }
+}
