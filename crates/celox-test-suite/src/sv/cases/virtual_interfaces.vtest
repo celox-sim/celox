@@ -1646,3 +1646,46 @@ endmodule
 "#)
   (top Top) (run_until 20)
   (assert_eq ra 118) (assert_eq rb 97) (assert_eq a4 10))
+
+; IEEE 1800-2023 25.9, 26.3: a task or function of an interface called
+; through a virtual interface, or through an interface port, names the
+; variables, functions and constants of a package the interface imports,
+; which the caller's scope need not import.
+(case subroutines_read_imported_package_items
+  (source "imported_items.sv" #"
+package lib;
+  int k = 5;
+  function int f(int a); return a * 2; endfunction
+  parameter int P = 3;
+  class Named; function string name(); return "root"; endfunction endclass
+  Named top = new;
+endpackage
+interface bfm(input logic clk);
+  import lib::*;
+  logic [7:0] v;
+  task sample(output int r); @(posedge clk); r = v + k + f(v) + P + top.name().len(); endtask
+  function int peek(); return k + f(1); endfunction
+endinterface
+module user(bfm port, output int pr);
+  initial begin #12; port.sample(pr); end
+endmodule
+module Top(output int r, output int pr, output bit done);
+  logic clk = 0;
+  always #5 clk = ~clk;
+  bfm b(.clk(clk));
+  user u(.port(b), .pr(pr));
+  class D;
+    virtual bfm vif;
+    task run(output int r); vif.v = 3; vif.sample(r); r += vif.peek(); endtask
+  endclass
+  D d;
+  initial begin
+    d = new;
+    d.vif = b;
+    d.run(r);
+    done = 1;
+  end
+endmodule
+"#)
+  (top Top) (run_until 100)
+  (assert_eq r 28) (assert_eq pr 21) (assert_eq done 1))
