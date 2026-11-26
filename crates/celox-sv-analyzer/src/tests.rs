@@ -7196,6 +7196,18 @@ fn class_randomize_rejects_unsupported_semantics() {
             "c.randomize()",
             "`$countbits` with a control bit other than a constant in a constraint",
         ),
+        // An array in an `inside` set stands for its elements (11.4.13),
+        // which the solver holds when they are integral.
+        (
+            "rand int x; string s[$]; constraint c { x inside {s}; }",
+            "c.randomize()",
+            "a constraint `inside` set of an array of elements other than 2-state integral ones of at most 64 bits",
+        ),
+        (
+            "rand int x; int a[1:4]; constraint c { x inside {a}; }",
+            "c.randomize()",
+            "a constraint `inside` set of a fixed-size array whose range is not [0:n-1]",
+        ),
         (
             "rand int x, y; function int f(output int v); v = 1; return 1; endfunction constraint c { x == f(y); }",
             "c.randomize()",
@@ -8615,13 +8627,14 @@ fn final_procedures_only_follow_defaults_for_omitted_arguments() {
 
 #[test]
 fn class_randomize_bounds_nested_membership_expansion() {
-    for levels in [4, 25] {
+    // Sets of values, and of arrays, whose members each copy the operand.
+    for (levels, set) in [(4, "0, 1"), (25, "0, 1"), (4, "a, a"), (25, "a, a")] {
         let mut expr = "x".to_owned();
         for _ in 0..levels {
-            expr = format!("({expr}) inside {{0, 1}}");
+            expr = format!("({expr}) inside {{{set}}}");
         }
         let source = format!(
-            "module Top; class C; rand bit x; constraint c {{ {expr}; }} endclass C c; initial begin c = new; c.randomize(); end endmodule"
+            "module Top; class C; rand bit x; bit a[$]; constraint c {{ {expr}; }} endclass C c; initial begin c = new; c.randomize(); end endmodule"
         );
         let result = analyze_source(&source, Path::new("nested_membership.sv"));
         if levels == 4 {
