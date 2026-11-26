@@ -1248,3 +1248,39 @@ fn specializations_call_constant_functions_in_defaults() {
         endinterface";
     assert_eq!(specialized_widths(interface, "2"), (7, 3));
 }
+
+sv_backends! {
+    // A string variable of an interface is a member that a virtual interface
+    // reads and writes, and that the interface's tasks called through one
+    // read, for the instance the handle denotes (IEEE 1800-2023 25.9, 6.16),
+    // as a bus functional model reports under its `name`.
+    fn string_members_through_virtual_interfaces(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+                interface bfm(input logic clk);
+                    string name = "none";
+                    task tell(output string s); @(posedge clk); s = {name, "!"}; endtask
+                endinterface
+                class t;
+                    virtual bfm vif;
+                    task run(output string r); string s; vif.name = {vif.name, "-x"}; vif.tell(s); r = s; endtask
+                endclass
+                module Top(output int ok);
+                    logic clk = 0;
+                    always #5 clk = ~clk;
+                    bfm a(.clk(clk));
+                    bfm b(.clk(clk));
+                    initial begin
+                        t x, y; string ra, rb;
+                        a.name = "A"; b.name = "B";
+                        x = new; x.vif = a; y = new; y.vif = b;
+                        fork x.run(ra); y.run(rb); join
+                        ok = ra == "A-x!" && rb == "B-x!" && a.name == "A-x";
+                    end
+                endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("virtual_interface_strings.sv"))], "Top");
+        sim.run_until(20).unwrap();
+        assert_eq!(sim.get(sim.signal("ok")), BigUint::from(1u8));
+    }
+}
