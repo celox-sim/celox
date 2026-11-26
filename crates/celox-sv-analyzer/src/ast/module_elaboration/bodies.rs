@@ -88,14 +88,24 @@ impl ScopeElaboration<'_> {
             ff_processes.extend(self.imported.ff_processes.iter().cloned());
             let mut initial_processes = array_initial_processes;
             initial_processes.extend(self.imported.initial_processes.iter().cloned());
-            initial_processes.extend(procedural::initial_processes_from_scope(
+            let (scope_processes, sites) = procedural::initial_processes_from_scope(
                 syntax_tree,
                 session,
                 &self.const_env,
                 &self.packed_dimensions,
                 &self.parameter_values,
                 &mut body_state,
-            )?);
+            )?;
+            initial_processes.extend(scope_processes);
+            // The variables that hold the covergroup instances sampled at
+            // their clocking events (IEEE 1800-2023 19.3).
+            self.signals.extend(
+                sites
+                    .signals
+                    .into_iter()
+                    .map(|(name, r#type)| Signal::new(name, r#type)),
+            );
+            ff_processes.extend(sites.edge_procedures);
             (subroutines, comb_processes, ff_processes, initial_processes)
         };
         // The blocks a `disable` ends from outside them keep their process

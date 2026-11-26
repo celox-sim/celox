@@ -5,11 +5,17 @@ use super::*;
 /// Process kind and index identify a thread without merging the lowering paths.
 /// Each instance owns an initialization RNG seeded with the same default
 /// (IEEE 1800-2023 18.14.1); relocation keeps sibling RNG states independent.
+/// A process of the analysis draws no seed (see [`UNSEEDED_PROCESS`]), so
+/// that it does not change the seeds of the processes of the source.
+/// The seed of a process of the analysis, which calls nothing random.
+pub(super) const UNSEEDED_PROCESS: u32 = 0x4d59_5df4;
+
 pub(super) fn process_random_seeds(module: &sv::ir::Module) -> HashMap<(u8, usize), u32> {
     let mut processes: Vec<_> = module
         .ff_processes()
         .iter()
         .enumerate()
+        .filter(|(_, p)| !p.is_synthetic())
         .map(|(i, p)| (p.creation_order(), 0u8, i))
         .chain(
             module
@@ -28,7 +34,7 @@ pub(super) fn process_random_seeds(module: &sv::ir::Module) -> HashMap<(u8, usiz
         )
         .collect();
     processes.sort_by_key(|&(order, kind, i)| (order, kind, i));
-    let mut state = 0x4d59_5df4u32;
+    let mut state = UNSEEDED_PROCESS;
     processes
         .into_iter()
         .map(|(_, kind, index)| {
@@ -251,7 +257,7 @@ pub(super) fn lower_initial_processes(
         let random_seed = random_seeds
             .get(&(1, index))
             .copied()
-            .unwrap_or(0x4d59_5df4);
+            .unwrap_or(UNSEEDED_PROCESS);
         let unit = pm.call_unit();
         // An `always` process never finishes, so it is never folded into
         // initial state. A program's `initial` procedure runs in the reactive

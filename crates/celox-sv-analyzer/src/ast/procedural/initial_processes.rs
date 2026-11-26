@@ -51,8 +51,13 @@ pub(in crate::ast) fn initial_processes_from_scope(
     packed_dimensions: &PackedDimensions,
     parameter_literals: &HashMap<String, Expr>,
     state: &mut BodyState<'_>,
-) -> Result<Vec<InitialProcess>, AnalyzerError> {
+) -> Result<(Vec<InitialProcess>, covergroup_sites::SiteParts), AnalyzerError> {
     let type_aliases = packed_dimensions.type_aliases.clone();
+    // The declarations that sample the covergroup instance they construct
+    // (see `covergroup_sites`), and their hidden variables.
+    let mut sites = Vec::new();
+    let mut parts = covergroup_sites::SiteParts::default();
+    let root = tree;
     // Variable declaration initializers run before every `initial` and
     // `always` procedure (IEEE 1800-2023 10.5).
     let mut initializers = Vec::new();
@@ -125,6 +130,7 @@ pub(in crate::ast) fn initial_processes_from_scope(
         if !assignments.is_empty() {
             let (item_dimensions, literals) = views.get(item);
             let mut body = Vec::new();
+            let first_site = sites.len();
             for (name, native, owner) in assignments {
                 let Some(native) = native else {
                     if let Some(aggregate) = item_dimensions
@@ -167,6 +173,22 @@ pub(in crate::ast) fn initial_processes_from_scope(
                     });
                     continue;
                 };
+                if owner.is_none()
+                    && let Some(stmts) = covergroup_sites::initializer(
+                        tree,
+                        session,
+                        item_dimensions,
+                        item,
+                        creation_order,
+                        &name,
+                        native,
+                        &mut sites,
+                        &mut parts.signals,
+                    )?
+                {
+                    body.extend(stmts);
+                    continue;
+                }
                 let scoped = owner.as_ref().map(|owner| {
                     classes::specializations::body_scope(session, owner, item_dimensions, literals)
                 });
@@ -216,6 +238,24 @@ pub(in crate::ast) fn initial_processes_from_scope(
                     synthetic: false,
                     repeats: false,
                 });
+            }
+            for site in &sites[first_site..] {
+                match covergroup_sites::sampler(
+                    root,
+                    session,
+                    state,
+                    &active,
+                    &mut views,
+                    const_env,
+                    parameter_literals,
+                    site,
+                )? {
+                    covergroup_sites::Sampler::Edge {
+                        covergroup,
+                        procedure,
+                    } => parts.add(covergroup, procedure),
+                    covergroup_sites::Sampler::Process(process) => processes.push(process),
+                }
             }
             continue;
         }
@@ -392,7 +432,7 @@ pub(in crate::ast) fn initial_processes_from_scope(
         });
     }
     initializers.extend(processes);
-    Ok(initializers)
+    Ok((initializers, parts))
 }
 
 /// The names of the variables written by assignment statements.

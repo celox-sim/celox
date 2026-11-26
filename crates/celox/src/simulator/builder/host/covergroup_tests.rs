@@ -1212,3 +1212,142 @@ fn options_and_methods_add_no_call_to_a_sample() {
     assert!(count(&calls, op::INST_COVERAGE) >= 3, "{calls:?}");
     assert!(count(&calls, op::TYPE_COVERAGE) >= 3, "{calls:?}");
 }
+
+/// A covergroup instance sampled at the clocking event of its type (IEEE
+/// 1800-2023 19.3) costs its declaration one procedure and one handle, the
+/// hidden variable that holds the instance. At edges of variables the
+/// procedure is flip-flop shaped: the plan of the design is that of the
+/// design that writes `always @(posedge clk) c.sample();` itself. At any
+/// other event it is a process, `initial forever begin @(event);
+/// c.sample(); end`, a compiled kernel, planned as that process written in
+/// the source. A clocking event costs nothing where no declaration
+/// constructs an instance of the type.
+#[test]
+fn covergroup_sampler_kernel_is_compiled() {
+    let plan = |items: &str| {
+        let (program, facts) = laid_out(timed(&rtl("", items)));
+        (crate::scheduler::plan_for_test(&program).unwrap(), facts)
+    };
+    for (written, clocked) in [
+        (
+            "    covergroup cg; coverpoint d; endgroup
+    cg c = new;
+    always @(posedge clk) c.sample();",
+            "    covergroup cg @(posedge clk); coverpoint d; endgroup
+    cg c = new;",
+        ),
+        (
+            "    covergroup cg; coverpoint d; endgroup
+    cg c = new;
+    initial forever begin @(clk); c.sample(); end",
+            "    covergroup cg @(clk); coverpoint d; endgroup
+    cg c = new;",
+        ),
+    ] {
+        let (written, written_facts) = plan(written);
+        let (sampled, sampled_facts) = plan(clocked);
+        assert!(sampled_facts.coverage_calls > 0);
+        assert_eq!(sampled_facts.heap_calls, 0);
+        assert_eq!(
+            sampled_facts.processes, written_facts.processes,
+            "{clocked}"
+        );
+        assert_eq!(
+            sampled_facts.functions, written_facts.functions,
+            "{clocked}"
+        );
+        assert_eq!(
+            sampled_facts.handles,
+            written_facts.handles + 1,
+            "{clocked}"
+        );
+        // The initializer, then the kernels of the fixture (and the
+        // sampler of a change event, compiled).
+        let (initializer, kernels) = sampled.fallback.split_first().unwrap();
+        assert_eq!(initializer.as_deref(), Some("a declaration initializer"));
+        assert!(
+            kernels.iter().all(Option::is_none),
+            "{:?}",
+            sampled.fallback
+        );
+        assert_eq!(sampled.fallback, written.fallback, "{clocked}");
+        assert_eq!(sampled.settle_reads, written.settle_reads);
+        assert!(sampled.settle_reads.is_some());
+        assert_eq!(sampled.lazy, written.lazy, "{clocked}");
+        assert_eq!(sampled.incremental, written.incremental);
+        assert_eq!(sampled.active, written.active);
+        assert_eq!(sampled.clocks, written.clocks);
+        assert_eq!(sampled.derived, written.derived);
+    }
+    // The edge sampler adds no kernel: the design has the processes of the
+    // design without the covergroup and its initializer.
+    let (_, none) = plan("");
+    let (_, edges) = plan(
+        "    covergroup cg @(posedge clk); coverpoint d; endgroup
+    cg c = new;",
+    );
+    assert_eq!(edges.processes, none.processes + 1);
+    // A sampler that waits for a named event has dynamic activation frames,
+    // as the process that triggers it does, and one of a program runs in
+    // the reactive region set: both run in the runtime's loop, as the same
+    // process written in the source does.
+    let (named, _) = plan(
+        "    event e;
+    initial forever #4 -> e;
+    covergroup cg @e; coverpoint d; endgroup
+    cg c = new;",
+    );
+    assert_eq!(
+        named.fallback.last().unwrap().as_deref(),
+        Some("the process has dynamic activation frames"),
+        "{:?}",
+        named.fallback
+    );
+    let (named_written, _) = plan(
+        "    event e;
+    initial forever #4 -> e;
+    covergroup cg; coverpoint d; endgroup
+    cg c = new;
+    initial forever begin @e; c.sample(); end",
+    );
+    assert_eq!(named.fallback, named_written.fallback);
+    let (program, _) = laid_out(timed(&rtl(
+        "program prog(input logic clk, input logic [7:0] d);
+    covergroup pc @(posedge clk); coverpoint d; endgroup
+    pc c = new;
+endprogram",
+        "    prog p(.clk(clk), .d(d));",
+    )));
+    let program = crate::scheduler::plan_for_test(&program).unwrap();
+    assert!(
+        program
+            .fallback
+            .iter()
+            .any(|reason| reason.as_deref()
+                == Some("a program process runs in the reactive region set")),
+        "{:?}",
+        program.fallback
+    );
+    // A type with a clocking event that only a variable names, or that a
+    // design merely declares, is laid out as one without.
+    for (clocked, plain) in [
+        (
+            "    covergroup cg @(posedge clk); coverpoint d; endgroup
+    cg c;",
+            "    covergroup cg; coverpoint d; endgroup
+    cg c;",
+        ),
+        (
+            "    covergroup cg @(posedge clk); coverpoint d; endgroup",
+            "",
+        ),
+    ] {
+        let (clocked_plan, clocked_facts) = plan(clocked);
+        let (plain_plan, plain_facts) = plan(plain);
+        assert_eq!(clocked_facts, plain_facts, "{clocked}");
+        assert_eq!(clocked_plan.fallback, plain_plan.fallback, "{clocked}");
+        assert_eq!(clocked_plan.settle_reads, plain_plan.settle_reads);
+        assert_eq!(clocked_plan.lazy, plain_plan.lazy);
+        assert_eq!(clocked_plan.incremental, plain_plan.incremental);
+    }
+}
