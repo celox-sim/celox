@@ -294,6 +294,7 @@ impl Module {
             scope.rename_imported_calls();
             scope.hoist_call_actuals();
             scope.validate_bodies()?;
+            scope.reject_package_samplers()?;
             let assignments = scope.assignments();
             let symbols = scope.symbols(syntax_tree, session, inline_randomizations);
             scope.complete_dispatchers();

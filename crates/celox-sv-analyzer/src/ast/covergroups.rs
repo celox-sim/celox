@@ -37,7 +37,8 @@ pub(super) use methods::{
 };
 pub(crate) use model::is_constructor;
 pub(super) use model::{
-    Covergroup, Formal, ITEM_FORMAL, build, count_formals, declare, is_sampler, rejected,
+    Covergroup, Formal, ITEM_FORMAL, build, count_formals, declare, is_sampler, is_spawner,
+    rejected,
 };
 
 /// The start of the reserved class name of every covergroup type.
@@ -364,18 +365,19 @@ fn through_expression() -> AnalyzerError {
 
 /// The formals of the subroutines of `model`, each with its name: source
 /// names, directions and types. `first` is the type of the first formal of
-/// `N::$new` and `N::$sample` where they take one: the handle type of the
-/// class of an embedded covergroup, whose object they take, or else that of
-/// the covergroup, whose handle `N::$sample` takes. `handle` is that of the
-/// covergroup, whose handle `N::$counts` takes.
+/// `N::$new`, `N::$sample` and `N::$spawn` where they take one: the handle
+/// type of the class of an embedded covergroup, whose object they take, or
+/// else that of the covergroup, whose handle `N::$sample` takes. `handle` is
+/// that of the covergroup, whose handle `N::$counts` and `N::$spawn` take.
+/// `N::$spawn` is a subroutine of a type with a clocking event alone.
 pub(super) fn signatures(
     model: &Covergroup,
     first: &Type,
     handle: &Type,
-) -> [(
+) -> Vec<(
     String,
     Vec<(String, crate::procedural::ParamDirection, Type)>,
-); 5] {
+)> {
     use crate::procedural::ParamDirection;
     let formals = |leading: Option<(&str, &Type)>, formals: &[Formal]| {
         leading
@@ -390,6 +392,11 @@ pub(super) fn signatures(
     };
     let embedded = model.owner.is_some();
     let counts = count_formals();
+    let spawn = model.event.map(|_| {
+        let mut formals = formals(embedded.then_some((classes::THIS, first)), &[]);
+        formals.push((HANDLE.to_owned(), ParamDirection::Input, handle.clone()));
+        (model.spawn_subroutine(), formals)
+    });
     [
         (model.type_subroutine(), Vec::new()),
         (
@@ -412,6 +419,9 @@ pub(super) fn signatures(
         ),
         (model.type_counts_subroutine(), formals(None, &counts)),
     ]
+    .into_iter()
+    .chain(spawn)
+    .collect()
 }
 
 /// The source name of the handle of the instance in the subroutines of a

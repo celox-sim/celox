@@ -186,14 +186,6 @@ fn construction(
         });
     }
     let model = model.usable()?;
-    // An instance is sampled at the clocking event of its type only where
-    // a declaration of a module or a program constructs it: another `new`
-    // would need a process that the construction starts (19.3).
-    if model.event.is_some() && !site {
-        return Err(unsupported(
-            "covergroup sampling event of a constructed instance (IEEE 1800-2023 19.3)",
-        ));
-    }
     request(session, model);
     let name = model.new_subroutine();
     let leading = usize::from(model.owner.is_some());
@@ -210,10 +202,31 @@ fn construction(
     if leading == 1 {
         args.insert(0, Some(expression_binding::object_this()));
     }
-    Ok(Expr::Call {
+    let construction = Expr::Call {
         callee: Callee::Subroutine(name),
         args,
         arg_order,
+    };
+    // An instance of a type with a clocking event is sampled at the event
+    // (19.3): a declaration of a module or a program that constructs it has
+    // a sampler of the scope (see `procedural::covergroup_sites`), and any
+    // other `new` hands the instance to `N::$spawn`, which starts one.
+    if model.event.is_none() || site {
+        return Ok(construction);
+    }
+    if session.covergroups.contains_key(&model.name)
+        && !session.covergroup_spawn_requests.contains(&model.name)
+    {
+        session.covergroup_spawn_requests.push(model.name.clone());
+    }
+    let mut args = vec![Some(construction)];
+    if leading == 1 {
+        args.insert(0, Some(expression_binding::object_this()));
+    }
+    Ok(Expr::Call {
+        callee: Callee::Subroutine(model.spawn_subroutine()),
+        arg_order: (0..args.len()).collect(),
+        args,
     })
 }
 

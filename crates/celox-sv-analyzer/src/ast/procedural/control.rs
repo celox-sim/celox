@@ -378,7 +378,11 @@ impl BodyBuilder<'_, '_, '_> {
                             branch += 1;
                         }
                         self.pop_scope();
-                        output.push(Stmt::Fork { join, branches });
+                        output.push(Stmt::Fork {
+                            join,
+                            unseeded: false,
+                            branches,
+                        });
                     }
                 }
                 Job::ForkBranch {
@@ -400,6 +404,7 @@ impl BodyBuilder<'_, '_, '_> {
                     if !discarded.is_empty() {
                         self.sensitivity_body.push(Stmt::Fork {
                             join,
+                            unseeded: false,
                             branches: vec![discarded],
                         });
                     }

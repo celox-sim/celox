@@ -279,8 +279,13 @@ pub(super) fn stage_inlined_nonblocking(
                 step: step.clone(),
                 body: stage_inlined_nonblocking(body, staged, pm),
             }),
-            sv::ir::Stmt::Fork { join, branches } => out.push(sv::ir::Stmt::Fork {
+            sv::ir::Stmt::Fork {
+                join,
+                unseeded,
+                branches,
+            } => out.push(sv::ir::Stmt::Fork {
                 join: *join,
+                unseeded: *unseeded,
                 branches: branches
                     .iter()
                     .map(|branch| stage_inlined_nonblocking(branch, staged, pm))

@@ -101,6 +101,39 @@
     },
     {
       "category": "Sequential",
+      "detail": "covergroup::constructed_instances_of_a_divided_clock_sample_before_the_updates at 1257:2: expect_output: expected [51, 32, 51, 32, 51, 32, 51, 32, 51, 32, 51, 32, 51, 55, 46, 53, 48, 10], got [48, 32, 48, 32, 48, 32, 48, 32, 48, 32, 48, 32, 48, 46, 48, 48, 10]",
+      "expectation": "Simulation",
+      "name": "covergroup::constructed_instances_of_a_divided_clock_sample_before_the_updates",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "covergroup::constructed_instances_take_stop_start_and_sample",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "covergroup::constructions_of_declaration_initializers_sample",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
       "name": "covergroup::constructor_arguments_set_the_bins",
@@ -233,6 +266,28 @@
     },
     {
       "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "covergroup::embedded_covergroup_samples_through_a_virtual_interface",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "covergroup::embedded_covergroups_sample_at_events_of_their_class at 1141:2: expect_output: expected [49, 56, 46, 55, 53, 32, 49, 56, 46, 55, 53, 32, 49, 56, 46, 55, 53, 32, 49, 56, 46, 55, 53, 10], got [48, 46, 48, 48, 32, 48, 46, 48, 48, 32, 48, 46, 48, 48, 32, 49, 56, 46, 55, 53, 10]",
+      "expectation": "Simulation",
+      "name": "covergroup::embedded_covergroups_sample_at_events_of_their_class",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "covergroup::handles_are_null_until_constructed reads q with unknown bits in a two-state run",
       "expectation": "Simulation",
       "name": "covergroup::handles_are_null_until_constructed",
@@ -335,6 +390,17 @@
       "detail": "",
       "expectation": "Simulation",
       "name": "covergroup::options_of_a_definition",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "covergroup::procedural_constructions_sample_at_their_clocking_events",
       "phase": "execute",
       "status": "passed",
       "stronger_than_sv": false,

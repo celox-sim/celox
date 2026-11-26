@@ -8,6 +8,9 @@
 //! - `N::$new([this,] formals...)` constructs an instance and returns its
 //!   handle.
 //! - `N::$sample(this | handle, sample formals...)` samples an instance.
+//! - `N::$spawn([this,] handle)`, of a type with a clocking event, starts
+//!   the process that samples an instance at the event and returns the
+//!   handle (see `spawn`).
 //!
 //! An embedded covergroup's take the object that holds it: its type is
 //! anonymous (19.4), and its expressions read the members of the class.
@@ -33,6 +36,7 @@ use num_bigint::BigUint;
 
 mod construct;
 mod sample;
+mod spawn;
 
 /// The IR type of formal or result `ty`, as `subroutines::interface_type`
 /// binds one.
@@ -822,8 +826,9 @@ fn counts(
 
 /// The subroutines of covergroup type `model`, which `item` declares, in
 /// class `class` when it is embedded, with `N::$counts` and
-/// `N::$type_counts` if `counts`. Nothing is made for a type that cannot be
-/// used: its uses report why.
+/// `N::$type_counts` if `counts`, and `N::$spawn` if `spawn` and the type
+/// has a clocking event. Nothing is made for a type that cannot be used:
+/// its uses report why.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn lower(
     model: &Covergroup,
@@ -836,6 +841,7 @@ pub(super) fn lower(
     item: &generate::Item,
     class: Option<&classes::Class>,
     counts: bool,
+    spawn: bool,
 ) -> Converted<Vec<Subroutine>> {
     if model.rejection.is_some() {
         return Ok(Vec::new());
@@ -919,6 +925,38 @@ pub(super) fn lower(
             subroutines.push(self::counts(&site, session, state, &handle, instance)?);
         }
     }
+    if spawn && let Some(event) = model.event {
+        // The instances of a type of a module or a program go to the list
+        // its sampler walks; those of an embedded type, and of a type of a
+        // package or the compilation unit, each get a process.
+        let list = class
+            .is_none()
+            .then(|| session.covergroup_instance_lists.get(&model.name).cloned())
+            .flatten();
+        let (spawned, ()) = site.subroutine(
+            session,
+            state,
+            Parts {
+                name: model.spawn_subroutine(),
+                first: object.map(|object| (classes::THIS, object)),
+                formals: vec![Formal {
+                    name: HANDLE.to_owned(),
+                    direction: ParamDirection::Input,
+                    r#type: handle.clone(),
+                    default: None,
+                }],
+                result: Some(handle.clone()),
+            },
+            |builder, first| {
+                let (result, body) = match &list {
+                    Some(list) => spawn::listed(builder, list, &handle),
+                    None => spawn::body(&site, builder, first, &handle, event)?,
+                };
+                Ok((Some(result), body, ()))
+            },
+        )?;
+        subroutines.push(spawned);
+    }
     Ok(subroutines)
 }
 
@@ -973,6 +1011,7 @@ pub(in crate::ast) fn scope_subroutines(
             item,
             None,
             every || session.covergroup_count_requests.contains(&name),
+            every || session.covergroup_spawn_requests.contains(&name),
         ) {
             Ok(lowered) => subroutines.extend(lowered),
             // What the analysis does not support in a type that nothing of

@@ -133,7 +133,8 @@ endpackage",
         "covergroup ucg(int a); option.weight = a; coverpoint a { bins b = {[0:a]}; } endgroup",
         "covergroup pcg with function sample(bit [3:0] s); coverpoint s; endgroup",
         "covergroup kcg(string s = \"k\"); option.name = s; coverpoint v iff (v > 0); \
-         coverpoint s.len(); endgroup",
+         coverpoint s.len(); endgroup
+        covergroup kclocked @(v); coverpoint v; endgroup",
     ]);
     let items = format!(
         "{import}
@@ -180,8 +181,10 @@ endpackage",
     always @(posedge clk) begin qcount++; ucount++; end";
     let (_, declared) = laid_out(timed(&rtl(
         &variables([
-            "covergroup ucg(string s = \"u\"); option.name = s; coverpoint s.len(); endgroup",
-            "covergroup pcg(string s = \"p\"); coverpoint s.len() + 1; endgroup",
+            "covergroup ucg(string s = \"u\"); option.name = s; coverpoint s.len(); endgroup
+covergroup uclocked @(ucount); coverpoint ucount; endgroup",
+            "covergroup pcg(string s = \"p\"); coverpoint s.len() + 1; endgroup
+    covergroup pclocked @(qcount); coverpoint qcount; endgroup",
         ]),
         counting,
     )));
@@ -1350,4 +1353,99 @@ endprogram",
         assert_eq!(clocked_plan.lazy, plain_plan.lazy);
         assert_eq!(clocked_plan.incremental, plain_plan.incremental);
     }
+}
+
+/// The instances of a type of the module that procedures construct (IEEE
+/// 1800-2023 19.3) are sampled from the list of the type: at an edge by the
+/// edge-sensitive procedure of the type, planned as the design that writes
+/// `always @(posedge clk) c.sample();`, at any other event by processes of
+/// the type, compiled kernels. Neither runs in the runtime's loop. The
+/// sampler of a covergroup embedded in a class (19.4) is the detached fork
+/// of a function the analysis makes, planned as the constructor that
+/// writes that fork. A type whose instances only declarations construct
+/// gets neither.
+#[test]
+fn constructed_samplers_are_planned_as_the_written_samplers() {
+    let plan = |items: &str| {
+        let (program, facts) = laid_out(timed(&rtl("", items)));
+        (crate::scheduler::plan_for_test(&program).unwrap(), facts)
+    };
+    let (written, written_facts) = plan(
+        "    covergroup cg; coverpoint d; endgroup
+    cg c;
+    initial c = new;
+    always @(posedge clk) c.sample();",
+    );
+    for clocked in [
+        "    covergroup cg @(posedge clk); coverpoint d; endgroup
+    cg c;
+    initial c = new;",
+        "    covergroup cg @(posedge clk); coverpoint d; endgroup
+    cg a[4];
+    initial foreach (a[i]) a[i] = new;",
+    ] {
+        let (sampled, sampled_facts) = plan(clocked);
+        assert!(sampled_facts.coverage_calls > 0);
+        assert_eq!(
+            sampled_facts.processes, written_facts.processes,
+            "{clocked}"
+        );
+        assert_eq!(sampled.fallback, written.fallback, "{clocked}");
+        assert_eq!(sampled.settle_reads, written.settle_reads, "{clocked}");
+        assert_eq!(sampled.incremental, written.incremental, "{clocked}");
+        assert_eq!(sampled.active, written.active, "{clocked}");
+        assert_eq!(sampled.clocks, written.clocks, "{clocked}");
+        assert_eq!(sampled.derived, written.derived, "{clocked}");
+    }
+    let (changed, _) = plan(
+        "    covergroup cg @(clk); coverpoint d; endgroup
+    cg c;
+    initial c = new;",
+    );
+    assert!(
+        changed
+            .fallback
+            .iter()
+            .flatten()
+            .all(|reason| reason != "the process has dynamic activation frames"),
+        "{:?}",
+        changed.fallback
+    );
+    let (written, written_facts) = plan(
+        "    class K;
+        covergroup kc; coverpoint d; endgroup
+        function new();
+            kc = new;
+            fork forever begin @(posedge clk); kc.sample(); end join_none
+        endfunction
+    endclass
+    K k;
+    initial k = new;",
+    );
+    let (sampled, sampled_facts) = plan(
+        "    class K;
+        covergroup kc @(posedge clk); coverpoint d; endgroup
+        function new(); kc = new; endfunction
+    endclass
+    K k;
+    initial k = new;",
+    );
+    assert_eq!(sampled_facts.processes, written_facts.processes);
+    assert_eq!(sampled.fallback, written.fallback);
+    assert_eq!(sampled.settle_reads, written.settle_reads);
+    assert_eq!(sampled.lazy, written.lazy);
+    assert_eq!(sampled.incremental, written.incremental);
+    // Declarations alone: the design of C13, no function more than the one
+    // of the written edge sampler.
+    let (_, declared) = plan(
+        "    covergroup cg @(posedge clk); coverpoint d; endgroup
+    cg c = new;",
+    );
+    let (_, written) = plan(
+        "    covergroup cg; coverpoint d; endgroup
+    cg c = new;
+    always @(posedge clk) c.sample();",
+    );
+    assert_eq!(declared.functions, written.functions);
+    assert_eq!(declared.processes, written.processes);
 }

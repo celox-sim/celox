@@ -197,10 +197,23 @@ impl<B: SimBackend> SimulationState<B> {
         process: usize,
         encoded: u64,
     ) -> Result<bool, Halt> {
+        // Join code 3 is a `join_none` whose children are processes of the
+        // analysis (`celox_frontend_core::process::fork_mode`): the sampler
+        // of a covergroup instance a procedure constructs (19.3). They draw
+        // no seed from the forking process (18.14.1) and are no children of
+        // it, which its `wait fork`, `disable fork` and `kill()` do not see
+        // (9.6.1, 9.6.3, 9.7).
+        let (join, unseeded) = match (encoded >> 32) & 0b11 {
+            0 => (ForkJoin::All, false),
+            1 => (ForkJoin::Any, false),
+            2 => (ForkJoin::None, false),
+            _ => (ForkJoin::None, true),
+        };
         // A function called by a declaration initializer may fork a
         // background process only from an initial or always procedure
         // (IEEE 1800-2023 13.4.4), checked when it forks.
-        if self.model.processes[process].kind == celox_design::ProcessKind::Initializer {
+        if !unseeded && self.model.processes[process].kind == celox_design::ProcessKind::Initializer
+        {
             return Err(SimulatorErrorCode::Runtime {
                 message: "background process scheduled by a declaration initializer; IEEE \
                           1800-2023 13.4.4 requires an initial/always process"
@@ -211,12 +224,6 @@ impl<B: SimBackend> SimulationState<B> {
         }
         let first = (encoded & 0xffff) as usize;
         let count = ((encoded >> 16) & 0xffff) as usize;
-        let join = match (encoded >> 32) & 0b11 {
-            0 => ForkJoin::All,
-            1 => ForkJoin::Any,
-            2 => ForkJoin::None,
-            _ => return Err(SimulatorErrorCode::InternalError.into()),
-        };
         // A fork of a function unit the process is suspended inside: each
         // child continues the call the kernel is suspended in, through a
         // copy of the parent's frames whose forking unit resumes at the
@@ -261,10 +268,14 @@ impl<B: SimBackend> SimulationState<B> {
         let mut children = Vec::with_capacity(count);
         for entry in first..first + count {
             let mut child = self.process_state.activations[process].clone();
-            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            child
-                .private
-                .set(random, &((u64::from(seed) | (1 << 32)).into(), 0u8.into()));
+            // A child of the analysis keeps the generator state of the
+            // parent, which it does not draw from.
+            if !unseeded {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                child
+                    .private
+                    .set(random, &((u64::from(seed) | (1 << 32)).into(), 0u8.into()));
+            }
             child.control = ProcessControl::default();
             child.live = true;
             // Linked below, by `set_parent`.
@@ -293,7 +304,7 @@ impl<B: SimBackend> SimulationState<B> {
                     self.process_state.activations.len() - 1
                 }
             };
-            self.set_parent(id, Some(process));
+            self.set_parent(id, (!unseeded).then_some(process));
             if let Some((stack, resume)) = &frames {
                 let mut stack = stack.clone();
                 stack[unit_resume..unit_resume + UNIT_RESUME_BYTES]
@@ -310,7 +321,7 @@ impl<B: SimBackend> SimulationState<B> {
             }
             children.push(id);
         }
-        if count != 0 {
+        if count != 0 && !unseeded {
             backend.set(random_slot, u64::from(seed) | (1 << 32));
         }
         self.process_state.activations[process]

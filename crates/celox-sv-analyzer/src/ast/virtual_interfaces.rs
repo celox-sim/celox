@@ -2270,8 +2270,13 @@ pub(super) fn without_event_blocks(stmt: &Stmt) -> Stmt {
             step: all(step),
             body: all(body),
         },
-        Stmt::Fork { join, branches } => Stmt::Fork {
+        Stmt::Fork {
+            join,
+            unseeded,
+            branches,
+        } => Stmt::Fork {
             join: *join,
+            unseeded: *unseeded,
             branches: branches.iter().map(|branch| all(branch)).collect(),
         },
         Stmt::Block { id, body } => Stmt::Block {
