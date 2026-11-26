@@ -18,6 +18,16 @@ pub(in crate::ast) struct Formal {
     pub default: Option<celox_sv_syntax::ExprId>,
 }
 
+/// A coverpoint or cross of a covergroup type, as a use of the type names it
+/// (IEEE 1800-2023 19.5, 19.6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::ast) struct Item {
+    /// The name the language can use: the label, or the variable of an
+    /// unlabelled coverpoint of one; `None` for a name only reports show.
+    pub name: Option<String>,
+    pub cross: bool,
+}
+
 /// A covergroup type, as the scope that declares it bound its header. It is
 /// what travels to the scopes that use the type: a scope-level one with the
 /// symbols of its scope, an embedded one with its class.
@@ -42,6 +52,10 @@ pub(in crate::ast) struct Covergroup {
     /// The formals of `sample`: none unless the covergroup is declared `with
     /// function sample` (19.8.1).
     pub sample_formals: Vec<Formal>,
+    /// The coverpoints, then the crosses, in the order the heap numbers
+    /// them from item 1: the declared coverpoints, those of the variables
+    /// the crosses cross, then the crosses (see `compile::Layout`).
+    pub items: Vec<Item>,
     /// Why the type cannot be constructed or sampled: something it declares
     /// is not supported, or its header does not bind. The declaration
     /// itself is accepted, so that a covergroup nothing uses keeps a design
@@ -76,6 +90,27 @@ impl Covergroup {
         format!("{}::$sample", self.name)
     }
 
+    /// The subroutine of `get_inst_coverage(ref int, ref int)` of an
+    /// instance (19.8).
+    pub fn counts_subroutine(&self) -> String {
+        format!("{}::$counts", self.name)
+    }
+
+    /// The subroutine of `get_coverage(ref int, ref int)` of the type
+    /// (19.8).
+    pub fn type_counts_subroutine(&self) -> String {
+        format!("{}::$type_counts", self.name)
+    }
+
+    /// The item named `name`, its number among the items of the heap from
+    /// 1, and whether it is a cross.
+    pub fn item(&self, name: &str) -> Option<(u32, bool)> {
+        self.items
+            .iter()
+            .position(|item| item.name.as_deref() == Some(name))
+            .map(|index| (index as u32 + 1, self.items[index].cross))
+    }
+
     /// The type, when it can be constructed and sampled.
     pub fn usable(&self) -> Converted<&Self> {
         match &self.rejection {
@@ -84,6 +119,40 @@ impl Covergroup {
         }
     }
 }
+
+/// The formals of `N::$counts` after the handle of the instance, which are
+/// those of `N::$type_counts`: the number of the item, then the two `int`
+/// formals that `get_coverage` and `get_inst_coverage` take by reference
+/// (IEEE 1800-2023 19.8).
+pub(in crate::ast) fn count_formals() -> Vec<Formal> {
+    let formal = |name: &str, direction, r#type| Formal {
+        name: name.to_owned(),
+        direction,
+        r#type,
+        default: None,
+    };
+    vec![
+        formal(
+            ITEM_FORMAL,
+            ParamDirection::Input,
+            classes::unsigned_type(32),
+        ),
+        formal(
+            "covered",
+            ParamDirection::Ref,
+            crate::ast::procedural::int_type(),
+        ),
+        formal(
+            "total",
+            ParamDirection::Ref,
+            crate::ast::procedural::int_type(),
+        ),
+    ]
+}
+
+/// The source name of the formal of `N::$counts` and `N::$type_counts` that
+/// numbers the item, which no identifier of a source spells.
+pub(in crate::ast) const ITEM_FORMAL: &str = "$item";
 
 /// Whether subroutine `name` samples an instance of a covergroup.
 pub(in crate::ast) fn is_sampler(name: &str) -> bool {
@@ -164,6 +233,7 @@ pub(in crate::ast) fn build(
         owner,
         new_formals: Vec::new(),
         sample_formals: Vec::new(),
+        items: Vec::new(),
         rejection: None,
     };
     fn reject(model: &mut Covergroup, error: AnalyzerError) {
@@ -176,6 +246,24 @@ pub(in crate::ast) fn build(
         );
         return Ok(model);
     };
+    let layout = compile::Layout::of(tree.declarations(), declaration);
+    model.items = layout
+        .names
+        .iter()
+        .map(|name| Item {
+            name: name.clone(),
+            cross: false,
+        })
+        .chain(layout.crosses.iter().map(|(cross, _)| {
+            Item {
+                name: cross
+                    .label
+                    .as_ref()
+                    .map(|label| instances::normalize_identifier(&label.spelling)),
+                cross: true,
+            }
+        }))
+        .collect();
     // Before the formals are bound: an unexpanded `let` in one would bind
     // as a call of a function nothing declares.
     let port_tokens = formal_ports(declaration)
@@ -217,6 +305,14 @@ pub(in crate::ast) fn build(
     }
     match event {
         None => {}
+        // `type_option.strobe` "only applies to the scheduling of samples
+        // triggered by a clocking event" (19.3): a type without one may set
+        // it to no effect, and a type with one that sets it is rejected for
+        // it, as a sample in the Postponed region is not supported.
+        Some(CoverageEvent::Clocking(_)) if strobes(tree, session, declaration, context) => reject(
+            &mut model,
+            unsupported("covergroup strobe sampling (IEEE 1800-2023 19.7.1)"),
+        ),
         Some(CoverageEvent::Clocking(_)) => reject(
             &mut model,
             unsupported("covergroup sampling event (IEEE 1800-2023 19.3)"),
@@ -292,6 +388,38 @@ pub(in crate::ast) fn build(
         }
     }
     Ok(model)
+}
+
+/// Whether covergroup `declaration` assigns `type_option.strobe` a value
+/// that `context`, the scope that declares it, folds to a nonzero constant
+/// (IEEE 1800-2023 19.7.1).
+fn strobes(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    declaration: &celox_sv_syntax::CovergroupDeclaration,
+    context: &PackedDimensions,
+) -> bool {
+    let native = tree.declarations();
+    declaration.items.iter().any(|item| {
+        let celox_sv_syntax::CoverageItem::Option(option) = item else {
+            return false;
+        };
+        if !option.type_option
+            || instances::normalize_identifier(&option.member.spelling) != "strobe"
+        {
+            return false;
+        }
+        let Ok(value) =
+            expression_binding::bind_value(option.value, native, tree, session, context, None)
+        else {
+            return false;
+        };
+        match fold_const_integral_expr_preserving_mask(tree, session, value, &context.const_env) {
+            Expr::Literal(text) => crate::typecheck::parse_integral_literal(&text)
+                .is_some_and(|literal| literal.value != num_bigint::BigUint::ZERO),
+            _ => false,
+        }
+    })
 }
 
 /// The `let` declaration of the design element of covergroup `declaration`

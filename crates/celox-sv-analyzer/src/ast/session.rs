@@ -119,6 +119,11 @@ pub(crate) struct Session {
     /// the order it bound them: a module makes the subroutines of these
     /// alone.
     pub(super) covergroup_requests: Vec<String>,
+    /// Those of `covergroup_requests` whose `get_coverage` or
+    /// `get_inst_coverage` the scope has bound with the two `ref int`
+    /// arguments (19.8): a module makes `N::$counts` and `N::$type_counts`
+    /// of these alone.
+    pub(super) covergroup_count_requests: Vec<String>,
 }
 
 impl Session {

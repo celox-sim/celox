@@ -740,11 +740,21 @@ impl Default for ItemTypeOptions {
     }
 }
 
-/// The type of an option member (19.10).
+/// The type of an option member (19.10): what [`op::SET_OPTION`] and
+/// [`op::SET_TYPE_OPTION`] take as the value and [`op::GET_OPTION`] and
+/// [`op::GET_TYPE_OPTION`] give.
+///
+/// [`op::SET_OPTION`]: super::op::SET_OPTION
+/// [`op::SET_TYPE_OPTION`]: super::op::SET_TYPE_OPTION
+/// [`op::GET_OPTION`]: super::op::GET_OPTION
+/// [`op::GET_TYPE_OPTION`]: super::op::GET_TYPE_OPTION
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum OptionKind {
+pub enum OptionKind {
+    /// An `int`, sign extended.
     Int,
+    /// A `bit`.
     Bit,
+    /// A `string`, as the handle of a heap string.
     Text,
 }
 
@@ -822,7 +832,8 @@ impl OptionId {
         }
     }
 
-    pub(crate) const fn kind(self) -> OptionKind {
+    /// The type of the member (19.10).
+    pub const fn kind(self) -> OptionKind {
         match self {
             Self::Name | Self::Comment => OptionKind::Text,
             Self::Weight
@@ -910,7 +921,8 @@ impl TypeOptionId {
         }
     }
 
-    pub(crate) const fn kind(self) -> OptionKind {
+    /// The type of the member (19.10).
+    pub const fn kind(self) -> OptionKind {
         match self {
             Self::Comment => OptionKind::Text,
             Self::Weight | Self::Goal => OptionKind::Int,

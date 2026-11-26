@@ -64,8 +64,8 @@ mod value;
 pub use descriptor::{
     BinArray, BinDescriptor, BinFilter, BinKind, BinValues, Bound, Constant, CrossBinDescriptor,
     CrossDescriptor, FilterDescriptor, GroupTypeOptions, InputDescriptor, ItemTypeOptions,
-    MAX_SELECT_DEPTH, Operand, OptionId, OptionInit, OptionValue, PointDescriptor, PointType,
-    RangeDescriptor, Select, TypeDescriptor, TypeOptionId, ValueType,
+    MAX_SELECT_DEPTH, Operand, OptionId, OptionInit, OptionKind, OptionValue, PointDescriptor,
+    PointType, RangeDescriptor, Select, TypeDescriptor, TypeOptionId, ValueType,
 };
 pub use report::{
     BinReport, BinReportKind, CoverItemKind, CoverItemReport, CoverageReport,
@@ -74,7 +74,7 @@ pub use report::{
 pub use shape::{RangeValue, Resolved, ResolvedItem, resolve, resolve_warnings, value_count};
 
 use cross::{CrossScratch, Crossed};
-use descriptor::{Level, OptionKind};
+use descriptor::Level;
 use shape::{BinClass, Item, PointOptions, PointShape, SetInput, Shape, ValueKey, bin_name};
 use value::{KeyValue, Matcher, bias, low_ones, numeric, ones};
 

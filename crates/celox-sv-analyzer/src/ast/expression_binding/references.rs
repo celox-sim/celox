@@ -6,7 +6,7 @@ use super::*;
 
 /// Check actual `actual` of formal `position` of subroutine `name` when that
 /// formal is passed by reference.
-pub(super) fn check_actual(
+pub(in crate::ast) fn check_actual(
     name: &str,
     position: usize,
     actual: ExprId,

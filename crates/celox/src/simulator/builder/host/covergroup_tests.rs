@@ -1092,3 +1092,123 @@ fn descriptor_of_a_thousand_bins_is_registered_once() {
     );
     assert_eq!(facts.functions, small.functions);
 }
+
+/// Options written in a procedure, `start()`, `stop()` and the queries of
+/// items are coverage operations where they are written (IEEE 1800-2023
+/// 19.7, 19.8): a sample makes the calls it makes without them, and none is
+/// a call of the heap helper, so the plan of a design that uses them in its
+/// clocked logic is that of the design without them. A covergroup that does
+/// not call `get_coverage` or `get_inst_coverage` with two arguments has no
+/// subroutine for it. (A string member takes a string, which is made as
+/// any string is.)
+#[test]
+fn options_and_methods_add_no_call_to_a_sample() {
+    use coverage::op;
+    let design = |setup: &str, after: &str| {
+        rtl(
+            "",
+            &format!(
+                "    bit [3:0] v;
+    int covered, total;
+    real r;
+    covergroup cg;
+        cv: coverpoint v {{ bins low[] = {{[0:3]}}; bins high = {{[4:15]}}; }}
+        cq: coverpoint q;
+        x: cross cv, cq;
+    endgroup
+    cg c;
+    always @(posedge clk) begin
+        if (c == null) begin
+            c = new;
+{setup}
+        end
+        c.sample();
+{after}
+    end"
+            ),
+        )
+    };
+    let plan = |source: &str| {
+        let (program, facts) = laid_out(timed(source));
+        let calls = coverage_subs(&program.sir);
+        let plan = crate::scheduler::plan_for_test(&program).unwrap();
+        (
+            (
+                plan.settle_reads.is_some(),
+                plan.fallback,
+                plan.lazy,
+                plan.incremental,
+                plan.active,
+            ),
+            facts,
+            calls,
+            program.sir.functions.len(),
+        )
+    };
+    let of_a_sample = |calls: &[(u64, u64, u64)]| {
+        let bodies = count(calls, op::SAMPLING);
+        assert!(bodies > 0);
+        [
+            op::SAMPLING,
+            op::PRESENT,
+            op::POINTS,
+            op::POINT,
+            op::PREDICATES,
+            op::SAMPLE_END,
+            op::MESSAGE,
+        ]
+        .map(|sub| {
+            let calls = count(calls, sub);
+            assert_eq!(calls % bodies, 0);
+            calls / bodies
+        })
+    };
+    let (base, base_facts, base_calls, base_functions) = plan(&design("", ""));
+    assert!(base.0 && base.2.is_some());
+    assert_eq!(base_facts.heap_calls, 0);
+    let per_sample = of_a_sample(&base_calls);
+    assert_eq!(
+        [
+            op::COLLECT,
+            op::SET_OPTION,
+            op::GET_OPTION,
+            op::SET_TYPE_OPTION,
+            op::GET_TYPE_OPTION
+        ]
+        .map(|sub| count(&base_calls, sub)),
+        [0; 5]
+    );
+    let (used, facts, calls, functions) = plan(&design(
+        "            c.option.weight = 2;
+            c.cv.option.at_least = 2;
+            c.x.option.cross_num_print_missing = 1;
+            cg::type_option.weight = 3;
+            cg::cq::type_option.goal = 50;
+            cg::type_option.merge_instances = 1;",
+        "        if (q == 8'd9) c.stop();
+        if (q == 8'd20) c.cv.start();
+        if (q == 8'd30) c.start();
+        r = c.cv.get_inst_coverage() + cg::x::get_coverage();
+        covered = c.option.at_least + cg::type_option.weight;",
+    ));
+    assert_eq!(facts.heap_calls, 0);
+    assert_eq!(of_a_sample(&calls), per_sample);
+    assert_eq!(used, base);
+    // No subroutine of the two-argument queries reaches the design.
+    assert_eq!(functions, base_functions);
+    assert!(count(&calls, op::COLLECT) >= 3, "{calls:?}");
+    assert!(count(&calls, op::SET_OPTION) >= 3, "{calls:?}");
+    assert!(count(&calls, op::SET_TYPE_OPTION) >= 3, "{calls:?}");
+    assert!(count(&calls, op::GET_OPTION) >= 1, "{calls:?}");
+    assert!(count(&calls, op::GET_TYPE_OPTION) >= 1, "{calls:?}");
+    // With the two arguments, the queries are coverage operations too.
+    let (counted, facts, calls, _) = plan(&design(
+        "",
+        "        r = c.get_inst_coverage(covered, total) + cg::x::get_coverage(covered, total);",
+    ));
+    assert_eq!(facts.heap_calls, 0);
+    assert_eq!(of_a_sample(&calls), per_sample);
+    assert_eq!(counted, base);
+    assert!(count(&calls, op::INST_COVERAGE) >= 3, "{calls:?}");
+    assert!(count(&calls, op::TYPE_COVERAGE) >= 3, "{calls:?}");
+}

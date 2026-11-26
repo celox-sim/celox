@@ -9,7 +9,7 @@
 //! builds its bins.
 
 use super::*;
-use crate::ast::covergroups::{ITEM, Layout, Level, OptionType, SelectTree};
+use crate::ast::covergroups::{ITEM, Layout, Level, Member, OptionType, SelectTree};
 use celox_sv_syntax::{
     BinsArray, CoverageItem, CoverageOption, CoverpointItem, CrossBins, SelectKind,
 };
@@ -43,8 +43,32 @@ struct Construction<'x> {
     /// Whether building an instance may warn of what the analysis could
     /// not warn of: a bin operand, an element of an array or
     /// `option.auto_bin_max` that is known only then (19.5.7), or a
-    /// wildcard value that is matched as a pattern (19.5.4).
+    /// wildcard value that is matched as a pattern (19.5.4), and a type
+    /// that assigns `option.detect_overlap`.
     warns: bool,
+    /// The `type_option` assignments of the definition, by item (19.7.1).
+    type_options: Vec<(u32, heap::TypeOptionId, TypeValue)>,
+}
+
+/// The constant value of a `type_option` member (19.7.1).
+enum TypeValue {
+    Int(i32),
+    Bit(bool),
+    Text(String),
+}
+
+/// The low 32 bits of `literal` as an `int` variable holds it once it is
+/// assigned: extended by its sign where it is narrower, and with 0 for an x
+/// or z bit (IEEE 1800-2023 6.11.2).
+fn int_value(literal: &crate::typecheck::IntegralLiteral) -> i32 {
+    let width = literal.width as u32;
+    let ones = (BigUint::from(1u8) << width) - 1u8;
+    let known = &literal.value & (&ones ^ (&literal.mask & &ones));
+    let mut word = known.iter_u32_digits().next().unwrap_or(0);
+    if literal.signed && (1..32).contains(&width) && word >> (width - 1) & 1 != 0 {
+        word |= u32::MAX << width;
+    }
+    word as i32
 }
 
 /// A bin declaration as `N::$new` compiles it.
@@ -141,10 +165,102 @@ impl Construction<'_> {
         index
     }
 
+    /// `type_option.member = value` of item `item` of the definition
+    /// (19.7.1): a constant expression, which is part of the descriptor of
+    /// the type. `strobe` has no effect on a type without a clocking event
+    /// (19.3), which is any this analysis makes.
+    fn type_option(
+        &mut self,
+        builder: &mut BodyBuilder<'_, '_, '_>,
+        item: u32,
+        option: &CoverageOption,
+        member: Member,
+        kind: OptionType,
+    ) -> Converted<()> {
+        let model = self.site.model;
+        let name = instances::normalize_identifier(&option.member.spelling);
+        let place = || format!("`type_option.{name}` of covergroup `{}`", model.display);
+        let not_constant = || {
+            invalid(format!(
+                "{} is assigned a value that is not a constant expression (IEEE 1800-2023 19.7.1)",
+                place()
+            ))
+        };
+        let value = match kind {
+            OptionType::Text => {
+                let native = self.site.tree.declarations();
+                let literal = match &native
+                    .expression(expression_binding::ungroup(option.value, native))
+                    .kind
+                {
+                    ExprKind::Literal(text) => expression_binding::string_literal_bytes(text)
+                        .and_then(|bytes| String::from_utf8(bytes).ok()),
+                    _ => None,
+                };
+                // Table 19-3 gives `comment=string_literal`.
+                let Some(text) = literal else {
+                    return Err(unsupported(format!(
+                        "covergroup type_option.{name} that is no string literal (IEEE 1800-2023 19.7.1)"
+                    )));
+                };
+                TypeValue::Text(text)
+            }
+            OptionType::Int | OptionType::Bit => {
+                let ty = if kind == OptionType::Int {
+                    int_type()
+                } else {
+                    packed_type(1, false, false)
+                };
+                builder.covergroup_assignable(option.value, &ty, place)?;
+                let value = builder.covergroup_value(option.value, Some(&ty))?;
+                let bits = match builder.covergroup_constant(&value) {
+                    Some(literal) => int_value(&literal),
+                    // A `real` constant, which an `int` or `bit` variable
+                    // takes rounded (6.12.1).
+                    None => self
+                        .real_constant(builder, option.value)
+                        .ok_or_else(not_constant)?,
+                };
+                if kind == OptionType::Bit {
+                    TypeValue::Bit(bits & 1 != 0)
+                } else {
+                    // "The specified weight shall be a non-negative integral
+                    // value" (Table 19-3).
+                    if member == Member::Type(heap::TypeOptionId::Weight) && bits < 0 {
+                        return Err(invalid(format!(
+                            "{} is assigned the negative weight {bits} (IEEE 1800-2023 19.7.1)",
+                            place()
+                        )));
+                    }
+                    TypeValue::Int(bits)
+                }
+            }
+        };
+        if let Member::Type(option) = member {
+            self.type_options.push((item, option, value));
+        }
+        Ok(())
+    }
+
+    /// Native expression `value` as a `real` constant converted to an `int`
+    /// as an assignment converts it (6.12.1, 6.24.1): rounded, ties away
+    /// from zero, and the low 32 bits of the result. None for a value that
+    /// is no `real` constant.
+    fn real_constant(&self, builder: &mut BodyBuilder<'_, '_, '_>, value: ExprId) -> Option<i32> {
+        let constant =
+            constant_binding::bind(value, &builder.tree, builder.session, &builder.dims).ok()??;
+        let real =
+            crate::typecheck::eval_const_real_expr(&constant.into(), &*builder.dims.const_env)?;
+        if !real.is_finite() {
+            return Some(0);
+        }
+        Some(real.round().rem_euclid(4_294_967_296.0) as u32 as i32)
+    }
+
     /// `option.member = value` of item `item` of the definition (19.7): an
     /// ordinary expression of the scope of `new`, assigned to a variable of
     /// the type of the member (19.10) as a declaration assigns its
-    /// initializer.
+    /// initializer. `type_option.member = value` is [`Self::type_option`].
     fn option(
         &mut self,
         builder: &mut BodyBuilder<'_, '_, '_>,
@@ -153,7 +269,17 @@ impl Construction<'_> {
         level: Level,
     ) -> Converted<()> {
         let model = self.site.model;
-        let (id, kind) = covergroups::option_member(option, level, &model.display)??;
+        let (member, kind) = covergroups::option_member(option, level, &model.display)??;
+        let id = match member {
+            Member::Option(id) => id,
+            Member::Type(_) | Member::Strobe => {
+                return self.type_option(builder, item, option, member, kind);
+            }
+        };
+        // The heap warns of the bins of a coverpoint that overlap.
+        if id == heap::OptionId::DetectOverlap {
+            self.warns = true;
+        }
         let value = match kind {
             OptionType::Text => self.text(builder, option.value)?,
             OptionType::Int | OptionType::Bit => {
@@ -1600,6 +1726,7 @@ pub(super) fn body(
         answer: Vec::new(),
         keyed: Vec::new(),
         warns: false,
+        type_options: Vec::new(),
     };
     let native = site.tree.declarations();
     let layout = Layout::of(native, site.declaration());
@@ -1688,6 +1815,7 @@ pub(super) fn body(
         filters,
         answer,
         warns,
+        type_options,
         ..
     } = construction;
     let cg = Expr::Ident(instance.clone());
@@ -1737,5 +1865,46 @@ pub(super) fn body(
     descriptor.sets = sets;
     descriptor.filters = filters;
     descriptor.crosses = crosses;
+    for (item, option, value) in type_options {
+        type_option(&mut descriptor, item, option, value);
+    }
     Ok((instance, body, descriptor))
+}
+
+/// Assign `value` to member `option` of `type_option` of item `item` of
+/// `descriptor` (19.7.1): item 0 is the covergroup, then the coverpoints,
+/// then the crosses. The levels are those `covergroups::option_member`
+/// allows.
+fn type_option(
+    descriptor: &mut heap::TypeDescriptor,
+    item: u32,
+    option: heap::TypeOptionId,
+    value: TypeValue,
+) {
+    use heap::TypeOptionId as Id;
+    let points = descriptor.points.len();
+    let item = item as usize;
+    if item == 0 {
+        let options = &mut descriptor.type_options;
+        match (option, value) {
+            (Id::Weight, TypeValue::Int(value)) => options.weight = value,
+            (Id::Goal, TypeValue::Int(value)) => options.goal = value,
+            (Id::Comment, TypeValue::Text(value)) => options.comment = value,
+            (Id::MergeInstances, TypeValue::Bit(value)) => options.merge_instances = value,
+            (Id::DistributeFirst, TypeValue::Bit(value)) => options.distribute_first = value,
+            _ => unreachable!("a member of the type options of a covergroup"),
+        }
+        return;
+    }
+    let options = if item <= points {
+        &mut descriptor.points[item - 1].type_options
+    } else {
+        &mut descriptor.crosses[item - 1 - points].type_options
+    };
+    match (option, value) {
+        (Id::Weight, TypeValue::Int(value)) => options.weight = value,
+        (Id::Goal, TypeValue::Int(value)) => options.goal = value,
+        (Id::Comment, TypeValue::Text(value)) => options.comment = value,
+        _ => unreachable!("a member of the type options of a coverpoint or cross"),
+    }
 }

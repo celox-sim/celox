@@ -971,6 +971,14 @@ pub(in crate::ast) fn shape(
     while let Some(job) = jobs.pop() {
         match job {
             Job::Enter(id) => {
+                // A coverage query or an option member of a covergroup is
+                // a value of the type 19.8 and 19.10 give it.
+                if let Some(shape) =
+                    super::super::covergroups::result_shape(tree, session, id, native, context)
+                {
+                    values.push(shape);
+                    continue;
+                }
                 if let Some((_, shape)) =
                     array_reductions::bind(id, native, tree, session, context)?
                 {

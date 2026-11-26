@@ -746,9 +746,83 @@ fn constant(
     }
 }
 
+/// `N::$counts` of an instance if `instance`, else `N::$type_counts` of the
+/// type of `site` (IEEE 1800-2023 19.8): they assign the covered bins and
+/// the bins of the item to their `ref int` formals and return its coverage,
+/// as `get_inst_coverage` and `get_coverage` with two arguments do. The
+/// latter does not read a handle, so a `null` one is no error.
+fn counts(
+    site: &Site<'_>,
+    session: &mut Session,
+    state: &mut BodyState<'_>,
+    handle: &Type,
+    instance: bool,
+) -> Converted<Subroutine> {
+    let model = site.model;
+    let key = Expr::Call {
+        callee: Callee::Subroutine(model.type_subroutine()),
+        args: Vec::new(),
+        arg_order: Vec::new(),
+    };
+    let real = crate::ast::type_binding::builtin_type("real", None).expect("`real` is a type");
+    let (subroutine, ()) = site.subroutine(
+        session,
+        state,
+        Parts {
+            name: if instance {
+                model.counts_subroutine()
+            } else {
+                model.type_counts_subroutine()
+            },
+            first: instance.then(|| (HANDLE, handle.clone())),
+            formals: covergroups::count_formals(),
+            result: Some(real.clone()),
+        },
+        |builder, first| {
+            let target = match first {
+                Some(first) => Expr::Ident(first),
+                None => key.clone(),
+            };
+            let mut item = Expr::Ident(covergroups::ITEM_FORMAL.to_owned());
+            builder.rename_expr(&mut item);
+            let query = |what: system_functions::CoverageQuery| {
+                coverage(
+                    if instance {
+                        CoverageOp::InstCoverage { what }
+                    } else {
+                        CoverageOp::TypeCoverage { what }
+                    },
+                    vec![target.clone(), item.clone()],
+                )
+            };
+            let result = builder.declare("$coverage", real);
+            let mut body = Vec::new();
+            for (formal, what) in [
+                ("covered", system_functions::CoverageQuery::Covered),
+                ("total", system_functions::CoverageQuery::Total),
+            ] {
+                let mut lhs = LValue::Ident(formal.to_owned());
+                builder.rename_lvalue(&mut lhs);
+                body.push(Stmt::Assign {
+                    lhs,
+                    rhs: query(what),
+                    nonblocking: false,
+                });
+            }
+            body.push(assign(
+                &result,
+                query(system_functions::CoverageQuery::Real),
+            ));
+            Ok((Some(result), body, ()))
+        },
+    )?;
+    Ok(subroutine)
+}
+
 /// The subroutines of covergroup type `model`, which `item` declares, in
-/// class `class` when it is embedded. Nothing is made for a type that
-/// cannot be used: its uses report why.
+/// class `class` when it is embedded, with `N::$counts` and
+/// `N::$type_counts` if `counts`. Nothing is made for a type that cannot be
+/// used: its uses report why.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn lower(
     model: &Covergroup,
@@ -760,6 +834,7 @@ pub(super) fn lower(
     state: &mut BodyState<'_>,
     item: &generate::Item,
     class: Option<&classes::Class>,
+    counts: bool,
 ) -> Converted<Vec<Subroutine>> {
     if model.rejection.is_some() {
         return Ok(Vec::new());
@@ -837,7 +912,13 @@ pub(super) fn lower(
             ))
         },
     )?;
-    Ok(vec![register, new, sample])
+    let mut subroutines = vec![register, new, sample];
+    if counts {
+        for instance in [true, false] {
+            subroutines.push(self::counts(&site, session, state, &handle, instance)?);
+        }
+    }
+    Ok(subroutines)
 }
 
 /// The subroutines of the scope-level covergroup types the scope being
@@ -890,6 +971,7 @@ pub(in crate::ast) fn scope_subroutines(
             state,
             item,
             None,
+            every || session.covergroup_count_requests.contains(&name),
         ) {
             Ok(lowered) => subroutines.extend(lowered),
             // What the analysis does not support in a type that nothing of

@@ -724,3 +724,177 @@ endmodule"#)
 endmodule"#)
  (top Top) (run_until 0)
  (expect_output "75.76\n"))
+
+; 19.7: an instance option assigned after the instance is constructed, as
+; `g1.a.option.weight = 3;` of the clause, changes how its coverage is
+; computed from then on. `ca` covers 2 of 3 bins and `cb` 2 of 4; with two
+; hits needed, `cb` covers 1.
+(case options_assigned_after_construction_change_the_coverage
+ (source "procedural_options.sv" #"module Top;
+ bit [1:0] a, b;
+ covergroup cg;
+  ca: coverpoint a { bins lo = {0}; bins mid = {1}; bins hi = {[2:3]}; }
+  cb: coverpoint b;
+ endgroup
+ cg c = new;
+ initial begin
+  a = 0; b = 0; c.sample();
+  a = 0; b = 1; c.sample();
+  a = 1; b = 1; c.sample();
+  $display("%0.2f", c.get_inst_coverage());
+  c.ca.option.weight = 3;
+  $display("%0.2f", c.get_inst_coverage());
+  c.cb.option.at_least = 2;
+  $display("%0.2f", c.get_inst_coverage());
+ end
+endmodule"#)
+ (top Top) (run_until 0)
+ (expect_output "58.33\n62.50\n56.25\n"))
+
+; 19.10: a procedure reads the members of `option` of an instance and of
+; its items, of the types the structures declare them with.
+(case option_members_read_back_what_is_assigned
+ (source "option_members.sv" #"module Top;
+ bit [1:0] a;
+ covergroup cg(int w);
+  option.weight = w;
+  ca: coverpoint a { option.goal = 80; }
+ endgroup
+ cg c = new(4);
+ initial begin
+  c.option.name = "first";
+  c.option.comment = "of the instance";
+  c.ca.option.at_least = 3;
+  $display("%s %s %0d %0d %0d", c.option.name, c.option.comment, c.option.weight,
+           c.ca.option.goal, c.ca.option.at_least);
+ end
+endmodule"#)
+ (top Top) (run_until 0)
+ (expect_output "first of the instance 4 80 3\n"))
+
+; 19.7.1: type options assigned through the type before any instance
+; exists, as in the example of the clause, and with `merge_instances` the
+; coverage of the type "((merge of coverage of a from all instances) × 3) +
+; ((merge of coverage of b from all instances) × 5) ) / (3 + 5)": `a` has 3
+; of its 4 bins in the union, `b` 2.
+(case type_options_weigh_the_merged_items
+ (source "type_options.sv" #"module Top;
+ bit [1:0] a_var, b_var;
+ covergroup gc;
+  type_option.merge_instances = 1;
+  a: coverpoint a_var;
+  b: coverpoint b_var;
+ endgroup
+ gc g1, g2;
+ initial begin
+  gc::a::type_option.weight = 3;
+  gc::b::type_option.weight = 5;
+  g1 = new;
+  g2 = new;
+  a_var = 0; b_var = 0; g1.sample();
+  a_var = 1; g1.sample();
+  b_var = 3; g2.sample();
+  a_var = 2; g2.sample();
+  $display("%0.2f %0.2f %0d", gc::get_coverage(), gc::a::get_coverage(), gc::b::type_option.weight);
+ end
+endmodule"#)
+ (top Top) (run_until 0)
+ (expect_output "59.38 75.00 5\n"))
+
+; 19.11.3: with `merge_instances` the bins of the instances are united by
+; name, and with `option.get_inst_coverage` each instance keeps its own
+; coverage: the `gt` example of the clause, where `b[1]` is a bin of both
+; instances.
+(case merged_instances_unite_bins_by_name
+ (source "merge.sv" #"module Top;
+ bit [7:0] a;
+ covergroup gt (int l, h);
+  type_option.merge_instances = 1;
+  option.get_inst_coverage = 1;
+  coverpoint a {bins b[] = { [l:h] };}
+ endgroup
+ gt gv1 = new (0,1);
+ gt gv2 = new (1,2);
+ initial begin
+  a = 0; gv1.sample();
+  a = 1; gv1.sample(); gv2.sample();
+  $display("%0.2f %0.2f %0.2f", gt::get_coverage(), gv1.get_inst_coverage(), gv2.get_inst_coverage());
+ end
+endmodule"#)
+ (top Top) (run_until 0)
+ (expect_output "66.67 100.00 50.00\n"))
+
+; 19.8: with two `int` variables passed by reference, `get_coverage` and
+; `get_inst_coverage` give the covered bins and the bins, of a coverpoint
+; or of the covergroup, of an instance or of all instances. The example of
+; the clause, with the values sampled as arguments of `sample`: totals 2, 5,
+; 6 and 16.
+(case coverage_queries_count_bins_by_reference
+ (source "counts.sv" #"module Top;
+ covergroup cg (int xb, yb) with function sample(int x, int y);
+  coverpoint x {bins xbins[] = { [0:xb] }; }
+  coverpoint y {bins ybins[] = { [0:yb] }; }
+ endgroup
+ cg cv1 = new (1,2);
+ cg cv2 = new (3,6);
+ int covered, total;
+ initial begin
+  cv1.sample(0, 0);
+  cv2.sample(3, 6);
+  void'(cv1.x.get_inst_coverage(covered,total)); $display("%0d %0d", covered, total);
+  void'(cv1.get_inst_coverage(covered,total)); $display("%0d %0d", covered, total);
+  void'(cg::x::get_coverage(covered,total)); $display("%0d %0d", covered, total);
+  void'(cg::get_coverage(covered,total)); $display("%0d %0d", covered, total);
+ end
+endmodule"#)
+ (top Top) (run_until 0)
+ (expect_output "1 2\n2 5\n2 6\n4 16\n"))
+
+; Table 19-5: `get_coverage` and `get_inst_coverage` of a coverpoint and of
+; a cross, through an instance and, for the type, through `::`.
+(case coverpoints_and_crosses_report_their_coverage
+ (source "item_methods.sv" #"module Top;
+ bit [1:0] a, b;
+ covergroup cg;
+  pa: coverpoint a { bins lo = {[0:1]}; bins hi = {[2:3]}; }
+  pb: coverpoint b { bins lo = {[0:1]}; bins hi = {[2:3]}; }
+  x: cross pa, pb;
+ endgroup
+ cg c1 = new, c2 = new;
+ initial begin
+  a = 0; b = 0; c1.sample();
+  a = 2; b = 3; c2.sample();
+  a = 3; b = 0; c2.sample();
+  $display("%0.2f %0.2f %0.2f", c1.pa.get_inst_coverage(), cg::pb::get_coverage(), c1.pa.get_coverage());
+  $display("%0.2f %0.2f", c2.x.get_inst_coverage(), cg::x::get_coverage());
+ end
+endmodule"#)
+ (top Top) (run_until 0)
+ (expect_output "50.00 75.00 50.00\n50.00 37.50\n"))
+
+; 19.8: a stopped covergroup collects nothing until it is started again,
+; and a stopped coverpoint counts no sample while the others do.
+(case stop_and_start_control_collection
+ (source "start_stop.sv" #"module Top;
+ bit [1:0] a, b;
+ covergroup cg;
+  ca: coverpoint a;
+  cb: coverpoint b;
+ endgroup
+ cg c = new;
+ int covered, total;
+ initial begin
+  a = 0; b = 0; c.sample();
+  c.stop();
+  a = 1; b = 1; c.sample();
+  c.start();
+  c.cb.stop();
+  a = 2; b = 2; c.sample();
+  c.cb.start();
+  a = 3; b = 3; c.sample();
+  void'(c.ca.get_inst_coverage(covered, total)); $display("%0d %0d", covered, total);
+  void'(c.cb.get_inst_coverage(covered, total)); $display("%0d %0d", covered, total);
+ end
+endmodule"#)
+ (top Top) (run_until 0)
+ (expect_output "3 4\n2 4\n"))

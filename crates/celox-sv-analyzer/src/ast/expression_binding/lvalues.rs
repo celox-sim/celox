@@ -17,6 +17,9 @@ pub(in crate::ast) fn variable_lvalue(
         unpacked_structs::check_operands(ungroup(root, native), native, tree, session, dimensions)?;
     }
     chandles::check_target(chandle, root, tree, native, dimensions, session)?;
+    // A member of the options of a covergroup is no variable (IEEE
+    // 1800-2023 19.10).
+    super::super::covergroups::check_place(tree, session, root, native, dimensions)?;
     if let Some(place) = direct::object_place(root, native, tree, session, dimensions)? {
         return Ok(place);
     }

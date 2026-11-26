@@ -70,7 +70,29 @@
       "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
+      "name": "covergroup::coverage_queries_count_bins_by_reference",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
       "name": "covergroup::coverpoint_guard_skips_the_sample",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "covergroup::coverpoints_and_crosses_report_their_coverage",
       "phase": "execute",
       "status": "passed",
       "stronger_than_sv": false,
@@ -211,6 +233,39 @@
     },
     {
       "category": "Sequential",
+      "detail": "covergroup::merged_instances_unite_bins_by_name at 825:2: expect_output: expected [54, 54, 46, 54, 55, 32, 49, 48, 48, 46, 48, 48, 32, 53, 48, 46, 48, 48, 10], got [49, 48, 48, 46, 48, 48, 32, 49, 48, 48, 46, 48, 48, 32, 49, 48, 48, 46, 48, 48, 10]",
+      "expectation": "Simulation",
+      "name": "covergroup::merged_instances_unite_bins_by_name",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "covergroup::option_members_read_back_what_is_assigned at 773:2: expect_output: expected [102, 105, 114, 115, 116, 32, 111, 102, 32, 116, 104, 101, 32, 105, 110, 115, 116, 97, 110, 99, 101, 32, 52, 32, 56, 48, 32, 51, 10], got [102, 105, 114, 115, 116, 32, 111, 102, 32, 116, 104, 101, 32, 105, 110, 115, 116, 97, 110, 99, 101, 32, 120, 32, 120, 32, 51, 10]",
+      "expectation": "Simulation",
+      "name": "covergroup::option_members_read_back_what_is_assigned",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "covergroup::options_assigned_after_construction_change_the_coverage at 752:2: expect_output: expected [53, 56, 46, 51, 51, 10, 54, 50, 46, 53, 48, 10, 53, 54, 46, 50, 53, 10], got [53, 56, 46, 51, 51, 10, 53, 56, 46, 51, 51, 10, 53, 56, 46, 51, 51, 10]",
+      "expectation": "Simulation",
+      "name": "covergroup::options_assigned_after_construction_change_the_coverage",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
       "name": "covergroup::options_of_a_definition",
@@ -255,11 +310,33 @@
     },
     {
       "category": "Sequential",
+      "detail": "covergroup::stop_and_start_control_collection at 900:2: expect_output: expected [51, 32, 52, 10, 50, 32, 52, 10], got [50, 32, 52, 10, 50, 32, 52, 10]",
+      "expectation": "Simulation",
+      "name": "covergroup::stop_and_start_control_collection",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "xezim build exit status: 1; see <case>/build.log\n<case>/source_0.sv:5:22: error: expected expression, found Slash '/'\n    5 |    bins near = {[11 +/- 1]};\n      |                      ^\n<case>/source_0.sv:5:26: error: expected Colon, found RBracket ']'\n    5 |    bins near = {[11 +/- 1]};\n      |                          ^\n<case>/source_0.sv:5:26: error: expected expression, found RBracket ']'\n    5 |    bins near = {[11 +/- 1]};\n      |                          ^\n<case>/source_0.sv:5:27: error: expected RBracket, found RBrace '}'\n    5 |    bins near = {[11 +/- 1]};\n      |                           ^\n<case>/source_0.sv:6:20: error: expected expression, found Percent '%'\n    6 |    bins pct = {[7 +%- 25]};\n      |                    ^\n<case>/source_0.sv:6:25: error: expected Colon, found RBracket ']'\n    6 |    bins pct = {[7 +%- 25]};\n      |                         ^\n<case>/source_0.sv:6:25: error: expected expression, found RBracket ']'\n    6 |    bins pct = {[7 +%- 25]};\n      |                         ^\n<case>/source_0.sv:6:26: error: expected RBracket, found RBrace '}'\n    6 |    bins pct = {[7 +%- 25]};\n      |                          ^\nParsed 3 file(s): 3 descriptions, 8 errors, 0 warnings\n",
       "expectation": "Simulation",
       "name": "covergroup::tolerance_ranges_of_a_bin",
       "phase": "compile",
       "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "covergroup::type_options_weigh_the_merged_items at 802:2: expect_output: expected [53, 57, 46, 51, 56, 32, 55, 53, 46, 48, 48, 32, 53, 10], got [54, 50, 46, 53, 48, 32, 55, 53, 46, 48, 48, 32, 53, 10]",
+      "expectation": "Simulation",
+      "name": "covergroup::type_options_weigh_the_merged_items",
+      "phase": "execute",
+      "status": "mismatch",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []

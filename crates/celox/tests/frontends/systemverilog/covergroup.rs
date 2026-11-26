@@ -4740,3 +4740,1048 @@ endmodule
         }
     }
 }
+
+sv_backends! {
+    /// 19.7: the options of an instance and of its items assigned after
+    /// the instance was constructed change its coverage from then on:
+    /// `at_least` of the covergroup is that of every item that does not
+    /// assign its own (Table 19-2), `weight` of an item weighs it in the
+    /// instance; `goal`, `comment` and `name` change only what the report
+    /// shows. A procedure reads them back.
+    fn procedural_options(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done, output longint unsigned r0, r1, r2, r3,
+           output int weight, at_least, inherited, goal, named);
+    bit [1:0] a, b;
+    covergroup cg;
+        ca: coverpoint a { bins lo = {0}; bins mid = {1}; bins hi = {[2:3]}; }
+        cb: coverpoint b;
+    endgroup
+    cg c = new;
+    initial begin
+        a = 0; b = 0; c.sample();
+        a = 0; b = 1; c.sample();
+        a = 1; b = 1; c.sample();
+        r0 = $realtobits(c.get_inst_coverage());
+        c.option.at_least = 2;
+        r1 = $realtobits(c.get_inst_coverage());
+        c.ca.option.weight = 3;
+        r2 = $realtobits(c.get_inst_coverage());
+        c.cb.option.at_least = 1;
+        r3 = $realtobits(c.get_inst_coverage());
+        c.option.goal = 75;
+        c.option.comment = "late";
+        c.option.name = "renamed";
+        c.ca.option.comment = $sformatf("of %s", "ca");
+        weight = c.ca.option.weight;
+        at_least = c.cb.option.at_least;
+        inherited = c.ca.option.at_least;
+        goal = c.option.goal;
+        named = c.option.name == "renamed" && c.ca.option.comment == "of ca";
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        // `ca` 2 of 3 bins, `cb` 2 of 4.
+        assert!(close(real(&mut sim, "r0"), (200.0 / 3.0 + 50.0) / 2.0));
+        // At least two hits: `ca` 1 of 3, `cb` 1 of 4.
+        assert!(close(real(&mut sim, "r1"), (100.0 / 3.0 + 25.0) / 2.0));
+        assert!(close(real(&mut sim, "r2"), (100.0 + 25.0) / 4.0));
+        assert!(close(real(&mut sim, "r3"), (100.0 + 50.0) / 4.0));
+        for (name, value) in [
+            ("weight", 3u8),
+            ("at_least", 1),
+            ("inherited", 2),
+            ("goal", 75),
+            ("named", 1),
+        ] {
+            let signal = sim.signal(name);
+            assert_eq!(sim.get(signal), BigUint::from(value), "{name}");
+        }
+        let report = sim.coverage();
+        let instance = &group(&report, "Top.cg").instances[0];
+        assert_eq!(
+            (instance.name.as_str(), instance.comment.as_str()),
+            ("renamed", "late")
+        );
+        assert_eq!((instance.goal, instance.at_least), (75, 2));
+        let ca = item(&report, "Top.cg", 0, "ca");
+        assert_eq!(
+            (ca.weight, ca.at_least, ca.comment.as_str()),
+            (3, 2, "of ca")
+        );
+        assert_eq!(counted(&report, "Top.cg", 0, "cb"), (2, 4));
+    }
+
+    /// 19.7.1: `type_option` of the type and of its items, through `::`
+    /// before any instance exists, as in the example of the clause, and in
+    /// the definition. With `merge_instances` the coverage of the type is
+    /// "((merge of coverage of a from all instances) × 3) + ((merge of
+    /// coverage of b from all instances) × 5) ) / (3 + 5)".
+    fn type_options_through_scope(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done, output longint unsigned ty, ta, tb, output int covered, total,
+           output int weight, merged);
+    bit [1:0] a_var, b_var;
+    covergroup gc;
+        type_option.goal = 90;
+        a: coverpoint a_var;
+        b: coverpoint b_var { type_option.weight = 2; }
+    endgroup
+    gc g1, g2;
+    initial begin
+        gc::type_option.comment = "Here is a comment for all covergroups of type gc";
+        gc::a::type_option.weight = 3;
+        g1 = new;
+        gc::b::type_option.weight = 5;
+        gc::type_option.merge_instances = 1;
+        g2 = new;
+        a_var = 0; b_var = 0; g1.sample();
+        a_var = 1; g1.sample();
+        b_var = 3; g2.sample();
+        a_var = 2; g2.sample();
+        ty = $realtobits(gc::get_coverage());
+        ta = $realtobits(gc::a::get_coverage());
+        tb = $realtobits(gc::b::get_coverage(covered, total));
+        weight = gc::a::type_option.weight + 10 * gc::b::type_option.weight;
+        merged = g1.type_option.merge_instances;
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        // `a` has 3 of its 4 bins in the union, `b` 2.
+        assert!(close(real(&mut sim, "ty"), (75.0 * 3.0 + 50.0 * 5.0) / 8.0));
+        assert_eq!(real(&mut sim, "ta"), 75.0);
+        assert_eq!(real(&mut sim, "tb"), 50.0);
+        for (name, value) in [
+            ("covered", 2u8),
+            ("total", 4),
+            ("weight", 53),
+            ("merged", 1),
+        ] {
+            let signal = sim.signal(name);
+            assert_eq!(sim.get(signal), BigUint::from(value), "{name}");
+        }
+        let report = sim.coverage();
+        let gc = group(&report, "Top.gc");
+        assert_eq!(
+            gc.comment,
+            "Here is a comment for all covergroups of type gc"
+        );
+        assert!(gc.merge_instances);
+        assert_eq!((gc.weight, gc.goal), (1, 90));
+        let weights: Vec<_> = gc.items.iter().map(|item| (item.name.as_str(), item.weight)).collect();
+        assert_eq!(weights, [("a", 3), ("b", 5)]);
+    }
+
+    /// 19.11.3: with `merge_instances`, the bins of the instances are
+    /// united by name, and `get_inst_coverage` is the coverage of the
+    /// instance only with `option.get_inst_coverage`, else that of the type
+    /// (Table 19-1). The two examples of the clause: `gt`, where `b[1]` is
+    /// a bin of both instances, and `ga`, whose instances have bins of no
+    /// common name, 96 in all.
+    fn merge_instances(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done, output longint unsigned gt_type, gv1_inst, gv2_inst,
+           gu_type, gu1_inst, ga_type, ga_avg, output int ga_covered, ga_total);
+    bit [7:0] a;
+    covergroup gt (int l, h);
+        type_option.merge_instances = 1;
+        option.get_inst_coverage = 1;
+        coverpoint a {bins b[] = { [l:h] };}
+    endgroup
+    covergroup gu (int l, h);
+        type_option.merge_instances = 1;
+        coverpoint a {bins b[] = { [l:h] };}
+    endgroup
+    covergroup ga (int abm);
+        option.auto_bin_max = abm;
+        coverpoint a {ignore_bins i = {3};}
+    endgroup
+    gt gv1 = new (0,1);
+    gt gv2 = new (1,2);
+    gu gu1 = new (0,1);
+    gu gu2 = new (1,2);
+    ga gav1 = new (64);
+    ga gav2 = new (32);
+    initial begin
+        a = 0; gv1.sample(); gu1.sample(); gav1.sample();
+        a = 1; gv1.sample(); gv2.sample(); gu1.sample(); gu2.sample(); gav2.sample();
+        gt_type = $realtobits(gt::get_coverage());
+        gv1_inst = $realtobits(gv1.get_inst_coverage());
+        gv2_inst = $realtobits(gv2.get_inst_coverage());
+        gu_type = $realtobits(gu::get_coverage());
+        gu1_inst = $realtobits(gu1.get_inst_coverage());
+        ga_avg = $realtobits(ga::get_coverage());
+        ga::type_option.merge_instances = 1;
+        ga_type = $realtobits(ga::get_coverage(ga_covered, ga_total));
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        assert!(close(real(&mut sim, "gt_type"), 200.0 / 3.0));
+        assert_eq!(real(&mut sim, "gv1_inst"), 100.0);
+        assert_eq!(real(&mut sim, "gv2_inst"), 50.0);
+        // Without `option.get_inst_coverage` an instance gives the coverage
+        // of the type.
+        assert!(close(real(&mut sim, "gu_type"), 200.0 / 3.0));
+        assert!(close(real(&mut sim, "gu1_inst"), 200.0 / 3.0));
+        // The weighted average of 1 of 64 and 1 of 32, then the union: 2 of
+        // 96.
+        assert!(close(real(&mut sim, "ga_avg"), (100.0 / 64.0 + 100.0 / 32.0) / 2.0));
+        assert!(close(real(&mut sim, "ga_type"), 200.0 / 96.0));
+        for (name, value) in [("ga_covered", 2u8), ("ga_total", 96)] {
+            let signal = sim.signal(name);
+            assert_eq!(sim.get(signal), BigUint::from(value), "{name}");
+        }
+        let report = sim.coverage();
+        // The bins of the type: `b[1]` with the hits of both instances.
+        let gt = group(&report, "Top.gt");
+        let point = &gt.items[0];
+        assert_eq!(
+            point
+                .bins
+                .iter()
+                .map(|bin| (bin.name.as_str(), bin.hits))
+                .collect::<Vec<_>>(),
+            [("b[0]", 1), ("b[1]", 2), ("b[2]", 0)]
+        );
+        assert_eq!((gt.covered, gt.total), (2, 3));
+    }
+
+    /// 19.11.3: the automatic bins of a cross are united over the instances
+    /// by their names, "<binname1,...,binnameN>", as the bins of its
+    /// coverpoints are; without `merge_instances` the type is the average
+    /// of its instances.
+    fn merge_instances_with_crosses(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done, output longint unsigned merged, averaged, cross_merged,
+           output int covered, total);
+    bit a, b;
+    covergroup cg;
+        ca: coverpoint a;
+        cb: coverpoint b;
+        x: cross ca, cb;
+    endgroup
+    cg c1 = new, c2 = new;
+    initial begin
+        a = 0; b = 0; c1.sample(); c2.sample();
+        a = 1; b = 1; c2.sample();
+        averaged = $realtobits(cg::get_coverage());
+        cg::type_option.merge_instances = 1;
+        merged = $realtobits(cg::get_coverage());
+        cross_merged = $realtobits(cg::x::get_coverage(covered, total));
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        // `c1`: 50, 50 and 1 of 4; `c2`: 100, 100 and 2 of 4.
+        assert!(close(
+            real(&mut sim, "averaged"),
+            ((50.0 + 50.0 + 25.0) / 3.0 + (100.0 + 100.0 + 50.0) / 3.0) / 2.0
+        ));
+        // The union: both coverpoints whole, 2 of the 4 cross bins.
+        assert!(close(real(&mut sim, "merged"), (100.0 + 100.0 + 50.0) / 3.0));
+        assert_eq!(real(&mut sim, "cross_merged"), 50.0);
+        for (name, value) in [("covered", 2u8), ("total", 4)] {
+            let signal = sim.signal(name);
+            assert_eq!(sim.get(signal), BigUint::from(value), "{name}");
+        }
+    }
+
+    /// 19.8: with the two `ref int` arguments, `get_coverage` and
+    /// `get_inst_coverage` give the covered bins and the bins, of an item
+    /// or of the covergroup, of an instance or of all instances. The
+    /// example of the clause, with the values sampled as arguments of
+    /// `sample` (a `ref` argument of the covergroup is not supported):
+    /// totals 2, 5, 6 and 16.
+    fn coverage_counts_by_reference(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done, output int c0, t0, c1, t1, c2, t2, c3, t3,
+           output longint unsigned r0, r1, r2, r3);
+    covergroup cg (int xb, yb) with function sample(int x, int y);
+        coverpoint x {bins xbins[] = { [0:xb] }; }
+        coverpoint y {bins ybins[] = { [0:yb] }; }
+    endgroup
+    cg cv1 = new (1,2); // cv1.x has 2 bins, cv1.y has 3 bins
+    cg cv2 = new (3,6); // cv2.x has 4 bins, cv2.y has 7 bins
+    int covered, total;
+    initial begin
+        cv1.sample(0, 0);
+        cv2.sample(3, 6);
+        r0 = $realtobits(cv1.x.get_inst_coverage(covered,total)); c0 = covered; t0 = total;
+        r1 = $realtobits(cv1.get_inst_coverage(covered,total)); c1 = covered; t1 = total;
+        r2 = $realtobits(cg::x::get_coverage(covered,total)); c2 = covered; t2 = total;
+        r3 = $realtobits(cg::get_coverage(covered,total)); c3 = covered; t3 = total;
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        for (name, value) in [
+            ("c0", 1u8),
+            ("t0", 2),
+            ("c1", 2),
+            ("t1", 5),
+            ("c2", 2),
+            ("t2", 6),
+            ("c3", 4),
+            ("t3", 16),
+        ] {
+            let signal = sim.signal(name);
+            assert_eq!(sim.get(signal), BigUint::from(value), "{name}");
+        }
+        assert_eq!(real(&mut sim, "r0"), 50.0);
+        assert!(close(real(&mut sim, "r1"), (50.0 + 100.0 / 3.0) / 2.0));
+        // The type coverage of `x` is the average of its coverage in the
+        // instances, of the covergroup that of the instances (19.11.3).
+        assert!(close(real(&mut sim, "r2"), (50.0 + 25.0) / 2.0));
+        assert!(close(
+            real(&mut sim, "r3"),
+            ((50.0 + 100.0 / 3.0) / 2.0 + (25.0 + 100.0 / 7.0) / 2.0) / 2.0
+        ));
+    }
+
+    /// 19.8, Table 19-5: `get_coverage` and `get_inst_coverage` of a
+    /// coverpoint and of a cross, through an instance and, for the type,
+    /// through `::`.
+    fn item_methods(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done, output longint unsigned pi, pt, ps, xi, xt, xs);
+    bit [1:0] a, b;
+    covergroup cg;
+        pa: coverpoint a { bins lo = {[0:1]}; bins hi = {[2:3]}; }
+        coverpoint b { bins lo = {[0:1]}; bins hi = {[2:3]}; }
+        x: cross pa, b;
+    endgroup
+    cg c1 = new, c2 = new;
+    initial begin
+        a = 0; b = 0; c1.sample();
+        a = 2; b = 3; c2.sample();
+        a = 3; b = 0; c2.sample();
+        pi = $realtobits(c1.pa.get_inst_coverage());
+        pt = $realtobits(c1.pa.get_coverage());
+        ps = $realtobits(cg::b::get_coverage());
+        xi = $realtobits(c2.x.get_inst_coverage());
+        xt = $realtobits(c1.x.get_coverage());
+        xs = $realtobits(cg::x::get_coverage());
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        assert_eq!(real(&mut sim, "pi"), 50.0);
+        // `pa`: 50 in `c1`, 50 in `c2`; `b`: 50, 100.
+        assert_eq!(real(&mut sim, "pt"), 50.0);
+        assert_eq!(real(&mut sim, "ps"), 75.0);
+        // `x`: 1 of 4 in `c1`, 2 of 4 in `c2`.
+        assert_eq!(real(&mut sim, "xi"), 50.0);
+        assert_eq!(real(&mut sim, "xt"), 37.5);
+        assert_eq!(real(&mut sim, "xs"), 37.5);
+    }
+
+    /// 19.8: `stop()` and `start()` of the covergroup and of each item. A
+    /// stopped covergroup takes no sample, and evaluates nothing of one; a
+    /// stopped coverpoint counts none, nor do the crosses of it, and a
+    /// stopped cross counts none. An item collects while it and the
+    /// covergroup do.
+    fn start_and_stop(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done);
+    class holder; bit [1:0] v; endclass
+    bit [1:0] a, b;
+    holder h;
+    covergroup cg;
+        ca: coverpoint a;
+        cb: coverpoint b;
+        x: cross ca, cb;
+    endgroup
+    covergroup of_object;
+        coverpoint h.v;
+    endgroup
+    cg c = new;
+    of_object d = new;
+    initial begin
+        a = 0; b = 0; c.sample();
+        c.stop();
+        a = 1; b = 1; c.sample();
+        c.start(); c.ca.stop();
+        a = 2; b = 2; c.sample();
+        c.ca.start(); c.x.stop();
+        a = 3; b = 3; c.sample();
+        c.stop(); c.x.start(); c.x.stop(); c.start();
+        a = 1; b = 1; c.sample();
+        c.x.start();
+        a = 0; b = 0; c.sample();
+        d.stop();
+        d.sample();
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        let report = sim.coverage();
+        assert_eq!(samples(&report, "Top.cg"), [5]);
+        assert_eq!(
+            bins(&report, "Top.cg", 0, "ca"),
+            hits(&[("auto[0]", 2), ("auto[1]", 1), ("auto[2]", 0), ("auto[3]", 1)])
+        );
+        assert_eq!(
+            bins(&report, "Top.cg", 0, "cb"),
+            hits(&[("auto[0]", 2), ("auto[1]", 1), ("auto[2]", 1), ("auto[3]", 1)])
+        );
+        assert_eq!(counted(&report, "Top.cg", 0, "x"), (1, 16));
+        assert_eq!(
+            rows(&report, "Top.cg", 0, "x").0,
+            counting(&[("<auto[0],auto[0]>", 2)])
+        );
+        assert!(group(&report, "Top.cg").instances[0].collecting);
+        // A stopped covergroup did not read `h.v` of a `null` handle.
+        let d = &group(&report, "Top.of_object").instances[0];
+        assert_eq!(d.samples, 0);
+        assert!(!d.collecting);
+    }
+
+    /// 19.8, Table 19-1: `set_inst_name` sets the name of the instance,
+    /// which `option.name` reads and the report and the messages of the
+    /// instance show; `option.name` sets it too.
+    fn set_inst_name(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done, output int same);
+    bit [1:0] a;
+    covergroup cg;
+        coverpoint a { illegal_bins bad = {3}; }
+    endgroup
+    cg c1 = new, c2 = new, c3 = new;
+    string s;
+    initial begin
+        s = "first";
+        c1.set_inst_name(s);
+        c2.option.name = {"sec", "ond"};
+        same = c1.option.name == "first" && c2.option.name == "second";
+        a = 3; c1.sample();
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        let same = sim.signal("same");
+        assert_eq!(sim.get(same), BigUint::from(1u8));
+        let report = sim.coverage();
+        let names: Vec<_> = group(&report, "Top.cg")
+            .instances
+            .iter()
+            .map(|instance| instance.name.as_str())
+            .collect();
+        assert_eq!(names, ["first", "second", "Top.cg#2"]);
+        assert_eq!(
+            reports(sim.drain_runtime_events()),
+            [(
+                celox::Severity::Error,
+                "illegal_bins `bad` of coverpoint `a` of covergroup `Top.cg` (instance `first`): \
+                 value 3"
+                    .to_string()
+            )]
+        );
+    }
+
+    /// 19.7.1: `type_option` is a static member, which an instance only
+    /// names, of the covergroup and of its items: through a handle that is
+    /// `null` it is the member of the type.
+    fn type_option_through_an_instance(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done, output int weight, same);
+    bit [1:0] a;
+    covergroup cg;
+        cp: coverpoint a;
+    endgroup
+    cg h, never;
+    initial begin
+        never.type_option.weight = 4;
+        never.cp.type_option.comment = "of cp";
+        h = new;
+        h.cp.type_option.goal = 30;
+        weight = cg::type_option.weight;
+        same = never.cp.type_option.comment == "of cp" && cg::cp::type_option.goal == 30;
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        for (name, value) in [("weight", 4u8), ("same", 1)] {
+            let signal = sim.signal(name);
+            assert_eq!(sim.get(signal), BigUint::from(value), "{name}");
+        }
+        let report = sim.coverage();
+        let cg = group(&report, "Top.cg");
+        assert_eq!(cg.weight, 4);
+        assert_eq!(
+            (cg.items[0].comment.as_str(), cg.items[0].goal),
+            ("of cp", 30)
+        );
+    }
+
+    /// 19.7: "When set at the covergroup level, the weight, goal, comment,
+    /// and per_instance options do not act as default values to the lower
+    /// syntactic levels": a covergroup of weight 0 leaves the weights of its
+    /// items at 1 and its own coverage as it is, and drops out of the
+    /// coverage of the type (19.11.3).
+    fn group_weight_is_not_an_item_default(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done, output longint unsigned i1, ty, output int weight);
+    bit [1:0] a;
+    covergroup cg;
+        coverpoint a { bins lo = {[0:1]}; bins hi = {[2:3]}; }
+    endgroup
+    cg c1 = new, c2 = new;
+    initial begin
+        c1.option.weight = 0;
+        a = 0; c1.sample(); c2.sample();
+        a = 2; c1.sample();
+        i1 = $realtobits(c1.get_inst_coverage());
+        ty = $realtobits(cg::get_coverage());
+        weight = c1.a.option.weight;
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        assert_eq!(real(&mut sim, "i1"), 100.0);
+        assert_eq!(real(&mut sim, "ty"), 50.0);
+        let weight = sim.signal("weight");
+        assert_eq!(sim.get(weight), BigUint::from(1u8));
+        let report = sim.coverage();
+        assert_eq!(item(&report, "Top.cg", 0, "a").weight, 1);
+    }
+
+    /// The options and methods of an embedded covergroup are those of the
+    /// instance of each object (19.4): through the variable of the
+    /// covergroup in a method of the class and through an object.
+    fn embedded_covergroups_of_several_objects(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done, output longint unsigned r1, r2, output int c1, t1);
+    class C;
+        bit [1:0] v;
+        covergroup cg(int al);
+            cv: coverpoint v;
+        endgroup
+        function new(string name, int al);
+            cg = new(al);
+            cg.set_inst_name(name);
+            cg.cv.option.at_least = al;
+        endfunction
+        function void record(bit [1:0] value); v = value; cg.sample(); endfunction
+        function void pause(); cg.stop(); endfunction
+        function real inst(output int covered, total);
+            return cg.cv.get_inst_coverage(covered, total);
+        endfunction
+    endclass
+    C o1, o2;
+    initial begin
+        o1 = new("one", 1);
+        o2 = new("two", 2);
+        o1.record(0); o2.record(0); o2.record(1); o2.record(1);
+        o2.pause(); o2.record(2);
+        o1.cg.option.comment = "of one";
+        r1 = $realtobits(o1.inst(c1, t1));
+        r2 = $realtobits(o2.cg.get_inst_coverage());
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        assert_eq!(real(&mut sim, "r1"), 25.0);
+        // `o2` needs two hits: only `auto[1]` has them.
+        assert_eq!(real(&mut sim, "r2"), 25.0);
+        for (name, value) in [("c1", 1u8), ("t1", 4)] {
+            let signal = sim.signal(name);
+            assert_eq!(sim.get(signal), BigUint::from(value), "{name}");
+        }
+        let report = sim.coverage();
+        let instances = &group(&report, "C::cg").instances;
+        assert_eq!(
+            instances
+                .iter()
+                .map(|instance| (instance.name.as_str(), instance.samples, instance.collecting))
+                .collect::<Vec<_>>(),
+            [("one", 1, true), ("two", 3, false)]
+        );
+        assert_eq!(instances[0].comment, "of one");
+        assert_eq!(item(&report, "C::cg", 1, "cv").at_least, 2);
+    }
+
+    /// The options written after construction are part of a checkpoint:
+    /// restoring one restores them with the samples.
+    fn options_roll_back_with_a_checkpoint(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done, output int weight);
+    bit a;
+    covergroup cg;
+        coverpoint a;
+    endgroup
+    cg c = new;
+    initial begin
+        c.option.weight = 2;
+        c.a.option.at_least = 3;
+        cg::type_option.comment = "before";
+        #2;
+        c.option.weight = 5;
+        c.a.option.at_least = 1;
+        cg::type_option.comment = "after";
+        c.stop();
+        #2 weight = c.option.weight;
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let checkpoint = sim.checkpoint().unwrap();
+        sim.run_until(3).unwrap();
+        let options = |report: &celox::CoverageReport| {
+            let instance = &group(report, "Top.cg").instances[0];
+            (
+                instance.weight,
+                instance.items[0].at_least,
+                instance.collecting,
+                group(report, "Top.cg").comment.clone(),
+            )
+        };
+        assert_eq!(options(&sim.coverage()), (5, 1, false, "after".to_string()));
+        sim.restore(&checkpoint).unwrap();
+        assert_eq!(options(&sim.coverage()), (2, 3, true, "before".to_string()));
+        sim.run_until(5).unwrap();
+        let weight = sim.signal("weight");
+        assert_eq!(sim.get(weight), BigUint::from(5u8));
+    }
+
+    /// Table 19-1: `option.detect_overlap` warns, when an instance is
+    /// constructed, of two bins of a coverpoint whose values overlap.
+    fn detect_overlap_warns_at_new(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done);
+    bit [3:0] a, b;
+    covergroup cg(int hi);
+        option.detect_overlap = 1;
+        ca: coverpoint a { bins low = {[0:hi]}; bins high = {[4:15]}; }
+        cb: coverpoint b { option.detect_overlap = 0; bins x = {[0:8]}; bins y = {[4:15]}; }
+    endgroup
+    cg c1 = new(3), c2 = new(6);
+    initial done = 1;
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        let warned = reports(sim.drain_runtime_events());
+        assert_eq!(warned.len(), 1, "{warned:?}");
+        assert_eq!(warned[0].0, celox::Severity::Warning);
+        assert!(
+            warned[0].1.contains("coverpoint `ca`")
+                && warned[0].1.contains("bins `low` and `high` overlap"),
+            "{warned:?}"
+        );
+    }
+
+    /// Table 19-3: `type_option.distribute_first` distributes the values of
+    /// a bin array among its bins before its `with` filter is applied.
+    fn distribute_first_orders_the_filter(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done);
+    bit [2:0] a;
+    covergroup after;
+        coverpoint a { bins b[2] = {[0:7]} with (item < 3); }
+    endgroup
+    covergroup first;
+        type_option.distribute_first = 1;
+        coverpoint a { bins b[2] = {[0:7]} with (item < 3); }
+    endgroup
+    after c1 = new;
+    first c2 = new;
+    initial begin
+        a = 1; c1.sample(); c2.sample();
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        let report = sim.coverage();
+        // The values 0, 1 and 2 in two bins: 0, then 1 and 2.
+        assert_eq!(
+            bins(&report, "Top.after", 0, "a"),
+            hits(&[("b[0]", 0), ("b[1]", 1)])
+        );
+        // The values 0 to 3 and 4 to 7, then filtered: 0, 1 and 2, then
+        // none.
+        assert_eq!(bins(&report, "Top.first", 0, "a"), hits(&[("b[0]", 1)]));
+        assert_eq!(counted(&report, "Top.first", 0, "a"), (1, 1));
+    }
+}
+
+/// 19.7, 19.8: the options and methods of an instance read its handle, and
+/// through `null` they are a run-time error; those of the type do not
+/// (`get_coverage`, `type_option`).
+#[test]
+fn instance_options_and_methods_through_null() {
+    for (statement, faults) in [
+        ("n = never.get_inst_coverage(n, t) > 0;", true),
+        ("never.option.weight = 2;", true),
+        ("n = never.option.goal;", true),
+        ("never.cp.option.at_least = 2;", true),
+        ("never.start();", true),
+        ("never.cp.stop();", true),
+        ("never.set_inst_name(\"x\");", true),
+        ("n = never.get_coverage(n, t) >= 0;", false),
+        ("n = never.cp.get_coverage() >= 0;", false),
+        ("never.type_option.goal = 2;", false),
+        ("n = never.cp.type_option.weight;", false),
+    ] {
+        let source = format!(
+            "`timescale 1ns/1ns
+module Top(output int reached, done);
+    bit [1:0] a;
+    covergroup cg; cp: coverpoint a; endgroup
+    cg never;
+    int n, t;
+    initial begin
+        reached = 1;
+        #1 {statement}
+        #1 done = 1;
+    end
+endmodule
+"
+        );
+        let mut sim = simulation(&source).four_state(false).build().unwrap();
+        sim.run_until(0).unwrap();
+        let result = sim.run_until(3);
+        assert_eq!(result.is_err(), faults, "{statement}: {result:?}");
+        if let Err(error) = result {
+            assert!(error.to_string().contains("null"), "{statement}: {error}");
+        } else {
+            let done = sim.signal("done");
+            assert_eq!(sim.get(done), BigUint::from(1u8), "{statement}");
+        }
+    }
+}
+
+/// Options and methods of a covergroup in the clocked procedure that
+/// samples it, under the untimed `Simulator`: the weight of an item
+/// assigned from an input, `stop()` and `start()` from the state of the
+/// design. At every optimization level and in both state modes.
+#[test]
+fn options_and_methods_in_clocked_logic_under_simulator() {
+    let source = r#"module Top(input bit clk, input logic [1:0] d, input logic [3:0] w,
+           output bit [7:0] q, output int covered, output int at_least);
+    covergroup cg;
+        cd: coverpoint d;
+    endgroup
+    cg c;
+    int total;
+    always_ff @(posedge clk) q <= q + 8'd1;
+    always @(posedge clk) begin
+        if (c == null) c = new;
+        c.cd.option.weight = w;
+        if (q == 8'd2) c.stop();
+        if (q == 8'd4) c.start();
+        c.sample();
+        void'(c.cd.get_inst_coverage(covered, total));
+        at_least = c.cd.option.at_least + c.cd.option.weight;
+    end
+endmodule
+"#;
+    for level in [
+        celox::OptLevel::O0,
+        celox::OptLevel::O1,
+        celox::OptLevel::O2,
+    ] {
+        for four_state in [false, true] {
+            let mut sim =
+                Simulator::from_sv_sources(vec![(source, Path::new("covergroup_ff.sv"))], "Top")
+                    .four_state(four_state)
+                    .opt_level(level)
+                    .build()
+                    .unwrap();
+            let clk = sim.event("clk");
+            let d = sim.signal("d");
+            let w = sim.signal("w");
+            // `q` is the number of edges before the one that samples: the
+            // third and fourth are not counted.
+            for value in [0u8, 1, 2, 3, 3, 1] {
+                sim.modify(|io| {
+                    io.set(d, value);
+                    // The top bit set: the weight is 9, the value of the
+                    // unsigned input.
+                    io.set(w, 9u8);
+                })
+                .unwrap();
+                sim.tick(clk).unwrap();
+            }
+            let context = format!("{level:?} four_state={four_state}");
+            let report = sim.coverage();
+            assert_eq!(samples(&report, "Top.cg"), [4], "{context}");
+            assert_eq!(
+                bins(&report, "Top.cg", 0, "cd"),
+                hits(&[
+                    ("auto[0]", 1),
+                    ("auto[1]", 2),
+                    ("auto[2]", 0),
+                    ("auto[3]", 1)
+                ]),
+                "{context}"
+            );
+            assert_eq!(item(&report, "Top.cg", 0, "cd").weight, 9, "{context}");
+            let covered = sim.signal("covered");
+            assert_eq!(sim.get(covered), BigUint::from(3u8), "{context}");
+            let at_least = sim.signal("at_least");
+            assert_eq!(sim.get(at_least), BigUint::from(10u8), "{context}");
+        }
+    }
+}
+
+/// Table 19-1, Table 19-3: a weight "shall be a non-negative integral
+/// value": a procedure that assigns a negative one ends the simulation
+/// with an error.
+#[test]
+fn negative_weight_assigned_in_a_procedure_ends_the_simulation() {
+    for statement in [
+        "c.option.weight = -1;",
+        "c.cp.option.weight = -2;",
+        "cg::type_option.weight = -3;",
+        "cg::cp::type_option.weight = -4;",
+    ] {
+        let source = format!(
+            "`timescale 1ns/1ns
+module Top(output int done);
+    bit [1:0] a;
+    covergroup cg; cp: coverpoint a; endgroup
+    cg c = new;
+    initial begin
+        #1 {statement}
+        #1 done = 1;
+    end
+endmodule
+"
+        );
+        let mut sim = simulation(&source).four_state(false).build().unwrap();
+        let error = sim.run_until(3).unwrap_err().to_string();
+        assert!(error.contains("negative weight"), "{statement}: {error}");
+    }
+}
+
+sv_backends! {
+    /// 19.10: an `int` or `bit` member takes the value assigned to it as a
+    /// variable of its type does: an unsigned value narrower than 32 bits is
+    /// extended with zeros, a signed one by its sign, a wider one is cut, x
+    /// and z bits are 0 and a `real` is rounded, ties away from zero
+    /// (6.12.1, 10.7). For `option` and `type_option`, of the covergroup and
+    /// of a coverpoint.
+    fn option_values_take_the_type_of_the_member(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done, output longint unsigned cov,
+           output int g0, g1, g2, g3, g4, g5, g6, g7, g8, g9, g10, g11, g12, g13);
+    bit [1:0] a;
+    bit [3:0] b = 9;
+    bit [1:0] two = 2;
+    bit [39:0] wide = 40'h12_0000_0005;
+    byte neg = -3;
+    real r = 2.6;
+    covergroup cg;
+        cp: coverpoint a { bins lo = {[0:1]}; bins hi = {[2:3]}; }
+    endgroup
+    cg c = new;
+    initial begin
+        c.option.goal = b; g0 = c.option.goal;
+        c.option.goal = 8'hFF; g1 = c.option.goal;
+        c.option.goal = 1'b1; g2 = c.option.goal;
+        c.option.goal = wide; g3 = c.option.goal;
+        c.option.goal = neg; g4 = c.option.goal;
+        c.option.goal = r; g5 = c.option.goal;
+        c.option.goal = 2.5; g6 = c.option.goal;
+        c.option.goal = -0.4; g7 = c.option.goal;
+        c.cp.option.weight = 4'd9; g8 = c.cp.option.weight;
+        cg::type_option.goal = 8'hFF; g9 = cg::type_option.goal;
+        cg::cp::type_option.weight = r; g10 = cg::cp::type_option.weight;
+        c.type_option.goal = -2.5; g11 = c.type_option.goal;
+        c.type_option.merge_instances = 2'b10; g12 = c.type_option.merge_instances;
+        c.type_option.merge_instances = 0.6; g13 = cg::type_option.merge_instances;
+        c.cp.option.at_least = two;
+        a = 0; c.sample();
+        a = 2; c.sample();
+        cov = $realtobits(c.get_inst_coverage());
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        let expected: [i32; 14] = [9, 255, 1, 5, -3, 3, 3, 0, 9, 255, 3, -3, 0, 1];
+        for (index, value) in expected.into_iter().enumerate() {
+            let signal = sim.signal(&format!("g{index}"));
+            assert_eq!(sim.get(signal), BigUint::from(value as u32), "g{index}");
+        }
+        // Two hits needed and one in each bin: nothing is covered.
+        assert_eq!(real(&mut sim, "cov"), 0.0);
+        let report = sim.coverage();
+        let instance = &group(&report, "Top.cg").instances[0];
+        assert_eq!(instance.goal, 0);
+        assert_eq!(
+            (instance.items[0].weight, instance.items[0].at_least),
+            (9, 2)
+        );
+        let cg = group(&report, "Top.cg");
+        assert_eq!((cg.goal, cg.items[0].weight), (-3, 3));
+        assert!(cg.merge_instances);
+    }
+
+    /// 19.7.1: a `type_option` of the definition is a constant expression,
+    /// a `real` one among them, which the member takes rounded.
+    fn real_type_options_of_the_definition(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done);
+    bit a;
+    covergroup cg;
+        type_option.goal = 2.5;
+        cp: coverpoint a { bins b = {0}; type_option.weight = 1.5; }
+    endgroup
+    cg c = new;
+    initial done = 1;
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let report = sim.coverage();
+        let cg = group(&report, "Top.cg");
+        assert_eq!((cg.goal, cg.items[0].weight), (3, 2));
+    }
+}
+
+/// An `int` member assigned a value with x bits takes 0 for them, as an
+/// `int` variable does (6.11.2).
+#[test]
+fn option_values_with_unknown_bits_take_zero() {
+    let source = r#"`timescale 1ns/1ns
+module Top(output int done, output int goal, output int plain);
+    bit a;
+    logic [3:0] lx = 4'b1x01;
+    covergroup cg; coverpoint a; endgroup
+    cg c = new;
+    int i;
+    initial begin
+        c.option.goal = lx;
+        goal = c.option.goal;
+        i = lx;
+        plain = i;
+        done = 1;
+    end
+endmodule
+"#;
+    for four_state in [false, true] {
+        let mut sim = simulation(source).four_state(four_state).build().unwrap();
+        sim.run_until(1).unwrap();
+        let goal = sim.signal("goal");
+        let plain = sim.signal("plain");
+        assert_eq!(sim.get(goal), BigUint::from(9u8), "four_state={four_state}");
+        assert_eq!(sim.get(goal), sim.get(plain), "four_state={four_state}");
+    }
+}
+
+/// `$bits` of a member of an option structure, through the type as through
+/// an instance, is the width of its type (20.6.2, 19.10); the operand is not
+/// evaluated.
+#[test]
+fn bits_of_option_members() {
+    let source = r#"`timescale 1ns/1ns
+module Top(output int done, output int bits_type, bits_instance, bits_bit);
+    bit a;
+    covergroup cg; cp: coverpoint a; endgroup
+    cg never;
+    initial begin
+        bits_type = $bits(cg::type_option.weight);
+        bits_instance = $bits(never.cp.option.at_least);
+        bits_bit = $bits(cg::type_option.merge_instances);
+        done = 1;
+    end
+endmodule
+"#;
+    let mut sim = simulation(source).four_state(false).build().unwrap();
+    sim.run_until(1).unwrap();
+    for (name, value) in [("bits_type", 32u8), ("bits_instance", 32), ("bits_bit", 1)] {
+        let signal = sim.signal(name);
+        assert_eq!(sim.get(signal), BigUint::from(value), "{name}");
+    }
+}

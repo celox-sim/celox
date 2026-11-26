@@ -9,7 +9,7 @@
 //! when the subroutines are made.
 
 use super::*;
-use celox_heap::coverage::OptionId;
+use celox_heap::coverage::{OptionId, TypeOptionId};
 use celox_sv_syntax::{
     Bins, BinsArray, BinsKind, BinsValue, CoverageItem, CoverageOption, CoverageRange,
     CoverageRangeKind, CovergroupDeclaration, CovergroupKind, Coverpoint, CoverpointItem, Cross,
@@ -47,103 +47,172 @@ pub(in crate::ast) enum OptionType {
     Text,
 }
 
+/// A member of `option` or `type_option` as the heap keeps it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::ast) enum Member {
+    Option(OptionId),
+    Type(TypeOptionId),
+    /// `type_option.strobe`, which the heap does not keep: it has no effect
+    /// on a type without a clocking event (19.3), and a type with one that
+    /// sets it is rejected.
+    Strobe,
+}
+
 /// A member of `option` (Table 19-1): its name, whether a covergroup, a
-/// coverpoint and a cross have it (Table 19-2), and what a definition that
-/// assigns it compiles to, if the analysis supports the member.
+/// coverpoint and a cross have it (19.10), what it is to the heap, and
+/// whether it "can only be set in the covergroup definition" (19.7).
 #[allow(clippy::type_complexity)]
-const OPTIONS: [(&str, [bool; 3], Option<(OptionId, OptionType)>); 11] = [
+const OPTIONS: [(&str, [bool; 3], (OptionId, OptionType), bool); 11] = [
     (
         "name",
         [true, false, false],
-        Some((OptionId::Name, OptionType::Text)),
+        (OptionId::Name, OptionType::Text),
+        false,
     ),
     (
         "weight",
         [true, true, true],
-        Some((OptionId::Weight, OptionType::Int)),
+        (OptionId::Weight, OptionType::Int),
+        false,
     ),
     (
         "goal",
         [true, true, true],
-        Some((OptionId::Goal, OptionType::Int)),
+        (OptionId::Goal, OptionType::Int),
+        false,
     ),
     (
         "comment",
         [true, true, true],
-        Some((OptionId::Comment, OptionType::Text)),
+        (OptionId::Comment, OptionType::Text),
+        false,
     ),
     (
         "at_least",
         [true, true, true],
-        Some((OptionId::AtLeast, OptionType::Int)),
+        (OptionId::AtLeast, OptionType::Int),
+        false,
     ),
     (
         "auto_bin_max",
         [true, true, false],
-        Some((OptionId::AutoBinMax, OptionType::Int)),
+        (OptionId::AutoBinMax, OptionType::Int),
+        true,
     ),
     (
         "cross_num_print_missing",
         [true, false, true],
-        Some((OptionId::CrossNumPrintMissing, OptionType::Int)),
+        (OptionId::CrossNumPrintMissing, OptionType::Int),
+        false,
     ),
     (
         "cross_retain_auto_bins",
         [true, false, true],
-        Some((OptionId::CrossRetainAutoBins, OptionType::Bit)),
+        (OptionId::CrossRetainAutoBins, OptionType::Bit),
+        true,
     ),
-    ("detect_overlap", [true, true, false], None),
+    (
+        "detect_overlap",
+        [true, true, false],
+        (OptionId::DetectOverlap, OptionType::Bit),
+        true,
+    ),
     (
         "per_instance",
         [true, false, false],
-        Some((OptionId::PerInstance, OptionType::Bit)),
+        (OptionId::PerInstance, OptionType::Bit),
+        true,
     ),
-    ("get_inst_coverage", [true, false, false], None),
+    (
+        "get_inst_coverage",
+        [true, false, false],
+        (OptionId::GetInstCoverage, OptionType::Bit),
+        true,
+    ),
 ];
 
-/// A member of `type_option` (Table 19-3): its name and whether a
-/// covergroup, a coverpoint and a cross have it (19.10).
-const TYPE_OPTIONS: [(&str, [bool; 3]); 7] = [
-    ("weight", [true, true, true]),
-    ("goal", [true, true, true]),
-    ("comment", [true, true, true]),
-    ("strobe", [true, false, false]),
-    ("merge_instances", [true, false, false]),
-    ("distribute_first", [true, false, false]),
-    ("real_interval", [true, true, false]),
+/// A member of `type_option` (Table 19-3): its name, whether a covergroup,
+/// a coverpoint and a cross have it (19.10), what it is to the heap if the
+/// analysis supports it, and whether it "can only be set in the covergroup
+/// definition" (19.7.1).
+#[allow(clippy::type_complexity)]
+const TYPE_OPTIONS: [(&str, [bool; 3], Option<(Member, OptionType)>, bool); 7] = [
+    (
+        "weight",
+        [true, true, true],
+        Some((Member::Type(TypeOptionId::Weight), OptionType::Int)),
+        false,
+    ),
+    (
+        "goal",
+        [true, true, true],
+        Some((Member::Type(TypeOptionId::Goal), OptionType::Int)),
+        false,
+    ),
+    (
+        "comment",
+        [true, true, true],
+        Some((Member::Type(TypeOptionId::Comment), OptionType::Text)),
+        false,
+    ),
+    (
+        "strobe",
+        [true, false, false],
+        Some((Member::Strobe, OptionType::Bit)),
+        true,
+    ),
+    (
+        "merge_instances",
+        [true, false, false],
+        Some((Member::Type(TypeOptionId::MergeInstances), OptionType::Bit)),
+        false,
+    ),
+    (
+        "distribute_first",
+        [true, false, false],
+        Some((Member::Type(TypeOptionId::DistributeFirst), OptionType::Bit)),
+        false,
+    ),
+    ("real_interval", [true, true, false], None, true),
 ];
 
-/// What the definition-level assignment `option` at `level` compiles to:
-/// the member of the heap and its type. An error is what the standard
-/// excludes, a member that does not exist or that the level has not
-/// (19.7, 19.10); `Ok(Err(_))` is the rejection of a member, or of a
-/// `type_option`, that the analysis does not support.
-pub(in crate::ast) fn option_member(
-    option: &CoverageOption,
+/// Member `member` of `type_option` if `type_option`, else of `option`, at
+/// `level` of covergroup `display`, which the definition assigns if
+/// `defined`, else a procedure uses: what it is to the heap and whether it
+/// can be set only in the definition. An error is a member that does not
+/// exist or that the level has not (19.10); `Ok(Err(_))` is the rejection
+/// of a member the analysis does not support.
+#[allow(clippy::type_complexity)]
+fn lookup(
+    type_option: bool,
+    member: &str,
     level: Level,
     display: &str,
-) -> Converted<Result<(OptionId, OptionType), AnalyzerError>> {
-    let member = instances::normalize_identifier(&option.member.spelling);
-    let structure = if option.type_option {
-        "type_option"
-    } else {
-        "option"
-    };
-    let found = if option.type_option {
+    defined: bool,
+) -> Converted<Result<((Member, OptionType), bool), AnalyzerError>> {
+    let structure = if type_option { "type_option" } else { "option" };
+    let found = if type_option {
         TYPE_OPTIONS
             .iter()
             .find(|(name, ..)| *name == member)
-            .map(|&(_, levels)| (levels, None))
+            .map(|&(_, levels, compiled, definition)| (levels, compiled, definition))
     } else {
-        OPTIONS
-            .iter()
-            .find(|(name, ..)| *name == member)
-            .map(|&(_, levels, compiled)| (levels, compiled))
+        OPTIONS.iter().find(|(name, ..)| *name == member).map(
+            |&(_, levels, (id, kind), definition)| {
+                (levels, Some((Member::Option(id), kind)), definition)
+            },
+        )
     };
-    let Some((levels, compiled)) = found else {
-        return Err(invalid(format!(
-            "`{structure}` has no member `{member}`, which covergroup `{display}` assigns (IEEE 1800-2023 19.10)"
-        )));
+    let Some((levels, compiled, definition)) = found else {
+        return Err(invalid(if defined {
+            format!(
+                "`{structure}` has no member `{member}`, which covergroup `{display}` assigns (IEEE 1800-2023 19.10)"
+            )
+        } else {
+            format!(
+                "`{structure}` of covergroup `{display}` has no member `{member}` (IEEE 1800-2023 19.10)"
+            )
+        }));
     };
     let has = levels[match level {
         Level::Covergroup => 0,
@@ -152,17 +221,64 @@ pub(in crate::ast) fn option_member(
     }];
     if !has {
         return Err(invalid(format!(
-            "`{structure}.{member}` is assigned in {} of covergroup `{display}`, which has no such member (IEEE 1800-2023 19.10)",
+            "`{structure}.{member}` is {} {} of covergroup `{display}`, which has no such member (IEEE 1800-2023 19.10)",
+            if defined { "assigned in" } else { "used on" },
             level.noun()
         )));
     }
     Ok(match compiled {
-        Some(compiled) if !option.type_option => Ok(compiled),
-        _ if option.type_option => Err(unsupported(
-            "covergroup type_option (IEEE 1800-2023 19.7.1)",
-        )),
+        Some(compiled) => Ok((compiled, definition)),
+        None => Err(unsupported(format!(
+            "covergroup {structure}.{member} (IEEE 1800-2023 19.7.1)"
+        ))),
+    })
+}
+
+/// What the definition-level assignment `option` at `level` compiles to:
+/// the member of the heap and its type. An error is what the standard
+/// excludes, a member that does not exist or that the level has not
+/// (19.7, 19.10); `Ok(Err(_))` is the rejection of a member that the
+/// analysis does not support.
+pub(in crate::ast) fn option_member(
+    option: &CoverageOption,
+    level: Level,
+    display: &str,
+) -> Converted<Result<(Member, OptionType), AnalyzerError>> {
+    let member = instances::normalize_identifier(&option.member.spelling);
+    Ok(lookup(option.type_option, &member, level, display, true)?.map(|(compiled, _)| compiled))
+}
+
+/// What a use of member `member` of `type_option` if `type_option`, else of
+/// `option`, of `level` of covergroup `display` in a procedure is: a write
+/// if `write` (19.7, 19.7.1). The members that "can only be set in the
+/// covergroup definition" are errors to write; `Ok(Err(_))` is the
+/// rejection of what the analysis does not support, a member the heap does
+/// not keep.
+pub(in crate::ast) fn procedural_member(
+    type_option: bool,
+    member: &str,
+    level: Level,
+    display: &str,
+    write: bool,
+) -> Converted<Result<(Member, OptionType), AnalyzerError>> {
+    let structure = if type_option { "type_option" } else { "option" };
+    let found = lookup(type_option, member, level, display, false)?;
+    let definition = match &found {
+        Ok((_, definition)) => *definition,
+        // `real_interval` can be set only in the definition, as `strobe`.
+        Err(_) => true,
+    };
+    if write && definition {
+        return Err(invalid(format!(
+            "`{structure}.{member}` of {} of covergroup `{display}` is assigned in a procedure: it can be set only in the covergroup definition (IEEE 1800-2023 {})",
+            level.noun(),
+            if type_option { "19.7.1" } else { "19.7" }
+        )));
+    }
+    Ok(match found {
+        Ok((compiled, _)) if !matches!(compiled.0, Member::Strobe) => Ok(compiled),
         _ => Err(unsupported(format!(
-            "covergroup option `{member}` (IEEE 1800-2023 19.7)"
+            "covergroup {structure}.{member} read in a procedure (IEEE 1800-2023 19.7.1)"
         ))),
     })
 }

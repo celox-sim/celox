@@ -613,6 +613,7 @@ pub(super) fn lower_class(
                 state,
                 item,
                 Some(&class),
+                true,
             )
             .map_err(crate::ast::covergroups::rejected)?,
         );
