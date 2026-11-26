@@ -1,1 +1,6 @@
-Rebased onto master to resolve conflicts in warning.rs (new warning labels) and diagnostic_policy.rs (STRICT_CODES grew on both sides); kept both sides and bumped the count to 12.
+Revision history for #4705:
+
+rev 2 (content) 2026-11-26 07:39 UTC — Rebased onto master to resolve conflicts in warning.rs (new warning labels) and diagnostic_policy.rs (STRICT_CODES grew on both sides); kept both sides and bumped the count to 12.
+rev 1 (initial) 2026-11-26 07:39 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":4705,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"29fd599715faef1d67a6190ab545c4d5aa87aefe","timestamp_iso":"2026-11-26T07:39:46Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"29fd599715faef1d67a6190ab545c4d5aa87aefe","new_sha":"794ce009fa4f266aba27ca5d463c4172cfbd6ac6","timestamp_iso":"2026-11-26T07:39:46Z","reason":"Rebased onto master to resolve conflicts in warning.rs (new warning labels) and diagnostic_policy.rs (STRICT_CODES grew on both sides); kept both sides and bumped the count to 12.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/29fd599715faef1d67a6190ab545c4d5aa87aefe...794ce009fa4f266aba27ca5d463c4172cfbd6ac6"}]} -->
