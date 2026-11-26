@@ -18,6 +18,11 @@ pub(crate) struct Session {
     pub(super) foreign_arguments: Vec<(String, classes::specializations::BoundArguments)>,
     pub(super) foreign_names: Vec<(String, classes::specializations::BoundArguments, String)>,
     pub(super) foreign_error: Option<AnalyzerError>,
+    /// Whether a scope analysis that makes the specializations requested of
+    /// package class templates once it ends is running, so that a request
+    /// waits for it rather than analyzing the package at once (see
+    /// [`classes::foreign::build_requested`]).
+    pub(super) foreign_requests_wait: bool,
     pub(super) dimensions: dimensions::State,
     pub(super) inline_randomizations: Vec<classes::constraints::Inline>,
     pub(super) next_call_site: usize,
