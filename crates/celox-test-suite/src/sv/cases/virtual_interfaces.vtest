@@ -1564,3 +1564,49 @@ endmodule
 "#)
   (top Top) (run_until 20)
   (assert_eq ok 1))
+
+; IEEE 1800-2023 25.9, 26.3: the members of a virtual interface keep the
+; types the interface declares, whose bounds may name constants of a
+; package it imports, at file scope or inside it, or qualifies.
+(case members_sized_by_imported_constants
+  (source "imported_widths.sv" #"
+package g; parameter int W = 12; endpackage
+import g::*;
+interface file_scope(input logic clk);
+  logic [W-1:0] v;
+  task sample(output int r); @(posedge clk); r = $bits(v) + v; endtask
+endinterface
+interface local_import(input logic clk);
+  import g::*;
+  logic [W-1:0] v;
+  task sample(output int r); @(posedge clk); r = $bits(v) + v; endtask
+endinterface
+interface qualified #(int N = 2) (input logic clk);
+  logic [N*g::W-1:0] v;
+  task sample(output int r); @(posedge clk); r = $bits(v) + v; endtask
+endinterface
+module Top(output int a, output int b, output int c, output bit done);
+  logic clk = 0;
+  always #5 clk = ~clk;
+  file_scope fa(.clk(clk));
+  local_import fb(.clk(clk));
+  qualified fc(.clk(clk));
+  class D;
+    virtual file_scope va;
+    virtual local_import vb;
+    virtual qualified vc;
+    task run(output int a, output int b, output int c);
+      va.v = 3; vb.v = 4; vc.v = 5;
+      va.sample(a); vb.sample(b); vc.sample(c);
+    endtask
+  endclass
+  initial begin
+    D d = new;
+    d.va = fa; d.vb = fb; d.vc = fc;
+    d.run(a, b, c);
+    done = 1;
+  end
+endmodule
+"#)
+  (top Top) (run_until 100)
+  (assert_eq a 15) (assert_eq b 16) (assert_eq c 29) (assert_eq done 1))
