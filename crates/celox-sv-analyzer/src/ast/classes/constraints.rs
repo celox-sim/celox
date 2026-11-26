@@ -535,26 +535,26 @@ fn element(
         return Ok(None);
     }
     let native = tree.declarations();
-    let (level, member, width, signed) =
-        match element_member(id, tree, session, properties, names, env, inputs, loops)? {
-            Some((level, property)) => (
-                level,
-                Some(property.field.offset),
-                property.field.width,
-                property.field.signed,
-            ),
-            None => {
-                let Some(level) = loop_element(id, native, properties, names, inputs, loops)?
-                else {
-                    return Ok(None);
-                };
-                let element = &loops[level].element;
-                if !solver_element(element, tree, session, env) {
-                    return Err("a constraint array element other than 2-state integral".into());
-                }
-                (level, None, element.layout.width, element.layout.signed)
+    let (level, member, width, signed) = match element_member(
+        id, tree, session, properties, names, env, inputs, loops,
+    )? {
+        Some((level, property)) => (
+            level,
+            Some(property.field.offset),
+            property.field.width,
+            property.field.signed,
+        ),
+        None => {
+            let Some(level) = loop_element(id, native, properties, names, inputs, loops)? else {
+                return Ok(None);
+            };
+            let element = &loops[level].element;
+            if !solver_element(element, tree, session, env) {
+                return Err("a constraint array element other than 2-state integral ones of at most 64 bits".into());
             }
-        };
+            (level, None, element.layout.width, element.layout.signed)
+        }
+    };
     Ok(Some(Typed {
         kind: Kind::Leaf(ConstraintExpr::Element {
             level: level as u32,
@@ -620,7 +620,9 @@ fn element_at(
     visible(property, tree, session, env)?;
     let element = property.array_storage().expect("an array property").clone();
     if !solver_element(&element, tree, session, env) {
-        return Err("a constraint array element other than 2-state integral".into());
+        return Err(
+            "a constraint array element other than 2-state integral ones of at most 64 bits".into(),
+        );
     }
     let array = properties[..position]
         .iter()
@@ -2968,17 +2970,37 @@ impl Class {
 }
 
 /// Whether the solver can randomize array property `property`, a dynamic
-/// array or queue or a fixed-size array: one of 2-state integral elements
-/// of at most 64 bits.
+/// array or queue or a fixed-size array: one of 2-state integral elements,
+/// which are its variables (see [`solver_element`]) unless they are wider
+/// than 64 bits (see [`random_record_width`]).
 pub(in crate::ast) fn random_array(
     property: &Property,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
 ) -> bool {
-    property
-        .array_storage()
-        .is_some_and(|container| solver_element(container, tree, session, env))
+    property.array_storage().is_some_and(|container| {
+        solver_element(container, tree, session, env) || random_record_width(container) != 0
+    })
+}
+
+/// The width of the elements of `container` when they are 2-state integral
+/// values wider than 64 bits, each held in a record: a random array gets
+/// random ones, as no constraint can name them (IEEE 1800-2023 18.4). 0
+/// for others.
+fn random_record_width(container: &ContainerType) -> u32 {
+    match container.record.as_ref().map(|record| &record.fields[..]) {
+        Some([field])
+            if container.element.unpacked_struct().is_none()
+                && container.element.enum_domain().is_none()
+                && field.handle.is_none()
+                && !field.four_state
+                && !field.real =>
+        {
+            field.width
+        }
+        _ => 0,
+    }
 }
 
 /// Dynamic array or queue property `property` of a constraint program: a
@@ -2999,7 +3021,7 @@ pub(in crate::ast) fn array(
         }
         if !random_array(property, tree, session, env) {
             return Err(unsupported(
-                "rand dynamic arrays and queues currently require 2-state integral elements of at most 64 bits",
+                "rand dynamic arrays and queues currently require 2-state integral elements",
             ));
         }
     }
@@ -3039,6 +3061,7 @@ pub(in crate::ast) fn array(
                     .collect()
             })
             .unwrap_or_default(),
+        record_width: random_record_width(container),
     })
 }
 

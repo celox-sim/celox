@@ -247,6 +247,11 @@ pub struct Array {
     /// others.
     #[serde(default)]
     pub domain: Vec<u64>,
+    /// The width of 2-state integral elements wider than 64 bits, each held
+    /// in a record of one field (see [`crate::RECORD_CLASS`]), which no
+    /// constraint names: a random array gets random ones. 0 for others.
+    #[serde(default)]
+    pub record_width: u32,
 }
 
 /// The size up to which a random array's size is first sought; only when
@@ -1231,6 +1236,27 @@ impl Heap {
     /// Store solution `value` in `field` of `object`, as [`Self::field_bits`]
     /// reads it: a 4-state field holds the complements of the value and of
     /// a mask without X or Z bits.
+    /// The handle of a record of one 2-state field of `width` bits with
+    /// random bits that `object` draws.
+    fn random_record(&mut self, object: Handle, width: u32) -> u64 {
+        let bytes = width.div_ceil(8) as usize;
+        let mut value = Vec::with_capacity(bytes.next_multiple_of(8));
+        while value.len() < bytes {
+            value.extend_from_slice(&self.random_object(object).to_le_bytes());
+        }
+        value.truncate(bytes);
+        if !width.is_multiple_of(8)
+            && let Some(last) = value.last_mut()
+        {
+            *last &= (1 << (width % 8)) - 1;
+        }
+        let record = self.new_object(crate::RECORD_CLASS, bytes);
+        if let Some(target) = self.object_bytes_mut(record) {
+            target.copy_from_slice(&value);
+        }
+        self.finish_record(record).into()
+    }
+
     fn store_field(&mut self, object: Handle, field: &Field, value: u64) {
         let bytes = field.width.div_ceil(8) as usize;
         if field.four_state {
@@ -3072,6 +3098,9 @@ impl Heap {
                         let elements = solved.unwrap_or_else(|| {
                             (0..length)
                                 .map(|_| {
+                                    if array.record_width != 0 {
+                                        return self.random_record(object, array.record_width);
+                                    }
                                     let draw = self.random_object(object);
                                     if array.domain.is_empty() {
                                         draw & mask
@@ -3689,6 +3718,7 @@ mod tests {
                 width: 8,
                 random: true,
                 domain: Vec::new(),
+                record_width: 0,
             }],
             constraints: vec![
                 compare(
@@ -3748,6 +3778,7 @@ mod tests {
                 width: 8,
                 random: true,
                 domain: Vec::new(),
+                record_width: 0,
             }],
             constraints: vec![
                 compare(
@@ -3848,6 +3879,7 @@ mod tests {
                 width: 8,
                 random: true,
                 domain: Vec::new(),
+                record_width: 0,
             }],
             constraints: vec![
                 Expr::Soft {
@@ -3976,6 +4008,7 @@ mod tests {
                 width: 8,
                 random: true,
                 domain: Vec::new(),
+                record_width: 0,
             }],
             constraints: vec![
                 binary(
@@ -4026,6 +4059,7 @@ mod tests {
             width: 8,
             random: true,
             domain: Vec::new(),
+            record_width: 0,
         };
         let size = |op: &str, value| Expr::Binary {
             op: op.into(),
@@ -4153,6 +4187,7 @@ mod tests {
                 width: 8,
                 random: true,
                 domain: Vec::new(),
+                record_width: 0,
             }],
             constraints: vec![
                 // c == 1 -> 4096 < size < 4100; c == 0 -> size < 10.
