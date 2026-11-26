@@ -888,12 +888,79 @@ impl Packages {
         }
         // Package bodies can query selected hierarchy roots while they are
         // collected, before any module is analyzed.
+        // The specializations the packages ask of the class templates of
+        // others are collected in rounds of analyses of every package,
+        // which make none: the declarations of those each round asked for
+        // are then made at once, and the next round may ask for more
+        // through them. Once a round asks for none, the full analyses of
+        // all are made once, with the symbols every package hands over,
+        // and each package is analyzed with them. A package analyzed
+        // before any request keeps its analysis.
+        let mut kept: HashMap<usize, Arc<Package>> = HashMap::default();
+        let mut stable: HashMap<usize, Arc<Package>> = HashMap::default();
+        for round_index in 0..64 {
+            let mut round = Self {
+                timescales: timescales.clone(),
+                ..Self::default()
+            };
+            session.foreign_batch = true;
+            for &index in &order {
+                let (name, tree) = &declarations[index];
+                if !round.packages.is_empty() {
+                    round.build_design_subroutines();
+                }
+                let package = match kept.get(&index).or_else(|| stable.get(&index)) {
+                    Some(package) => package.clone(),
+                    None => {
+                        // An analysis of a package again starts afresh, as
+                        // another pass of a scope does.
+                        if round_index > 0 {
+                            fresh_scope(session);
+                        }
+                        let before = session.foreign.has_requests();
+                        let asked = session.foreign.request_count();
+                        // A package whose analysis fails, for want of the
+                        // specializations it asks for or of a package it
+                        // uses, is analyzed again in the next round; the
+                        // last analysis reports a lasting error.
+                        let Ok(package) = analyze_package(name, tree, &round, session) else {
+                            continue;
+                        };
+                        let package = Arc::new(Package {
+                            dependencies: dependencies[index].clone(),
+                            ..package
+                        });
+                        if !before && !session.foreign.has_requests() {
+                            kept.insert(index, package.clone());
+                        } else if session.foreign.request_count() == asked {
+                            // A package that asked for nothing new has what
+                            // it asks for: later rounds take this analysis.
+                            stable.insert(index, package.clone());
+                        }
+                        package
+                    }
+                };
+                round.packages.insert(name.clone(), package);
+            }
+            session.foreign_batch = false;
+            if !classes::foreign::build_requested(session) {
+                break;
+            }
+        }
+        classes::foreign::finish_kept(session)?;
         let mut packages = Self {
             timescales,
             ..Self::default()
         };
         for index in order {
             let (name, tree) = &declarations[index];
+            if let Some(package) = kept.get(&index) {
+                packages.packages.insert(name.clone(), package.clone());
+                continue;
+            }
+            // The last analysis of a package, after the rounds, starts
+            // afresh, as the last pass of a scope does.
+            fresh_scope(session);
             // A specialization of a class template of a package analyzed
             // before, for a class of another, may call that class's
             // methods, as `uvm_object_registry#(T)` calls `T::new`: the
@@ -913,6 +980,17 @@ impl Packages {
         }
         Ok(packages)
     }
+}
+
+/// Forget what the last scope analysis made of classes and their
+/// specializations, as a scope analyzed again does (see
+/// `Module::from_selected_scope`).
+fn fresh_scope(session: &mut Session) {
+    session.classes.clear();
+    session.class_specializations.clear();
+    session.class_specialization_names.clear();
+    session.foreign_error.take();
+    session.foreign_names.clear();
 }
 
 /// The variables package `name` declares: each is one object, shared by
