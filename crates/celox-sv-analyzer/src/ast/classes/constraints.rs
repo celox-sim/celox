@@ -1,5 +1,6 @@
 //! Scalar constraint binding. Unsupported forms fail before any RNG draws.
 use super::*;
+use crate::system_functions::SystemFunction;
 use celox_heap::randomization::{Array, Expr as ConstraintExpr, Field, Program};
 use celox_sv_syntax::{ExprId, ExprKind};
 
@@ -1142,6 +1143,83 @@ pub(in crate::ast) fn element_names(
 /// function the constraints of a class make (see `Class::constraint_calls`),
 /// which its randomize call places after the inputs it has.
 pub(in crate::ast) const RESULT_INPUTS: usize = 1 << 28;
+
+/// The bit-vector system function (IEEE 1800-2023 20.9) that `callee`
+/// names.
+pub(in crate::ast) fn bit_vector_function(
+    callee: ExprId,
+    native: &celox_sv_syntax::Declarations,
+) -> Option<SystemFunction> {
+    let ExprKind::Name(name) = &native.expression(callee).kind else {
+        return None;
+    };
+    SystemFunction::from_name(&name.spelling).filter(|function| {
+        matches!(
+            function,
+            SystemFunction::Countbits
+                | SystemFunction::Countones
+                | SystemFunction::Onehot
+                | SystemFunction::Onehot0
+                | SystemFunction::Isunknown
+        )
+    })
+}
+
+/// The value, `0`, `1`, `x` or `z`, of control bit `id` of `$countbits`:
+/// the least significant bit of a constant (IEEE 1800-2023 20.9), as a
+/// literal gives it with its X and Z bits.
+fn control_bit(
+    id: ExprId,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    env: &ConstEnv,
+) -> Result<char, String> {
+    let native = tree.declarations();
+    if let ExprKind::Literal(text) = &native
+        .expression(expression_binding::ungroup(id, native))
+        .kind
+    {
+        let text = text.replace('_', "");
+        let (base, digits) = match text.split_once('\'') {
+            // An unbased unsized literal, `'x`, is its one digit.
+            Some((_, based)) => {
+                let based = based.trim_start_matches(['s', 'S']);
+                match based.chars().next() {
+                    Some(base @ ('b' | 'B' | 'o' | 'O' | 'd' | 'D' | 'h' | 'H')) => {
+                        (base.to_ascii_lowercase(), based[1..].trim())
+                    }
+                    _ => ('b', based.trim()),
+                }
+            }
+            None => ('d', text.trim()),
+        };
+        let last = digits
+            .chars()
+            .last()
+            .ok_or("`$countbits` control bit literal")?;
+        return Ok(match last.to_ascii_lowercase() {
+            'x' => 'x',
+            'z' | '?' => 'z',
+            _ => {
+                let odd = if base == 'd' {
+                    digits
+                        .parse::<num_bigint::BigUint>()
+                        .map_err(|_| "`$countbits` control bit literal")?
+                        .bit(0)
+                } else {
+                    last.to_digit(16)
+                        .ok_or("`$countbits` control bit literal")?
+                        & 1
+                        == 1
+                };
+                if odd { '1' } else { '0' }
+            }
+        });
+    }
+    let value = constant(id, tree, session, env)
+        .ok_or("`$countbits` with a control bit other than a constant in a constraint")?;
+    Ok(if value & 1 == 1 { '1' } else { '0' })
+}
 
 /// Record the call of function `callee` of the class whose constraints are
 /// being bound, with `arguments` (IEEE 1800-2023 18.5.11): its index among
@@ -2419,6 +2497,79 @@ pub(in crate::ast) fn bind_inputs(
                     kind: Kind::Binary(operator.clone(), Box::new(a), Box::new(b)),
                 }
             }
+            // A bit-vector system function (IEEE 1800-2023 20.9): the number
+            // of bits of its self-determined argument that have one of the
+            // values it counts, an `int`, or a comparison of it, a `bit`.
+            ExprKind::Call {
+                expression: callee,
+                arguments,
+            } if bit_vector_function(*callee, native).is_some() => {
+                let function = bit_vector_function(*callee, native).expect("a bit-vector function");
+                let name = function.name();
+                if arguments.iter().any(|argument| argument.name.is_some()) {
+                    return Err(format!("`{name}` with a named argument"));
+                }
+                let mut values = arguments.iter().map(|argument| argument.value);
+                let Some(Some(argument)) = values.next() else {
+                    return Err(format!("`{name}` without an argument"));
+                };
+                let controls = values.collect::<Vec<_>>();
+                let counted = if function == SystemFunction::Countbits {
+                    if controls.is_empty() {
+                        return Err("`$countbits` without a control bit".into());
+                    }
+                    let mut counted = ['0', '1', 'x', 'z'].map(|_| false);
+                    for control in controls {
+                        let control = control.ok_or("`$countbits` with an empty control bit")?;
+                        let bit = control_bit(control, tree, session, env)?;
+                        counted[match bit {
+                            '0' => 0,
+                            '1' => 1,
+                            'x' => 2,
+                            _ => 3,
+                        }] = true;
+                    }
+                    counted
+                } else {
+                    if !controls.is_empty() {
+                        return Err(format!("`{name}` with more than one argument"));
+                    }
+                    [
+                        false,
+                        function != SystemFunction::Isunknown,
+                        function == SystemFunction::Isunknown,
+                        function == SystemFunction::Isunknown,
+                    ]
+                };
+                // The solver holds the X and Z bits of a value as one mask.
+                if counted[2] != counted[3] {
+                    return Err(
+                        "`$countbits` counting X bits apart from Z bits in a constraint".into(),
+                    );
+                }
+                let value = recurse(session, budget, argument)?;
+                let count = Typed {
+                    kind: Kind::Leaf(ConstraintExpr::CountBits {
+                        value: Box::new(emit(value, None)),
+                        ones: counted[1],
+                        zeros: counted[0],
+                        unknown: counted[2],
+                    }),
+                    width: 32,
+                    signed: true,
+                };
+                let int = |value| Typed {
+                    kind: Kind::Leaf(ConstraintExpr::Literal(32, value)),
+                    width: 32,
+                    signed: true,
+                };
+                match function {
+                    SystemFunction::Onehot => relation("==", count, int(1)),
+                    SystemFunction::Onehot0 => relation("<=", count, int(1)),
+                    SystemFunction::Isunknown => relation("!=", count, int(0)),
+                    _ => count,
+                }
+            }
             ExprKind::Call {
                 expression: callee,
                 arguments,
@@ -2691,7 +2842,9 @@ fn operand_variables(
                 .is_some_and(|property| property.rand && !property.randc),
         ),
         ConstraintExpr::Sum(_) => variables.push(false),
-        ConstraintExpr::Resize { value, .. } | ConstraintExpr::Unary { value, .. } => {
+        ConstraintExpr::Resize { value, .. }
+        | ConstraintExpr::Unary { value, .. }
+        | ConstraintExpr::CountBits { value, .. } => {
             operand_variables(value, properties, member, variables);
         }
         ConstraintExpr::Binary { left, right, .. } => {

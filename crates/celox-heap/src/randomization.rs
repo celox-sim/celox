@@ -138,6 +138,17 @@ pub enum Expr {
         right: Box<Expr>,
         signed: bool,
     },
+    /// The number of bits of `value` that are 1 with `ones`, 0 with `zeros`
+    /// and X or Z with `unknown`, a 32-bit `int` (IEEE 1800-2023 20.9): the
+    /// value of `$countbits`, `$countones`, and of the comparisons
+    /// `$onehot`, `$onehot0` and `$isunknown` make of it. Its X and Z bits
+    /// are counted or not, never unknown, so it has none.
+    CountBits {
+        value: Box<Expr>,
+        ones: bool,
+        zeros: bool,
+        unknown: bool,
+    },
     /// `value dist { ... }` (IEEE 1800-2023 18.5.3): true while `membership`
     /// is, the value being one of an item of nonzero weight. As a constraint
     /// of its own, the solver first tries one of `choices`, each an item's
@@ -565,7 +576,8 @@ impl Expr {
             Self::Enabled { value, .. }
             | Self::Soft { value, .. }
             | Self::Resize { value, .. }
-            | Self::Unary { value, .. } => (Some(value), None, &[]),
+            | Self::Unary { value, .. }
+            | Self::CountBits { value, .. } => (Some(value), None, &[]),
             Self::Foreach { body, .. } => (Some(body), None, &[]),
             Self::DisableSoft {
                 variable,
@@ -604,7 +616,8 @@ impl Expr {
                 Self::Enabled { value, .. }
                 | Self::Soft { value, .. }
                 | Self::Resize { value, .. }
-                | Self::Unary { value, .. } => (Some(value), None, &mut []),
+                | Self::Unary { value, .. }
+                | Self::CountBits { value, .. } => (Some(value), None, &mut []),
                 Self::Foreach { body, .. } => (Some(body), None, &mut []),
                 Self::DisableSoft {
                     variable,
@@ -710,7 +723,8 @@ impl Expr {
                 variable: value, ..
             }
             | Self::Resize { value, .. }
-            | Self::Unary { value, .. } => value.variables(base, size_base, names),
+            | Self::Unary { value, .. }
+            | Self::CountBits { value, .. } => value.variables(base, size_base, names),
             Self::Binary { left, right, .. } => {
                 left.variables(base, size_base, names);
                 right.variables(base, size_base, names);
@@ -858,6 +872,38 @@ impl Expr {
                     ),
                     _ => return Err("invalid constraint unary operation".into()),
                 }
+            }
+            Self::CountBits {
+                value,
+                ones,
+                zeros,
+                unknown: count_unknown,
+            } => {
+                let (value, mask) = value.four_state(terms, base, sizes, inputs, unknown)?;
+                let width = width_of(&value);
+                let op2 = |op: &str, x: Term, y: Term| node(Sort::Bv(width), op, vec![x, y]);
+                let invert = |x: Term| node(Sort::Bv(width), "bvnot", vec![x]);
+                // The known bits of a plane, which a value bit under the
+                // mask is not.
+                let known = |plane: Term| match &mask {
+                    Some(mask) => op2("bvand", plane, invert(mask.clone())),
+                    None => plane,
+                };
+                let mut counted = Vec::new();
+                if *ones {
+                    counted.push(known(value.clone()));
+                }
+                if *zeros {
+                    counted.push(known(invert(value.clone())));
+                }
+                if *count_unknown && let Some(mask) = &mask {
+                    counted.push(mask.clone());
+                }
+                let counted = counted
+                    .into_iter()
+                    .reduce(|x, y| op2("bvor", x, y))
+                    .unwrap_or_else(|| bv(width, 0));
+                (popcount(&counted), None)
             }
             Self::Binary {
                 op,
@@ -1093,6 +1139,47 @@ fn binary_mask(
         "+" | "-" | "*" => any_x(&either, width),
         _ => return Err("invalid constraint binary operation".into()),
     })
+}
+
+/// The number of 1 bits of bit-vector `value`, a 32-bit value: the sum of
+/// its bits as a balanced tree, each sum of the width its count needs.
+fn popcount(value: &Term) -> Term {
+    fn count(value: &Term, low: u32, high: u32) -> (Term, u32) {
+        if high - low == 1 {
+            let bit = node(
+                Sort::Bv(1),
+                format!("(_ extract {low} {low})"),
+                vec![value.clone()],
+            );
+            return (bit, 1);
+        }
+        let middle = low + (high - low) / 2;
+        let width = u32::BITS - (high - low).leading_zeros();
+        let extend = |(term, from): (Term, u32)| {
+            if from == width {
+                term
+            } else {
+                node(
+                    Sort::Bv(width),
+                    format!("(_ zero_extend {})", width - from),
+                    vec![term],
+                )
+            }
+        };
+        let left = extend(count(value, low, middle));
+        let right = extend(count(value, middle, high));
+        (node(Sort::Bv(width), "bvadd", vec![left, right]), width)
+    }
+    let (sum, width) = count(value, 0, width_of(value));
+    if width == 32 {
+        sum
+    } else {
+        node(
+            Sort::Bv(32),
+            format!("(_ zero_extend {})", 32 - width),
+            vec![sum],
+        )
+    }
 }
 
 /// Whether bit-vector `value` is not 0.
@@ -1535,6 +1622,19 @@ impl Heap {
                 value: boxed(self.unroll(
                     object, program, value, loops, solved, arrays, check_only, inputs,
                 )?),
+            },
+            Expr::CountBits {
+                value,
+                ones,
+                zeros,
+                unknown,
+            } => Expr::CountBits {
+                value: boxed(self.unroll(
+                    object, program, value, loops, solved, arrays, check_only, inputs,
+                )?),
+                ones: *ones,
+                zeros: *zeros,
+                unknown: *unknown,
             },
             Expr::Binary {
                 op,

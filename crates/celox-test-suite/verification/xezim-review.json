@@ -1154,6 +1154,10 @@
     "sv_embedded_covergroup_events_of_properties": {
       "title": "A covergroup embedded in a class is never sampled at a clocking event on a property of the class: @m_z, @(posedge clk_bit) of a bit property and @ev of an event property give no sample, where an event on a signal of the module samples",
       "standard": "IEEE 1800-2023 19.3, 19.4"
+    },
+    "sv_onehot_constraint": {
+      "title": "A constraint `$onehot(w)` on a rand `bit [15:0] w` has no solution: randomize() returns 0, though every value with one 1 bit satisfies it",
+      "standard": "IEEE 1800-2023 18.5, 20.9"
     }
   },
   "cases": [
@@ -6010,6 +6014,14 @@
       "classification": "xezim_bug",
       "bug": "sv_constructed_covergroups_at_divided_clocks",
       "note": "19.3 samples each instance at each occurrence of its clocking event. div rises at 5, 25 and 45, where r is 0, 1 and 2 before the nonblocking assignments of the edge, so each of the six instances covers 3 of 8 bins (37.50 for a[5].r). xezim 0.11.4 displays 0 for every instance and 0.00, so it takes no sample; it passes the declared instances of a divided clock (clocking_events_of_nba_updated_clocks_sample_before_the_updates) and the procedurally constructed ones of a clock that blocking assignments make (procedural_constructions_sample_at_their_clocking_events). Verilator 5.054 displays the expected 37.50 (and 0 for the bins it counts by reference, as in every case)."
+    },
+    {
+      "suite": "sv",
+      "name": "class::constraint_bit_vector_functions",
+      "status": "runtime_error",
+      "classification": "xezim_bug",
+      "bug": "sv_onehot_constraint",
+      "note": "xezim reports no solution for the constraints of class C; with only `constraint c { $onehot(w); }` on `rand bit [15:0] w` its randomize() returns 0 and w stays 0, while `$onehot0`, `$countones` and `$countbits` constraints of the same class solve correctly."
     }
   ]
 }

@@ -7184,6 +7184,18 @@ fn class_randomize_rejects_unsupported_semantics() {
             "c.randomize()",
             "a function call in a constraint loop",
         ),
+        // A bit-vector function counts X and Z bits together, by constant
+        // control bits (20.9).
+        (
+            "rand bit [7:0] x; constraint c { $countbits(x, 'x) == 0; }",
+            "c.randomize()",
+            "`$countbits` counting x bits apart from z bits in a constraint",
+        ),
+        (
+            "rand bit [7:0] x; bit b; constraint c { $countbits(x, b) == 1; }",
+            "c.randomize()",
+            "`$countbits` with a control bit other than a constant in a constraint",
+        ),
         (
             "rand int x, y; function int f(output int v); v = 1; return 1; endfunction constraint c { x == f(y); }",
             "c.randomize()",
