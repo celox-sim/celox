@@ -554,7 +554,7 @@
     }
   ],
   "driver_profile": "release",
-  "measured_at": "2026-11-25T19:49:52.530764+00:00",
-  "celox_revision": "69dc14eed91be7ea39908eefa39e0848a9e9b53e",
-  "run_url": "https://github.com/celox-sim/celox/actions/runs/45681793043"
+  "measured_at": "2026-11-26T14:43:18.747321+00:00",
+  "celox_revision": "49b6f3bee8d03e04653b2a7dfbc74c3702b9261b",
+  "run_url": "https://github.com/celox-sim/celox/actions/runs/45834913633"
 }
