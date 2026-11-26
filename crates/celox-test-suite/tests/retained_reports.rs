@@ -1454,6 +1454,39 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "compile",
                             "Non-constant expression in bin range",
                         ),
+                        (
+                            "icarus",
+                            "covergroup::bin_arrays_have_a_bin_for_each_value_or_share_the_values"
+                            | "covergroup::bin_guard_holds_for_the_count"
+                            | "covergroup::default_bin_is_no_bin_of_the_coverage"
+                            | "covergroup::ignored_values_are_values_of_no_bin"
+                            | "covergroup::illegal_values_are_values_of_no_other_bin"
+                            | "covergroup::tolerance_ranges_of_a_bin"
+                            | "covergroup::wildcard_bins_stand_for_both_values_of_a_bit"
+                            | "covergroup::with_expression_keeps_the_values_of_a_bin",
+                        ) => ("compile_error", "compile", "Invalid module item"),
+                        ("icarus", "covergroup::set_expression_is_the_values_of_a_bin") => (
+                            "compile_error",
+                            "compile",
+                            "unpacked array parameters are not supported yet",
+                        ),
+                        (
+                            "verilator",
+                            "covergroup::bin_arrays_have_a_bin_for_each_value_or_share_the_values",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            // "values 7.14" expected, "values 9.59" displayed.
+                            "expect_output: expected [118, 97, 108, 117, 101, 115, 32, 55, 46, 49, 52, 10,",
+                        ),
+                        ("verilator", "covergroup::set_expression_is_the_values_of_a_bin") => (
+                            "compile_error",
+                            "compile",
+                            "syntax error, unexpected ';', expecting with-then-(",
+                        ),
+                        ("verilator", "covergroup::tolerance_ranges_of_a_bin") => {
+                            ("compile_error", "compile", "Unsupported: +/- range")
+                        }
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

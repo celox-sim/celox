@@ -207,7 +207,7 @@ For `expect (property_spec) action_block` (16.17), the executing process makes o
 
 A covergroup (clause 19) is a type: declared in a module, a program, a package, the compilation unit or a generate block, or embedded in a class (19.4). `new` constructs an instance, with the arguments of the covergroup; `sample()` samples it, with the arguments of a `with function sample` declaration; `get_inst_coverage()`, `get_coverage()`, `T::get_coverage()` and `$get_coverage()` give coverage. The results are read through `Simulation::coverage()` (see [Coverage](#coverage)).
 
-A coverpoint (19.5) is of an integral type of any width: with or without a label, with a type of its own, and with an `iff` guard, whose expression is evaluated first. Its expression and its guard read the arguments of the covergroup and of `sample`, then the members of the class of an embedded covergroup, then the names of the scope. Its bins are the automatic bins of 19.5.3, also those of an enumeration, or bins of values and ranges (`bins b = {0, [1:3], [8:$]};`). A bin value is a constant, an argument of the covergroup or a call of a function with these, which the construction evaluates, so the instances of one type may differ in their bins. The definition may assign `option.name`, `comment`, `per_instance`, `weight`, `goal`, `at_least` and `auto_bin_max`, each at the levels 19.10 gives it, with any expression of the scope of `new` as the value.
+A coverpoint (19.5) is of an integral type of any width: with or without a label, with a type of its own, and with an `iff` guard, whose expression is evaluated first. Its expression and its guard read the arguments of the covergroup and of `sample`, then the members of the class of an embedded covergroup, then the names of the scope. Its bins are the automatic bins of 19.5.3, also those of an enumeration, or the bins it declares for values (19.5.1 to 19.5.6): one bin, a bin for each value (`bins b[]`) or a number of bins (`bins b[N]`) of a list of values and ranges, also ranges with a tolerance (`[a +/- b]`, `[a +%- b]`), of the values a `with` expression keeps, or of the elements of an array; `default` bins; `ignore_bins` and `illegal_bins`; `wildcard` bins; and a guard on any of them (`iff`). A bin value is a constant, an argument of the covergroup or a call of a function with these, which the construction evaluates, so the instances of one type may differ in their bins. A sample of an illegal value is reported as an error. The definition may assign `option.name`, `comment`, `per_instance`, `weight`, `goal`, `at_least` and `auto_bin_max`, each at the levels 19.10 gives it, with any expression of the scope of `new` as the value.
 
 A construct of the **Not supported** column is rejected where a `new` or a method of the covergroup is written, not where the covergroup is declared: a covergroup that nothing constructs is accepted whatever it declares, and so is a variable of its type. All of them point to [#4294](https://github.com/celox-sim/celox/issues/4294), which tracks what is left of clause 19.
 
@@ -215,12 +215,12 @@ A construct of the **Not supported** column is rejected where a `new` or a metho
 | --- | --- | --- |
 | **Declarations (19.3, 19.4)** | A covergroup of a module, a program, a package, the compilation unit or a generate block; a covergroup embedded in a class; variables of a covergroup type | `covergroup extends` (19.4.1); a covergroup declared in an interface, which rejects the interface; one declared in a checker or in a loop generate block; constructing or sampling a covergroup type that a module takes as a type parameter (it declares variables there) |
 | **Coverpoints (19.5)** | Coverpoints of an integral type of any width, with or without a label, with a type of their own, and with an `iff` guard | A coverpoint of a `real` type; one of an enumeration whose enumerators have x or z bits; a coverpoint of a signal of a clocking block (clocking blocks are not supported) |
-| **Bins (19.5)** | The automatic bins of 19.5.3, also those of an enumeration; bins of values and ranges (`bins b = {0, [1:3], [8:$]};`) whose values are constants, arguments of the covergroup or calls of functions with these | Bin arrays (`bins b[]`, `bins b[N]`); `default` and `default sequence` bins; `ignore_bins` and `illegal_bins`; `wildcard` bins; a guard on a bin (`bins b = {1} iff (en);`); `with` filters; bins of a set expression; ranges with a tolerance (`[a +/- b]`); transition bins; a bin value that is not integral |
+| **Bins (19.5)** | The automatic bins of 19.5.3, also those of an enumeration; bins of values and ranges (`bins b = {0, [1:3], [8:$]};`) whose values are constants, arguments of the covergroup or calls of functions with these; bin arrays (`bins b[]`, `bins b[N]`); ranges with a tolerance (`[a +/- b]`, `[a +%- b]`) of integral operands; `default` and `default[]` bins; `ignore_bins` and `illegal_bins`; `wildcard` bins; a guard on a bin (`bins b = {1} iff (en);`); `with` filters (`bins b[] = {[0:255]} with (item % 3 == 0);`, `bins b = cp with (f(item));`); bins of a set expression (`bins b[] = S;`) that is an array parameter with integral elements, or a dynamic array, a queue or a constant array of the class of an embedded covergroup with integral elements of at most 64 bits | Transition bins and `default sequence` bins (19.5.2); `bins b[N] = default` (the standard does not say how the values are distributed); a `with` filter on a bin array, on `ignore_bins` or on `illegal_bins` whose values are constants and more than 1,048,576, such as `ignore_bins b = cp with (...)` on an `int` coverpoint (on one `bins` bin such a filter is supported, see [Coverage](#coverage)); a wildcard value of more than 65,536 ranges of values in a bin array or under such a filter; a set expression of any other form: an assignment pattern, a concatenation, a fixed-size array that is no parameter, an array of strings, handles or elements of more than 64 bits; a tolerance range with a `real` operand; a bin value that is not integral |
 | **Crosses (19.6)** | — | Every `cross` |
 | **Options (19.7)** | `option.name`, `comment`, `per_instance`, `weight`, `goal`, `at_least` and `auto_bin_max` assigned in the definition, each at the levels 19.10 gives it, with any expression of the scope of `new` as the value | `type_option` assignments; the `option` members `detect_overlap`, `cross_num_print_missing`, `cross_retain_auto_bins` and `get_inst_coverage` |
 | **Sampling (19.3, 19.8.1)** | `sample()` | A covergroup declared with a clocking event (`covergroup cg @(posedge clk);`) or a block event (`@@(begin f)`); `sample()` in a sequence match item |
 | **Arguments (19.3, 19.8.1)** | The arguments of a covergroup and of its `with function sample` declaration | `ref` arguments of a covergroup or of its sample method; arguments of unpacked type; an argument of the covergroup that a coverpoint reads and that is not of an integral type, a string or a class handle, such as a `real` |
-| **`let` declarations (11.12)** | — | A `let` is not expanded in what follows the name of a covergroup: a covergroup whose argument types or defaults, coverpoint expressions, guards, bin values or option values name one is rejected, unless an argument of the covergroup or of `sample` has the name |
+| **`let` declarations (11.12)** | — | A `let` is not expanded in what follows the name of a covergroup: a covergroup whose argument types or defaults, coverpoint expressions, guards, bin values, `with` expressions or option values name one is rejected, unless an argument of the covergroup or of `sample` has the name (`item` in a `with` expression is the value of the bin, whatever is named so) |
 | **Methods (19.8)** | `sample()`, `get_inst_coverage()`, `get_coverage()`, `T::get_coverage()`, and `$get_coverage()`; a method of an embedded covergroup called on its variable (`cg` in the class, `obj.cg`) | `start()`, `stop()` and `set_inst_name()`; `get_coverage` and `get_inst_coverage` with `ref int` arguments; the methods of coverpoints and crosses; reading or writing `option` and `type_option` members; a method of an embedded covergroup called on another expression that gives the handle, such as a conditional expression |
 | **Construction (19.3, 19.4)** | `new` with the arguments of the covergroup; in the `new` method of its class, an embedded covergroup assigned as `cg = new;` or `this.cg = new;` | `new` with a covergroup handle as a shallow copy (8.12); an embedded covergroup assigned through another handle of the class (`other.cg = new;`) in the `new` method (outside that method the assignment is the error 19.4 makes it) |
 | **Type names (20.6.1)** | — | `$typename` of a covergroup type, of a variable of one, or of an array or structure that holds one (20.6.1 has no rule for the name) |
@@ -547,6 +547,79 @@ advances no time.
   takes no part, with a warning (19.5.4 and 19.5.7 differ here). A bound of
   a range with such bits drops the range. In two-state simulation no
   sample has such a bit.
+- **An illegal bin hit is an error report.** A sample of a value of an
+  `illegal_bins` bin whose guard holds issues a report of `$error` severity
+  that names the bin, its coverpoint, its covergroup, the instance and the
+  value (19.5.6); a sample that hits several such bins reports them in one.
+  The simulation goes on, the sample counts in no `bins` bin, and the run
+  ends as any run with an error report does. The values of an illegal bin
+  are values of no other bin whether or not its guard holds, and so are
+  those of `ignore_bins`: a guard on these gates the hit count of the bin
+  itself, which the report shows, and that of an illegal bin its error.
+- **Bins are made when an instance is constructed** (19.5.1): a bin for
+  each value (`b[]`) in the order the values first appear, named
+  `b[value]`; `b[N]` as 19.5.1 distributes the values, named `b[0]` to
+  `b[N-1]`. The values of `ignore_bins` and `illegal_bins` are taken once
+  the values are distributed, and a bin that is left without a value takes
+  no part in the coverage and is not listed (19.5.5, 19.11.1). A number of
+  bins `N` that is not positive is an error of the build for a constant
+  and ends the simulation with an error for an argument.
+- **`default` bins** count the samples that are in no bin of a declaration
+  of their coverpoint, `ignore_bins` and `illegal_bins` among those: an
+  ignored value is no `default` value. A sample with x or z bits that no
+  bin lists with those bits is such a sample, so `illegal_bins b = default`
+  reports it in four-state simulation. A `default[]` array has a bin for
+  each of the first 4,096 values that are sampled, named with the value (a
+  value with x or z bits as a sized binary literal, `b[4'b1x0z]`); the
+  samples of further values are counted in `omitted_bins` of the report.
+  A coverpoint with a `default` bin of `bins` has no automatic bins, and
+  where it declares no other `bins` it has no bin to cover (19.11.1).
+- **Wildcard bins** (19.5.4) list the values their x, z and `?` bits stand
+  for, so that ignored and illegal values are taken from them as from any
+  bin. A value of more than 65,536 ranges of values (`4'b11??` is one
+  range, `4'b1??1` four) is instead matched when it is sampled: what is
+  counted is the same, but `ignore_bins` and `illegal_bins` take no value
+  from such a bin,
+  and as a value of `ignore_bins` or `illegal_bins` it leaves no bin
+  without a value; the `new` of the instance warns where that can matter.
+  Only one bin without a `with` filter may have such a value. A range of a
+  wildcard bin whose bounds have x or z bits is the values from its lowest
+  low bound to its highest high bound.
+- **`with` filters** (19.5.1.1) are asked about each value of their bin
+  when an instance is constructed, at most 1,048,576 values; a bin whose
+  values depend on an argument and are more ends the simulation with an
+  error. Before `with`, the name of a coverpoint of an enumeration stands
+  for its named values, as its automatic bins do (19.5.3). What the
+  expression reads beside `item` and constants, such as an argument of the
+  covergroup, a string among them, or a constant of the object of an
+  embedded covergroup, decides the bins with the values of the bin: an
+  instance that is constructed with the values an earlier one of its type
+  was constructed with takes its bins without evaluating the expression
+  again (19.5.1.1 allows caching). A filter that reads an object, whose
+  state those values do not tell, is evaluated by every construction: one
+  that calls a method of the class of an embedded covergroup that is not
+  static, which may read the constants of its object (19.5), and one with
+  a handle among its operands, such as `h.ok(item)` or `f(h, item)`. Any
+  other function is taken to read its arguments and global constants only,
+  as 19.5 requires. The filter of one `bins` bin (no array) whose values are constants and more
+  than that, such as `bins b = cp with (...)` on a coverpoint of more than
+  20 bits, is evaluated for the sampled value at each sample instead. Such
+  a bin always counts as a bin with values, also when the expression keeps
+  none, and `ignore_bins` and `illegal_bins` take from it without regard to
+  the expression.
+- **Set expressions** (19.5.1.2). The elements of an array parameter
+  (`localparam int S [3] = '{1, 4, 6};`, also of a package) are the values
+  of the bin as if it listed them, and the build warns of those the
+  coverpoint type has not. The elements of a dynamic array or a queue,
+  such as a function returns for the arguments of the covergroup, and of a
+  constant array of the class of an embedded covergroup are read when an
+  instance is constructed, which then warns. The first element is the
+  first value: `bins b[2] = S` of four elements has the first two in
+  `b[0]`.
+- **Tolerance ranges** (11.4.13) take integral operands; the tolerance of
+  `[A +%- B]` is `A * B / 100` as integers divide, towards zero, which is
+  what the standard's conversion of `A*B/100.0` gives for the values a
+  `real` holds exactly.
 - **Automatic bins of a signed coverpoint start at its lowest value**, and
   are named by their values: `auto[3]`, `auto[0:3]`, `auto[NAME]` for an
   enumerator. A coverpoint without a label has the name of its variable

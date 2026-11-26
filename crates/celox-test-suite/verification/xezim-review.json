@@ -1102,6 +1102,26 @@
     "sv_enumeration_coverpoint_bins_by_width": {
       "title": "A coverpoint of an enumeration without bins has an automatic bin for each value of the base type, not for each enumerator: with typedef enum bit [1:0] { RED, GREEN, BLUE } color_t, samples of the three enumerators cover 75% of the coverpoint",
       "standard": "IEEE 1800-2023 19.5.3"
+    },
+    "sv_ignored_values_keep_empty_automatic_bins": {
+      "title": "An automatic bin whose values are all ignored still counts in the coverage: with bit [2:0] b, option.auto_bin_max = 4 and ignore_bins ig = {[0:1], [5:6]}, the coverpoint has four bins where the three that keep a value are its bins",
+      "standard": "IEEE 1800-2023 19.5.5, 19.11.1"
+    },
+    "sv_wildcard_bin_array_is_one_bin": {
+      "title": "A wildcard bin array has one bin for all the values its value stands for: wildcard bins a[] = { 4'b11?? } is one bin, where it is a bin for each of 12, 13, 14 and 15",
+      "standard": "IEEE 1800-2023 19.5.4"
+    },
+    "sv_coverpoint_with_filter_keeps_no_value": {
+      "title": "A bin of the values of its coverpoint that a with expression keeps has no value: bins func[] = b with (myfunc(item)) is never covered, where it has a bin for each value of b for which the function returns true",
+      "standard": "IEEE 1800-2023 19.5.1.1"
+    },
+    "sv_set_expression_bins_have_no_value": {
+      "title": "A bin whose values are the elements of an array has no value: with localparam int S [3] = '{1, 4, 6}, bins s[] = S is never covered, where it has the bins s[1], s[4] and s[6]",
+      "standard": "IEEE 1800-2023 19.5.1.2"
+    },
+    "sv_tolerance_ranges_in_bins": {
+      "title": "A range with a tolerance in the values of a bin, bins near = {[11 +/- 1]} or bins pct = {[7 +%- 25]}, is a parse error (\"expected expression, found Slash '/'\")",
+      "standard": "IEEE 1800-2023 19.5.1, 11.4.13"
     }
   },
   "cases": [
@@ -5854,6 +5874,46 @@
       "classification": "xezim_bug",
       "bug": "sv_enumeration_coverpoint_bins_by_width",
       "note": "The coverpoint of color, of an enumeration of three enumerators in bit [1:0], declares no bins, so it has an automatic bin for each enumerator: for an enum coverage point N is the cardinality of the enumeration (19.5.3). After GREEN and RED its coverage is two thirds and after BLUE 100, so the case expects the lines colors 66.67 and colors 100.00. xezim 0.11.4 displays colors 50.00 and colors 75.00, the coverage of four bins; a probe of the same coverpoint displays 25.00 after the sample of one enumerator. The lines before these, of the coverpoints of bit [2:0] and of bit [7:0] with option.auto_bin_max = 2, are as the case expects."
+    },
+    {
+      "suite": "sv",
+      "name": "covergroup::ignored_values_are_values_of_no_bin",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_ignored_values_keep_empty_automatic_bins",
+      "note": "The coverpoint of b is the example of 19.11.1: bit [2:0] b with option.auto_bin_max = 4 has the automatic bins auto[0,1], auto[2,3], auto[4,5] and auto[6,7], and ignore_bins ig = {[0:1], [5:6]} leaves the first without a value, which then \"is ignored and shall not contribute to the coverage computation\". Three bins are left, so the samples 2, 4 and 7 give the lines ct 33.33, ct 66.67 and ct 100.00. xezim 0.11.4 displays ct 25.00, ct 50.00 and ct 75.00, the coverage of four bins. The lines of the second covergroup, bins all[4] = {[0:15]} with ignore_bins quarter = {[4:7]}, are as the case expects (0.00, 66.67, 100.00), so a declared bin that is left without a value is left out. Verilator 5.054 passes the case."
+    },
+    {
+      "suite": "sv",
+      "name": "covergroup::wildcard_bins_stand_for_both_values_of_a_bit",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_wildcard_bin_array_is_one_bin",
+      "note": "The two declarations are those of 19.5.4: wildcard bins g12_15 = { 4'b11?? } is one bin of 12 to 15, and wildcard bins g12_15_array[] = { 4'b11?? } \"a separate bin ... for each of the four values\". Five bins, so the sample 13 covers two of them (40.00), 12 and 14 two more (80.00) and 15 the last (100.00). xezim 0.11.4 displays 50.00 after 13 and after every later sample: it has two bins, and one of them is never covered. Verilator 5.054 passes the case."
+    },
+    {
+      "suite": "sv",
+      "name": "covergroup::with_expression_keeps_the_values_of_a_bin",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_coverpoint_with_filter_keeps_no_value",
+      "note": "The second covergroup is the second example of 19.5.1.1: bins func[] = b with (myfunc(item)), where the name of the coverpoint stands for all its values. myfunc keeps 1, 5, 9 and 13 of bit [3:0] b, so there are four bins, the sample 1 covers one (kept 25.00) and 13, 5 and 9 the rest (kept 100.00). xezim 0.11.4 displays kept 0.00 twice. The line of the first example, bins mod3[] = {[0:255]} with (item % 3 == 0), is as the case expects (thirds 2.33, two of 86 bins). Verilator 5.054 passes the case."
+    },
+    {
+      "suite": "sv",
+      "name": "covergroup::set_expression_is_the_values_of_a_bin",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_set_expression_bins_have_no_value",
+      "note": "bins s[] = S, with localparam int S [3] = '{1, 4, 6}, has the elements of the array as its values (19.5.1.2): the bins s[1], s[4] and s[6]. The sample 4 covers one of three (33.33) and 1 and 6 the rest (100.00). xezim 0.11.4 accepts the declaration and displays 0.00 twice. Verilator 5.054 rejects the declaration as a syntax error."
+    },
+    {
+      "suite": "sv",
+      "name": "covergroup::tolerance_ranges_of_a_bin",
+      "status": "compile_error",
+      "classification": "xezim_bug",
+      "bug": "sv_tolerance_ranges_in_bins",
+      "note": "A covergroup_value_range may be [ covergroup_expression +/- covergroup_expression ] or [ covergroup_expression +%- covergroup_expression ] (A.2.11, 19.5.1 refers to 11.4.13 for the range list). xezim 0.11.4 does not parse either in bins near = {[11 +/- 1]} and bins pct = {[7 +%- 25]}: \"expected expression, found Slash '/'\", \"expected expression, found Percent '%'\". Verilator 5.054 reports both as unsupported."
     }
   ]
 }

@@ -25,7 +25,11 @@ use super::*;
 use crate::ast::covergroups::{self, Covergroup, Formal, HANDLE};
 use crate::system_functions::{CoverageOp, ObjectField};
 use celox_heap::coverage as heap;
-use celox_sv_syntax::{CovergroupDeclaration, ExprId, ExprKind};
+use celox_sv_syntax::{
+    Bins, BinsKind, BinsValue, CoverageRange, CoverageRangeKind, CovergroupDeclaration, ExprId,
+    ExprKind,
+};
+use num_bigint::BigUint;
 
 mod construct;
 mod sample;
@@ -240,6 +244,17 @@ enum Stored {
     Handle(ObjectField),
 }
 
+/// The predicate bits of a bin declaration among those of its coverpoint,
+/// which a sample hands over (IEEE 1800-2023 19.5.1, 19.5.1.1).
+#[derive(Clone, Copy, Default)]
+struct BinBits {
+    /// The bit of the guard of the declaration.
+    iff: Option<u32>,
+    /// The bit of its `with` filter, where a sample evaluates it for the
+    /// sampled value: a construction is not asked about its values then.
+    filter: Option<u32>,
+}
+
 /// What making `N::$sample` found of the type.
 struct Sampled {
     /// The arguments of the covergroup that a sample reads, by their index
@@ -247,6 +262,38 @@ struct Sampled {
     stored: Vec<(usize, Stored)>,
     /// The coverpoints, without their bins.
     points: Vec<heap::PointDescriptor>,
+    /// The type of the variable that holds the value of each coverpoint,
+    /// which `item` has in a `with` expression of its bins (19.5.1.1).
+    items: Vec<Type>,
+    /// The predicate bits of the bin declarations of each coverpoint, in
+    /// declaration order.
+    bins: Vec<Vec<BinBits>>,
+}
+
+/// How many values the `with` filter of a bin is asked about (19.5.1.1),
+/// as far as the analysis knows.
+enum Candidates {
+    /// A value or bound of the bin is known only when an instance is
+    /// constructed.
+    Unknown,
+    /// This many, each value as often as the bin lists it.
+    Listed(BigUint),
+    /// A wildcard value of the bin is matched as a pattern: its values are
+    /// not listed (see `heap::MAX_WILDCARD_EXPANSION`).
+    Pattern,
+}
+
+impl Candidates {
+    /// Whether a construction can be asked about every value: there are
+    /// no more than `heap::MAX_FILTER_CANDIDATES`, or only a construction
+    /// knows how many there are.
+    fn enumerable(&self) -> bool {
+        match self {
+            Self::Unknown => true,
+            Self::Listed(count) => *count <= BigUint::from(heap::MAX_FILTER_CANDIDATES),
+            Self::Pattern => false,
+        }
+    }
 }
 
 impl BodyBuilder<'_, '_, '_> {
@@ -322,6 +369,320 @@ impl BodyBuilder<'_, '_, '_> {
     }
 }
 
+impl BodyBuilder<'_, '_, '_> {
+    /// The type of operand `root` of a bin, which is integral (19.5.1).
+    fn covergroup_operand_type(&mut self, root: ExprId) -> Converted<heap::ValueType> {
+        let native = self.syntax().declarations();
+        let ty = expression_types::type_of(&self.tree, self.session, root, native, &self.dims)?;
+        let packed = match self.session.types.data(ty) {
+            semantic_types::TyData::Packed(packed) => packed.clone(),
+            _ => {
+                return Err(unsupported(
+                    "covergroup bin value that is not integral (IEEE 1800-2023 19.5.1)",
+                ));
+            }
+        };
+        Ok(heap::ValueType {
+            width: u32::try_from(packed.bits())
+                .ok()
+                .filter(|width| *width != 0)
+                .ok_or_else(|| unsupported("covergroup bin value of this many bits"))?,
+            signed: packed.signed,
+        })
+    }
+
+    /// Operand `root` of a bin as a constant of its type, where the body
+    /// binds it to one.
+    fn covergroup_operand_constant(&mut self, root: ExprId) -> Option<heap::Constant> {
+        let ty = self.covergroup_operand_type(root).ok()?;
+        let value = self.covergroup_value(root, None).ok()?;
+        let literal = self.covergroup_constant(&value)?;
+        Some(constant(literal, Some(ty)))
+    }
+
+    /// The bounds of the tolerance range `[center +/- tolerance]`, or
+    /// `[center +%- tolerance]` if `relative` (11.4.13), where both fold
+    /// to constants: of the type of `center`, the lower first.
+    fn covergroup_tolerance_constants(
+        &mut self,
+        center: ExprId,
+        tolerance: ExprId,
+        relative: bool,
+    ) -> Option<(heap::Constant, heap::Constant)> {
+        let ty = self.covergroup_operand_type(center).ok()?;
+        let tolerance_type = self.covergroup_operand_type(tolerance).ok()?;
+        let center = self.covergroup_value(center, None).ok()?;
+        let tolerance = self.covergroup_value(tolerance, None).ok()?;
+        let tolerance = tolerance_value(&center, ty, tolerance, tolerance_type, relative);
+        let (low, high) = tolerance_bounds(&center, &tolerance, ty);
+        let low = self.covergroup_constant(&low)?;
+        let high = self.covergroup_constant(&high)?;
+        Some((constant(low, Some(ty)), constant(high, Some(ty))))
+    }
+
+    /// Element `range` of the range list of a bin with its operands as
+    /// constants, where the body binds every one of them to one.
+    fn covergroup_constant_range(
+        &mut self,
+        range: &CoverageRange,
+    ) -> Option<heap::RangeDescriptor> {
+        let operand = heap::Operand::Constant;
+        Some(match &range.kind {
+            CoverageRangeKind::Value(value) => {
+                heap::RangeDescriptor::Value(operand(self.covergroup_operand_constant(*value)?))
+            }
+            CoverageRangeKind::Range { low, high } => {
+                let mut bound = |bound: &Option<ExprId>| {
+                    Some(match bound {
+                        Some(bound) => {
+                            heap::Bound::Operand(operand(self.covergroup_operand_constant(*bound)?))
+                        }
+                        None => heap::Bound::Open,
+                    })
+                };
+                heap::RangeDescriptor::Range {
+                    low: bound(low)?,
+                    high: bound(high)?,
+                }
+            }
+            CoverageRangeKind::Tolerance {
+                center,
+                tolerance,
+                relative,
+            } => {
+                let (low, high) =
+                    self.covergroup_tolerance_constants(*center, *tolerance, *relative)?;
+                heap::RangeDescriptor::Range {
+                    low: heap::Bound::Operand(operand(low)),
+                    high: heap::Bound::Operand(operand(high)),
+                }
+            }
+        })
+    }
+}
+
+/// `value` of type `from` as a value of type `to`: extended by its own
+/// signedness, or cut, to the width of `to`, as a cast to that type does
+/// (6.24.1).
+fn cast(value: Expr, from: heap::ValueType, to: heap::ValueType) -> Expr {
+    let resize = |expr: Expr, signed: bool| Expr::Resize {
+        expr: Box::new(expr),
+        width: to.width as usize,
+        signed,
+    };
+    let sized = resize(value, from.signed);
+    if from.signed == to.signed {
+        sized
+    } else {
+        resize(sized, to.signed)
+    }
+}
+
+/// The tolerance of a tolerance range of constants as a value of the type
+/// `ty` of its center (11.4.13): `type(A)'(B)` of `[A +/- B]`, and `type(A)'(A*B/100.0)`
+/// of `[A +%- B]`, where the conversion truncates. The operands are
+/// integral and keep their own signedness: each is extended by it to a
+/// signed type that holds the product, which is divided as integers are,
+/// towards zero.
+fn tolerance_value(
+    center: &Expr,
+    ty: heap::ValueType,
+    tolerance: Expr,
+    tolerance_type: heap::ValueType,
+    relative: bool,
+) -> Expr {
+    if !relative {
+        return cast(tolerance, tolerance_type, ty);
+    }
+    let wide = heap::ValueType {
+        width: (ty.width + tolerance_type.width + 2).max(16),
+        signed: true,
+    };
+    let binary = |left: Expr, op: BinaryOp, right: Expr| Expr::Binary {
+        left: Box::new(left),
+        op,
+        right: Box::new(right),
+    };
+    cast(
+        binary(
+            binary(
+                cast(center.clone(), ty, wide),
+                BinaryOp::Mul,
+                cast(tolerance, tolerance_type, wide),
+            ),
+            BinaryOp::Div,
+            Expr::Literal(format!("{}'sd100", wide.width)),
+        ),
+        wide,
+        ty,
+    )
+}
+
+/// The bounds of the tolerance range of the constants `center` and
+/// `tolerance`, both of type `ty` (11.4.13): `center - tolerance` and `center + tolerance` in
+/// that type, the lower of the two first.
+fn tolerance_bounds(center: &Expr, tolerance: &Expr, ty: heap::ValueType) -> (Expr, Expr) {
+    let bound = |op: BinaryOp| Expr::Resize {
+        expr: Box::new(Expr::Binary {
+            left: Box::new(center.clone()),
+            op,
+            right: Box::new(tolerance.clone()),
+        }),
+        width: ty.width as usize,
+        signed: ty.signed,
+    };
+    let (below, above) = (bound(BinaryOp::Sub), bound(BinaryOp::Add));
+    let ordered = Expr::Binary {
+        left: Box::new(below.clone()),
+        op: BinaryOp::Le,
+        right: Box::new(above.clone()),
+    };
+    let choose = |then_expr: &Expr, else_expr: &Expr| Expr::Mux {
+        condition: Box::new(ordered.clone()),
+        then_expr: Box::new(then_expr.clone()),
+        else_expr: Box::new(else_expr.clone()),
+    };
+    (choose(&below, &above), choose(&above, &below))
+}
+
+/// The element `range` of a range list whose operands are constants as
+/// the heap resolves one.
+fn range_value(range: &heap::RangeDescriptor) -> Option<heap::RangeValue<'_>> {
+    fn constant(operand: &heap::Operand) -> Option<&heap::Constant> {
+        match operand {
+            heap::Operand::Constant(constant) => Some(constant),
+            heap::Operand::Input(_) => None,
+        }
+    }
+    fn bound(bound: &heap::Bound) -> Option<Option<&heap::Constant>> {
+        match bound {
+            heap::Bound::Open => Some(None),
+            heap::Bound::Operand(value) => constant(value).map(Some),
+        }
+    }
+    Some(match range {
+        heap::RangeDescriptor::Value(value) => heap::RangeValue::Value(constant(value)?),
+        heap::RangeDescriptor::Range { low, high } => heap::RangeValue::Range {
+            low: bound(low)?,
+            high: bound(high)?,
+        },
+    })
+}
+
+/// How many values the `with` filter of bin declaration `bins` of a
+/// coverpoint of type `ty` is asked about, as the body of `builder` binds
+/// the operands of the bin. An operand that names an argument of the
+/// covergroup is known only to a construction, whatever the body binds the
+/// name to.
+fn candidates(
+    site: &Site<'_>,
+    builder: &mut BodyBuilder<'_, '_, '_>,
+    bins: &Bins,
+    ty: &heap::PointType,
+) -> Candidates {
+    let native = site.tree.declarations();
+    let ranges = match &bins.value {
+        // Every value of the coverpoint: of an enumeration its named
+        // values.
+        BinsValue::CoverpointWith { .. } => {
+            return Candidates::Listed(if ty.members.is_empty() {
+                BigUint::from(1u8) << ty.width
+            } else {
+                BigUint::from(ty.members.len())
+            });
+        }
+        BinsValue::Ranges { ranges, .. } => ranges,
+        _ => return Candidates::Unknown,
+    };
+    let formal = |root: ExprId| {
+        covergroups::variable_names(native, root)
+            .into_iter()
+            .any(|(name, _)| {
+                site.model
+                    .new_formals
+                    .iter()
+                    .any(|formal| formal.name == name)
+            })
+    };
+    let mut total = BigUint::ZERO;
+    for range in ranges {
+        let operands: Vec<ExprId> = match &range.kind {
+            CoverageRangeKind::Value(value) => vec![*value],
+            CoverageRangeKind::Range { low, high } => low.iter().chain(high).copied().collect(),
+            CoverageRangeKind::Tolerance {
+                center, tolerance, ..
+            } => vec![*center, *tolerance],
+        };
+        if operands.into_iter().any(formal) {
+            return Candidates::Unknown;
+        }
+        let Some(range) = builder.covergroup_constant_range(range) else {
+            return Candidates::Unknown;
+        };
+        let Some(value) = range_value(&range) else {
+            return Candidates::Unknown;
+        };
+        match heap::value_count(ty, bins.wildcard, value) {
+            Some(count) => total += count,
+            None => return Candidates::Pattern,
+        }
+    }
+    Candidates::Listed(total)
+}
+
+/// Whether a sample, not a construction, evaluates the `with` filter of
+/// bin declaration `bins` of a coverpoint of type `ty` (19.5.1.1): the bin
+/// is one `bins` bin and its values are known to be more than a
+/// construction is asked about. The bin then has every value of its range
+/// list, and a sample whose value the filter does not keep is none of it.
+fn filtered_at_each_sample(
+    site: &Site<'_>,
+    builder: &mut BodyBuilder<'_, '_, '_>,
+    bins: &Bins,
+    ty: &heap::PointType,
+) -> bool {
+    covergroups::filter(bins).is_some()
+        && bins.kind == BinsKind::Bins
+        && bins.array.is_none()
+        && !candidates(site, builder, bins, ty).enumerable()
+}
+
+/// The statements that run coverage operation `op` of instance `cg`, which
+/// returns how many messages the heap has for it, and report those with
+/// severity `severity`: the warnings of a construction, or the illegal bins
+/// a sample hit. `count` names the variable of the number.
+fn reported(
+    site: &Site<'_>,
+    builder: &mut BodyBuilder<'_, '_, '_>,
+    cg: &Expr,
+    op: CoverageOp,
+    severity: system_functions::Severity,
+    count: &str,
+) -> Vec<Stmt> {
+    let count = builder.declare(count, classes::unsigned_type(32));
+    vec![
+        assign(&count, coverage(op, vec![cg.clone()])),
+        Stmt::If {
+            condition: Expr::Binary {
+                left: Box::new(Expr::Ident(count)),
+                op: BinaryOp::Ne,
+                right: Box::new(Expr::Literal("32'd0".into())),
+            },
+            then_body: vec![Stmt::SystemTask {
+                task: SystemTask::Severity(severity),
+                args: vec![
+                    SystemTaskArg::Str("%s".into()),
+                    SystemTaskArg::Expr(coverage(CoverageOp::Message, vec![cg.clone()])),
+                ],
+                site: source_span(site.declaration().header, site.tree),
+                assertion: None,
+                home: None,
+            }],
+            else_body: Vec::new(),
+        },
+    ]
+}
+
 /// `literal` as a constant of a descriptor, of type `ty` if one is given:
 /// its bits are then extended by the sign of the literal or cut to the
 /// width of the type.
@@ -329,7 +690,6 @@ fn constant(
     literal: crate::typecheck::IntegralLiteral,
     ty: Option<heap::ValueType>,
 ) -> heap::Constant {
-    use num_bigint::BigUint;
     let own = heap::ValueType {
         width: literal.width as u32,
         signed: literal.signed,

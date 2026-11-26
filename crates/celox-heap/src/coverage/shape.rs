@@ -92,6 +92,25 @@ pub fn resolve_warnings(ty: &PointType, wildcard: bool, range: RangeValue<'_>) -
     warnings
 }
 
+/// How many values the element `range` of a bin of a coverpoint of type
+/// `ty` holds, each as often as the element lists it, where `wildcard` is
+/// whether the declaration of the bin is `wildcard` (19.5.4): the number of
+/// values that a `with` filter of the bin is asked about for the element
+/// (19.5.1.1). `None` for a wildcard value of more than
+/// [`MAX_WILDCARD_EXPANSION`] ranges of values, which is matched as a
+/// pattern and whose values are not listed.
+pub fn value_count(ty: &PointType, wildcard: bool, range: RangeValue<'_>) -> Option<BigUint> {
+    let mut items = Vec::new();
+    resolve_into(ty, wildcard, range, &mut items, &mut Vec::new());
+    items
+        .iter()
+        .map(|item| match item {
+            Item::Wild { .. } => None,
+            item => Some(item.count()),
+        })
+        .sum()
+}
+
 /// The bits of the two planes of `constant` in its width.
 fn planes(constant: &Constant) -> (BigUint, BigUint) {
     let ones = ones(constant.ty.width);

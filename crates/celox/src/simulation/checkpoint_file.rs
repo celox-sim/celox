@@ -14,8 +14,10 @@ const MAGIC: &[u8; 8] = b"CELOXCP1";
 // Version 10 keeps the covergroup types, bins, options and hits of a heap
 // after its other fields. Version 11 keeps the bin arrays, `default`, ignore,
 // illegal and wildcard bins of a covergroup with the sets and filters of its
-// constructions.
-const VERSION: u32 = 11;
+// constructions. Version 12 keeps, with what decides the bins of a
+// construction of a covergroup, the strings its `with` filters read, and
+// with a filter whether its constructions share their bins.
+const VERSION: u32 = 12;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CheckpointFileError {

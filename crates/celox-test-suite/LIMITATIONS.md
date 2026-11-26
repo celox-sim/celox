@@ -1765,7 +1765,7 @@ No assertions or exclusions are weakened.
 
 ### Covergroups
 
-The 12 `covergroup::*` cases check what IEEE 1800-2023 fixes of covergroups.
+The 21 `covergroup::*` cases check what IEEE 1800-2023 fixes of covergroups.
 Five are of a covergroup without items: a variable of a covergroup type holds
 a handle or `null` (19.3), `new` and `sample` take the arguments of the
 covergroup and of its sample method, by position, by name and by default
@@ -1773,26 +1773,45 @@ covergroup and of its sample method, by position, by name and by default
 covergroup is constructed by the `new` method of its class (19.4), and a
 shallow copy has none (8.12). No coverage value is compared in these: the
 coverage of a covergroup without items is a zero-denominator case the tools
-need not agree on. Seven are of coverpoints, and display
+need not agree on. The others are of coverpoints, and display
 `get_inst_coverage()` with two decimals, expecting the value 19.11 gives, so
-that a result that differs shows the coverage the tool computed: bins of
-values and ranges count the samples in them (19.5.1), a coverpoint without
-bins has a bin for each value, `option.auto_bin_max` bins that share the
-values, or a bin for each enumerator (19.5.3), a guard that is false skips
-the sample (19.5), the arguments of the sample method are what the
-coverpoints read (19.8.1), the arguments of `new` set the bins of an
-instance (19.3, 19.5), `option.weight` and `option.at_least` weigh a
-coverpoint and cover a bin (19.7, 19.11), and the coverpoints of an embedded
-covergroup read the members of its class (19.4). Celox passes all of them on
-every backend.
+that a result that differs shows the coverage the tool computed. Seven are of
+coverpoints and their plain bins: bins of values and ranges count the samples
+in them (19.5.1), a coverpoint without bins has a bin for each value,
+`option.auto_bin_max` bins that share the values, or a bin for each
+enumerator (19.5.3), a guard that is false skips the sample (19.5), the
+arguments of the sample method are what the coverpoints read (19.8.1), the
+arguments of `new` set the bins of an instance (19.3, 19.5), `option.weight`
+and `option.at_least` weigh a coverpoint and cover a bin (19.7, 19.11), and
+the coverpoints of an embedded covergroup read the members of its class
+(19.4). Nine are of the other bins of values, with the examples of the
+standard where it has one: `b[]` is a bin for each value, also for a value
+listed twice, and `b[N]` distributes the values (19.5.1: 70 bins, <1,2,3>
+<4,5,6> <7,8,9> <10,1,4,7>, and <1> <4> <7>), a `default` bin is no bin of
+the coverage (19.5), an ignored value is a value of no bin and a bin left
+without one does not count (19.5.5, 19.11.1), an illegal value is a value of
+no other bin (19.5.6, with no sample of one: the error is not shared),
+`wildcard` bins stand for both values of a bit (19.5.4), a guard of a bin
+gates its count (19.5.1), a `with` expression keeps the values of a bin
+(19.5.1.1), the elements of an array are the values of a bin (19.5.1.2), and
+ranges with a tolerance (11.4.13). Celox passes all of them on every backend.
 
-Verilator 5.054 passes ten cases. It keeps the embedded covergroup in a
+Verilator 5.054 passes 16 cases. It keeps the embedded covergroup in a
 shallow copy (`covergroup::shallow_copy_has_no_embedded_covergroup` reads the
 handle of the copy as not `null`), where 8.12 gives the new object a `null`
 handle, and it rejects the bins of
 `covergroup::constructor_arguments_set_the_bins` ("Non-constant expression in
 bin range; range bounds must be constants"), where 19.5 lets a bin name the
-non-`ref` arguments of its covergroup. xezim 0.11.4 passes eight. It keeps
+non-`ref` arguments of its covergroup. Of the bins of this group it gives
+`bins b[] = { [127:150],[148:191] }` a bin for each listed value, 68, where
+19.5.1 says the declaration "creates a set of 65 bins b[127] . . . b[191]"
+(`covergroup::bin_arrays_have_a_bin_for_each_value_or_share_the_values`
+displays 9.59, seven of 73 bins, where the case expects 7.14, five of 70; its
+lines of `fixed [4]` and `fixed [5]` are as expected), and it has neither
+bins of a set expression ("syntax error, unexpected ';', expecting
+with-then-(", `covergroup::set_expression_is_the_values_of_a_bin`) nor ranges
+with a tolerance ("Unsupported: +/- range",
+`covergroup::tolerance_ranges_of_a_bin`). xezim 0.11.4 passes 12. It keeps
 the embedded covergroup in a shallow copy too, compares a covergroup variable
 that nothing assigned with `null` as `x`
 (`covergroup::handles_are_null_until_constructed`,
@@ -1801,7 +1820,19 @@ coverpoint of an enumeration of three enumerators in two bits four automatic
 bins (`covergroup::automatic_bins_of_a_coverpoint` displays 50.00 after a
 sample of two of the enumerators and 75.00 after one of each, where the case
 expects 66.67 and 100.00), where 19.5.3 makes their number the cardinality of
-the enumeration. Icarus 13.0 compiles none of the cases: it has no covergroups
+the enumeration. Of the bins of this group it counts an automatic bin whose
+values are all ignored (`covergroup::ignored_values_are_values_of_no_bin`
+displays 25.00, 50.00 and 75.00 for the example of 19.11.1, where three bins
+are left and the case expects 33.33, 66.67 and 100.00), makes one bin of a
+wildcard bin array
+(`covergroup::wildcard_bins_stand_for_both_values_of_a_bit` stays at 50.00),
+gives `bins func[] = b with (myfunc(item))` and `bins s[] = S` no value
+(`covergroup::with_expression_keeps_the_values_of_a_bin` and
+`covergroup::set_expression_is_the_values_of_a_bin` display 0.00), and does
+not parse a range with a tolerance. The two tools disagree with each other
+where each fails: xezim passes the bin arrays with 70 bins, and Verilator
+passes the ignored values, the wildcard bins and the `with` expressions.
+Icarus 13.0 compiles none of the cases: it has no covergroups
 ("Invalid module item", "Invalid class item"). All of these remain executed
 evidence in the [Verilator report](verification/sv/verilator/covergroup.json),
 the [xezim report](verification/sv/xezim/covergroup.json) and the

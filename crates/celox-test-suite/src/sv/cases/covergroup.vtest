@@ -284,3 +284,259 @@ endmodule"#)
 endmodule"#)
  (top Top) (run_until 0)
  (expect_output "50.00 0.00\n50.00 100.00\n"))
+
+; 19.5.1: `name[]` is a bin for each value of the list, also for a value
+; that the list has more than once, and `name[N]` distributes the values
+; among N bins, the last taking the rest; a bin without a value is none.
+; The examples of the clause: 70 bins of `v_a`, <1,2,3>, <4,5,6>, <7,8,9>,
+; <10,1,4,7> of `fixed [4]`, and <1>, <4>, <7> of `fixed [5]`.
+(case bin_arrays_have_a_bin_for_each_value_or_share_the_values
+ (source "bin_arrays.sv" #"module Top;
+ bit [9:0] v_a;
+ bit [3:0] f;
+ covergroup values;
+  coverpoint v_a {
+   bins a = { [0:63],65 };
+   bins b[] = { [127:150],[148:191] };
+   bins c[] = { 200,201,202 };
+   bins d = { [1000:$] };
+   bins others[] = default;
+  }
+ endgroup
+ covergroup four; coverpoint f { bins fixed [4] = {[1:10], 1, 4, 7}; } endgroup
+ covergroup five; coverpoint f { bins fixed [5] = {1, 4, 7}; } endgroup
+ values v = new;
+ four a = new;
+ five b = new;
+ initial begin
+  v_a = 65; v.sample(); v_a = 148; v.sample(); v_a = 149; v.sample();
+  v_a = 201; v.sample(); v_a = 1023; v.sample(); v_a = 500; v.sample();
+  $display("values %0.2f", v.get_inst_coverage());
+  f = 1; a.sample(); b.sample();
+  $display("four %0.2f five %0.2f", a.get_inst_coverage(), b.get_inst_coverage());
+  f = 9; a.sample(); b.sample();
+  $display("four %0.2f five %0.2f", a.get_inst_coverage(), b.get_inst_coverage());
+  f = 4; a.sample(); b.sample();
+  $display("four %0.2f five %0.2f", a.get_inst_coverage(), b.get_inst_coverage());
+ end
+endmodule"#)
+ (top Top) (run_until 0)
+ (expect_output "values 7.14\nfour 50.00 five 33.33\nfour 75.00 five 33.33\nfour 100.00 five 66.67\n"))
+
+; 19.5: a `default` bin counts the samples that are in no other bin, and
+; is no bin of the coverage.
+(case default_bin_is_no_bin_of_the_coverage
+ (source "default_bin.sv" #"module Top;
+ bit [2:0] v;
+ covergroup cg;
+  coverpoint v {
+   bins low = {[0:1]};
+   bins mid = {[2:3]};
+   bins rest = default;
+  }
+ endgroup
+ cg c = new;
+ initial begin
+  v = 5; c.sample(); v = 7; c.sample();
+  $display("%0.2f", c.get_inst_coverage());
+  v = 0; c.sample();
+  $display("%0.2f", c.get_inst_coverage());
+  v = 3; c.sample();
+  $display("%0.2f", c.get_inst_coverage());
+ end
+endmodule"#)
+ (top Top) (run_until 0)
+ (expect_output "0.00\n50.00\n100.00\n"))
+
+; 19.5.5, 19.11.1: an ignored value is a value of no bin, and a bin that is
+; left without a value is none of the coverage. The first covergroup is the
+; example of 19.11.1: of the automatic bins auto[0,1], auto[2,3], auto[4,5]
+; and auto[6,7] three are left. In the second the values are taken after
+; they are distributed, so <4,5,6,7> is left without one.
+(case ignored_values_are_values_of_no_bin
+ (source "ignore_bins.sv" #"module Top;
+ bit [2:0] b;
+ bit [3:0] w;
+ covergroup ct;
+  coverpoint b {
+   option.auto_bin_max = 4;
+   ignore_bins ig = {[0:1], [5:6]};
+  }
+ endgroup
+ covergroup parts;
+  coverpoint w {
+   bins all[4] = {[0:15]};
+   ignore_bins quarter = {[4:7]};
+  }
+ endgroup
+ ct c = new;
+ parts p = new;
+ initial begin
+  b = 0; c.sample();
+  $display("ct %0.2f", c.get_inst_coverage());
+  b = 2; c.sample();
+  $display("ct %0.2f", c.get_inst_coverage());
+  b = 5; c.sample(); b = 4; c.sample();
+  $display("ct %0.2f", c.get_inst_coverage());
+  b = 7; c.sample();
+  $display("ct %0.2f", c.get_inst_coverage());
+  w = 5; p.sample();
+  $display("parts %0.2f", p.get_inst_coverage());
+  w = 1; p.sample(); w = 9; p.sample();
+  $display("parts %0.2f", p.get_inst_coverage());
+  w = 15; p.sample();
+  $display("parts %0.2f", p.get_inst_coverage());
+ end
+endmodule"#)
+ (top Top) (run_until 0)
+ (expect_output "ct 0.00\nct 33.33\nct 66.67\nct 100.00\nparts 0.00\nparts 66.67\nparts 100.00\n"))
+
+; 19.5.6: an illegal value is a value of no other bin either. No sample
+; here is of one.
+(case illegal_values_are_values_of_no_other_bin
+ (source "illegal_bins.sv" #"module Top;
+ bit [1:0] v;
+ covergroup cg;
+  coverpoint v {
+   bins each[] = {[0:3]};
+   illegal_bins bad = {3};
+  }
+ endgroup
+ cg c = new;
+ initial begin
+  v = 0; c.sample(); v = 1; c.sample();
+  $display("%0.2f", c.get_inst_coverage());
+  v = 2; c.sample();
+  $display("%0.2f", c.get_inst_coverage());
+ end
+endmodule"#)
+ (top Top) (run_until 0)
+ (expect_output "66.67\n100.00\n"))
+
+; 19.5.4: in a `wildcard` bin an x, z or `?` bit of a value stands for 0
+; and for 1: `4'b11??` is 12 to 15, one bin, or with `[]` a bin for each.
+(case wildcard_bins_stand_for_both_values_of_a_bit
+ (source "wildcard_bins.sv" #"module Top;
+ bit [3:0] v;
+ covergroup cg;
+  coverpoint v {
+   wildcard bins g12_15 = { 4'b11?? };
+   wildcard bins g12_15_array[] = { 4'b11?? };
+  }
+ endgroup
+ cg c = new;
+ initial begin
+  v = 3; c.sample();
+  $display("%0.2f", c.get_inst_coverage());
+  v = 13; c.sample();
+  $display("%0.2f", c.get_inst_coverage());
+  v = 12; c.sample(); v = 14; c.sample();
+  $display("%0.2f", c.get_inst_coverage());
+  v = 15; c.sample();
+  $display("%0.2f", c.get_inst_coverage());
+ end
+endmodule"#)
+ (top Top) (run_until 0)
+ (expect_output "0.00\n40.00\n80.00\n100.00\n"))
+
+; 19.5.1: a bin with a guard counts a sample only where the guard holds.
+(case bin_guard_holds_for_the_count
+ (source "bin_guard.sv" #"module Top;
+ bit v;
+ bit en;
+ covergroup cg;
+  coverpoint v {
+   bins zero = {0} iff (en);
+   bins one = {1} iff (!en);
+  }
+ endgroup
+ cg c = new;
+ initial begin
+  v = 0; en = 0; c.sample();
+  $display("%0.2f", c.get_inst_coverage());
+  en = 1; c.sample();
+  $display("%0.2f", c.get_inst_coverage());
+  v = 1; c.sample();
+  $display("%0.2f", c.get_inst_coverage());
+  en = 0; c.sample();
+  $display("%0.2f", c.get_inst_coverage());
+ end
+endmodule"#)
+ (top Top) (run_until 0)
+ (expect_output "0.00\n50.00\n50.00\n100.00\n"))
+
+; 19.5.1.1: a bin has the values of its list for which its `with`
+; expression holds, `item` being the value, and the name of the coverpoint
+; stands for all its values. The two examples of the clause: the 86
+; multiples of 3 below 256, and the values a function keeps, here four.
+(case with_expression_keeps_the_values_of_a_bin
+ (source "with_filter.sv" #"module Top;
+ bit [7:0] x;
+ bit [3:0] b;
+ function automatic bit myfunc(bit [3:0] value);
+  return value[1:0] == 2'd1;
+ endfunction
+ covergroup thirds;
+  a: coverpoint x { bins mod3[] = {[0:255]} with (item % 3 == 0); }
+ endgroup
+ covergroup kept;
+  coverpoint b { bins func[] = b with (myfunc(item)); }
+ endgroup
+ thirds t = new;
+ kept k = new;
+ initial begin
+  x = 3; t.sample(); x = 7; t.sample(); x = 255; t.sample();
+  $display("thirds %0.2f", t.get_inst_coverage());
+  b = 1; k.sample(); b = 2; k.sample();
+  $display("kept %0.2f", k.get_inst_coverage());
+  b = 13; k.sample(); b = 5; k.sample(); b = 9; k.sample();
+  $display("kept %0.2f", k.get_inst_coverage());
+ end
+endmodule"#)
+ (top Top) (run_until 0)
+ (expect_output "thirds 2.33\nkept 25.00\nkept 100.00\n"))
+
+; 19.5.1.2: the values of a bin may be the elements of an array.
+(case set_expression_is_the_values_of_a_bin
+ (source "set_expression.sv" #"module Top;
+ localparam int S [3] = '{1, 4, 6};
+ bit [3:0] v;
+ covergroup cg;
+  coverpoint v { bins s[] = S; }
+ endgroup
+ cg c = new;
+ initial begin
+  v = 4; c.sample(); v = 5; c.sample();
+  $display("%0.2f", c.get_inst_coverage());
+  v = 1; c.sample(); v = 6; c.sample();
+  $display("%0.2f", c.get_inst_coverage());
+ end
+endmodule"#)
+ (top Top) (run_until 0)
+ (expect_output "33.33\n100.00\n"))
+
+; 11.4.13: `[A +/- B]` is A - B to A + B, and `[A +%- B]` the values
+; within B percent of A, the tolerance cut to an integer: 25 percent of 7
+; is 1, so the range is 6 to 8.
+(case tolerance_ranges_of_a_bin
+ (source "tolerance.sv" #"module Top;
+ bit [3:0] v;
+ covergroup cg;
+  coverpoint v {
+   bins near = {[11 +/- 1]};
+   bins pct = {[7 +%- 25]};
+   bins rest = {[13:15]};
+  }
+ endgroup
+ cg c = new;
+ initial begin
+  v = 9; c.sample(); v = 5; c.sample();
+  $display("%0.2f", c.get_inst_coverage());
+  v = 10; c.sample(); v = 6; c.sample();
+  $display("%0.2f", c.get_inst_coverage());
+  v = 8; c.sample(); v = 12; c.sample(); v = 13; c.sample();
+  $display("%0.2f", c.get_inst_coverage());
+ end
+endmodule"#)
+ (top Top) (run_until 0)
+ (expect_output "0.00\n66.67\n100.00\n"))

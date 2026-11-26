@@ -11,8 +11,9 @@
 use super::*;
 use celox_heap::coverage::OptionId;
 use celox_sv_syntax::{
-    BinsKind, BinsValue, CoverageItem, CoverageOption, CoverageRangeKind, CovergroupDeclaration,
-    CovergroupKind, Coverpoint, CoverpointItem, ExprId, ExprKind, TokenRange, TypeId,
+    Bins, BinsArray, BinsKind, BinsValue, CoverageItem, CoverageOption, CoverageRangeKind,
+    CovergroupDeclaration, CovergroupKind, Coverpoint, CoverpointItem, ExprId, ExprKind,
+    TokenRange, TypeId,
 };
 
 fn invalid(text: impl Into<String>) -> AnalyzerError {
@@ -187,20 +188,49 @@ pub(in crate::ast) fn coverpoints(
     })
 }
 
-/// The operand expressions of the range list of bin value `value`: those of
-/// `bins b = { ... }` without a filter, which is what the analysis compiles.
-pub(in crate::ast) fn range_operands(value: &BinsValue) -> Vec<ExprId> {
-    let BinsValue::Ranges { ranges, with: None } = value else {
-        return Vec::new();
-    };
-    ranges
-        .iter()
-        .flat_map(|range| match &range.kind {
-            CoverageRangeKind::Value(value) => vec![*value],
-            CoverageRangeKind::Range { low, high } => low.iter().chain(high).copied().collect(),
-            CoverageRangeKind::Tolerance { .. } => Vec::new(),
-        })
-        .collect()
+/// The name `item` that a `with` expression gives the value it is asked
+/// about (IEEE 1800-2023 19.5.1.1).
+pub(in crate::ast) const ITEM: &str = "item";
+
+/// The `with` expression of bin declaration `bins`, if it has one
+/// (19.5.1.1).
+pub(in crate::ast) fn filter(bins: &Bins) -> Option<ExprId> {
+    match &bins.value {
+        BinsValue::Ranges { with, .. } => *with,
+        BinsValue::CoverpointWith { with, .. } => Some(*with),
+        _ => None,
+    }
+}
+
+/// The expressions of bin declaration `bins` that a construction evaluates
+/// (19.5.1, 19.5.1.1, 19.5.1.2): the size of the array, the values and
+/// bounds of the range list, the `with` expression and the set expression.
+/// The guard of the bin is none of them: a sample evaluates it.
+pub(in crate::ast) fn construction_operands(bins: &Bins) -> Vec<ExprId> {
+    let mut operands = Vec::new();
+    if let Some(BinsArray::Sized(size)) = &bins.array {
+        operands.push(*size);
+    }
+    match &bins.value {
+        BinsValue::Ranges { ranges, with } => {
+            for range in ranges {
+                match &range.kind {
+                    CoverageRangeKind::Value(value) => operands.push(*value),
+                    CoverageRangeKind::Range { low, high } => {
+                        operands.extend(low.iter().chain(high));
+                    }
+                    CoverageRangeKind::Tolerance {
+                        center, tolerance, ..
+                    } => operands.extend([*center, *tolerance]),
+                }
+            }
+            operands.extend(with);
+        }
+        BinsValue::CoverpointWith { with, .. } => operands.push(*with),
+        BinsValue::Set(set) => operands.push(*set),
+        BinsValue::Transitions(_) | BinsValue::DefaultSequence | BinsValue::Default => {}
+    }
+    operands
 }
 
 /// The expressions and the types after the header of `declaration` that the
@@ -214,6 +244,10 @@ pub(crate) struct Bound {
     pub sampled: Vec<ExprId>,
     /// Evaluated at `new`: these read the arguments of the covergroup.
     pub constructed: Vec<ExprId>,
+    /// Those of `constructed` that are the `with` expressions of bins
+    /// (19.5.1.1), in which `item` names the value the filter is asked
+    /// about and nothing of the scope.
+    pub filters: Vec<ExprId>,
     pub types: Vec<TypeId>,
 }
 
@@ -231,7 +265,9 @@ impl Bound {
                         match item {
                             CoverpointItem::Option(option) => bound.constructed.push(option.value),
                             CoverpointItem::Bins(bins) => {
-                                bound.constructed.extend(range_operands(&bins.value));
+                                bound.constructed.extend(construction_operands(bins));
+                                bound.filters.extend(filter(bins));
+                                bound.sampled.extend(bins.iff);
                             }
                         }
                     }
@@ -240,6 +276,16 @@ impl Bound {
             }
         }
         bound
+    }
+
+    /// Whether the expression at `tokens` is `name` as the value a `with`
+    /// expression is asked about: `item` in one of them (19.5.1.1).
+    pub(crate) fn names_item(&self, native: &Declarations, name: &str, tokens: TokenRange) -> bool {
+        name == ITEM
+            && self.filters.iter().any(|filter| {
+                let filter = native.expression(*filter).tokens;
+                filter.start <= tokens.start && tokens.start < filter.end
+            })
     }
 
     /// The token ranges of the expressions and types.
@@ -295,7 +341,8 @@ pub(in crate::ast) fn variable_names(native: &Declarations, root: ExprId) -> Vec
 /// What the items of covergroup `declaration`, shown as `display`, are to
 /// the analysis. An error is what the standard makes illegal: an option
 /// member that does not exist, that its level has not or that one
-/// definition assigns twice (19.7, 19.10), two items of one name (19.5),
+/// definition assigns twice (19.7, 19.10), two items of one name and two
+/// bins of one name in a coverpoint (19.5),
 /// and an argument of the sample method in an option value or a bin
 /// (19.8.1), whose names are `sample_formals`. `Ok(Some(_))` is the
 /// rejection of the first item the analysis does not support, which the
@@ -332,13 +379,15 @@ pub(super) fn check(
         seen.push(key);
         Ok(compiled.err())
     };
-    let no_sample_formal = |root: ExprId, what: &str| -> Converted<()> {
+    // In a `with` expression (`filter`), `item` is the value the filter is
+    // asked about (19.5.1.1), not an argument of that name.
+    let no_sample_formal = |root: ExprId, what: &str, in_filter: bool| -> Converted<()> {
         if sample_formals.is_empty() {
             return Ok(());
         }
         match variable_names(native, root)
             .into_iter()
-            .find(|(name, _)| sample_formals.contains(name))
+            .find(|(name, _)| sample_formals.contains(name) && !(in_filter && name == ITEM))
         {
             Some((name, _)) => Err(invalid(format!(
                 "argument `{name}` of the sample method of covergroup `{display}` is used in {what}: it is visible in coverpoint expressions and their guards only (IEEE 1800-2023 19.8.1)"
@@ -358,7 +407,7 @@ pub(super) fn check(
                 {
                     reject(error);
                 }
-                no_sample_formal(option.value, "an option value")?;
+                no_sample_formal(option.value, "an option value", false)?;
             }
             CoverageItem::Coverpoint(coverpoint) => {
                 points += 1;
@@ -373,6 +422,9 @@ pub(super) fn check(
                 }
                 let place = format!("coverpoint `{name}` of covergroup `{display}`");
                 let mut options = Vec::new();
+                // A coverpoint is a scope (19.5), which its bins are named
+                // in.
+                let mut bin_names: Vec<String> = Vec::new();
                 for item in &coverpoint.items {
                     match item {
                         CoverpointItem::Option(option) => {
@@ -381,12 +433,21 @@ pub(super) fn check(
                             {
                                 reject(error);
                             }
-                            no_sample_formal(option.value, "an option value")?;
+                            no_sample_formal(option.value, "an option value", false)?;
                         }
                         CoverpointItem::Bins(bins) => {
-                            for operand in range_operands(&bins.value) {
-                                no_sample_formal(operand, "a bin")?;
+                            let bin = instances::normalize_identifier(&bins.name.spelling);
+                            if bin_names.contains(&bin) {
+                                return Err(invalid(format!(
+                                    "{place} has two bins named `{bin}` (IEEE 1800-2023 19.5)"
+                                )));
                             }
+                            bin_names.push(bin);
+                            let with = filter(bins);
+                            for operand in construction_operands(bins) {
+                                no_sample_formal(operand, "a bin", Some(operand) == with)?;
+                            }
+                            check_bins(bins, &name, &place)?;
                             if let Some(construct) = unsupported_bins(bins) {
                                 reject(unsupported(construct));
                             }
@@ -411,47 +472,41 @@ pub(super) fn check(
     Ok(rejection)
 }
 
-/// What of bin declaration `bins` the analysis does not support: anything
-/// but `bins name = { values and ranges }`.
-fn unsupported_bins(bins: &celox_sv_syntax::Bins) -> Option<&'static str> {
-    if bins.wildcard {
-        return Some("covergroup wildcard bins (IEEE 1800-2023 19.5.4)");
-    }
-    match bins.kind {
-        BinsKind::Bins => {}
-        BinsKind::IgnoreBins => return Some("covergroup ignore_bins (IEEE 1800-2023 19.5.5)"),
-        BinsKind::IllegalBins => return Some("covergroup illegal_bins (IEEE 1800-2023 19.5.6)"),
-    }
-    if bins.array.is_some() {
-        return Some("covergroup bin array (IEEE 1800-2023 19.5.1)");
-    }
+/// What the standard excludes of bin declaration `bins` of the coverpoint
+/// named `point`, which `place` names, as the declaration alone shows: an
+/// ignored `default` bin (19.5), and the name of another coverpoint before
+/// `with` (19.5.1.1).
+fn check_bins(bins: &Bins, point: &str, place: &str) -> Converted<()> {
+    let name = instances::normalize_identifier(&bins.name.spelling);
     match &bins.value {
-        BinsValue::Ranges { ranges, with } => {
-            if with.is_some() {
-                return Some("covergroup bins with a filter (IEEE 1800-2023 19.5.1.1)");
-            }
-            if ranges
-                .iter()
-                .any(|range| matches!(range.kind, CoverageRangeKind::Tolerance { .. }))
-            {
-                return Some(
-                    "covergroup bin range with a tolerance (IEEE 1800-2023 19.5.1, 11.4.13)",
-                );
-            }
+        BinsValue::Default | BinsValue::DefaultSequence if bins.kind == BinsKind::IgnoreBins => {
+            Err(invalid(format!(
+                "`ignore_bins {name}` of {place} is a default bin, which cannot be ignored (IEEE 1800-2023 19.5)"
+            )))
         }
-        BinsValue::CoverpointWith { .. } => {
-            return Some("covergroup bins with a filter (IEEE 1800-2023 19.5.1.1)");
+        BinsValue::CoverpointWith { coverpoint, .. }
+            if instances::normalize_identifier(&coverpoint.spelling) != point =>
+        {
+            Err(invalid(format!(
+                "bin `{name}` of {place} takes the values of `{}`: only the name of its own coverpoint stands for all its values (IEEE 1800-2023 19.5.1.1)",
+                instances::normalize_identifier(&coverpoint.spelling)
+            )))
         }
-        BinsValue::Set(_) => {
-            return Some("covergroup bins of a set expression (IEEE 1800-2023 19.5.1.2)");
-        }
+        _ => Ok(()),
+    }
+}
+
+/// What of bin declaration `bins` the analysis does not support: bins of
+/// transitions, and a `default` bin array with a size, whose values the
+/// standard does not distribute.
+fn unsupported_bins(bins: &Bins) -> Option<&'static str> {
+    match &bins.value {
         BinsValue::Transitions(_) | BinsValue::DefaultSequence => {
-            return Some("covergroup transition bins (IEEE 1800-2023 19.5.2)");
+            Some("covergroup transition bins (IEEE 1800-2023 19.5.2)")
         }
-        BinsValue::Default => return Some("covergroup default bins (IEEE 1800-2023 19.5)"),
+        BinsValue::Default if matches!(bins.array, Some(BinsArray::Sized(_))) => {
+            Some("covergroup default bin array with a size (IEEE 1800-2023 19.5)")
+        }
+        _ => None,
     }
-    if bins.iff.is_some() {
-        return Some("covergroup bins with a guard (IEEE 1800-2023 19.5.1)");
-    }
-    None
 }
