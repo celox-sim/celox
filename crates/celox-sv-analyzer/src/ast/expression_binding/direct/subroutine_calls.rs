@@ -909,6 +909,7 @@ fn check_copy_out(
     session: &mut Session,
     dimensions: &PackedDimensions,
 ) -> Converted<()> {
+    crate::ast::covergroups::check_place(tree, session, id, native, dimensions)?;
     let Some(source) = formal.type_id(&mut session.types, &tree.functions, &dimensions.const_env)
     else {
         return Ok(());

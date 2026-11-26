@@ -274,7 +274,8 @@ pub(in crate::ast) fn subroutine_argument_names(
             )?;
             if model.rejection.is_none() {
                 let handle = classes::handle(&mut session.types, &model.name);
-                for (name, formals) in crate::ast::covergroups::signatures(&model, &handle) {
+                for (name, formals) in crate::ast::covergroups::signatures(&model, &handle, &handle)
+                {
                     directions.insert(
                         name.clone(),
                         formals.iter().map(|(_, direction, _)| *direction).collect(),
@@ -379,7 +380,8 @@ pub(in crate::ast) fn subroutine_argument_names(
                     model.owner.as_deref() == Some(class.as_str()) && model.rejection.is_none()
                 })
             {
-                for (name, formals) in crate::ast::covergroups::signatures(model, &handle) {
+                let own = classes::handle(&mut session.types, &model.name);
+                for (name, formals) in crate::ast::covergroups::signatures(model, &handle, &own) {
                     directions.insert(
                         name.clone(),
                         formals.iter().map(|(_, direction, _)| *direction).collect(),

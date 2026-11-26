@@ -11,6 +11,7 @@ mod format_patterns;
 mod lvalues;
 pub(super) mod objects;
 mod references;
+pub(in crate::ast) use references::check_actual as check_reference_actual;
 #[cfg(test)]
 mod selected;
 mod streams;

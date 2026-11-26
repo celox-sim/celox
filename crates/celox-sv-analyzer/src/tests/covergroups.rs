@@ -407,28 +407,6 @@ fn unsupported_covergroup_constructs_are_rejected_where_used() {
     // What a covergroup without items does not support yet.
     let covergroup = "covergroup cg; endgroup cg c; real r; int a, b;";
     for (items, construct) in [
-        ("initial c.start();", "covergroup method `start`"),
-        ("initial c.stop();", "covergroup method `stop`"),
-        (
-            "initial c.set_inst_name(\"x\");",
-            "covergroup method `set_inst_name`",
-        ),
-        (
-            "initial r = c.get_coverage(a, b);",
-            "covergroup method `get_coverage` with arguments",
-        ),
-        (
-            "initial r = c.get_inst_coverage(a, b);",
-            "covergroup method `get_inst_coverage` with arguments",
-        ),
-        ("initial c.option.weight = 2;", "covergroup option"),
-        ("initial a = c.option.weight;", "covergroup option"),
-        ("initial cg::type_option.weight = 2;", "covergroup option"),
-        ("initial a = c.type_option.goal;", "covergroup option"),
-        (
-            "initial r = c.point.get_coverage();",
-            "covergroup coverpoint or cross method",
-        ),
         (
             "cg d; initial d = new c;",
             "covergroup shallow copy with new",
@@ -1592,24 +1570,16 @@ fn unsupported_coverpoint_constructs_are_rejected_where_used() {
             "covergroup transition bins (IEEE 1800-2023 19.5.2)",
         ),
         (
-            "covergroup cg; type_option.weight = 2; endgroup",
-            "covergroup type_option (IEEE 1800-2023 19.7.1)",
+            "covergroup cg; type_option.real_interval = 2.0; endgroup",
+            "covergroup type_option.real_interval (IEEE 1800-2023 19.7.1)",
         ),
         (
-            "bit x; covergroup cg; coverpoint x { type_option.comment = \"c\"; } endgroup",
-            "covergroup type_option (IEEE 1800-2023 19.7.1)",
+            "bit x; covergroup cg; coverpoint x { type_option.real_interval = 0.5; } endgroup",
+            "covergroup type_option.real_interval (IEEE 1800-2023 19.7.1)",
         ),
         (
-            "covergroup cg; option.detect_overlap = 1; endgroup",
-            "covergroup option `detect_overlap` (IEEE 1800-2023 19.7)",
-        ),
-        (
-            "covergroup cg; option.get_inst_coverage = 1; endgroup",
-            "covergroup option `get_inst_coverage` (IEEE 1800-2023 19.7)",
-        ),
-        (
-            "bit x; covergroup cg; coverpoint x { option.detect_overlap = 1; } endgroup",
-            "covergroup option `detect_overlap` (IEEE 1800-2023 19.7)",
+            "parameter string S = \"s\"; covergroup cg; type_option.comment = S; endgroup",
+            "covergroup type_option.comment that is no string literal (IEEE 1800-2023 19.7.1)",
         ),
         (
             "real r; covergroup cg; coverpoint r; endgroup",
@@ -2666,10 +2636,6 @@ fn unsupported_cross_constructs_are_rejected_where_used() {
             "covergroup cross selection of the bins of a coverpoint that the cross does not cross \
              (IEEE 1800-2023 19.6.1)",
         ),
-        (
-            "bit [1:0] x, y; covergroup cg; c: cross x, y { type_option.weight = 2; } endgroup",
-            "covergroup type_option (IEEE 1800-2023 19.7.1)",
-        ),
     ];
     for (declaration, construct) in constructs {
         let construct = construct.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -2747,5 +2713,440 @@ fn unsupported_cross_constructs_are_rejected_where_used() {
         assert!(text.ends_with(&construct), "{select}: {text}");
         assert!(text.starts_with("covergroups.sv:"), "{select}: {text}");
         assert_eq!(error.tracking_issue(), COVERGROUPS_ISSUE, "{select}");
+    }
+}
+
+#[test]
+fn options_and_methods_bind_through_instances_and_types() {
+    // 19.7, 19.7.1, 19.8, 19.10: the members of `option` through an
+    // instance and of `type_option` through an instance or the type, at the
+    // covergroup, a coverpoint and a cross; the methods of the items; the
+    // two `ref int` arguments; `start`, `stop` and `set_inst_name`.
+    let ir = analyze(
+        "module Top; bit [1:0] a, b; int covered, total; real r; string s; bit on; \
+         covergroup cg; ca: coverpoint a; coverpoint b; x: cross ca, b; endgroup \
+         cg c; \
+         initial begin \
+           cg::type_option.comment = \"type\"; cg::ca::type_option.weight = 3; \
+           cg::x::type_option.goal = 90; cg::type_option.merge_instances = 1; \
+           cg::type_option.distribute_first = 0; \
+           c = new; \
+           c.option.weight = 2; c.option.name = \"first\"; c.ca.option.at_least = 2; \
+           c.b.option.comment = s; c.x.option.cross_num_print_missing = 4; \
+           c.type_option.weight = 4; c.ca.type_option.goal = 50; \
+           covered = c.option.at_least; s = c.option.comment; on = c.option.per_instance; \
+           covered = c.x.type_option.weight; on = cg::type_option.merge_instances; \
+           s = cg::ca::type_option.comment; \
+           r = c.ca.get_coverage() + c.ca.get_inst_coverage() + cg::x::get_coverage(); \
+           r = c.get_coverage(covered, total) + c.get_inst_coverage(covered, total); \
+           r = c.x.get_inst_coverage(covered, total) + cg::ca::get_coverage(covered, total); \
+           void'(cg::get_coverage(covered, total)); \
+           c.stop(); c.ca.stop(); c.sample(); c.ca.start(); c.x.stop(); c.start(); \
+           c.set_inst_name(\"named\"); c.set_inst_name(s); \
+         end endmodule",
+    )
+    .unwrap();
+    let top = module(&ir, "Top");
+    let names = top
+        .subroutines()
+        .iter()
+        .map(|subroutine| subroutine.name.as_str())
+        .filter(|name| name.starts_with("$covergroup::"))
+        .collect::<Vec<_>>();
+    assert!(
+        names.iter().any(|name| name.ends_with("::$counts")),
+        "{names:?}"
+    );
+    assert!(
+        names.iter().any(|name| name.ends_with("::$type_counts")),
+        "{names:?}"
+    );
+    // Without a call with two arguments a module makes neither.
+    let ir = analyze(
+        "module Top; bit a; real r; covergroup cg; coverpoint a; endgroup cg c = new; \
+         initial begin c.option.weight = 2; r = c.a.get_coverage(); c.stop(); end endmodule",
+    )
+    .unwrap();
+    assert!(
+        !module(&ir, "Top")
+            .subroutines()
+            .iter()
+            .any(|subroutine| subroutine.name.ends_with("counts")),
+    );
+    // Through a `null` handle and the members of an embedded covergroup
+    // of the objects of a class.
+    analyze(
+        "class C; bit [1:0] v; covergroup cg; cv: coverpoint v; endgroup \
+         function new(); cg = new; cg.option.weight = 2; cg.cv.option.at_least = 2; endfunction \
+         function void off(); cg.stop(); cg.cv.start(); endfunction endclass \
+         module Top; C o; int n, t; real r; \
+         initial begin o = new; o.cg.option.comment = \"o\"; o.cg.cv.option.goal = 1; \
+         r = o.cg.cv.get_inst_coverage(n, t); o.cg.set_inst_name(\"o\"); o.off(); \
+         n = o.cg.type_option.weight; end endmodule",
+    )
+    .unwrap();
+}
+
+#[test]
+fn procedural_options_the_standard_excludes_are_errors() {
+    let covergroup = "bit [1:0] a, b; int n; string s; real r; \
+        covergroup cg; ca: coverpoint a; x: cross a, b; endgroup cg c = new;";
+    for (items, rule) in [
+        // "The per_instance and get_inst_coverage options can only be set in
+        // the covergroup definition. The auto_bin_max, detect_overlap, and
+        // cross_retain_auto_bins options can only be set in the covergroup or
+        // coverpoint definition" (19.7).
+        (
+            "initial c.option.per_instance = 1;",
+            "`option.per_instance` of a covergroup of covergroup `Top.cg` is assigned in a procedure: it can be set only in the covergroup definition (IEEE 1800-2023 19.7)",
+        ),
+        (
+            "initial c.option.get_inst_coverage = 1;",
+            "`option.get_inst_coverage` of a covergroup",
+        ),
+        (
+            "initial c.option.auto_bin_max = 4;",
+            "(IEEE 1800-2023 19.7)",
+        ),
+        ("initial c.ca.option.auto_bin_max = 4;", "of a coverpoint"),
+        (
+            "initial c.ca.option.detect_overlap = 1;",
+            "(IEEE 1800-2023 19.7)",
+        ),
+        (
+            "initial c.x.option.cross_retain_auto_bins = 0;",
+            "of a cross",
+        ),
+        // "The strobe and real_interval type options can only be set in the
+        // covergroup definition" (19.7.1).
+        (
+            "initial cg::type_option.strobe = 1;",
+            "`type_option.strobe` of a covergroup of covergroup `Top.cg` is assigned in a procedure: it can be set only in the covergroup definition (IEEE 1800-2023 19.7.1)",
+        ),
+        (
+            "initial c.type_option.real_interval = 2.0;",
+            "(IEEE 1800-2023 19.7.1)",
+        ),
+        // 19.10: the members of each level.
+        (
+            "initial n = c.option.size;",
+            "`option` of covergroup `Top.cg` has no member `size` (IEEE 1800-2023 19.10)",
+        ),
+        (
+            "initial c.ca.option.name = \"x\";",
+            "`option.name` is used on a coverpoint of covergroup `Top.cg`, which has no such member (IEEE 1800-2023 19.10)",
+        ),
+        ("initial n = c.x.option.auto_bin_max;", "used on a cross"),
+        (
+            "initial c.ca.type_option.merge_instances = 1;",
+            "(IEEE 1800-2023 19.10)",
+        ),
+        (
+            "initial n = cg::x::type_option.real_interval;",
+            "(IEEE 1800-2023 19.10)",
+        ),
+        // `option` is a member of an instance, `type_option` a static one.
+        (
+            "initial cg::option.weight = 2;",
+            "named with `::`: `option` is a member of each instance",
+        ),
+        (
+            "initial n = cg::ca::option.weight;",
+            "(IEEE 1800-2023 19.7, 19.7.1)",
+        ),
+        // Items (19.5, 19.6), and the methods Table 19-5 gives them.
+        (
+            "initial r = c.nope.get_coverage();",
+            "covergroup `Top.cg` has no coverpoint or cross named `nope` (IEEE 1800-2023 19.5, 19.6)",
+        ),
+        ("initial c.nope.option.weight = 2;", "named `nope`"),
+        (
+            "initial c.ca.sample();",
+            "`sample` called on a coverpoint or cross",
+        ),
+        (
+            "initial c.x.set_inst_name(\"x\");",
+            "`set_inst_name` called on a coverpoint",
+        ),
+        (
+            "initial cg::start();",
+            "it is not a static method (IEEE 1800-2023 19.8)",
+        ),
+        (
+            "initial r = cg::ca::get_inst_coverage();",
+            "it is not a static method",
+        ),
+        ("initial cg::ca::start();", "it is not a static method"),
+        ("initial cg::x::stop();", "it is not a static method"),
+        (
+            "initial n = c.start();",
+            "the start method of covergroup `Top.cg` returns no value",
+        ),
+        ("initial s = c.ca.stop();", "the stop method"),
+        ("initial n = c.set_inst_name(\"x\");", "returns no value"),
+        (
+            "initial n = c.option.weight();",
+            "it is a member of a structure, not a method",
+        ),
+    ] {
+        let error = rejected("", &format!("{covergroup} {items}"));
+        let AnalyzerError::InvalidCovergroup(text) = &error else {
+            panic!("{items}: {error}");
+        };
+        assert!(text.contains(rule), "{items}: {text}");
+    }
+    // The arity of the methods (19.8) is that of a call.
+    for items in [
+        "initial r = c.get_coverage(n);",
+        "initial r = c.get_inst_coverage(n, n, n);",
+        "initial r = cg::ca::get_coverage(n);",
+        "initial c.start(1);",
+        "initial c.set_inst_name();",
+        "initial c.set_inst_name(s, s);",
+    ] {
+        let error = rejected("", &format!("{covergroup} {items}"));
+        assert!(
+            matches!(error, AnalyzerError::InvalidCallArguments { .. }),
+            "{items}: {error}"
+        );
+    }
+    // The two arguments are variables passed by reference (13.5.2).
+    for items in [
+        "initial r = c.get_coverage(1, n);",
+        "initial r = c.ca.get_inst_coverage(n, n + 1);",
+        "logic [31:0] l; initial r = c.get_coverage(l, n);",
+    ] {
+        let error = rejected("", &format!("{covergroup} {items}"));
+        let AnalyzerError::InvalidRefArgument { subroutine, .. } = &error else {
+            panic!("{items}: {error}");
+        };
+        // The error names the method, not a subroutine of the analysis.
+        assert!(
+            matches!(subroutine.as_str(), "get_coverage" | "get_inst_coverage"),
+            "{items}: {error}"
+        );
+    }
+    // Table 19-5 gives the formals of the methods no names; those of a
+    // `with function sample` declaration have theirs (19.8.1).
+    for items in [
+        "initial r = c.get_coverage(.covered(n), .total(n));",
+        "initial r = cg::ca::get_coverage(.a(n), .b(n));",
+        "initial r = c.get_inst_coverage(n, .total(n));",
+        "initial c.set_inst_name(.name(s));",
+        "initial c.start(.x());",
+        "initial c.sample(.v(1));",
+    ] {
+        let error = rejected("", &format!("{covergroup} {items}"));
+        let AnalyzerError::InvalidCallArguments { subroutine, detail } = &error else {
+            panic!("{items}: {error}");
+        };
+        assert!(
+            !subroutine.contains('$') && !detail.contains('$'),
+            "{items}: {error}"
+        );
+    }
+    analyze(
+        "module Top; covergroup cg with function sample(int v, bit b = 0); coverpoint v; endgroup \
+         cg c = new; initial c.sample(.b(1), .v(2)); endmodule",
+    )
+    .unwrap();
+    // `$bits` of a member through the type, as through an instance (20.6.2).
+    analyze(&format!(
+        "module Top; {covergroup} initial begin n = $bits(cg::type_option.weight); \
+         n = $bits(c.type_option.goal) + $bits(cg::ca::type_option.weight) + $bits(c.option.at_least); \
+         end endmodule"
+    ))
+    .unwrap();
+    // The value is checked as one assigned to a variable of the member's
+    // type (19.10).
+    for items in [
+        "initial c.option.weight = s;",
+        "bit [1:0] v[2]; initial c.option.weight = v;",
+        "initial c.ca.option.at_least = c;",
+    ] {
+        assert!(
+            analyze(&format!("module Top; {covergroup} {items} endmodule")).is_err(),
+            "{items}"
+        );
+    }
+    // What the analysis does not support of the members.
+    for (items, construct) in [
+        (
+            "initial c.option.weight += 1;",
+            "covergroup option member assigned with `+=` (`option.weight` of covergroup `Top.cg`; IEEE 1800-2023 19.7)",
+        ),
+        (
+            "initial c.option.weight <= 1;",
+            "covergroup option member assigned with `<=` (`option.weight` of covergroup `Top.cg`; IEEE 1800-2023 19.7)",
+        ),
+        (
+            "initial c.option.weight++;",
+            "covergroup option member written other than by an assignment with `=` (`option.weight` of covergroup `Top.cg`; IEEE 1800-2023 19.7)",
+        ),
+        (
+            "initial cg::type_option.weight++;",
+            "covergroup option member written other than by an assignment with `=` (`type_option.weight` of covergroup `Top.cg`; IEEE 1800-2023 19.7)",
+        ),
+        (
+            "initial c.type_option.weight--;",
+            "covergroup option member written other than by an assignment with `=` (`type_option.weight` of covergroup `Top.cg`; IEEE 1800-2023 19.7)",
+        ),
+        (
+            "task automatic t(output int o); o = 1; endtask initial t(c.option.weight);",
+            "covergroup option member written other than by an assignment with `=` (`option.weight` of covergroup `Top.cg`; IEEE 1800-2023 19.7)",
+        ),
+        (
+            "function automatic int f(inout int o); o = 1; return 0; endfunction \
+             initial n = f(c.ca.option.at_least);",
+            "covergroup option member written other than by an assignment with `=` (`option.at_least` of covergroup `Top.cg`; IEEE 1800-2023 19.7)",
+        ),
+        (
+            "initial force c.type_option.weight = 1;",
+            "covergroup option member written other than by an assignment with `=` (`type_option.weight` of covergroup `Top.cg`; IEEE 1800-2023 19.7)",
+        ),
+        (
+            "initial n = cg::type_option.strobe;",
+            "covergroup type_option.strobe read in a procedure (IEEE 1800-2023 19.7.1)",
+        ),
+        (
+            "initial r = c.ca.type_option.real_interval;",
+            "covergroup type_option.real_interval read in a procedure (IEEE 1800-2023 19.7.1)",
+        ),
+        (
+            "initial $display(\"%p\", c.option);",
+            "covergroup option structure used as a whole (`option` of `Top.cg`; IEEE 1800-2023 19.10)",
+        ),
+    ] {
+        let error = rejected("", &format!("{covergroup} {items}"));
+        assert_eq!(
+            error,
+            AnalyzerError::Unsupported(construct.into()),
+            "{items}"
+        );
+        assert_eq!(error.tracking_issue(), COVERGROUPS_ISSUE);
+    }
+}
+
+#[test]
+fn type_options_of_the_definition_compile_to_the_descriptor() {
+    // 19.7.1: `type_option` assignments of the definition, at the three
+    // levels, are constants of the descriptor of the type.
+    let ir = analyze(
+        "module Top; bit [1:0] a, b; localparam int W = 3; \
+         covergroup cg; \
+         type_option.weight = W + 1; type_option.goal = 80; type_option.comment = \"of the type\"; \
+         type_option.merge_instances = 1; type_option.distribute_first = 1; \
+         type_option.strobe = 0; \
+         ca: coverpoint a { type_option.weight = W; option.weight = 2; type_option.comment = \"a\"; \
+         type_option.goal = 2.5; } \
+         x: cross ca, b { type_option.goal = 70; type_option.weight = -0.4; } \
+         option.detect_overlap = 1; option.get_inst_coverage = 1; \
+         endgroup cg c = new; endmodule",
+    )
+    .unwrap();
+    let descriptor_of = |ir: &Ir| descriptor(module(ir, "Top"), "Top.cg");
+    let descriptor = descriptor_of(&ir);
+    let group = &descriptor.type_options;
+    assert_eq!(
+        (group.weight, group.goal, group.comment.as_str()),
+        (4, 80, "of the type")
+    );
+    assert!(group.merge_instances && group.distribute_first);
+    let point = &descriptor.points[0].type_options;
+    assert_eq!(
+        (point.weight, point.goal, point.comment.as_str()),
+        (3, 3, "a")
+    );
+    // A `real` constant is rounded, as an `int` variable takes it (6.12.1).
+    let cross = &descriptor.crosses[0].type_options;
+    assert_eq!((cross.weight, cross.goal), (0, 70));
+    let rounded = analyze(
+        "module Top; bit a; covergroup cg; type_option.goal = 2.5; type_option.weight = 2.0 + 0.6; \
+         type_option.merge_instances = 0.6; coverpoint a; endgroup cg c = new; endmodule",
+    )
+    .unwrap();
+    let group = &descriptor_of(&rounded).type_options;
+    assert_eq!(
+        (group.goal, group.weight, group.merge_instances),
+        (3, 3, true)
+    );
+    use celox_heap::coverage::OptionId;
+    assert!(
+        descriptor
+            .options
+            .iter()
+            .any(|option| option.option == OptionId::DetectOverlap)
+    );
+    assert!(
+        descriptor
+            .options
+            .iter()
+            .any(|option| option.option == OptionId::GetInstCoverage)
+    );
+    // What the standard excludes: a value that is no constant (19.7.1, "NOTE:
+    // type_option.weight = w would cause syntax error"), a negative weight
+    // (Table 19-3), a member at a level that has none (19.10).
+    for (declaration, rule) in [
+        (
+            "bit a; covergroup cg(int w = 1); coverpoint a { type_option.weight = w; } endgroup",
+            "`type_option.weight` of covergroup `Top.cg` is assigned a value that is not a constant expression (IEEE 1800-2023 19.7.1)",
+        ),
+        (
+            "int v; covergroup cg; type_option.goal = v; endgroup",
+            "is assigned a value that is not a constant expression",
+        ),
+        (
+            "covergroup cg; type_option.weight = -1; endgroup",
+            "`type_option.weight` of covergroup `Top.cg` is assigned the negative weight -1 (IEEE 1800-2023 19.7.1)",
+        ),
+        (
+            "bit a; covergroup cg; coverpoint a { type_option.merge_instances = 1; } endgroup",
+            "`type_option.merge_instances` is assigned in a coverpoint",
+        ),
+    ] {
+        let error = rejected("", &format!("{declaration} cg c = new;"));
+        let AnalyzerError::InvalidCovergroup(text) = &error else {
+            panic!("{declaration}: {error}");
+        };
+        assert!(text.contains(rule), "{declaration}: {text}");
+    }
+}
+
+#[test]
+fn strobe_follows_the_sampling_event() {
+    // 19.3: strobe "only applies to the scheduling of samples triggered by
+    // a clocking event. It shall have no effect on sampling due to a block
+    // event expression or procedural calls to the sample() method." A type
+    // without a clocking event accepts it; one with a clocking event that
+    // sets it to a nonzero constant is rejected for it.
+    for declaration in [
+        "covergroup cg with function sample(bit v); type_option.strobe = 1; coverpoint v; endgroup",
+        "covergroup cg; type_option.strobe = 1'b1; endgroup",
+        "covergroup cg; type_option.strobe = 0; endgroup",
+    ] {
+        analyze(&format!("module Top; {declaration} cg c = new; endmodule"))
+            .unwrap_or_else(|error| panic!("{declaration}: {error}"));
+    }
+    for (strobe, construct) in [
+        ("1", "covergroup strobe sampling (IEEE 1800-2023 19.7.1)"),
+        (
+            "2 - 1",
+            "covergroup strobe sampling (IEEE 1800-2023 19.7.1)",
+        ),
+        ("0", "covergroup sampling event (IEEE 1800-2023 19.3)"),
+    ] {
+        let error = rejected(
+            "",
+            &format!(
+                "bit clk; covergroup cg @(posedge clk); type_option.strobe = {strobe}; endgroup \
+                 cg c = new;"
+            ),
+        );
+        assert_eq!(
+            error,
+            AnalyzerError::Unsupported(construct.into()),
+            "{strobe}"
+        );
+        assert_eq!(error.tracking_issue(), COVERGROUPS_ISSUE);
     }
 }

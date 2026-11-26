@@ -28,12 +28,17 @@ mod model;
 
 pub(crate) use compile::Bound;
 pub(super) use compile::{
-    ITEM, Layout, Level, OptionType, SelectTree, cross_name, filter, option_member, point_name,
-    select_tree, variable_names,
+    ITEM, Layout, Level, Member, OptionType, SelectTree, cross_name, filter, option_member,
+    point_name, select_tree, variable_names,
 };
-pub(super) use methods::{construct, overall, result_type, sample_statement, value};
+pub(super) use methods::{
+    check_place, construct, option_assignment, overall, result_shape, result_type,
+    sample_statement, value,
+};
 pub(crate) use model::is_constructor;
-pub(super) use model::{Covergroup, Formal, build, declare, is_sampler, rejected};
+pub(super) use model::{
+    Covergroup, Formal, ITEM_FORMAL, build, count_formals, declare, is_sampler, rejected,
+};
 
 /// The start of the reserved class name of every covergroup type.
 const PREFIX: &str = "$covergroup::";
@@ -359,20 +364,22 @@ fn through_expression() -> AnalyzerError {
 
 /// The formals of the subroutines of `model`, each with its name: source
 /// names, directions and types. `first` is the type of the first formal of
-/// the subroutines that take one: the handle type of the class of an
-/// embedded covergroup, whose object `N::$new` and `N::$sample` take, or
-/// else that of the covergroup, whose handle `N::$sample` takes.
+/// `N::$new` and `N::$sample` where they take one: the handle type of the
+/// class of an embedded covergroup, whose object they take, or else that of
+/// the covergroup, whose handle `N::$sample` takes. `handle` is that of the
+/// covergroup, whose handle `N::$counts` takes.
 pub(super) fn signatures(
     model: &Covergroup,
     first: &Type,
+    handle: &Type,
 ) -> [(
     String,
     Vec<(String, crate::procedural::ParamDirection, Type)>,
-); 3] {
+); 5] {
     use crate::procedural::ParamDirection;
-    let formals = |leading: Option<&str>, formals: &[Formal]| {
+    let formals = |leading: Option<(&str, &Type)>, formals: &[Formal]| {
         leading
-            .map(|name| (name.to_owned(), ParamDirection::Input, first.clone()))
+            .map(|(name, ty)| (name.to_owned(), ParamDirection::Input, ty.clone()))
             .into_iter()
             .chain(
                 formals
@@ -382,19 +389,28 @@ pub(super) fn signatures(
             .collect::<Vec<_>>()
     };
     let embedded = model.owner.is_some();
+    let counts = count_formals();
     [
         (model.type_subroutine(), Vec::new()),
         (
             model.new_subroutine(),
-            formals(embedded.then_some(classes::THIS), &model.new_formals),
+            formals(
+                embedded.then_some((classes::THIS, first)),
+                &model.new_formals,
+            ),
         ),
         (
             model.sample_subroutine(),
             formals(
-                Some(if embedded { classes::THIS } else { HANDLE }),
+                Some((if embedded { classes::THIS } else { HANDLE }, first)),
                 &model.sample_formals,
             ),
         ),
+        (
+            model.counts_subroutine(),
+            formals(Some((HANDLE, handle)), &counts),
+        ),
+        (model.type_counts_subroutine(), formals(None, &counts)),
     ]
 }
 
