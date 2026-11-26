@@ -2393,6 +2393,20 @@ fn caller_inputs(
                 pending.extend(before.iter().chain(after).map(|id| (*id, loops.clone())));
                 None
             }
+            // The arguments of a bit-vector function (20.9) are operands of
+            // the constraint, which may name the caller's variables.
+            ExprKind::Call {
+                expression,
+                arguments,
+            } if classes::constraints::bit_vector_function(*expression, native).is_some() => {
+                pending.extend(
+                    arguments
+                        .iter()
+                        .filter_map(|argument| argument.value)
+                        .map(|value| (value, loops.clone())),
+                );
+                None
+            }
             // A loop's body sees its variables (18.5.8.1).
             ExprKind::ConstraintForeach {
                 variables, body, ..
