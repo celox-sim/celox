@@ -200,6 +200,13 @@ pub struct SimModule {
     /// What the runtime reads in a saved frame of each of `functions`, in
     /// the same order.
     pub function_frames: Vec<celox_design::FunctionFrame>,
+    /// Functions of other modules that the module's units call, numbered
+    /// after `functions`: `FunctionId(functions.len() + k)` names function
+    /// `imported_functions[k].1` of module `imported_functions[k].0`, which
+    /// has exactly one instance, whose copy every instance of this module
+    /// calls. The frontend imports a function only when that copy serves
+    /// this module's calls as one of its own would.
+    pub imported_functions: Vec<(ModuleId, u32)>,
     /// Variables of the module that denote a variable of a package (IEEE
     /// 1800-2023 26.2). Every instance of the module refers to that one
     /// object instead of a state object of its own.
