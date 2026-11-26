@@ -79,7 +79,7 @@ Veryl と混在する階層では `Simulation::from_sources(veryl).with_sv_sourc
 | 区分 | 概要 | 詳細 |
 | --- | --- | --- |
 | **未対応** | `bind`、checker、clocking ブロック、`specify` ブロック、UDP、`disable fork` 以外の `disable`、`wait_order`、unpacked / tagged union | [未対応の機能](./systemverilog-reference#what-is-not-supported) |
-| **部分対応** | ポート/`ref` ポート/ネット/`defparam`/ゲート、階層参照、interface、virtual interface、unpacked 構造体、手続き的 `force`/`assign`、遅延、イベント制御、クラス、ランダム化、動的コンテナ、並行アサーション、covergroup（カバーポイントは自動ビンと値のビン（配列、`default`、`ignore_bins`、`illegal_bins`、`wildcard`、ガード、`with` フィルタ）に対応。遷移ビン、クロス、`type_option`、サンプリングイベントは未対応）、I/O の対応・未対応対照表 | [部分対応の機能](./systemverilog-reference#partial-support) |
+| **部分対応** | ポート/`ref` ポート/ネット/`defparam`/ゲート、階層参照、interface、virtual interface、unpacked 構造体、手続き的 `force`/`assign`、遅延、イベント制御、クラス、ランダム化、動的コンテナ、並行アサーション、covergroup（カバーポイントは自動ビンと値のビン（配列、`default`、`ignore_bins`、`illegal_bins`、`wildcard`、ガード、`with` フィルタ）に対応。クロスは `binsof` と `intersect` の選択に対応。遷移ビン、クロスの `with` 選択、`type_option`、サンプリングイベントは未対応）、I/O の対応・未対応対照表 | [部分対応の機能](./systemverilog-reference#partial-support) |
 | **個別制約** | non-ANSI ポート式、`always_comb` / `always_latch` 内のノンブロッキング代入、ループ展開上限などの個別の制限 | [個別制約](./systemverilog-reference#narrow-limitations) |
 | **標準準拠コードへの逸脱** | program 継続代入の実行領域、モジュール間 interface の static 記憶域、手続き的 `assign` の上書きタイミング、実行時 `%p`、`$exit` 警告など | [標準準拠コードに影響する逸脱](./systemverilog-reference#deviations-standard-code) |
 | **標準外コードの許容** | オプションや既定警告の緩和（`strict = true` / `--strict` でエラー化）および変数選択への `force` や `$psprintf` などの非標準拡張 | [標準外コードの許容](./systemverilog-reference#deviations-nonstandard-code) |

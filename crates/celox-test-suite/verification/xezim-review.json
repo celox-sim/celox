@@ -1122,6 +1122,10 @@
     "sv_tolerance_ranges_in_bins": {
       "title": "A range with a tolerance in the values of a bin, bins near = {[11 +/- 1]} or bins pct = {[7 +%- 25]}, is a parse error (\"expected expression, found Slash '/'\")",
       "standard": "IEEE 1800-2023 19.5.1, 11.4.13"
+    },
+    "sv_cross_retain_auto_bins_ignored": {
+      "title": "option.cross_retain_auto_bins = 0 keeps the automatic bins of a cross beside the bins it declares, set for the covergroup or for the cross: with two coverpoints of two bins, a cross with bins b = binsof(cp.lo) has three bins, where it has b alone",
+      "standard": "IEEE 1800-2023 19.7 (Table 19-1, Table 19-2), 19.11.2"
     }
   },
   "cases": [
@@ -5914,6 +5918,14 @@
       "classification": "xezim_bug",
       "bug": "sv_tolerance_ranges_in_bins",
       "note": "A covergroup_value_range may be [ covergroup_expression +/- covergroup_expression ] or [ covergroup_expression +%- covergroup_expression ] (A.2.11, 19.5.1 refers to 11.4.13 for the range list). xezim 0.11.4 does not parse either in bins near = {[11 +/- 1]} and bins pct = {[7 +%- 25]}: \"expected expression, found Slash '/'\", \"expected expression, found Percent '%'\". Verilator 5.054 reports both as unsupported."
+    },
+    {
+      "suite": "sv",
+      "name": "covergroup::cross_retain_auto_bins_removes_the_automatic_bins",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_cross_retain_auto_bins_ignored",
+      "note": "The covergroup sets option.cross_retain_auto_bins = 0, the default of its crosses (Table 19-2: \"Yes (default for crosses)\"). When false, \"all automatically generated bins are removed by the presence of any explicit cross bin\" (Table 19-1): kept, with bins b = binsof(cp.lo), has the one bin b; nothing, with only an ignore_bins, has no bin and does not contribute (19.11.2); retained sets the option back to 1 and has b and the automatic bins <hi,lo> and <hi,hi>. The samples <lo,lo> and <hi,hi> cover cp, cq and kept and two of the three bins of retained: 91.67. xezim 0.11.4 displays 76.67, the coverage with the automatic bins kept in kept and nothing; a probe that also sets the option to 0 in a cross of its own and displays the coverage of each cross gives kept 66.67, nothing 50.00, retained 66.67 and 66.67 for that cross, so the option is ignored at both levels. Verilator 5.054 ignores the option too (\"Ignoring unsupported coverage cross option\")."
     }
   ]
 }

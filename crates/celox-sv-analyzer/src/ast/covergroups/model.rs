@@ -283,7 +283,7 @@ pub(in crate::ast) fn build(
             .map(|formal| formal.name.clone())
             .chain(sample_formals)
             .collect::<Vec<_>>();
-        let items = compile::Bound::of(declaration);
+        let items = compile::Bound::of(tree.declarations(), declaration);
         let bound = items.ranges(tree.declarations());
         if let Some(named) = let_name(tree, declaration, &bound, &hidden, Some(&items)) {
             model.rejection = Some(unsupported(format!(

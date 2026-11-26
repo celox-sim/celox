@@ -490,11 +490,11 @@ impl Parser<'_> {
             Some(label)
         };
         self.expect("cross")?;
-        let mut items = vec![self.name()?];
+        let mut items = vec![self.cross_item()?];
         self.expect(",")?;
-        items.push(self.name()?);
+        items.push(self.cross_item()?);
         while self.eat(",") {
-            items.push(self.name()?);
+            items.push(self.cross_item()?);
         }
         let iff = self.coverage_guard()?;
         let mut body_items = Vec::new();
@@ -542,6 +542,14 @@ impl Parser<'_> {
             body,
             tokens: self.range(start),
         })
+    }
+
+    /// A `cross_item`: the identifier of a coverpoint or of a variable, as a
+    /// name expression (19.6).
+    fn cross_item(&mut self) -> Result<ExprId> {
+        let start = self.at;
+        let name = self.name()?;
+        self.node(start, ExprKind::Name(name))
     }
 
     /// A `bins_selection` of a cross (19.6.1); `start` is where its

@@ -1765,7 +1765,7 @@ No assertions or exclusions are weakened.
 
 ### Covergroups
 
-The 21 `covergroup::*` cases check what IEEE 1800-2023 fixes of covergroups.
+The 27 `covergroup::*` cases check what IEEE 1800-2023 fixes of covergroups.
 Five are of a covergroup without items: a variable of a covergroup type holds
 a handle or `null` (19.3), `new` and `sample` take the arguments of the
 covergroup and of its sample method, by position, by name and by default
@@ -1794,9 +1794,21 @@ no other bin (19.5.6, with no sample of one: the error is not shared),
 `wildcard` bins stand for both values of a bit (19.5.4), a guard of a bin
 gates its count (19.5.1), a `with` expression keeps the values of a bin
 (19.5.1.1), the elements of an array are the values of a bin (19.5.1.2), and
-ranges with a tolerance (11.4.13). Celox passes all of them on every backend.
+ranges with a tolerance (11.4.13). Six are of crosses, with the examples of
+the standard where it has one: a cross of two variables gives each a
+coverpoint and has a bin for each pair of their bins (19.6: 2 of 16, 2 of 16
+and 2 of 256), the bins of the cross `c` of 19.6.1.1 take their 4, 7 and 1
+cross products and leave 6 automatic bins (9 bins), the cross products of
+`ignore_bins` and `illegal_bins` are no bins (`yy` of 19.6.2 keeps 192 of
+256, `zz` of 19.6.3 12 of 16, with no sample of an illegal one), the guard
+of a cross and of a cross bin and that of a crossed coverpoint (19.6),
+`option.cross_retain_auto_bins` 0 of the covergroup as the default of its
+crosses (Tables 19-1 and 19-2, 19.11.2), and `!binsof`, `&&`, `||`,
+parentheses, an `intersect` list of arguments and of a function call and the
+identifier of the cross (19.6.1, 19.6.1.2). Celox passes all of them on
+every backend.
 
-Verilator 5.054 passes 16 cases. It keeps the embedded covergroup in a
+Verilator 5.054 passes 18 cases. It keeps the embedded covergroup in a
 shallow copy (`covergroup::shallow_copy_has_no_embedded_covergroup` reads the
 handle of the copy as not `null`), where 8.12 gives the new object a `null`
 handle, and it rejects the bins of
@@ -1811,7 +1823,17 @@ lines of `fixed [4]` and `fixed [5]` are as expected), and it has neither
 bins of a set expression ("syntax error, unexpected ';', expecting
 with-then-(", `covergroup::set_expression_is_the_values_of_a_bin`) nor ranges
 with a tolerance ("Unsupported: +/- range",
-`covergroup::tolerance_ranges_of_a_bin`). xezim 0.11.4 passes 12. It keeps
+`covergroup::tolerance_ranges_of_a_bin`). Of the crosses it passes the bins
+of 19.6.1.1 and the guards; it does not cross a variable that is no
+coverpoint ("Unsupported: cross of 'a' which is not a coverpoint (implicit
+coverpoint)"), so `covergroup::cross_of_variables_has_a_bin_for_each_pair_of_bins`
+and `covergroup::ignored_and_illegal_cross_products_are_no_bins` display
+0.00, it ignores `option.cross_retain_auto_bins` ("Ignoring unsupported
+coverage cross option": `covergroup::cross_retain_auto_bins_removes_the_automatic_bins`
+displays 76.67 for 91.67), and it ignores an `intersect` value that is no
+constant ("Unsupported: non-constant or non-integral 'intersect' value":
+`covergroup::cross_select_expressions_combine_binsof_conditions` displays
+72.55 for 75.76). xezim 0.11.4 passes 17. It keeps
 the embedded covergroup in a shallow copy too, compares a covergroup variable
 that nothing assigned with `null` as `x`
 (`covergroup::handles_are_null_until_constructed`,
@@ -1829,9 +1851,14 @@ wildcard bin array
 gives `bins func[] = b with (myfunc(item))` and `bins s[] = S` no value
 (`covergroup::with_expression_keeps_the_values_of_a_bin` and
 `covergroup::set_expression_is_the_values_of_a_bin` display 0.00), and does
-not parse a range with a tolerance. The two tools disagree with each other
-where each fails: xezim passes the bin arrays with 70 bins, and Verilator
-passes the ignored values, the wildcard bins and the `with` expressions.
+not parse a range with a tolerance. Of the crosses it fails one: it keeps
+the automatic bins of a cross where `option.cross_retain_auto_bins` is 0,
+of the covergroup and of the cross alike (`covergroup::cross_retain_auto_bins_removes_the_automatic_bins`
+displays 76.67; a probe that displays each cross gives the coverage with
+the automatic bins). The two tools disagree with each other
+where each fails: xezim passes the bin arrays with 70 bins and the crosses of
+variables and of `intersect` lists of arguments, and Verilator passes the
+ignored values, the wildcard bins and the `with` expressions.
 Icarus 13.0 compiles none of the cases: it has no covergroups
 ("Invalid module item", "Invalid class item"). All of these remain executed
 evidence in the [Verilator report](verification/sv/verilator/covergroup.json),

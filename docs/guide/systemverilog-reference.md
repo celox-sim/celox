@@ -207,20 +207,24 @@ For `expect (property_spec) action_block` (16.17), the executing process makes o
 
 A covergroup (clause 19) is a type: declared in a module, a program, a package, the compilation unit or a generate block, or embedded in a class (19.4). `new` constructs an instance, with the arguments of the covergroup; `sample()` samples it, with the arguments of a `with function sample` declaration; `get_inst_coverage()`, `get_coverage()`, `T::get_coverage()` and `$get_coverage()` give coverage. The results are read through `Simulation::coverage()` (see [Coverage](#coverage)).
 
-A coverpoint (19.5) is of an integral type of any width: with or without a label, with a type of its own, and with an `iff` guard, whose expression is evaluated first. Its expression and its guard read the arguments of the covergroup and of `sample`, then the members of the class of an embedded covergroup, then the names of the scope. Its bins are the automatic bins of 19.5.3, also those of an enumeration, or the bins it declares for values (19.5.1 to 19.5.6): one bin, a bin for each value (`bins b[]`) or a number of bins (`bins b[N]`) of a list of values and ranges, also ranges with a tolerance (`[a +/- b]`, `[a +%- b]`), of the values a `with` expression keeps, or of the elements of an array; `default` bins; `ignore_bins` and `illegal_bins`; `wildcard` bins; and a guard on any of them (`iff`). A bin value is a constant, an argument of the covergroup or a call of a function with these, which the construction evaluates, so the instances of one type may differ in their bins. A sample of an illegal value is reported as an error. The definition may assign `option.name`, `comment`, `per_instance`, `weight`, `goal`, `at_least` and `auto_bin_max`, each at the levels 19.10 gives it, with any expression of the scope of `new` as the value.
+A coverpoint (19.5) is of an integral type of any width: with or without a label, with a type of its own, and with an `iff` guard, whose expression is evaluated first. Its expression and its guard read the arguments of the covergroup and of `sample`, then the members of the class of an embedded covergroup, then the names of the scope. Its bins are the automatic bins of 19.5.3, also those of an enumeration, or the bins it declares for values (19.5.1 to 19.5.6): one bin, a bin for each value (`bins b[]`) or a number of bins (`bins b[N]`) of a list of values and ranges, also ranges with a tolerance (`[a +/- b]`, `[a +%- b]`), of the values a `with` expression keeps, or of the elements of an array; `default` bins; `ignore_bins` and `illegal_bins`; `wildcard` bins; and a guard on any of them (`iff`). A bin value is a constant, an argument of the covergroup or a call of a function with these, which the construction evaluates, so the instances of one type may differ in their bins. A sample of an illegal value is reported as an error.
 
-A construct of the **Not supported** column is rejected where a `new` or a method of the covergroup is written, not where the covergroup is declared: a covergroup that nothing constructs is accepted whatever it declares, and so is a variable of its type. All of them point to [#4294](https://github.com/celox-sim/celox/issues/4294), which tracks what is left of clause 19.
+A cross (19.6) crosses two or more coverpoints of the covergroup, or variables, which get a coverpoint of their own: an integral variable or net, a property of the class of an embedded covergroup, or an argument of the covergroup or of `sample`. It has a bin for each combination of bins of its coverpoints that take part in their coverage, and its `bins`, `ignore_bins` and `illegal_bins` take the combinations their select expressions select: `binsof(cp)` and `binsof(cp.bin)`, with `intersect {...}`, `!`, `&&`, `||`, parentheses, and the identifier of the cross itself, which selects every combination. A cross and each of its bins may have a guard (`iff`). A sample of an illegal combination is reported as an error.
+
+The definition may assign `option.name`, `comment`, `per_instance`, `weight`, `goal`, `at_least`, `auto_bin_max`, `cross_num_print_missing` and `cross_retain_auto_bins`, each at the levels 19.10 gives it, with any expression of the scope of `new` as the value.
+
+A construct of the **Not supported** column is rejected where a `new` or a method of the covergroup is written, not where the covergroup is declared: a covergroup that nothing constructs is accepted whatever it declares, and so is a variable of its type. The exceptions are `!` before a parenthesized selection and a conditional cross set expression, which the parser rejects where the covergroup is declared. All of them point to [#4294](https://github.com/celox-sim/celox/issues/4294), which tracks what is left of clause 19.
 
 | Aspect | Supported | Not supported |
 | --- | --- | --- |
 | **Declarations (19.3, 19.4)** | A covergroup of a module, a program, a package, the compilation unit or a generate block; a covergroup embedded in a class; variables of a covergroup type | `covergroup extends` (19.4.1); a covergroup declared in an interface, which rejects the interface; one declared in a checker or in a loop generate block; constructing or sampling a covergroup type that a module takes as a type parameter (it declares variables there) |
 | **Coverpoints (19.5)** | Coverpoints of an integral type of any width, with or without a label, with a type of their own, and with an `iff` guard | A coverpoint of a `real` type; one of an enumeration whose enumerators have x or z bits; a coverpoint of a signal of a clocking block (clocking blocks are not supported) |
 | **Bins (19.5)** | The automatic bins of 19.5.3, also those of an enumeration; bins of values and ranges (`bins b = {0, [1:3], [8:$]};`) whose values are constants, arguments of the covergroup or calls of functions with these; bin arrays (`bins b[]`, `bins b[N]`); ranges with a tolerance (`[a +/- b]`, `[a +%- b]`) of integral operands; `default` and `default[]` bins; `ignore_bins` and `illegal_bins`; `wildcard` bins; a guard on a bin (`bins b = {1} iff (en);`); `with` filters (`bins b[] = {[0:255]} with (item % 3 == 0);`, `bins b = cp with (f(item));`); bins of a set expression (`bins b[] = S;`) that is an array parameter with integral elements, or a dynamic array, a queue or a constant array of the class of an embedded covergroup with integral elements of at most 64 bits | Transition bins and `default sequence` bins (19.5.2); `bins b[N] = default` (the standard does not say how the values are distributed); a `with` filter on a bin array, on `ignore_bins` or on `illegal_bins` whose values are constants and more than 1,048,576, such as `ignore_bins b = cp with (...)` on an `int` coverpoint (on one `bins` bin such a filter is supported, see [Coverage](#coverage)); a wildcard value of more than 65,536 ranges of values in a bin array or under such a filter; a set expression of any other form: an assignment pattern, a concatenation, a fixed-size array that is no parameter, an array of strings, handles or elements of more than 64 bits; a tolerance range with a `real` operand; a bin value that is not integral |
-| **Crosses (19.6)** | — | Every `cross` |
-| **Options (19.7)** | `option.name`, `comment`, `per_instance`, `weight`, `goal`, `at_least` and `auto_bin_max` assigned in the definition, each at the levels 19.10 gives it, with any expression of the scope of `new` as the value | `type_option` assignments; the `option` members `detect_overlap`, `cross_num_print_missing`, `cross_retain_auto_bins` and `get_inst_coverage` |
+| **Crosses (19.6)** | Crosses of coverpoints and of integral variables or nets (a variable gets a coverpoint of its own), with or without a label, with an `iff` guard; `bins`, `ignore_bins` and `illegal_bins` of select expressions of `binsof(cp)` and `binsof(cp.bin)`, with `intersect {...}` lists whose values are constants, arguments of the covergroup or calls of functions with these, `!`, `&&`, `\|\|`, parentheses and the identifier of the cross (`bins all = X;`); a guard on a cross bin | `with` and `matches` in a select expression (19.6.1.2); cross set expressions and functions declared in a cross body (19.6.1.3, 19.6.1.4); `!` before a parenthesized selection (`!(binsof(a) && binsof(b))`) and a conditional cross set expression, both rejected where the covergroup is declared; a cross that lists one item twice; `binsof` of a coverpoint that the cross does not cross; `&&` and `\|\|` that alternate through more than 32 levels of parentheses; an `intersect` list that meets values only a sample sorts into bins (see [Coverage](#coverage)) |
+| **Options (19.7)** | `option.name`, `comment`, `per_instance`, `weight`, `goal`, `at_least`, `auto_bin_max`, `cross_num_print_missing` and `cross_retain_auto_bins` assigned in the definition, each at the levels 19.10 gives it, with any expression of the scope of `new` as the value | `type_option` assignments; the `option` members `detect_overlap` and `get_inst_coverage` |
 | **Sampling (19.3, 19.8.1)** | `sample()` | A covergroup declared with a clocking event (`covergroup cg @(posedge clk);`) or a block event (`@@(begin f)`); `sample()` in a sequence match item |
 | **Arguments (19.3, 19.8.1)** | The arguments of a covergroup and of its `with function sample` declaration | `ref` arguments of a covergroup or of its sample method; arguments of unpacked type; an argument of the covergroup that a coverpoint reads and that is not of an integral type, a string or a class handle, such as a `real` |
-| **`let` declarations (11.12)** | — | A `let` is not expanded in what follows the name of a covergroup: a covergroup whose argument types or defaults, coverpoint expressions, guards, bin values, `with` expressions or option values name one is rejected, unless an argument of the covergroup or of `sample` has the name (`item` in a `with` expression is the value of the bin, whatever is named so) |
+| **`let` declarations (11.12)** | — | A `let` is not expanded in what follows the name of a covergroup: a covergroup whose argument types or defaults, coverpoint expressions, crossed variables, guards, bin values, `intersect` values, `with` expressions or option values name one is rejected, unless an argument of the covergroup or of `sample` has the name (`item` in a `with` expression is the value of the bin, whatever is named so) |
 | **Methods (19.8)** | `sample()`, `get_inst_coverage()`, `get_coverage()`, `T::get_coverage()`, and `$get_coverage()`; a method of an embedded covergroup called on its variable (`cg` in the class, `obj.cg`) | `start()`, `stop()` and `set_inst_name()`; `get_coverage` and `get_inst_coverage` with `ref int` arguments; the methods of coverpoints and crosses; reading or writing `option` and `type_option` members; a method of an embedded covergroup called on another expression that gives the handle, such as a conditional expression |
 | **Construction (19.3, 19.4)** | `new` with the arguments of the covergroup; in the `new` method of its class, an embedded covergroup assigned as `cg = new;` or `this.cg = new;` | `new` with a covergroup handle as a shallow copy (8.12); an embedded covergroup assigned through another handle of the class (`other.cg = new;`) in the `new` method (outside that method the assignment is the error 19.4 makes it) |
 | **Type names (20.6.1)** | — | `$typename` of a covergroup type, of a variable of one, or of an array or structure that holds one (20.6.1 has no rule for the name) |
@@ -627,6 +631,54 @@ advances no time.
   a member of an object (`t.kind`) and a select of a variable among them,
   it is shown as `$point<n>`, with the number of the coverpoint in the
   covergroup from 1.
+- **Crosses** (19.6). The coverpoint of a variable that a cross crosses
+  and that is no coverpoint of the covergroup is named by the variable and
+  follows the coverpoints the covergroup declares, one for each variable
+  however many crosses cross it; it takes part in the coverage of the
+  covergroup as they do. A cross without a label is shown as `$cross<n>`,
+  with the number of the cross in the covergroup from 1. An automatic bin
+  of a cross is named by its bins, `<a1,auto[3]>`. The bins of a cross are
+  those of its coverpoints that take part in their coverage: a `default`,
+  ignored or illegal bin and one left without a value have no cross
+  products (19.6, 19.11.1).
+- **A cross is sampled where each of its coverpoints counts the sample**
+  in such a bin (19.6.1: "every coverage point in the cross matches its
+  corresponding bin"). A coverpoint whose guard is false, or whose value is
+  in no bin of it that takes part, or only in bins whose guard is false,
+  leaves its crosses without the sample. A sample in two bins of a
+  coverpoint is two cross products of its crosses. A cross bin counts a
+  sample once however many of its cross products it is, and a cross bin
+  whose guard is false counts nothing; its cross products stay those of no
+  automatic bin.
+- **Cross bins.** The values of an `intersect` list are resolved as those
+  of a bin of the coverpoint of its `binsof` (19.5.7), with the warnings of
+  bin values: of the build for a constant, of the `new` of the instance for
+  a value an argument gives. `intersect` keeps the bins that hold one of
+  them after ignored and illegal values are taken from the bins. The cross
+  products of `ignore_bins` and `illegal_bins` are those of no other bin
+  (19.6.2, 19.6.3), and a declared `bins` bin left without a cross product
+  takes no part in the coverage. A sample of an illegal cross product
+  issues a report of `$error` severity that names the bin, the cross, the
+  covergroup, the instance and the cross product, as an illegal value of a
+  coverpoint does. With `option.cross_retain_auto_bins` 0 a cross that
+  declares any bin, `ignore_bins` and `illegal_bins` among them, has no
+  automatic bin (Table 19-1), so a cross with only `ignore_bins` has no bin
+  and takes no part in the coverage (19.11.2).
+- **Crosses are not listed product by product.** A report lists the bins
+  a cross declares, its automatic bins that were sampled, then as many
+  others as `option.cross_num_print_missing` asks for, at most 4,096; the
+  number of the others is in `omitted_bins`. A construction ends the
+  simulation with an error where the bins of a cross tell more than
+  1,048,576 classes of cross products apart, where a cross has more than
+  2^128 cross products, and where sorting the cross products into its
+  bins takes more than 2^26 steps; with `type_option.merge_instances`, a
+  query of the coverage of the type does where uniting the automatic bins
+  of its instances takes more than 2^26 steps (the report counts them
+  however long it takes). An `intersect` list that meets values of a bin
+  that only a sample sorts, those of an ignore or illegal wildcard value of
+  more than 65,536 ranges or of a bin whose `with` filter is evaluated at
+  each sample, is not supported: the construction ends the simulation with
+  an error that says so.
 - **A coverpoint has at most 1,048,576 bins.** A construction that would
   make more ends the simulation with an error, as does a sample whose
   values the heap cannot take as those of the coverpoints of its type,
