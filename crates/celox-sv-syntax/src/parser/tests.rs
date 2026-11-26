@@ -3993,6 +3993,51 @@ fn named_sequence_and_property_instances_are_substituted() {
 }
 
 #[test]
+fn until_properties_of_boolean_operands_parse_into_their_form() {
+    // IEEE 1800-2023 16.12.12: the four forms, as a property and as the
+    // consequent of an implication, which an until binds tighter than
+    // (Table 16-3).
+    for (property, strong, overlapping, antecedent, next) in [
+        ("a until b", false, false, false, false),
+        ("a s_until b", true, false, false, false),
+        ("c |-> a until_with b", false, true, true, false),
+        ("c |=> a s_until_with b", true, true, true, true),
+        ("(a until b)", false, false, false, false),
+        ("c |-> ((a s_until b))", true, false, true, false),
+    ] {
+        let syntax = parse(&format!(
+            "module M; property p; @(posedge clk) disable iff (r) {property}; endproperty endmodule"
+        ));
+        let [declaration] = syntax.assertion_declarations.as_slice() else {
+            panic!("{property}")
+        };
+        let body = declaration.body;
+        let until = body.until.unwrap_or_else(|| panic!("{property}"));
+        assert_eq!(
+            (
+                until.strong,
+                until.overlapping,
+                body.antecedent.is_some(),
+                until.next
+            ),
+            (strong, overlapping, antecedent, next),
+            "{property}"
+        );
+        assert!(body.clock.is_some() && body.disable.is_some(), "{property}");
+        let text = |id| {
+            syntax.tokens[syntax.expression(id).tokens.range()]
+                .iter()
+                .map(|token| token.text.as_str())
+                .collect::<String>()
+        };
+        assert_eq!(
+            (text(body.condition), text(until.release)),
+            ("a".into(), "b".into())
+        );
+    }
+}
+
+#[test]
 fn named_assertion_declarations_outside_the_subset_keep_their_boundary() {
     for declaration in [
         "sequence s; a ##1 b[*2]; endsequence",
@@ -4000,7 +4045,7 @@ fn named_assertion_declarations_outside_the_subset_keep_their_boundary() {
         "property p; a |-> b ##[0:$] c; endproperty",
         "sequence s; disable iff (r) a; endsequence",
         "sequence s; a |-> b; endsequence",
-        "property p; a until b; endproperty",
+        "property p; a ##1 b until c; endproperty",
         "property p; @(posedge clk or negedge rst) a within b; endproperty",
         "property p; a; endproperty : q",
     ] {

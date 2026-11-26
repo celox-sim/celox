@@ -902,6 +902,7 @@ impl BodyBuilder<'_, '_, '_> {
                                         condition,
                                         equivalent,
                                         sequence,
+                                        until,
                                     },
                                 module_item,
                                 ..
@@ -921,7 +922,24 @@ impl BodyBuilder<'_, '_, '_> {
                                 if !matches!(keyword.as_str(), "assert" | "assume" | "cover") {
                                     return Err(unsupported("concurrent assertion directive"));
                                 }
-                                if let Some(sequence) = sequence
+                                if let Some(until) = until {
+                                    let monitor = self.until_monitor(
+                                        *antecedent,
+                                        *condition,
+                                        *until,
+                                        *disable,
+                                    )?;
+                                    stages = Some(assertions::SequenceMonitor {
+                                        stages: Vec::new(),
+                                        ticks: None,
+                                        updates: Vec::new(),
+                                        start: Vec::new(),
+                                        disabled: None,
+                                        multiclock: Some(monitor.decisions),
+                                        unresolved: monitor.unresolved,
+                                    });
+                                    (Expr::Literal("1'b1".into()), &None, Some(None))
+                                } else if let Some(sequence) = sequence
                                     && multiclock::clocked(
                                         &self
                                             .syntax()
@@ -950,6 +968,7 @@ impl BodyBuilder<'_, '_, '_> {
                                         start: Vec::new(),
                                         disabled: None,
                                         multiclock: Some(multiclock),
+                                        unresolved: None,
                                     });
                                     (Expr::Literal("1'b1".into()), &None, Some(None))
                                 } else if let Some(sequence) = sequence {
@@ -1277,6 +1296,46 @@ impl BodyBuilder<'_, '_, '_> {
                         .as_mut()
                         .and_then(|monitor| monitor.multiclock.take())
                     {
+                        // The attempts of a strong until property still
+                        // pending fail when the simulation ends.
+                        if let Some(unresolved) = stages
+                            .as_mut()
+                            .and_then(|monitor| monitor.unresolved.take())
+                        {
+                            let index = self.declare(assertions::ACTION_LOOP, int_type());
+                            let count = unresolved.count;
+                            let fail = Stmt::Loop {
+                                kind: LoopKind::For,
+                                init: vec![Stmt::Local {
+                                    name: index.clone(),
+                                    init: Some(Expr::Literal("0".into())),
+                                }],
+                                condition: Some(Expr::Binary {
+                                    left: Box::new(Expr::Ident(index.clone())),
+                                    op: BinaryOp::Lt,
+                                    right: Box::new(count),
+                                }),
+                                step: vec![Stmt::Assign {
+                                    lhs: LValue::Ident(index.clone()),
+                                    rhs: Expr::Binary {
+                                        left: Box::new(Expr::Ident(index)),
+                                        op: BinaryOp::Add,
+                                        right: Box::new(Expr::Literal("1".into())),
+                                    },
+                                    nonblocking: false,
+                                }],
+                                body: else_body.iter().skip(1).cloned().collect(),
+                            };
+                            // Those that are disabled neither pass nor fail.
+                            self.assertion_finals.push(vec![match unresolved.disabled {
+                                Some(disabled) => Stmt::If {
+                                    condition: disabled,
+                                    then_body: Vec::new(),
+                                    else_body: vec![fail],
+                                },
+                                None => fail,
+                            }]);
+                        }
                         // The wait for a tick of a clock, then in the
                         // Observed region the decisions, then the actions of
                         // the attempts that passed and failed, each once an
@@ -1293,7 +1352,7 @@ impl BodyBuilder<'_, '_, '_> {
                             (multiclock.passes, then_body),
                             (multiclock.fails, else_body),
                         ] {
-                            let index = self.declare("repeat@multiclock", int_type());
+                            let index = self.declare(assertions::ACTION_LOOP, int_type());
                             output.push(Stmt::Loop {
                                 kind: LoopKind::For,
                                 init: vec![Stmt::Local {
@@ -2552,6 +2611,7 @@ impl BodyBuilder<'_, '_, '_> {
             start,
             disabled: None,
             multiclock: None,
+            unresolved: None,
         })
     }
 
@@ -2560,7 +2620,11 @@ impl BodyBuilder<'_, '_, '_> {
     /// [`assertions::DisableHistory`]), and the process that records the
     /// condition between the ticks: it wakes on each change of the
     /// condition, current values rather than sampled ones (16.12).
-    fn disable_history(&mut self, disable: &Expr, length: u32) -> assertions::DisableHistory {
+    pub(super) fn disable_history(
+        &mut self,
+        disable: &Expr,
+        length: u32,
+    ) -> assertions::DisableHistory {
         let mut bits = Type::new(TypeKind::Bit);
         bits.packed_ranges = vec![PackedRange::new(
             ConstExpr::Literal(length.to_string()),
@@ -2704,6 +2768,9 @@ impl BodyBuilder<'_, '_, '_> {
         &mut self,
         property: &celox_sv_syntax::PropertySpec,
     ) -> Converted<ExpectAttempt> {
+        if property.until.is_some() {
+            return Err(unsupported("until property in an expect statement"));
+        }
         // A named sequence or property of the module stands for its body
         // (16.8, 16.12), unless the expect's scope declares the name too.
         let named = |this: &Self, id: Option<celox_sv_syntax::ExprId>| {
@@ -2753,6 +2820,9 @@ impl BodyBuilder<'_, '_, '_> {
                 property
             }
         };
+        if property.until.is_some() {
+            return Err(unsupported("until property in an expect statement"));
+        }
         let clock = property
             .clock
             .ok_or_else(|| unsupported("expect statement without a clocking event"))?;
