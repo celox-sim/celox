@@ -1248,3 +1248,46 @@ fn specializations_call_constant_functions_in_defaults() {
         endinterface";
     assert_eq!(specialized_widths(interface, "2"), (7, 3));
 }
+
+sv_backends! {
+    // A fixed-size unpacked array of an interface, as a bus functional
+    // model's memory, is a member that a virtual interface selects elements
+    // of, and that the interface's tasks called through one read and write
+    // for the instance the handle denotes (IEEE 1800-2023 25.9, 7.4).
+    fn unpacked_array_members_through_virtual_interfaces(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+                interface bfm(input logic clk);
+                    reg [3:0] mem [16];
+                    logic [7:0] grid [2][3];
+                    task put(input int i, input logic [3:0] v); @(posedge clk); mem[i] = v; grid[1][2] = 8'h5a; endtask
+                    task get(input int i, output logic [3:0] v); v = mem[i]; endtask
+                endinterface
+                class t;
+                    virtual bfm vif;
+                    task run(input logic [3:0] w, output int r);
+                        logic [3:0] v;
+                        vif.put(3, w); vif.get(3, v);
+                        vif.mem[4] = w + 1;
+                        r = v + vif.mem[3] + vif.mem[4] + vif.grid[1][2];
+                    endtask
+                endclass
+                module Top(output int ra, output int rb, output logic [3:0] a4);
+                    logic clk = 0;
+                    always #5 clk = ~clk;
+                    bfm a(.clk(clk));
+                    bfm b(.clk(clk));
+                    initial begin
+                        t x, y; x = new; x.vif = a; y = new; y.vif = b;
+                        fork x.run(4'd9, ra); y.run(4'd2, rb); join
+                        a4 = a.mem[4];
+                    end
+                endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("virtual_interface_arrays.sv"))], "Top");
+        sim.run_until(20).unwrap();
+        assert_eq!(sim.get(sim.signal("ra")), BigUint::from(118u8));
+        assert_eq!(sim.get(sim.signal("rb")), BigUint::from(97u8));
+        assert_eq!(sim.get(sim.signal("a4")), BigUint::from(10u8));
+    }
+}
