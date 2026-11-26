@@ -86,12 +86,10 @@ fn signed(mut constant: Constant) -> Constant {
 
 /// The filter of a bin of a coverpoint of type `ty`.
 fn item_filter(ty: &PointType) -> FilterDescriptor {
-    FilterDescriptor {
-        components: vec![ValueType {
-            width: ty.width,
-            signed: ty.signed,
-        }],
-    }
+    FilterDescriptor::new(vec![ValueType {
+        width: ty.width,
+        signed: ty.signed,
+    }])
 }
 
 fn four_state(width: u32, signed: bool) -> PointType {
@@ -3067,4 +3065,153 @@ fn bins_of_every_kind_survive_a_round_trip() {
         serde_json::json!({"name": "ill", "kind": "illegal", "hits": 1, "covered": true})
     );
     assert_eq!(bins[6]["kind"], "default");
+}
+
+/// `value_count` is how many values a `with` filter is asked about for an
+/// element of a bin: those that take part (19.5.7), a repeated one as often
+/// as it is listed, and none for a wildcard value that is kept as a
+/// pattern.
+#[test]
+fn the_values_of_an_element_are_counted_as_a_filter_is_asked_about_them() {
+    let count = |ty: &PointType, wildcard: bool, range: RangeValue<'_>| {
+        value_count(ty, wildcard, range).map(|count| count.to_string())
+    };
+    let byte = point_type(8, false);
+    let (three, three_hundred) = (int(3), int(300));
+    assert_eq!(
+        count(&byte, false, RangeValue::Value(&three)).as_deref(),
+        Some("1")
+    );
+    // 300 is no value of 8 bits, and of 3 to 300 those up to 255 are.
+    assert_eq!(
+        count(&byte, false, RangeValue::Value(&three_hundred)).as_deref(),
+        Some("0")
+    );
+    assert_eq!(
+        count(
+            &byte,
+            false,
+            RangeValue::Range {
+                low: Some(&three),
+                high: Some(&three_hundred),
+            },
+        )
+        .as_deref(),
+        Some("253")
+    );
+    // `[$:$]` is every value of the type, also of 64 bits.
+    assert_eq!(
+        count(
+            &point_type(64, true),
+            false,
+            RangeValue::Range {
+                low: None,
+                high: None,
+            },
+        )
+        .as_deref(),
+        Some("18446744073709551616")
+    );
+    // `4'b1??1` is four values as a wildcard value and one value with x
+    // bits otherwise, which a 2-state coverpoint has not.
+    let nibble = point_type(4, false);
+    let ends = pattern("1??1");
+    assert_eq!(
+        count(&nibble, true, RangeValue::Value(&ends)).as_deref(),
+        Some("4")
+    );
+    assert_eq!(
+        count(&nibble, false, RangeValue::Value(&ends)).as_deref(),
+        Some("0")
+    );
+    // 65,536 ranges of values are listed, twice as many are a pattern.
+    let ends = |free: usize| pattern(&format!("1{}1", "?".repeat(free)));
+    assert_eq!(
+        count(&point_type(18, false), true, RangeValue::Value(&ends(16))).as_deref(),
+        Some("65536")
+    );
+    assert_eq!(
+        count(&point_type(19, false), true, RangeValue::Value(&ends(17))),
+        None
+    );
+}
+
+/// What a `with` filter reads beside the integral inputs decides the bins
+/// of a construction too: a string that no option takes is part of what an
+/// earlier construction must have handed over for its bins to be taken,
+/// the string of an option is not. A type with a filter that does not
+/// share has the bins each of its constructions is asked about.
+#[test]
+fn bins_are_shared_by_what_the_filters_read() {
+    let ty = point_type(3, false);
+    // bins b[] = {[0:5]} with (s == "x" ? item < 2 : item < 4);
+    let descriptor = |shared: bool| {
+        let mut descriptor = group(
+            "g",
+            vec![point(
+                "p",
+                ty.clone(),
+                vec![open(filtered(
+                    bins("b", vec![range(int(0), int(5))]),
+                    BinFilter::Enumerate(0),
+                ))],
+            )],
+        );
+        descriptor.inputs = vec![InputDescriptor::String, InputDescriptor::String];
+        descriptor.options = vec![OptionInit {
+            item: 0,
+            option: OptionId::Name,
+            value: OptionValue::StringInput(0),
+        }];
+        let mut filter = item_filter(&ty);
+        filter.shared = shared;
+        descriptor.filters = vec![filter];
+        descriptor
+    };
+    let build = |heap: &mut Heap, key: u64, name: &str, read: &str| {
+        let object = start(heap, key, &[]);
+        for (input, text) in [name, read].into_iter().enumerate() {
+            let text = heap.intern(text.as_bytes());
+            call(
+                heap,
+                op::INPUT_STRING,
+                input as u64,
+                0,
+                [object.into(), text.into(), 0],
+            );
+        }
+        let limit = if read == "x" { 2 } else { 4 };
+        let asked = ask(heap, object, 0, |item| item < limit);
+        assert_eq!(finish(heap, object), 0);
+        asked.len()
+    };
+    let mut heap = Heap::new();
+    let key = register(&mut heap, descriptor(true));
+    assert_eq!(build(&mut heap, key, "first", "x"), 6);
+    assert_eq!(names(&heap, 0, 0), text(&["b[0]", "b[1]"]));
+    // Another string for the filter: other bins, which are asked about.
+    assert_eq!(build(&mut heap, key, "second", "y"), 6);
+    assert_eq!(names(&heap, 1, 0), text(&["b[0]", "b[1]", "b[2]", "b[3]"]));
+    // The strings of the first again, under another name: its bins.
+    assert_eq!(build(&mut heap, key, "third", "x"), 0);
+    assert_eq!(names(&heap, 2, 0), text(&["b[0]", "b[1]"]));
+    assert_eq!(build(&mut heap, key, "fourth", "y"), 0);
+    assert_eq!(names(&heap, 3, 0), names(&heap, 1, 0));
+    assert_eq!(heap.coverage.types[0].shapes.len(), 2);
+    // A filter that does not share is asked by every construction.
+    let mut heap = Heap::new();
+    let key = register(&mut heap, descriptor(false));
+    for (instance, read) in ["x", "x", "y", "x"].into_iter().enumerate() {
+        assert_eq!(build(&mut heap, key, "same", read), 6);
+        assert_eq!(
+            names(&heap, instance, 0).len(),
+            if read == "x" { 2 } else { 4 }
+        );
+    }
+    assert_eq!(heap.coverage.types[0].shapes.len(), 4);
+    // The instances and their bins survive a checkpoint.
+    let bytes = postcard::to_allocvec(&heap).unwrap();
+    let restored: Heap = postcard::from_bytes(&bytes).unwrap();
+    assert!(restored.same_contents(&heap));
+    assert_eq!(names(&restored, 2, 0).len(), 4);
 }

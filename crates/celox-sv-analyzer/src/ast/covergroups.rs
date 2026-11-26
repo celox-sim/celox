@@ -28,7 +28,7 @@ mod model;
 
 pub(crate) use compile::Bound;
 pub(super) use compile::{
-    Level, OptionType, coverpoints, option_member, point_name, variable_names,
+    ITEM, Level, OptionType, coverpoints, filter, option_member, point_name, variable_names,
 };
 pub(super) use methods::{construct, overall, result_type, sample_statement, value};
 pub(crate) use model::is_constructor;

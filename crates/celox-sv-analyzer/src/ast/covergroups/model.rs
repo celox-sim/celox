@@ -181,7 +181,7 @@ pub(in crate::ast) fn build(
     let port_tokens = formal_ports(declaration)
         .map(|port| port.tokens)
         .collect::<Vec<_>>();
-    if let Some(named) = let_name(tree, declaration, &port_tokens, &[]) {
+    if let Some(named) = let_name(tree, declaration, &port_tokens, &[], None) {
         model.rejection = Some(unsupported(format!(
             "covergroup argument that names `let` `{named}` (IEEE 1800-2023 11.12, 19.3)"
         )));
@@ -283,8 +283,9 @@ pub(in crate::ast) fn build(
             .map(|formal| formal.name.clone())
             .chain(sample_formals)
             .collect::<Vec<_>>();
-        let bound = compile::Bound::of(declaration).ranges(tree.declarations());
-        if let Some(named) = let_name(tree, declaration, &bound, &hidden) {
+        let items = compile::Bound::of(declaration);
+        let bound = items.ranges(tree.declarations());
+        if let Some(named) = let_name(tree, declaration, &bound, &hidden, Some(&items)) {
             model.rejection = Some(unsupported(format!(
                 "covergroup expression that names `let` `{named}` (IEEE 1800-2023 11.12, 19.5)"
             )));
@@ -302,12 +303,15 @@ pub(in crate::ast) fn build(
 /// rejected where it is used rather than bound with a call of a function
 /// that nothing declares. A formal does not hide the `let` in the types and
 /// defaults of the formals, which are those of the scope that declares the
-/// covergroup (13.5.3); it does in the items of the covergroup (19.8.1).
+/// covergroup (13.5.3); it does in the items of the covergroup (19.8.1),
+/// `items`, where `item` in a `with` expression is the value the filter is
+/// asked about (19.5.1.1).
 fn let_name(
     tree: &AnalysisContext<'_>,
     declaration: &celox_sv_syntax::CovergroupDeclaration,
     ports: &[celox_sv_syntax::TokenRange],
     hidden: &[String],
+    items: Option<&compile::Bound>,
 ) -> Option<String> {
     use celox_sv_syntax::ExprKind;
     let native = tree.declarations();
@@ -335,7 +339,9 @@ fn let_name(
                 return None;
             }
             let name = instances::normalize_identifier(&name.spelling);
-            if hidden.contains(&name) {
+            if hidden.contains(&name)
+                || items.is_some_and(|items| items.names_item(native, &name, expression.tokens))
+            {
                 return None;
             }
             native

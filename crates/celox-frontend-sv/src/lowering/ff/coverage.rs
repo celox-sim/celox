@@ -87,8 +87,9 @@ impl Ff<'_, '_> {
 
     /// A coverage operation that hands the heap a value of the design or
     /// reads one back (see [`CoverageOp`]): the values of a construction
-    /// and of a sample, the arguments an instance keeps, and the text of
-    /// its warnings. An operation that only hands a value over has none.
+    /// and of a sample, the arguments an instance keeps, the value a
+    /// filter is asked about, and the text of its warnings and illegal
+    /// bins. An operation that only hands a value over has none.
     fn coverage_value_call(
         &mut self,
         op: &CoverageOp,
@@ -117,10 +118,16 @@ impl Ff<'_, '_> {
                 item: slot,
                 width,
                 signed,
+            }
+            | CoverageOp::SetPush {
+                set: slot,
+                width,
+                signed,
             } => {
                 let sub = match op {
                     CoverageOp::Input { .. } => op::INPUT,
                     CoverageOp::FormalSet { .. } => op::FORMAL_SET,
+                    CoverageOp::SetPush { .. } => op::SET_PUSH,
                     _ => op::POINT,
                 };
                 let words = self.coverage_words(arg(1)?, *width as usize, *signed)?;
@@ -180,8 +187,29 @@ impl Ff<'_, '_> {
                 );
                 Ok(done)
             }
+            CoverageOp::Predicates { item, count } => {
+                // The bits are those of variables of 2-state type, which
+                // hold no x or z: only the value plane is handed over.
+                let words = self.coverage_words(arg(1)?, *count as usize, false)?;
+                let object = self.handle(arg(0)?)?;
+                for (word, (bits, _)) in words.into_iter().enumerate() {
+                    self.coverage_helper_call(
+                        op::PREDICATES,
+                        u64::from(*item),
+                        word as u64,
+                        &[object, bits],
+                    );
+                }
+                Ok(done)
+            }
             CoverageOp::Formal {
-                slot,
+                slot: index,
+                width,
+                signed,
+                four_state,
+            }
+            | CoverageOp::FilterItem {
+                filter: index,
                 width,
                 signed,
                 four_state,
@@ -189,6 +217,15 @@ impl Ff<'_, '_> {
                 let width = *width as usize;
                 let four_state = *four_state && self.m.four_state;
                 let object = self.handle(arg(0)?)?;
+                // Which word of which plane a call reads: of a kept
+                // argument, or of the value a filter is at, whose
+                // component 0 is the value of the coverpoint.
+                let filter = matches!(op, CoverageOp::FilterItem { .. });
+                let (sub, selector): (u64, fn(u64, u64) -> u64) = if filter {
+                    (op::FILTER_ITEM, |word, plane| word << 8 | plane << 23)
+                } else {
+                    (op::FORMAL, |word, plane| 2 * word + plane)
+                };
                 // The planes of the value, each in words from the least
                 // significant.
                 let planes = if four_state { 2 } else { 1 };
@@ -198,9 +235,9 @@ impl Ff<'_, '_> {
                     for (word, first) in (0..width).step_by(64).enumerate() {
                         let bits = (width - first).min(64);
                         let loaded = self.coverage_helper_call(
-                            op::FORMAL,
-                            u64::from(*slot),
-                            2 * word as u64 + plane,
+                            sub,
+                            u64::from(*index),
+                            selector(word as u64, plane),
                             &[object],
                         );
                         let part = self.b.alloc_bit(bits, false);
@@ -262,6 +299,9 @@ impl Ff<'_, '_> {
                 | CoverageOp::Points { .. }
                 | CoverageOp::Point { .. }
                 | CoverageOp::Message
+                | CoverageOp::SetPush { .. }
+                | CoverageOp::FilterItem { .. }
+                | CoverageOp::Predicates { .. }
         ) {
             return self.coverage_value_call(op, args);
         }
@@ -362,6 +402,14 @@ impl Ff<'_, '_> {
                 let object = first("sample")?;
                 self.coverage_helper_call(op::SAMPLE_END, 0, 0, &[object])
             }
+            CoverageOp::FilterNext { filter } => {
+                let object = first("filter")?;
+                let keep = match args.get(1) {
+                    Some(keep) => self.integer_of_width(keep, 1, false)?,
+                    None => self.constant64(0),
+                };
+                self.coverage_helper_call(op::FILTER_NEXT, u64::from(*filter), 0, &[object, keep])
+            }
             CoverageOp::InstCoverage { what } | CoverageOp::TypeCoverage { what } => {
                 let target = first("query")?;
                 let item = match args.get(1) {
@@ -387,7 +435,10 @@ impl Ff<'_, '_> {
             | CoverageOp::Formal { .. }
             | CoverageOp::Points { .. }
             | CoverageOp::Point { .. }
-            | CoverageOp::Message => unreachable!("handled by coverage_value_call"),
+            | CoverageOp::Message
+            | CoverageOp::SetPush { .. }
+            | CoverageOp::FilterItem { .. }
+            | CoverageOp::Predicates { .. } => unreachable!("handled by coverage_value_call"),
         };
         let (width, signed) = op.result_type();
         let value = self.b.alloc_bit(width, signed);
