@@ -28,7 +28,8 @@ pub struct SourceSpan {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ProcessSite {
     /// The construct the process comes from: `initial`, `always`,
-    /// `always_ff`, or `declaration initializer`.
+    /// `always_ff`, `declaration initializer`, or another a process of the
+    /// analysis is made for, such as `covergroup sampling`.
     pub construct: &'static str,
     pub path: std::path::PathBuf,
     /// One-based physical line.

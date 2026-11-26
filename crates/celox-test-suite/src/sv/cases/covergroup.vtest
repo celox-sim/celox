@@ -898,3 +898,172 @@ endmodule"#)
 endmodule"#)
  (top Top) (run_until 0)
  (expect_output "3 4\n2 4\n"))
+
+; 19.3: an instance that a declaration constructs is sampled at each
+; occurrence of the clocking event of its type. A flip-flop updates `q`
+; with a nonblocking assignment at the rising edge, so the rising edges see
+; 0 to 3 and the falling edges 1 to 4.
+(case clocking_events_sample_at_each_edge
+ (source "clocking_edges.sv" #"module Top;
+ bit clk = 0;
+ bit [2:0] q = 0;
+ always #5 clk = ~clk;
+ always_ff @(posedge clk) q <= q + 3'd1;
+ covergroup pos @(posedge clk);
+  early: coverpoint q { bins b[] = {[0:3]}; }
+  late: coverpoint q { bins b[] = {[4:7]}; }
+ endgroup
+ covergroup neg @(negedge clk);
+  early: coverpoint q { bins b[] = {0}; }
+  late: coverpoint q { bins b[] = {[1:4]}; }
+ endgroup
+ pos p = new;
+ neg n = new;
+ int covered, total;
+ initial begin
+  #42;
+  void'(p.early.get_inst_coverage(covered, total)); $display("%0d %0d", covered, total);
+  void'(p.late.get_inst_coverage(covered, total)); $display("%0d %0d", covered, total);
+  void'(n.early.get_inst_coverage(covered, total)); $display("%0d %0d", covered, total);
+  void'(n.late.get_inst_coverage(covered, total)); $display("%0d %0d", covered, total);
+  $finish;
+ end
+endmodule"#)
+ (top Top) (run_to_finish)
+ (expect_output "4 4\n0 4\n0 1\n4 4\n"))
+
+; 19.3, 9.4.2: a clocking event is any event control: a change, `edge`, an
+; `or` list of edges, and an edge with an `iff` condition (9.4.2.3), which
+; holds at the event. `n` counts the changes of `clk` with a nonblocking
+; assignment, so the k-th change sees k - 1; `en` toggles the same way at
+; each rising edge, so the `iff` holds at the second and fourth.
+(case clocking_event_forms_sample_their_occurrences
+ (source "clocking_forms.sv" #"module Top;
+ bit clk = 0;
+ bit en = 0;
+ bit [2:0] n = 0;
+ always #5 clk = ~clk;
+ always @(clk) n <= n + 3'd1;
+ always @(posedge clk) en <= ~en;
+ covergroup change @(clk); coverpoint n { bins b[] = {[0:7]}; } endgroup
+ covergroup both @(edge clk); coverpoint n { bins b[] = {[0:7]}; } endgroup
+ covergroup listed @(posedge clk or negedge clk); coverpoint n { bins b[] = {[0:7]}; } endgroup
+ covergroup rising @(posedge clk); coverpoint n { bins even[] = {0, 2, 4, 6}; bins odd[] = {1, 3, 5, 7}; } endgroup
+ covergroup gated @(posedge clk iff en); coverpoint n { bins b[] = {[0:7]}; } endgroup
+ change c = new;
+ both b = new;
+ listed l = new;
+ rising r = new;
+ gated g = new;
+ int covered, total;
+ initial begin
+  #42;
+  void'(c.get_inst_coverage(covered, total)); $display("%0d %0d", covered, total);
+  void'(b.get_inst_coverage(covered, total)); $display("%0d %0d", covered, total);
+  void'(l.get_inst_coverage(covered, total)); $display("%0d %0d", covered, total);
+  void'(r.get_inst_coverage(covered, total)); $display("%0d %0d", covered, total);
+  void'(g.get_inst_coverage(covered, total)); $display("%0d %0d", covered, total);
+  $display("%0.2f", g.get_inst_coverage());
+  $finish;
+ end
+endmodule"#)
+ (top Top) (run_to_finish)
+ (expect_output "8 8\n8 8\n8 8\n4 8\n2 8\n25.00\n"))
+
+; 19.3, 15.5.2: a named event, and an `or` of two, as the clocking event:
+; each trigger is a sample of the value at the trigger.
+(case named_events_sample_their_triggers
+ (source "clocking_named.sv" #"module Top;
+ event e, f;
+ bit [1:0] v = 0;
+ covergroup one @e; coverpoint v { bins b[] = {[0:3]}; } endgroup
+ covergroup two @(e or f); coverpoint v { bins b[] = {[0:3]}; } endgroup
+ one o = new;
+ two t = new;
+ int covered, total;
+ initial begin
+  #1 v = 1; -> e;
+  #1 v = 2; -> f;
+  #1 v = 3; -> e;
+  #1;
+  void'(o.get_inst_coverage(covered, total)); $display("%0d %0d", covered, total);
+  void'(t.get_inst_coverage(covered, total)); $display("%0d %0d", covered, total);
+  $finish;
+ end
+endmodule"#)
+ (top Top) (run_to_finish)
+ (expect_output "2 4\n3 4\n"))
+
+; 19.3, 27.4: each declaration in a generate loop constructs and samples an
+; instance of its own, with the arguments of its iteration.
+(case instances_of_a_generate_loop_sample_their_own
+ (source "clocking_generate.sv" #"module Top;
+ bit clk = 0;
+ bit [2:0] q = 0;
+ always #5 clk = ~clk;
+ always_ff @(posedge clk) q <= q + 3'd1;
+ covergroup cg(int k) @(posedge clk); coverpoint q { bins hit = {k}; bins other = default; } endgroup
+ for (genvar i = 0; i < 3; i++) begin : g
+  cg c = new(2 * i);
+  initial #(42 + i) $display("%0d %0.2f", i, c.get_inst_coverage());
+ end
+ initial #50 $finish;
+endmodule"#)
+ (top Top) (run_to_finish)
+ (expect_output "0 100.00\n1 100.00\n2 0.00\n"))
+
+; 19.8: an instance sampled at its clocking event takes the predefined
+; methods: `stop()` stops the sampling until `start()`, and `sample()`
+; samples it once more.
+(case clocked_instances_take_stop_start_and_sample
+ (source "clocking_methods.sv" #"module Top;
+ bit clk = 0;
+ bit [2:0] q = 0;
+ always #5 clk = ~clk;
+ always_ff @(posedge clk) q <= q + 3'd1;
+ covergroup cg @(posedge clk); coverpoint q { bins b[] = {[0:7]}; } endgroup
+ cg c = new;
+ int covered, total;
+ initial begin
+  #12 c.stop();
+  #10 c.start();
+  #1 c.sample();
+  #19;
+  void'(c.get_inst_coverage(covered, total)); $display("%0d %0d", covered, total);
+  $display("%0.2f", c.q.get_inst_coverage());
+  $finish;
+ end
+endmodule"#)
+ (top Top) (run_to_finish)
+ (expect_output "3 8\n37.50\n"))
+
+; 19.3: "as if the process triggering the event were to call the built-in
+; sample() method": at a rising edge of a clock that a flip-flop divides, and
+; of one that a nonblocking assignment toggles, a sample sees the values
+; before the nonblocking assignments of that edge, as the flip-flops of the
+; edge do. `div` rises at 5 and 25, where `r` is 0 and 1; `nclk` rises at 5,
+; 15, 25 and 35, where `q` is 0 to 3.
+(case clocking_events_of_nba_updated_clocks_sample_before_the_updates
+ (source "clocking_nba.sv" #"module Top;
+ bit clk = 0, div = 0, nclk = 0;
+ bit [2:0] r = 0, q = 0;
+ always #5 clk = ~clk;
+ always #5 nclk <= ~nclk;
+ always_ff @(posedge clk) div <= ~div;
+ always_ff @(posedge div) r <= r + 3'd1;
+ always_ff @(posedge nclk) q <= q + 3'd1;
+ covergroup on_div @(posedge div);
+  early: coverpoint r { bins b[] = {[0:1]}; }
+  late: coverpoint r { bins b[] = {[2:7]}; }
+ endgroup
+ covergroup on_nclk @(posedge nclk); coverpoint q { bins lo = {[0:3]}; bins hi = {[4:7]}; } endgroup
+ on_div d = new;
+ on_nclk n = new;
+ initial begin
+  #42;
+  $display("%0.2f %0.2f %0.2f", d.early.get_inst_coverage(), d.late.get_inst_coverage(), n.get_inst_coverage());
+  $finish;
+ end
+endmodule"#)
+ (top Top) (run_to_finish)
+ (expect_output "100.00 0.00 50.00\n"))

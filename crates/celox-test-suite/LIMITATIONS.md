@@ -1765,7 +1765,7 @@ No assertions or exclusions are weakened.
 
 ### Covergroups
 
-The 34 `covergroup::*` cases check what IEEE 1800-2023 fixes of covergroups.
+The 40 `covergroup::*` cases check what IEEE 1800-2023 fixes of covergroups.
 Five are of a covergroup without items: a variable of a covergroup type holds
 a handle or `null` (19.3), `new` and `sample` take the arguments of the
 covergroup and of its sample method, by position, by name and by default
@@ -1817,10 +1817,22 @@ of the instances by name (the `gt` example of 19.11.3: 66.67, 100.00 and
 `get_inst_coverage` with two `ref int` arguments count the bins (the example
 of 19.8, with the values as arguments of `sample`: totals 2, 5, 6 and 16), the
 methods of a coverpoint and of a cross (Table 19-5), and `stop()` and
-`start()` of the covergroup and of a coverpoint (19.8). Celox passes all of
-them on every backend.
+`start()` of the covergroup and of a coverpoint (19.8). Six are of the
+clocking event of a covergroup (19.3), each sampling the instances that
+declarations construct: rising and falling edges, with the value a
+nonblocking assignment of the edge updates sampled before the update, also
+at a clock that a flip-flop divides and at one that a nonblocking assignment
+toggles, a
+change, `edge`, an `or` list and an edge with an `iff` condition (9.4.2),
+named events and an `or` of two (15.5.2), the instances of a generate loop
+with the arguments of their iteration (27.4), and `stop()`, `start()` and
+`sample()` of a clocked instance (19.8). None of them makes an event occur
+twice without suspending, writes after the triggering write in the same
+process, makes an event occur at time zero or samples a clock updated in the
+NBA region with anything but one edge, where Celox differs from 19.3, and
+none is of a program. Celox passes all of them on every backend.
 
-Verilator 5.054 passes 18 cases. It keeps the embedded covergroup in a
+Verilator 5.054 passes 19 cases. It keeps the embedded covergroup in a
 shallow copy (`covergroup::shallow_copy_has_no_embedded_covergroup` reads the
 handle of the copy as not `null`), where 8.12 gives the new object a `null`
 handle, and it rejects the bins of
@@ -1850,7 +1862,19 @@ constant ("Unsupported: non-constant or non-integral 'intersect' value":
 or cross", "Unsupported: 'stop' of coverpoint or cross"), does not resolve a
 coverpoint or cross after `::` (`cg::x::get_coverage(...)`: "Package/class
 for ':: reference' not found"), and rejects the bins of the arguments of the
-`gt` example as before. xezim 0.11.4 passes 19. It keeps
+`gt` example as before. Of the clocking events it passes the divided and the
+NBA-toggled clock (`covergroup::clocking_events_of_nba_updated_clocks_sample_before_the_updates`)
+and no other: it rejects the
+two `ref int` arguments of `get_inst_coverage` of a coverpoint ("Unsupported:
+arguments of 'get_inst_coverage' of coverpoint or cross") and the bins of an
+argument as before (`covergroup::instances_of_a_generate_loop_sample_their_own`),
+and displays `0 0` for the covered bins and the bins of a covergroup it
+samples at its event (`covergroup::clocking_event_forms_sample_their_occurrences`,
+`covergroup::named_events_sample_their_triggers`,
+`covergroup::clocked_instances_take_stop_start_and_sample`, which also
+displays 50.00 for 37.50); the coverage it displays of the `iff` case,
+25.00, is the expected one. xezim 0.11.4 passes 25, all six cases of
+clocking events among them. It keeps
 the embedded covergroup in a shallow copy too, compares a covergroup variable
 that nothing assigned with `null` as `x`
 (`covergroup::handles_are_null_until_constructed`,

@@ -32,8 +32,8 @@ pub(super) use compile::{
     point_name, select_tree, variable_names,
 };
 pub(super) use methods::{
-    check_place, construct, option_assignment, overall, result_shape, result_type,
-    sample_statement, value,
+    check_place, construct, construct_at_site, option_assignment, overall, result_shape,
+    result_type, sample_statement, value,
 };
 pub(crate) use model::is_constructor;
 pub(super) use model::{
