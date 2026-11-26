@@ -877,7 +877,7 @@ pub enum ObjectPlace {
         element: Type,
         /// The immutable record that holds an element of unpacked
         /// structure type: a write stores a new record.
-        record: Option<crate::system_functions::Record>,
+        record: Option<Box<crate::system_functions::Record>>,
     },
     /// The bits `offset` up of width `width` of the flat value at `outer`,
     /// of `outer_width` bits: the leaves of a member of an unpacked

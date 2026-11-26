@@ -1,5 +1,98 @@
 use super::*;
 
+/// A dynamic array, queue or associative array of fixed-size unpacked
+/// arrays (IEEE 1800-2023 7.4, 7.5, 7.8, 7.10): each element is an array of
+/// its own, copied as a value, whose elements and bits are selected and
+/// written as those of a variable, and whose default, for a missing
+/// associative entry, an element `new[]` adds or a pop of an empty queue,
+/// is an array of default elements. The strobes are the AXI4 AVIP's.
+const FIXED_ELEMENTS: &str = r#"module Top(output bit [15:0] ok);
+    bit [63:0] strobe[int][1];
+    bit [63:0] y[1];
+    logic [7:0] m[int][2];
+    logic [7:0] w[2];
+    int q[$][3], x[3], d[][2], r[$][2], s[$][2], two[2];
+    int k = 0, b = 5;
+    class C;
+        int f[3];
+        function bit [63:0] mask(int at);
+            bit [63:0] local_strobe[int][1];
+            local_strobe[64][0][at] = 1'b1;
+            if (at > 2) local_strobe[64][0] = local_strobe[64][0] | 64'h100;
+            return local_strobe[64][0];
+        endfunction
+    endclass
+    C c;
+    initial begin
+        strobe[64][0][3] = 1'b1;
+        strobe[64][0][b] = 1'b1;
+        ok[0] = strobe[64][0] == 64'h28 && strobe.num() == 1;
+        strobe[7][0] = 64'hff << 4;
+        ok[1] = strobe[7][0] == 64'hff0 && strobe[9][0] == 0 && strobe.num() == 2;
+        y = strobe[99];
+        ok[2] = y[0] == 0 && !strobe.exists(99);
+        q.push_back('{1, 2, 3});
+        x = '{4, 5, 6};
+        q.push_back(x);
+        q[1][2] = 9;
+        x[0] = 100;
+        ok[3] = q[0][0] == 1 && q[0][2] == 3 && q[1][0] == 4 && q[1][2] == 9 && q.size() == 2;
+        x = q[1];
+        ok[4] = x[0] == 4 && x[1] == 5 && x[2] == 9;
+        q[0] = x;
+        foreach (q[i, j]) k += q[i][j];
+        ok[5] = k == 36 && $size(q[0]) == 3;
+        m[3][1] = 8'h11;
+        w = m[5];
+        ok[6] = m[3][0] === 8'hxx && m[3][1] == 8'h11 && w[0] === 8'hxx && w[1] === 8'hxx;
+        d = new[1];
+        d[0] = '{1, 2};
+        d = new[3](d);
+        ok[7] = d.size() == 3 && d[0][1] == 2 && d[2][0] == 0 && d[2][1] == 0;
+        r.push_back('{1, 2});
+        s = r;
+        ok[8] = r == s;
+        s[0][1] = 3;
+        ok[9] = r != s && r[0] != s[0];
+        q.delete(0);
+        ok[10] = q.size() == 1 && q[0][2] == 9;
+        r.push_front('{7, 8});
+        two = r.pop_front();
+        ok[11] = two[0] == 7 && two[1] == 8 && r.size() == 1;
+        two = r.pop_back();
+        two = r.pop_back();
+        ok[12] = two[0] == 0 && two[1] == 0 && r.size() == 0;
+        c = new;
+        ok[13] = c.mask(1) == 64'h2 && c.mask(4) == 64'h110;
+        // A fixed-size array class property is copied by its elements too.
+        c.f[1] = 7;
+        x = c.f;
+        ok[14] = x[0] == 0 && x[1] == 7 && x[2] == 0;
+        strobe.delete(7);
+        ok[15] = strobe.num() == 1;
+    end
+endmodule
+"#;
+
+sv_backends! {
+    fn containers_of_fixed_size_arrays_hold_array_values(sim) {
+        @setup { let source = FIXED_ELEMENTS; }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("fixed_elements.sv"))], "Top")
+            .four_state(true);
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("ok")), BigUint::from(0xffffu32));
+    }
+
+    // In 2-state simulation the 4-state defaults are 0, which `===` does not
+    // take for X.
+    fn containers_of_fixed_size_arrays_hold_two_state_values(sim) {
+        @setup { let source = FIXED_ELEMENTS; }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("fixed_elements.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("ok")), BigUint::from(0xffbfu32));
+    }
+}
+
 sv_backends! {
     fn popped_nested_queue_elements_are_containers(sim) {
         @setup {

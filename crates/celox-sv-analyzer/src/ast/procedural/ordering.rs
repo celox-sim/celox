@@ -70,8 +70,13 @@ impl BodyBuilder<'_, '_, '_> {
         }
         // The array is written as an assignment writes it.
         self.native_lvalue(*base, false)?;
-        let target =
-            containers::fixed_storage(&declared, &self.session.types, &self.tree, &self.dims)?;
+        let target = containers::fixed_storage(
+            &declared,
+            &self.session.types,
+            &self.tree,
+            &self.dims,
+            "class property",
+        )?;
         let layout = target.layout.clone();
         if matches!(op, ContainerOp::Sort | ContainerOp::Rsort) {
             // Chandles have no relational operators (6.14, 7.12.2).
@@ -254,6 +259,7 @@ impl BodyBuilder<'_, '_, '_> {
             handle: (key_type.kind() == TypeKind::String).then_some(HandleProperty::String),
             enum_values: None,
             key_enum_values: None,
+            fixed_elements: None,
         };
         // A container is held by its handle (see `containers::with_dimensions`).
         let mut keys_type = Type::new(TypeKind::Object);

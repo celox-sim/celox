@@ -281,7 +281,9 @@ impl Heap {
             | crate::containers::SHUFFLE
             | crate::containers::BOUND
             | crate::containers::MERGE
-            | crate::containers::SIZED) => self.container_call(op, parameter, a, b, c),
+            | crate::containers::SIZED
+            | crate::containers::FILLED
+            | crate::containers::FILL_NULL) => self.container_call(op, parameter, a, b, c),
             op @ (crate::streams::NEW..=crate::streams::TRUNCATE
             | crate::streams::WIDE_CONTAINER) => self.stream_call(op, parameter, a, b, c),
             crate::containers::PATTERN => {
