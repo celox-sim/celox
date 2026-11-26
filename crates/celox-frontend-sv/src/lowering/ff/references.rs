@@ -12,6 +12,19 @@ use sv::ir::{ConstExpr, Expr, LValue, ObjectOp, Stmt};
 /// formal bound to a class property.
 pub(super) const OBJECT_TEMP: &str = "ref_object";
 
+/// The purpose of the hidden variables holding the box of an automatic
+/// variable that a fork's children share with their parent (see
+/// `Ff::share_forked`).
+pub(super) const BOX_TEMP: &str = "fork_box";
+
+/// Whether `handle` names a hidden variable that holds an object for the
+/// whole of a call made with it: the object of a reference formal or the
+/// box of a shared variable, which an output written through it finds as
+/// the call found it.
+pub(super) fn holds_object_for_calls(handle: &str) -> bool {
+    handle.starts_with(OBJECT_TEMP) || handle.starts_with(BOX_TEMP)
+}
+
 /// What a reference formal stands for in the inlined body.
 pub(super) struct Alias {
     pub formal: String,

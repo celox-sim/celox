@@ -286,9 +286,12 @@ impl Ff<'_, '_> {
                 real: variable.float.is_some(),
                 key: self.box_changes(),
             };
-            let (handle_id, handle) =
-                self.m
-                    .temp("fork_box", celox_design::HANDLE_WIDTH, false, false);
+            let (handle_id, handle) = self.m.temp(
+                super::super::references::BOX_TEMP,
+                celox_design::HANDLE_WIDTH,
+                false,
+                false,
+            );
             self.m
                 .variables
                 .get_mut(&handle_id)
