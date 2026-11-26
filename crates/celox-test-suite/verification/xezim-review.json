@@ -1158,6 +1158,10 @@
     "sv_onehot_constraint": {
       "title": "A constraint `$onehot(w)` on a rand `bit [15:0] w` has no solution: randomize() returns 0, though every value with one 1 bit satisfies it",
       "standard": "IEEE 1800-2023 18.5, 20.9"
+    },
+    "sv_power_constraints_unsolved": {
+      "title": "Two constraints with powers of rand exponents, `p == 3 ** e` and `foreach (wstrb[i]) $countones(wstrb[i]) == 2 ** awsize`, have no solution together: randomize() returns 0 after 1000 rejected trials, though each solves alone",
+      "standard": "IEEE 1800-2023 11.4.3, 18.5, 18.6.3"
     }
   },
   "cases": [
@@ -6022,6 +6026,14 @@
       "classification": "xezim_bug",
       "bug": "sv_onehot_constraint",
       "note": "xezim reports no solution for the constraints of class C; with only `constraint c { $onehot(w); }` on `rand bit [15:0] w` its randomize() returns 0 and w stays 0, while `$onehot0`, `$countones` and `$countbits` constraints of the same class solve correctly."
+    },
+    {
+      "suite": "sv",
+      "name": "class::constraint_powers_and_element_positions",
+      "status": "runtime_error",
+      "classification": "xezim_bug",
+      "bug": "sv_power_constraints_unsolved",
+      "note": "xezim reports no solution for class C. Its rand-diag lists no unsatisfied item (\"1000 rejected trials\", a solver that does not report items). A class with only `awsize < 3; wstrb.size() == 3;`, `foreach (wstrb[i]) $countones(wstrb[i]) == 2 ** awsize;` and `p == 3 ** e; e > 0;` fails the same way; with `p == e + 1` in place of the power, or either constraint alone, it solves. Every constraint of the case also solves correctly on its own in xezim."
     }
   ]
 }

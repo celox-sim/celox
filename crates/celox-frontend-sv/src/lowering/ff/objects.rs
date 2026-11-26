@@ -825,17 +825,54 @@ impl Ff<'_, '_> {
     /// Constraint program `program` as the simulation holds its fields: a
     /// 4-state field holds the complements of its planes only in 4-state
     /// simulation (see [`Self::complement`]), and is a plain field in 2-state
-    /// simulation.
+    /// simulation, where a power that is X in 4-state simulation is 0.
     fn two_state_program<'p>(
         &self,
         program: &'p celox_heap::randomization::Program,
     ) -> std::borrow::Cow<'p, celox_heap::randomization::Program> {
-        if self.m.four_state || !program.fields.iter().any(|field| field.four_state) {
+        use celox_heap::randomization::Expr;
+        // A power that may be X (see `Expr::Power`) is 0 there instead.
+        let x_power = |expr: &Expr| {
+            expr.any(&mut |expr| {
+                matches!(
+                    expr,
+                    Expr::Power {
+                        exponent_signed: true,
+                        two_state: false,
+                        ..
+                    }
+                )
+            })
+        };
+        let expressions = |program: &celox_heap::randomization::Program| {
+            program
+                .constraints
+                .iter()
+                .chain(&program.arguments)
+                .chain(program.argument_guards.iter().flatten())
+                .any(x_power)
+        };
+        if self.m.four_state
+            || !(program.fields.iter().any(|field| field.four_state) || expressions(program))
+        {
             return std::borrow::Cow::Borrowed(program);
         }
         let mut program = program.clone();
         for field in &mut program.fields {
             field.four_state = false;
+        }
+        let mut two_state = |expr: &mut Expr| {
+            if let Expr::Power { two_state, .. } = expr {
+                *two_state = true;
+            }
+        };
+        for expr in program
+            .constraints
+            .iter_mut()
+            .chain(&mut program.arguments)
+            .chain(program.argument_guards.iter_mut().flatten())
+        {
+            expr.rewrite(&mut two_state);
         }
         std::borrow::Cow::Owned(program)
     }
