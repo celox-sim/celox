@@ -126,6 +126,17 @@ pub enum Expr {
         index: u64,
         width: u32,
     },
+    /// Element of array `array` of the program, of `width` bits, at the
+    /// position the unsigned 64-bit value of `index` gives, such as `i + 1`
+    /// in a loop: a state expression, known before solving as a guard is
+    /// (IEEE 1800-2023 18.5.13), read as [`Expr::ElementAt`] reads a
+    /// constant position; one with X or Z bits reads the default value too
+    /// (7.4.6).
+    ElementOf {
+        array: usize,
+        index: Box<Expr>,
+        width: u32,
+    },
     /// Read-only scalar supplied by this call, never a solver variable.
     Input {
         index: usize,
@@ -145,6 +156,21 @@ pub enum Expr {
         left: Box<Expr>,
         right: Box<Expr>,
         signed: bool,
+    },
+    /// `base ** exponent` (IEEE 1800-2023 11.4.3), of the width of `base`,
+    /// signed with `signed`, the exponent self-determined and signed with
+    /// `exponent_signed`, by Table 11-4: 1 for a zero exponent, and for a
+    /// negative one 1 of base 1, 1 or -1 of base -1 as the exponent is even
+    /// or odd, X of base 0, 0 of every other base. A 2-state simulation,
+    /// `two_state`, holds that X as 0. An X or Z operand bit makes every bit
+    /// X.
+    Power {
+        base: Box<Expr>,
+        exponent: Box<Expr>,
+        signed: bool,
+        exponent_signed: bool,
+        #[serde(default)]
+        two_state: bool,
     },
     /// The number of bits of `value` that are 1 with `ones`, 0 with `zeros`
     /// and X or Z with `unknown`, a 32-bit `int` (IEEE 1800-2023 20.9): the
@@ -592,7 +618,13 @@ impl Expr {
                 condition,
                 ..
             } => (Some(variable), condition.as_deref(), &[]),
-            Self::Binary { left, right, .. } => (Some(left), Some(right), &[]),
+            Self::Binary { left, right, .. }
+            | Self::Power {
+                base: left,
+                exponent: right,
+                ..
+            } => (Some(left), Some(right), &[]),
+            Self::ElementOf { index, .. } => (Some(index), None, &[]),
             Self::Dist {
                 membership,
                 choices,
@@ -632,7 +664,13 @@ impl Expr {
                     condition,
                     ..
                 } => (Some(variable), condition.as_deref_mut(), &mut []),
-                Self::Binary { left, right, .. } => (Some(left), Some(right), &mut []),
+                Self::Binary { left, right, .. }
+                | Self::Power {
+                    base: left,
+                    exponent: right,
+                    ..
+                } => (Some(left), Some(right), &mut []),
+                Self::ElementOf { index, .. } => (Some(index), None, &mut []),
                 Self::Dist {
                     membership,
                     choices,
@@ -680,7 +718,7 @@ impl Expr {
     /// over it or its sum.
     fn names_elements(&self, index: usize) -> bool {
         self.any(&mut |expr| {
-            matches!(expr, Self::Sum(array) | Self::ElementAt { array, .. } | Self::Foreach { array, .. } | Self::Any { array, .. }
+            matches!(expr, Self::Sum(array) | Self::ElementAt { array, .. } | Self::ElementOf { array, .. } | Self::Foreach { array, .. } | Self::Any { array, .. }
                 if *array == index)
         })
     }
@@ -733,10 +771,16 @@ impl Expr {
             | Self::Resize { value, .. }
             | Self::Unary { value, .. }
             | Self::CountBits { value, .. } => value.variables(base, size_base, names),
-            Self::Binary { left, right, .. } => {
+            Self::Binary { left, right, .. }
+            | Self::Power {
+                base: left,
+                exponent: right,
+                ..
+            } => {
                 left.variables(base, size_base, names);
                 right.variables(base, size_base, names);
             }
+            Self::ElementOf { index, .. } => index.variables(base, size_base, names),
             Self::Foreach { body, .. } | Self::Any { body, .. } => {
                 body.variables(base, size_base, names)
             }
@@ -838,7 +882,9 @@ impl Expr {
             Self::Foreach { .. } | Self::Any { .. } | Self::Index { .. } | Self::Element { .. } => {
                 return Err("constraint loop outside its array".into());
             }
-            Self::ElementAt { .. } => return Err("constraint element of an unread array".into()),
+            Self::ElementAt { .. } | Self::ElementOf { .. } => {
+                return Err("constraint element of an unread array".into());
+            }
             Self::Sum(_) => return Err("constraint sum of an unread array".into()),
             Self::Handle(_) => return Err("a handle the call did not read".into()),
             Self::Resize {
@@ -882,6 +928,28 @@ impl Expr {
                     ),
                     _ => return Err("invalid constraint unary operation".into()),
                 }
+            }
+            Self::Power {
+                base: operand,
+                exponent,
+                signed,
+                exponent_signed,
+                two_state,
+            } => {
+                let (a, ma) = operand.four_state(terms, base, sizes, inputs, unknown)?;
+                let (e, me) = exponent.four_state(terms, base, sizes, inputs, unknown)?;
+                let literal = match exponent.as_ref() {
+                    Self::Literal(_, value) => Some(*value),
+                    _ => None,
+                };
+                power(
+                    (a, ma),
+                    (e, me),
+                    literal,
+                    *signed,
+                    *exponent_signed && !*two_state,
+                    *exponent_signed,
+                )
             }
             Self::CountBits {
                 value,
@@ -1149,6 +1217,104 @@ fn binary_mask(
         "+" | "-" | "*" => any_x(&either, width),
         _ => return Err("invalid constraint binary operation".into()),
     })
+}
+
+/// `a ** e` and the mask of its X bits (see [`Expr::Power`]), each operand
+/// a value and the mask of its X bits: the product of the squares of `a`
+/// that the bits of a nonnegative `e` select, of those of `literal` when
+/// it is a known value, and by Table 11-4 for a negative one, which
+/// `exponent_signed` lets it be, and of which base 0 makes an X result
+/// with `undefined` (IEEE 1800-2023 11.4.3).
+fn power(
+    (a, ma): (Term, Option<Term>),
+    (e, me): (Term, Option<Term>),
+    literal: Option<u64>,
+    signed: bool,
+    undefined: bool,
+    exponent_signed: bool,
+) -> (Term, Option<Term>) {
+    let width = width_of(&a);
+    let exponent = width_of(&e);
+    let one = bv(width, 1);
+    let ones = bv(width, low(width));
+    let multiply = |x: Term, y: Term| node(Sort::Bv(width), "bvmul", vec![x, y]);
+    let bit = |index: u32| {
+        eq(
+            node(
+                Sort::Bv(1),
+                format!("(_ extract {index} {index})"),
+                vec![e.clone()],
+            ),
+            bv(1, 1),
+        )
+    };
+    let mut product = one.clone();
+    let mut square = a.clone();
+    match literal {
+        Some(value) => {
+            let mut value = value & low(exponent);
+            while value != 0 {
+                if value & 1 == 1 {
+                    product = multiply(product, square.clone());
+                }
+                value >>= 1;
+                if value != 0 {
+                    square = multiply(square.clone(), square);
+                }
+            }
+        }
+        None => {
+            for index in 0..exponent {
+                product = ite(
+                    bit(index),
+                    multiply(product.clone(), square.clone()),
+                    product,
+                );
+                if index + 1 < exponent {
+                    square = multiply(square.clone(), square);
+                }
+            }
+        }
+    }
+    let negative = node(Sort::Bool, "bvslt", vec![e.clone(), bv(exponent, 0)]);
+    let value = if exponent_signed {
+        // A base of -1, all ones, only of a signed base.
+        let minus_one = if signed {
+            ite(
+                eq(a.clone(), ones.clone()),
+                ite(bit(0), ones.clone(), one.clone()),
+                bv(width, 0),
+            )
+        } else {
+            bv(width, 0)
+        };
+        let reciprocal = ite(eq(a.clone(), one.clone()), one.clone(), minus_one);
+        ite(negative.clone(), reciprocal, product)
+    } else {
+        product
+    };
+    let operands = match (ma, me) {
+        (None, None) => None,
+        (ma, me) => {
+            let unknown = |mask: Option<Term>| mask.map(|mask| any_x(&mask, width));
+            [unknown(ma), unknown(me)]
+                .into_iter()
+                .flatten()
+                .reduce(|x, y| node(Sort::Bv(width), "bvor", vec![x, y]))
+        }
+    };
+    let undefined = undefined.then(|| {
+        ite(
+            and(negative, eq(a.clone(), bv(width, 0))),
+            ones.clone(),
+            bv(width, 0),
+        )
+    });
+    let mask = match (operands, undefined) {
+        (Some(x), Some(y)) => Some(node(Sort::Bv(width), "bvor", vec![x, y])),
+        (x, y) => x.or(y),
+    };
+    (value, mask)
 }
 
 /// The number of 1 bits of bit-vector `value`, a 32-bit value: the sum of
@@ -1570,11 +1736,7 @@ impl Heap {
                 let value = self.load(target, *member as usize, width.div_ceil(8) as usize);
                 Expr::Literal(*width, value & (u64::MAX >> (64 - width)))
             }
-            Expr::ElementAt {
-                array,
-                index,
-                width,
-            } => {
+            Expr::ElementAt { array, width, .. } | Expr::ElementOf { array, width, .. } => {
                 if !(1..=64).contains(width) {
                     return Err("invalid constraint element width".into());
                 }
@@ -1582,11 +1744,27 @@ impl Heap {
                     .arrays
                     .get(*array)
                     .ok_or("invalid constraint array")?;
+                // The position, none with X or Z bits: that of a state
+                // expression is known before solving (18.5.13).
+                let position = match constraint {
+                    Expr::ElementOf { index, .. } => {
+                        let index = self.unroll(
+                            object, program, index, loops, solved, arrays, check_only, inputs,
+                        )?;
+                        let (_, value, mask) = self
+                            .known(object, program, &index, check_only, inputs)
+                            .ok_or("an array position the solver chooses in a constraint")?;
+                        (mask == 0).then_some(value)
+                    }
+                    Expr::ElementAt { index, .. } => Some(*index),
+                    _ => unreachable!("an element"),
+                }
+                .and_then(|index| usize::try_from(index).ok());
                 // An element past the end reads as the default value
                 // (IEEE 1800-2023 7.4.6).
                 if let Some(&(base, length)) = arrays.elements.get(&(object, *array)) {
-                    return Ok(match usize::try_from(*index) {
-                        Ok(index) if index < length => Expr::Solved(base + index),
+                    return Ok(match position {
+                        Some(index) if index < length => Expr::Solved(base + index),
                         _ => Expr::Literal(*width, 0),
                     });
                 }
@@ -1595,8 +1773,7 @@ impl Heap {
                 }
                 let contents =
                     self.load(object, read.offset as usize, crate::HANDLE_BYTES) as Handle;
-                let value = usize::try_from(*index)
-                    .ok()
+                let value = position
                     .and_then(|index| self.sequence_element(contents, index))
                     .unwrap_or(0);
                 Expr::Literal(*width, value & (u64::MAX >> (64 - width)))
@@ -1634,6 +1811,23 @@ impl Heap {
                 value: boxed(self.unroll(
                     object, program, value, loops, solved, arrays, check_only, inputs,
                 )?),
+            },
+            Expr::Power {
+                base,
+                exponent,
+                signed,
+                exponent_signed,
+                two_state,
+            } => Expr::Power {
+                base: boxed(self.unroll(
+                    object, program, base, loops, solved, arrays, check_only, inputs,
+                )?),
+                exponent: boxed(self.unroll(
+                    object, program, exponent, loops, solved, arrays, check_only, inputs,
+                )?),
+                signed: *signed,
+                exponent_signed: *exponent_signed,
+                two_state: *two_state,
             },
             Expr::CountBits {
                 value,

@@ -134,6 +134,17 @@
     },
     {
       "category": "Types",
+      "detail": "xezim testbench failed: exit status: 1; see runtime.log and protocol.log\n[xezim][warning] randomize() failed for class 'dut.C': no solution found for its constraints (c0, wstrb_c4, ordered, rules, read_addr_c, powers); returned 0; XEZIM_RAND_DIAG=1 lists the unsatisfied constraint items\n",
+      "expectation": "Simulation",
+      "name": "class::constraint_powers_and_element_positions",
+      "phase": "execute",
+      "status": "runtime_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "the simulation ended before the script did",
       "expectation": "Simulation",
       "name": "class::constructors_chain_to_base",

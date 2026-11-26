@@ -7406,3 +7406,77 @@ module Top(output bit done);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1))
+
+; The power operator in constraints (IEEE 1800-2023 11.4.3, Table 11-4), of
+; random and state operands, and elements of arrays at positions that state
+; expressions give, as another loop's variable or `i + 1`, which read 0 past
+; the end (7.4.6): the read address of the AXI4 AVIP's `read_addr_c` stays
+; out of the spans of the writes in flight, and the strobes of `wstrb_c4`
+; have `2**awsize` bits set.
+(case constraint_powers_and_element_positions
+  (source "constraint_powers.sv" #"
+module Top(output bit done);
+    class C;
+        rand bit [7:0] arlen;
+        rand bit [2:0] arsize, awsize;
+        rand bit [31:0] araddr;
+        int avoid_base[$];
+        int avoid_span[$];
+        rand bit [63:0] wstrb[$];
+        rand int sorted[5];
+        rand bit [3:0] e;
+        rand int p;
+        int k;
+        bit [1:0] j = 3;
+        rand int r1, r2, r3, r4, r5, r6, r7;
+        constraint c0 { arlen < 4; arsize < 3; araddr < 4096; awsize < 3; wstrb.size() == 3; }
+        constraint read_addr_c {
+            solve arsize, arlen before araddr;
+            foreach (avoid_base[i])
+                (araddr + (arlen + 1) * (2 ** arsize) <= avoid_base[i]) ||
+                (araddr >= avoid_base[i] + avoid_span[i]);
+        }
+        constraint wstrb_c4 { foreach (wstrb[i]) $countones(wstrb[i]) == 2 ** awsize; }
+        constraint ordered {
+            foreach (sorted[i]) if (i < 4) sorted[i] < sorted[i + 1];
+            foreach (sorted[i]) sorted[i] inside {[0:9]};
+        }
+        constraint powers { p == 3 ** e; e > 0; }
+        constraint rules {
+            r1 == 2 ** k; r2 == (-1) ** k; r3 == 1 ** k; r4 == (k + 3) ** 2;
+            r5 == 5 ** 0; r6 == avoid_span[k + 2] + avoid_span[k + 5];
+            // A position is self-determined: `j + 2'd1` wraps to 0.
+            r7 == avoid_span[j + 2'd1];
+        }
+    endclass
+    C c;
+    int base;
+    initial begin
+        c = new;
+        c.srandom(11);
+        c.avoid_base = '{100, 2000};
+        c.avoid_span = '{64, 32};
+        for (int n = 0; n < 28; n++) begin
+            c.k = n % 7 - 3;
+            if (!c.randomize()) $fatal(1, "randomize");
+            foreach (c.avoid_base[i]) begin
+                base = c.avoid_base[i];
+                if (!(c.araddr + (c.arlen + 1) * (2 ** c.arsize) <= base
+                      || c.araddr >= base + c.avoid_span[i])) $fatal(1, "read_addr_c");
+            end
+            foreach (c.wstrb[i]) if ($countones(c.wstrb[i]) != 2 ** c.awsize) $fatal(1, "wstrb_c4");
+            for (int i = 0; i < 4; i++) if (c.sorted[i] >= c.sorted[i + 1]) $fatal(1, "ordered");
+            if (c.p != 3 ** c.e) $fatal(1, "powers");
+            // 2 ** -1 is 0, (-1) ** k is 1 or -1 as k is even or odd.
+            if (c.r1 != (c.k < 0 ? 0 : 1 << c.k)) $fatal(1, "power of two");
+            if (c.r2 != (c.k % 2 == 0 ? 1 : -1)) $fatal(1, "power of -1");
+            if (c.r3 != 1 || c.r5 != 1) $fatal(1, "power of one");
+            if (c.r4 != (c.k + 3) * (c.k + 3)) $fatal(1, "square");
+            if (c.r6 != (c.k + 2 >= 0 && c.k + 2 < 2 ? c.avoid_span[c.k + 2] : 0)) $fatal(1, "positions");
+            if (c.r7 != 64) $fatal(1, "self-determined position");
+        end
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
