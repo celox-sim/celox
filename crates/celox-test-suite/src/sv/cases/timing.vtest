@@ -4085,3 +4085,48 @@ endmodule
 "#)
   (top Top) (run_until 4) (assert_eq done 1)
   (expect_output "1 0 0\n1 1 0\n3 1 0\n"))
+
+; IEEE 1800-2023 9.4.2, 23.3.3: the input ports of instances connected to one
+; variable are that variable, so a write by a process that a clock edge
+; woke is an edge at each of them in the same time slot: every waiter on
+; those ports wakes at 30, whether it waits in an initial process of a
+; module or in an interface task called through a virtual interface.
+(case port_waits_wake_in_the_slot_of_the_write
+  (source "port_waits.sv" #"
+module m(input bit rst, output int at);
+  initial begin @(negedge rst); @(posedge rst); at = $time; end
+endmodule
+interface bfm_a(input bit rst);
+  int at;
+  task w(); @(negedge rst); @(posedge rst); at = $time; endtask
+endinterface
+interface bfm_b(input bit rst);
+  int at;
+  task w(); @(negedge rst); @(posedge rst); at = $time; endtask
+endinterface
+module Top(output int ta, output int tb, output int tc, output int via_a, output int via_b);
+  bit clk, rst;
+  initial begin clk = 0; forever #10 clk = ~clk; end
+  initial begin rst = 1; #10 rst = 0; @(posedge clk); rst = 1; end
+  m a(.rst(rst), .at(ta));
+  m b(.rst(rst), .at(tb));
+  m c(.rst(rst), .at(tc));
+  bfm_a ia(.rst(rst));
+  bfm_b ib(.rst(rst));
+  class Driver;
+    virtual bfm_a va;
+    virtual bfm_b vb;
+    task run(); fork va.w(); vb.w(); join endtask
+  endclass
+  initial begin
+    Driver d = new;
+    d.va = ia;
+    d.vb = ib;
+    d.run();
+  end
+  assign via_a = ia.at;
+  assign via_b = ib.at;
+endmodule
+"#)
+  (top Top) (run_until 100)
+  (assert_eq ta 30) (assert_eq tb 30) (assert_eq tc 30) (assert_eq via_a 30) (assert_eq via_b 30))
