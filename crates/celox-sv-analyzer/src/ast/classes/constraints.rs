@@ -3069,13 +3069,17 @@ fn operand_variables(
         | ConstraintExpr::Input { .. } => {
             variables.push(random_variable(expr, properties, member));
         }
-        ConstraintExpr::ElementAt { array, .. } => variables.push(
-            properties
-                .iter()
-                .filter(|property| property.constraint_array())
-                .nth(*array)
-                .is_some_and(|property| property.rand && !property.randc),
-        ),
+        // An element at a position of state, as at a constant one: the
+        // position is no operand of the order (18.5.13).
+        ConstraintExpr::ElementAt { array, .. } | ConstraintExpr::ElementOf { array, .. } => {
+            variables.push(
+                properties
+                    .iter()
+                    .filter(|property| property.constraint_array())
+                    .nth(*array)
+                    .is_some_and(|property| property.rand && !property.randc),
+            )
+        }
         ConstraintExpr::Sum(_) => variables.push(false),
         ConstraintExpr::Resize { value, .. }
         | ConstraintExpr::Unary { value, .. }

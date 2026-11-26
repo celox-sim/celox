@@ -2985,6 +2985,14 @@ fn caller_reads(
                     _ => false,
                 }
         }
+        // A bit-vector function (20.9) of state is state, as an operator
+        // of it is: it calls nothing.
+        ExprKind::Call {
+            expression,
+            arguments,
+        } if classes::constraints::bit_vector_function(*expression, native).is_some() => arguments
+            .iter()
+            .all(|argument| argument.value.is_some_and(&mut recurse)),
         // A method of an object, whose arguments read no random variable
         // either; a function of the class, or a method of an array the
         // object holds, the constraints call themselves (18.5.11,
