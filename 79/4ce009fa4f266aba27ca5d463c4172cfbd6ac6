@@ -1,0 +1,1 @@
+Rebased onto master to resolve conflicts in warning.rs (new warning labels) and diagnostic_policy.rs (STRICT_CODES grew on both sides); kept both sides and bumped the count to 12.
