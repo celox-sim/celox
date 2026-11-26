@@ -1662,6 +1662,7 @@ fn lay_out_shared_class(
                     &session.types,
                     tree,
                     &context,
+                    "class property",
                 )?)
             };
             if ty.container().is_some() && property.declaration.constant {

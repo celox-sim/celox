@@ -278,7 +278,8 @@ impl Ff<'_, '_> {
             New => {
                 let size = self.integer_of_width(&args[0], 64, true)?;
                 let source = self.handle(&args[1])?;
-                self.heap_call(code(heap::NEW), &[size, source])
+                let new = self.heap_call(code(heap::NEW), &[size, source]);
+                self.fill_fixed_elements(&layout, new)
             }
             Convert if matches!(layout.kind, ContainerKind::Associative { .. }) => {
                 self.handle(&args[0])?
@@ -324,7 +325,8 @@ impl Ff<'_, '_> {
             Merge => {
                 let first = self.handle(&args[0])?;
                 let second = self.handle(&args[1])?;
-                self.heap_call(code(heap::MERGE), &[first, second])
+                let merged = self.heap_call(code(heap::MERGE), &[first, second]);
+                self.fill_fixed_elements(&layout, merged)
             }
             Bound { depth } => {
                 let source = self.handle(&args[0])?;
@@ -484,6 +486,7 @@ impl Ff<'_, '_> {
                 } else {
                     if element_result {
                         let value = self.heap_call(code(heap::GET), &[handle, index, index_mask]);
+                        let value = self.filled_element(&layout, value);
                         let mask =
                             self.heap_call(code(heap::GET_MASK), &[handle, index, index_mask]);
                         let result = self.container_join(value, mask, width, four_state);
@@ -572,6 +575,35 @@ impl Ff<'_, '_> {
         self.store(temp, SIROffset::Static(0), 32, narrow);
         let elements = replace_expr(elements, source, &sv::ir::Expr::Ident(name));
         self.hoist(&elements)
+    }
+
+    /// Element `element` of a container of `layout`: when its elements are
+    /// fixed-size unpacked arrays, a null one, which the heap gives for a
+    /// default element, as an array of default elements (see
+    /// [`sv::ir::ContainerLayout::fixed_elements`]).
+    fn filled_element(&mut self, layout: &ContainerLayout, element: RegisterId) -> RegisterId {
+        let Some(fixed) = &layout.fixed_elements else {
+            return element;
+        };
+        let code = encode(heap::FILLED, self.container_parameter(&fixed.layout));
+        let count = self.constant64(u64::from(fixed.count));
+        self.heap_call(code, &[element, count])
+    }
+
+    /// Container `container` of `layout` with its null elements filled as
+    /// [`Self::filled_element`] fills one.
+    fn fill_fixed_elements(
+        &mut self,
+        layout: &ContainerLayout,
+        container: RegisterId,
+    ) -> RegisterId {
+        if layout.fixed_elements.is_none() {
+            return container;
+        }
+        let zero = self.constant64(0);
+        let default = self.filled_element(layout, zero);
+        let code = encode(heap::FILL_NULL, self.container_parameter(layout));
+        self.heap_call(code, &[container, default])
     }
 
     /// `receiver` with the indices of the outer containers it reads, and the
@@ -824,6 +856,7 @@ impl Ff<'_, '_> {
             let code = encode(heap::MERGE, self.container_parameter(&layout));
             self.when(unknown, |this| {
                 let merged = this.heap_call(code, &[then_handle, else_handle]);
+                let merged = this.fill_fixed_elements(&layout, merged);
                 this.store(temp, SIROffset::Static(0), 32, merged);
                 Ok(())
             })?;

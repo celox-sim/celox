@@ -161,7 +161,35 @@ fn dimensioned(
     } else {
         base
     };
-    if base.container().is_none() && dims.len() > 1 || !base.unpacked_ranges.is_empty() {
+    // `T a[x][N]`: each element is a fixed-size array `T [N]`, held in a
+    // container of its own as a fixed-size array class property is.
+    let base = if !base.unpacked_ranges.is_empty() && base.container().is_none() {
+        if base.unpacked_ranges.len() > 1 {
+            return Err(unsupported(
+                "dynamic container of multidimensional fixed-size unpacked arrays",
+            ));
+        }
+        let mut storage = (*fixed_storage(
+            &base,
+            &session.types,
+            tree,
+            context,
+            "dynamic container element",
+        )?)
+        .clone();
+        // Its elements' defaults are those of their type, which a nested
+        // fixed-size array would have to make of its own.
+        if storage.element.container().is_some() || !storage.element.unpacked_ranges.is_empty() {
+            return Err(unsupported(
+                "dynamic container of fixed-size unpacked arrays of unpacked arrays",
+            ));
+        }
+        storage.binding = base.binding.clone();
+        of(storage)
+    } else {
+        base
+    };
+    if base.container().is_none() && dims.len() > 1 {
         return Err(unsupported(
             "dynamic container of fixed-size unpacked arrays",
         ));
@@ -242,6 +270,13 @@ fn container_type(
         ) || handle.is_some(),
         handle,
         key_enum_values,
+        // A fixed-size array element is a container of its own (7.4).
+        fixed_elements: base.container().and_then(|inner| {
+            Some(Box::new(crate::system_functions::FixedElements {
+                count: u32::try_from(inner.fixed_size()?).ok()?,
+                layout: inner.layout.clone(),
+            }))
+        }),
         enum_values: base.enum_domain().map(|domain| {
             crate::system_functions::EnumValues::new(
                 domain
@@ -275,15 +310,16 @@ pub(super) fn fixed_storage(
     table: &semantic_types::TyTable,
     tree: &AnalysisContext<'_>,
     context: &PackedDimensions,
+    what: &str,
 ) -> Converted<Arc<ContainerType>> {
     let [range] = ty.unpacked_ranges.as_slice() else {
-        return Err(unsupported(
-            "class property with more than one unpacked dimension",
-        ));
+        return Err(unsupported(format!(
+            "{what} with more than one unpacked dimension"
+        )));
     };
     let bound = |expr: &ConstExpr| {
         eval_ast_const_expr(&tree.functions, expr, &context.const_env)
-            .ok_or_else(|| unsupported("class property with a range that is not constant"))
+            .ok_or_else(|| unsupported(format!("{what} with a range that is not constant")))
     };
     // The checks of every fixed-size unpacked dimension, then a count of
     // elements a container holds.
@@ -296,9 +332,9 @@ pub(super) fn fixed_storage(
     // An index of the property is an `int`, as is a foreach index over it
     // and one a locator method returns (IEEE 1800-2023 12.7.3, 7.12.1).
     if i32::try_from(fixed.0).is_err() || i32::try_from(fixed.1).is_err() {
-        return Err(unsupported(
-            "fixed-size array class property with a bound outside int",
-        ));
+        return Err(unsupported(format!(
+            "fixed-size array {what} with a bound outside int"
+        )));
     }
     if fixed
         .0
@@ -307,7 +343,7 @@ pub(super) fn fixed_storage(
         .is_none_or(|count| count > MAX_FIXED_PROPERTY_ELEMENTS)
     {
         return Err(unsupported(format!(
-            "fixed-size array class property of more than {MAX_FIXED_PROPERTY_ELEMENTS} elements"
+            "fixed-size array {what} of more than {MAX_FIXED_PROPERTY_ELEMENTS} elements"
         )));
     }
     let mut element = ty.clone();
@@ -324,9 +360,9 @@ pub(super) fn fixed_storage(
         .unpacked_struct_in(table)
         .is_some_and(|aggregate| aggregate.leaves().iter().any(|leaf| leaf.default.is_some()))
     {
-        return Err(unsupported(
-            "fixed-size array class property of an unpacked structure with member initial values",
-        ));
+        return Err(unsupported(format!(
+            "fixed-size array {what} of an unpacked structure with member initial values"
+        )));
     }
     let storage = container_type(
         element,
@@ -428,6 +464,22 @@ impl ContainerType {
         id.and_then(|id| table.handle_class(id)).cloned()
     }
 
+    /// The fixed-size array type the container holds, with its range (IEEE
+    /// 1800-2023 7.4), when its bounds are not negative.
+    pub(super) fn fixed_type(&self) -> Option<Type> {
+        let (left, right) = self.fixed?;
+        if left.min(right) < 0 {
+            return None;
+        }
+        let mut ty = self.element.clone();
+        ty.unpacked_ranges_mut().push(UnpackedRange::new(
+            ConstExpr::Literal(left.to_string()),
+            ConstExpr::Literal(right.to_string()),
+        ));
+        ty.binding = self.binding.clone();
+        Some(ty)
+    }
+
     /// The number of elements of the fixed-size array the container holds.
     pub(super) fn fixed_size(&self) -> Option<u64> {
         self.fixed
@@ -522,6 +574,27 @@ pub(super) fn value_container(
             if !matches!(kind, semantic_types::ArrayKind::Fixed(_))
     )
     .then_some(ty)
+}
+
+/// The semantic type of native expression `id` when it is an array held
+/// in a container: a dynamically sized one (see [`value_container`]), or a
+/// fixed-size one that a container holds, a class property or an element
+/// of a container. A fixed-size array variable takes its elements (IEEE
+/// 1800-2023 7.6).
+pub(super) fn held_array(
+    id: ExprId,
+    native: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Option<semantic_types::TyId> {
+    value_container(id, native, tree, session, dims).or_else(|| {
+        native_type(id, native, tree, session, dims)
+            .ok()
+            .flatten()
+            .filter(|container| container.fixed.is_some())?;
+        expression_types::type_of(tree, session, id, native, dims).ok()
+    })
 }
 
 pub(super) fn native_type(
@@ -1393,6 +1466,11 @@ fn element_value(
     // An element that is itself a container takes a container value, as an
     // assignment to a container variable does.
     if let Some(inner) = target.element.container().map(|c| &**c) {
+        // A fixed-size array element takes an array of as many elements,
+        // as a fixed-size array class property does (7.6).
+        if inner.fixed.is_some() {
+            return fixed_assignment(id, tree, session, dims, inner);
+        }
         return assignment(id, tree, session, dims, inner);
     }
     if native_type(id, native, tree, session, dims)?.is_some() {
@@ -2561,6 +2639,7 @@ mod tests {
                 handle: None,
                 enum_values: None,
                 key_enum_values: None,
+                fixed_elements: None,
             },
             element,
             record: None,
@@ -2730,8 +2809,8 @@ mod tests {
                 "container used as an element",
             ),
             (
-                "module Top; int a[][2]; endmodule",
-                "dynamic container of fixed-size unpacked arrays",
+                "module Top; int a[][2][3]; endmodule",
+                "dynamic container of multidimensional fixed-size unpacked arrays",
             ),
             (
                 "module Top; class A; endclass class B; endclass int m[A]; B b; initial begin b = new; m[b] = 1; end endmodule",
