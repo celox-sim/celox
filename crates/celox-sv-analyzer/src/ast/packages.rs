@@ -1290,6 +1290,20 @@ pub(super) fn analyze_package_with_symbols(
     }
     let aliases = imported.aliases.clone();
     let imported_locals = imported.local_names();
+    // The subroutines of other scopes it may lower with its own: those it
+    // imports, and those of the design its calls reach.
+    let foreign_subroutines: HashSet<String> = imported
+        .subroutines
+        .iter()
+        .map(|subroutine| subroutine.name.clone())
+        .chain(
+            imported
+                .design_subroutines
+                .0
+                .iter()
+                .flat_map(|design| design.subroutines.keys().cloned()),
+        )
+        .collect();
     // The names the package declares, from its syntax: an escaped name may
     // contain `::` itself.
     let own = imports::scope_names(tree)?;
@@ -1308,7 +1322,13 @@ pub(super) fn analyze_package_with_symbols(
         },
         Arc::new(imported),
     )?;
-    for subroutine in &module.subroutines {
+    // The static locals of its subroutines are variables of the package.
+    // Those of the subroutines of other packages that its code reaches are
+    // those packages' variables: they give it no state of its own.
+    let own_prefix = format!("{name}::");
+    for subroutine in module.subroutines.iter().filter(|subroutine| {
+        !foreign_subroutines.contains(&subroutine.name) || subroutine.name.starts_with(&own_prefix)
+    }) {
         variables.extend(subroutine.persistent_locals.iter().cloned());
     }
     let mut symbols = module
