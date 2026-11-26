@@ -512,8 +512,12 @@ fn unsupported_and_illegal_uses_are_rejected() {
             "parameter of unpacked structure type",
         ),
         (
-            "s_t q[$], r[$]; bit x; initial x = q == r;",
-            "comparison of dynamic containers of unpacked structures",
+            "typedef struct { logic [7:0] a; string s; } f_t; f_t q[$], r[$]; logic x; initial x = q == r;",
+            "comparison of dynamic containers of unpacked structures with 4-state members",
+        ),
+        (
+            "typedef struct { int a; int w[$]; } c_t; c_t q[$], r[$]; bit x; initial x = q === r;",
+            "comparison of dynamic containers of unpacked structures with dynamic container members",
         ),
         (
             "i_t q[$]; initial q.sort();",

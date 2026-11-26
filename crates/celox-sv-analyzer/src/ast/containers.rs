@@ -1666,6 +1666,49 @@ fn index_value_in(
     )
 }
 
+/// How the heap compares the records that hold the elements of `target`, or
+/// of its inner containers, with `op` (IEEE 1800-2023 11.4.5): the
+/// [`celox_heap::containers::four_state_records`] argument of an equality of
+/// 4-state elements wider than a container word, or `None` when the
+/// elements are equal exactly when their handles are, as equal records have
+/// one handle.
+fn element_records(target: &ContainerType, op: ContainerOp) -> Converted<Option<u64>> {
+    let mut level = target;
+    let mut depth = 0;
+    while let Some(inner) = level.element.container() {
+        level = &**inner;
+        depth += 1;
+    }
+    let Some(record) = &level.record else {
+        return Ok(None);
+    };
+    // The handle of an inner container need not be the one of every
+    // container with its elements.
+    if level.element.unpacked_struct().is_some_and(|aggregate| {
+        aggregate
+            .leaves()
+            .iter()
+            .any(|leaf| leaf.r#type.container().is_some())
+    }) {
+        return Err(unsupported(
+            "comparison of dynamic containers of unpacked structures with dynamic container members",
+        ));
+    }
+    if op == ContainerOp::CaseEqual || !record.fields.iter().any(|field| field.four_state) {
+        return Ok(None);
+    }
+    match &record.fields[..] {
+        // An integral element wider than a container word: X and Z bits make
+        // the equality unknown unless other bits differ.
+        [field] if level.element.unpacked_struct().is_none() => Ok(Some(
+            celox_heap::containers::four_state_records(field.width, depth),
+        )),
+        _ => Err(unsupported(
+            "comparison of dynamic containers of unpacked structures with 4-state members",
+        )),
+    }
+}
+
 pub(super) fn value(
     id: ExprId,
     native: &celox_sv_syntax::Declarations,
@@ -1742,34 +1785,26 @@ pub(super) fn value(
                 ));
             }
 
-            // Inner containers compare by their elements (IEEE 1800-2023
-            // 7.6, 11.4.5), which the heap compares through their handles.
-            let mut level = Some(&target);
-            while let Some(container) = level {
-                if container.record.is_some() {
-                    return Err(unsupported(
-                        "comparison of dynamic containers of unpacked structures or of elements wider than 64 bits",
-                    ));
-                }
-                level = container.element.container();
-            }
             let op = match operator.as_str() {
                 "==" | "!=" => ContainerOp::Equal,
                 "===" | "!==" => ContainerOp::CaseEqual,
                 _ => return Err(unsupported("integral operator on a dynamic container")),
             };
+            // Inner containers compare by their elements (IEEE 1800-2023
+            // 7.6, 11.4.5), which the heap compares through their handles.
+            let records = element_records(&target, op)?;
             let right = match other {
                 Some(other) => other,
                 None => expression_binding::value(*right, native, tree, session, dims)?,
             };
-            let value = call(
-                op,
-                target.layout.clone(),
-                vec![
-                    expression_binding::value(*left, native, tree, session, dims)?,
-                    right,
-                ],
-            );
+            let mut args = vec![
+                expression_binding::value(*left, native, tree, session, dims)?,
+                right,
+            ];
+            if let Some(records) = records {
+                args.push(Expr::Literal(format!("64'd{records}")));
+            }
+            let value = call(op, target.layout.clone(), args);
             Ok(Some(if matches!(operator.as_str(), "!=" | "!==") {
                 Expr::Unary {
                     op: UnaryOp::LogicNot,

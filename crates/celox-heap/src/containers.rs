@@ -46,7 +46,14 @@ pub const LAST: u64 = 91;
 pub const NEXT: u64 = 92;
 pub const PREV: u64 = 93;
 pub const ITER_VALID: u64 = 94;
+/// `equal(a, b, c)`: the logical equality of containers `a` and `b`, 1 if
+/// they are equal, 0 if they differ and 3 if X or Z bits leave it unknown
+/// (IEEE 1800-2023 11.4.5). Elements that are records compare by their
+/// handles, which equal records share, unless `c` is a
+/// [`four_state_records`] argument.
 pub const EQUAL: u64 = 95;
+/// `case_equal(a, b)`: the case equality of containers `a` and `b`, as
+/// [`EQUAL`] gives it with X and Z bits compared as values (11.4.6).
 pub const CASE_EQUAL: u64 = 96;
 /// Reverse sequence a, preserving element values and X/Z masks.
 pub const REVERSE: u64 = 97;
@@ -99,6 +106,38 @@ pub const MERGE: u64 = 107;
 /// elements is assigned: a run-time error ([`Fault::ArraySize`]) unless `a`
 /// has `b` elements (IEEE 1800-2023 7.6). An empty container may be null.
 pub const SIZED: u64 = 140;
+
+/// The [`EQUAL`] argument of containers whose elements, or those of their
+/// inner containers `depth` levels down, are records of one 4-state field
+/// of `width` bits (wider than a container word), which compare by its
+/// value and X and Z bits rather than by their handles.
+pub const fn four_state_records(width: u32, depth: u32) -> u64 {
+    width as u64 | (depth as u64) << 32
+}
+
+/// A decoded [`four_state_records`] argument.
+#[derive(Clone, Copy)]
+struct Records {
+    width: u32,
+    depth: u32,
+}
+
+impl Records {
+    fn of(argument: u64) -> Option<Self> {
+        (argument != 0).then_some(Self {
+            width: argument as u32,
+            depth: (argument >> 32) as u32,
+        })
+    }
+
+    /// The argument of the inner containers.
+    fn inner(self) -> Self {
+        Self {
+            depth: self.depth - 1,
+            ..self
+        }
+    }
+}
 
 /// The operation parameter encodes the element width (bits 0..6), whether
 /// it is two-state (7), its handle kind (8..9: none/string/object), container
@@ -640,7 +679,20 @@ impl Heap {
     /// `case`, X and Z bits compare as values (IEEE 1800-2023 11.4.5,
     /// 11.4.6). Elements that are containers compare by their elements
     /// (7.6), not by their handles; a null handle is an empty container.
-    fn element_equality(&self, x: Element, y: Element, case: bool, layout: Layout) -> u8 {
+    /// Elements that are the `records` compare by their values.
+    fn element_equality(
+        &self,
+        x: Element,
+        y: Element,
+        case: bool,
+        layout: Layout,
+        records: Option<Records>,
+    ) -> u8 {
+        if let Some(records) = records
+            && records.depth == 0
+        {
+            return self.record_equality(x.value as Handle, y.value as Handle, records.width);
+        }
         // Also one handle on both sides, whose elements may be unknown.
         let nested = layout.object_elements() && x.mask == 0 && y.mask == 0;
         if nested
@@ -653,6 +705,7 @@ impl Heap {
                 y.value as Handle,
                 case,
                 Layout(inner.layout),
+                records.map(Records::inner),
             );
         }
         if case {
@@ -666,22 +719,60 @@ impl Heap {
         }
     }
 
+    /// The logical equality of the records `x` and `y` of one 4-state
+    /// field of `width` bits, as [`Self::element_equality`] gives it: each
+    /// plane is stored complemented, the value's bytes and then the mask's,
+    /// so that `null` reads as all X.
+    fn record_equality(&self, x: Handle, y: Handle, width: u32) -> u8 {
+        let bytes = width.div_ceil(8) as usize;
+        let planes = |record| {
+            self.object_bytes(record)
+                .filter(|planes| planes.len() >= 2 * bytes)
+        };
+        let (Some(x), Some(y)) = (planes(x), planes(y)) else {
+            return 2;
+        };
+        let mut unknown = false;
+        for index in 0..bytes {
+            let bits = if index + 1 == bytes && !width.is_multiple_of(8) {
+                (1u8 << (width % 8)) - 1
+            } else {
+                u8::MAX
+            };
+            // The complemented mask has a bit set where the value is known.
+            let known = x[bytes + index] & y[bytes + index] & bits;
+            if (x[index] ^ y[index]) & known != 0 {
+                return 0;
+            }
+            unknown |= known != bits;
+        }
+        if unknown { 2 } else { 1 }
+    }
+
     /// The equality of containers `a` and `b` of `layout`, as
     /// [`Self::element_equality`] gives it: two containers are equal if they
     /// have the same keys or as many elements, each pair of them equal.
-    fn equality(&self, a: Handle, b: Handle, case: bool, layout: Layout) -> u8 {
+    fn equality(
+        &self,
+        a: Handle,
+        b: Handle,
+        case: bool,
+        layout: Layout,
+        records: Option<Records>,
+    ) -> u8 {
         let empty = Container::empty(layout);
         let left = self.containers.get(&a).map_or(&empty, |entry| &**entry);
         let right = self.containers.get(&b).map_or(&empty, |entry| &**entry);
         let mut unknown = false;
-        let mut compare = |x: Element, y: Element| match self.element_equality(x, y, case, layout) {
-            0 => false,
-            1 => true,
-            _ => {
-                unknown = true;
-                true
-            }
-        };
+        let mut compare =
+            |x: Element, y: Element| match self.element_equality(x, y, case, layout, records) {
+                0 => false,
+                1 => true,
+                _ => {
+                    unknown = true;
+                    true
+                }
+            };
         let equal = match (&left.contents, &right.contents) {
             (Contents::Sequence(x), Contents::Sequence(y)) => {
                 x.len() == y.len() && x.iter().zip(y).all(|(&x, &y)| compare(x, y))
@@ -713,7 +804,7 @@ impl Heap {
         });
         // Logically equivalent operands give the first (11.4.11); an
         // associative array also has its default.
-        if self.equality(a, b, false, layout) == 1 && left.default == right.default {
+        if self.equality(a, b, false, layout, None) == 1 && left.default == right.default {
             return a;
         }
         match (&left.contents, &right.contents) {
@@ -729,7 +820,7 @@ impl Heap {
                     .iter()
                     .zip(y)
                     .map(|(&x, &y)| {
-                        if self.element_equality(x, y, false, layout) == 1 {
+                        if self.element_equality(x, y, false, layout, None) == 1 {
                             x
                         } else {
                             default
@@ -827,7 +918,13 @@ impl Heap {
         };
         match op {
             EQUAL | CASE_EQUAL => {
-                return match self.equality(a as Handle, b as Handle, op == CASE_EQUAL, layout) {
+                return match self.equality(
+                    a as Handle,
+                    b as Handle,
+                    op == CASE_EQUAL,
+                    layout,
+                    Records::of(c),
+                ) {
                     0 => 0,
                     1 => 1,
                     _ => 3,

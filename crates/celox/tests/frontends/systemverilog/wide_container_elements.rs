@@ -93,4 +93,76 @@ sv_backends! {
             BigUint::parse_bytes(b"70123456789abcdef0f1e2d3c", 16).unwrap()
         );
     }
+
+    // Containers of elements wider than 64 bits compare element by element
+    // (IEEE 1800-2023 7.6, 11.4.5): a pair with X or Z bits makes `==`
+    // unknown unless a known bit of a pair differs, and `===` compares
+    // those bits as values.
+    fn wide_element_equality_follows_x_bits(sim) {
+        @setup {
+            let source = r#"module Top(output logic [16:0] ok);
+                logic [99:0] a[$], b[$];
+                logic [99:0] n[$][$], m[$][$];
+                logic [99:0] d[], e[];
+                logic [99:0] aa[int], bb[int];
+                logic [129:0] odd[$], other[$];
+                initial begin
+                    a = '{100'h1, {4'hf, 96'h0}}; b = a;
+                    ok[0] = (a == b) === 1'b1;
+                    b[1] = 100'h2; ok[1] = (a != b) === 1'b1;
+                    b = a; b[0] = {50'h1, 1'bx, 49'h0}; a[0] = {50'h1, 1'b0, 49'h0};
+                    ok[2] = (a == b) === 1'bx;
+                    b[1] = 100'h2; ok[3] = (a == b) === 1'b0;
+                    ok[4] = (a !== b) === 1'b1;
+                    a = b;
+                    ok[5] = (a == b) === 1'bx && a === b;
+                    n = '{'{100'h3}}; m = n; ok[6] = (n == m) === 1'b1;
+                    m[0] = '{100'h4}; ok[7] = (n != m) === 1'b1;
+                    m = '{'{100'bz}}; ok[8] = (n == m) === 1'bx;
+                    d = new[2]; e = new[2];
+                    ok[9] = (d == e) === 1'bx && d === e;
+                    d[0] = 1; d[1] = 2; e = d; ok[10] = (d == e) === 1'b1;
+                    aa[3] = 7; bb[3] = 7; ok[11] = (aa == bb) === 1'b1;
+                    bb[4] = 7; ok[12] = (aa != bb) === 1'b1;
+                    odd = '{{2'b11, 128'h1}}; other = odd;
+                    ok[13] = (odd == other) === 1'b1;
+                    other[0] = {2'b10, 128'h1}; ok[14] = (odd == other) === 1'b0;
+                    other[0] = {2'bx1, 128'h1}; ok[15] = (odd == other) === 1'bx;
+                    other[0] = {2'bx0, 128'h1}; ok[16] = (odd == other) === 1'b0;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("wide_equality.sv"))], "Top")
+            .four_state(true);
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("ok")), BigUint::from(0x1_ffffu32));
+    }
+
+    // Two-state elements wider than 64 bits and unpacked structures held in
+    // records are equal when their values are.
+    fn record_element_equality(sim) {
+        @setup {
+            let source = r#"module Top(output bit [7:0] ok);
+                bit [511:0] w[$], v[$];
+                typedef struct { int k; string s; bit [99:0] big; } s_t;
+                s_t p[$], q[$];
+                bit [99:0] g[string], h[string];
+                initial begin
+                    w = '{512'h5, {1'b1, 511'h0}}; v = w;
+                    ok[0] = w == v;
+                    v[0] = 512'h6; ok[1] = w != v && w !== v;
+                    p.push_back('{1, "x", 100'h1}); q.push_back('{1, "x", 100'h1});
+                    ok[2] = p == q;
+                    q[0].s = "y"; ok[3] = p != q;
+                    q[0].s = "x"; q[0].big = 100'h2; ok[4] = p != q;
+                    q[0].big = 100'h1; ok[5] = p === q;
+                    g["a"] = 1; h["a"] = 1; ok[6] = g == h;
+                    h["a"] = 2; ok[7] = g != h;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("record_equality.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("ok")), BigUint::from(0xffu32));
+    }
 }
