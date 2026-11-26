@@ -6378,7 +6378,7 @@ module Top(output int total, output int seen);
     end
 endmodule
 "#;
-    same_as_default(source, 1, 4, 40, &["total", "seen"]);
+    same_as_default(source, 1, 5, 40, &["total", "seen"]);
     assert_eq!(
         simulate(source, false, true, "interpreter", 40, &["total", "seen"]),
         Ok(vec![value(81), value(3)])
