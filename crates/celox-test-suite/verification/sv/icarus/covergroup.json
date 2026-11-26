@@ -57,6 +57,50 @@
     },
     {
       "category": "Sequential",
+      "detail": "Icarus build exit status: 6; see <case>/build.log\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Invalid module item.\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Invalid module item.\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:7: error: Invalid module item.\n",
+      "expectation": "Simulation",
+      "name": "covergroup::clocked_instances_take_stop_start_and_sample",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 32; see <case>/build.log\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Invalid module item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Invalid module item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:9: error: Invalid module item.\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: error: Invalid module item.\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:10: error: Invalid module item.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Invalid module item.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:11: error: Invalid module item.\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: error: Invalid module item.\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: error: Invalid module item.\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:12: error: Invalid module item.\n<case>/source_0.sv:12: syntax error\n<case>/source_0.sv:12: error: Invalid module item.\n<case>/source_0.sv:12: syntax error\n<case>/source_0.sv:13: error: Invalid module item.\n<case>/source_0.sv:14: syntax error\n<case>/source_0.sv:14: error: Invalid module instantiation\n<case>/source_0.sv:15: syntax error\n<case>/source_0.sv:15: error: Invalid module instantiation\n<case>/source_0.sv:16: syntax error\n<case>/source_0.sv:16: error: Invalid module instantiation\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: error: Invalid module instantiation\n",
+      "expectation": "Simulation",
+      "name": "covergroup::clocking_event_forms_sample_their_occurrences",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 16; see <case>/build.log\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: error: Invalid module item.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Invalid module item.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:11: error: Invalid module item.\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:13: error: Invalid module item.\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:13: error: Invalid module item.\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:13: error: Invalid module item.\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:14: error: Invalid module item.\n<case>/source_0.sv:15: syntax error\n<case>/source_0.sv:15: error: Invalid module instantiation\n",
+      "expectation": "Simulation",
+      "name": "covergroup::clocking_events_of_nba_updated_clocks_sample_before_the_updates",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 16; see <case>/build.log\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Invalid module item.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Invalid module item.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:8: error: Invalid module item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:10: error: Invalid module item.\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: error: Invalid module item.\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:12: error: Invalid module item.\n<case>/source_0.sv:12: syntax error\n<case>/source_0.sv:14: error: Invalid module item.\n<case>/source_0.sv:15: syntax error\n<case>/source_0.sv:15: error: Invalid module instantiation\n",
+      "expectation": "Simulation",
+      "name": "covergroup::clocking_events_sample_at_each_edge",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "Icarus build exit status: 12; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module item.\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:5: error: Invalid module item.\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Invalid module item.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Invalid module item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:10: error: Invalid module item.\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: error: Invalid module instantiation\n",
       "expectation": "Simulation",
       "name": "covergroup::constructor_arguments_set_the_bins",
@@ -233,9 +277,31 @@
     },
     {
       "category": "Sequential",
+      "detail": "Icarus build exit status: 13; see <case>/build.log\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Invalid module item.\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Invalid module item.\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Invalid module item.\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:7: error: Invalid module item.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Invalid module instantiation\n<case>/source_0.sv:7: error: Invalid module instantiation\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:11: error: Invalid module item.\n",
+      "expectation": "Simulation",
+      "name": "covergroup::instances_of_a_generate_loop_sample_their_own",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "Icarus build exit status: 12; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module item.\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Invalid module instantiation\n<case>/source_0.sv:5: error: Invalid module instantiation\n<case>/source_0.sv:6: error: Invalid module item.\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:8: error: Invalid module item.\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: error: Invalid module instantiation\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:13: error: Malformed statement\n",
       "expectation": "Simulation",
       "name": "covergroup::merged_instances_unite_bins_by_name",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 12; see <case>/build.log\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Invalid module item.\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Invalid module item.\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:5: error: Invalid module item.\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:5: error: Invalid module item.\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:6: error: Invalid module item.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Invalid module instantiation\n",
+      "expectation": "Simulation",
+      "name": "covergroup::named_events_sample_their_triggers",
       "phase": "compile",
       "status": "compile_error",
       "stronger_than_sv": false,

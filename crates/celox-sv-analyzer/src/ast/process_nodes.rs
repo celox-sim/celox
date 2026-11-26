@@ -107,6 +107,12 @@ impl FfProcess {
         self.always_ff
     }
 
+    /// A procedure the analysis generates, which is no process of the source
+    /// and so draws no seed (IEEE 1800-2023 18.14.1).
+    pub fn is_synthetic(&self) -> bool {
+        self.synthetic
+    }
+
     /// Position among the elaborated module items, shared across process kinds.
     pub fn creation_order(&self) -> usize {
         self.creation_order
@@ -120,6 +126,7 @@ impl FfProcess {
         Self {
             always_ff: false,
             suspendable: false,
+            synthetic: false,
             creation_order: 0,
             site: None,
             events,

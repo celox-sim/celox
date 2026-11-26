@@ -57,6 +57,50 @@
     },
     {
       "category": "Sequential",
+      "detail": "covergroup::clocked_instances_take_stop_start_and_sample at 1038:2: expect_output: expected [51, 32, 56, 10, 51, 55, 46, 53, 48, 10], got [48, 32, 48, 10, 53, 48, 46, 48, 48, 10]",
+      "expectation": "Simulation",
+      "name": "covergroup::clocked_instances_take_stop_start_and_sample",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "covergroup::clocking_event_forms_sample_their_occurrences at 971:2: expect_output: expected [56, 32, 56, 10, 56, 32, 56, 10, 56, 32, 56, 10, 52, 32, 56, 10, 50, 32, 56, 10, 50, 53, 46, 48, 48, 10], got [48, 32, 48, 10, 48, 32, 48, 10, 48, 32, 48, 10, 48, 32, 48, 10, 48, 32, 48, 10, 50, 53, 46, 48, 48, 10]",
+      "expectation": "Simulation",
+      "name": "covergroup::clocking_event_forms_sample_their_occurrences",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "covergroup::clocking_events_of_nba_updated_clocks_sample_before_the_updates",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error-UNSUPPORTED: <case>/source_0.sv:19:35: Unsupported: arguments of 'get_inst_coverage' of coverpoint or cross 'early'\n                                            : ... note: In instance 'celox_suite_tb.dut'\n   19 |   void'(p.early.get_inst_coverage(covered, total)); $display(\"%0d %0d\", covered, total);\n      |                                   ^~~~~~~\n                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.054\n%Error-UNSUPPORTED: <case>/source_0.sv:20:34: Unsupported: arguments of 'get_inst_coverage' of coverpoint or cross 'late'\n                                            : ... note: In instance 'celox_suite_tb.dut'\n   20 |   void'(p.late.get_inst_coverage(covered, total)); $display(\"%0d %0d\", covered, total);\n      |                                  ^~~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:21:35: Unsupported: arguments of 'get_inst_coverage' of coverpoint or cross 'early'\n                                            : ... note: In instance 'celox_suite_tb.dut'\n   21 |   void'(n.early.get_inst_coverage(covered, total)); $display(\"%0d %0d\", covered, total);\n      |                                   ^~~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:22:34: Unsupported: arguments of 'get_inst_coverage' of coverpoint or cross 'late'\n                                            : ... note: In instance 'celox_suite_tb.dut'\n   22 |   void'(n.late.get_inst_coverage(covered, total)); $display(\"%0d %0d\", covered, total);\n      |                                  ^~~~~~~\n%Error: Exiting due to 4 error(s)\n",
+      "expectation": "Simulation",
+      "name": "covergroup::clocking_events_sample_at_each_edge",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:5:18: Non-constant expression in bin range; range bounds must be constants (IEEE 1800-2023 19.5)\n                               : ... note: In instance 'celox_suite_tb.dut'\n    5 |    bins below = {[0:lo]};\n      |                  ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.054 for more assistance.\n%Error: <case>/source_0.sv:6:20: Non-constant expression in bin range; range bounds must be constants (IEEE 1800-2023 19.5)\n                               : ... note: In instance 'celox_suite_tb.dut'\n    6 |    bins between = {[lo + 1:hi]};\n      |                    ^\n%Error: <case>/source_0.sv:7:18: Non-constant expression in bin range; range bounds must be constants (IEEE 1800-2023 19.5)\n                               : ... note: In instance 'celox_suite_tb.dut'\n    7 |    bins above = {[hi + 1:$]};\n      |                  ^\n%Error: Exiting due to 3 error(s)\n",
       "expectation": "Simulation",
       "name": "covergroup::constructor_arguments_set_the_bins",
@@ -233,11 +277,33 @@
     },
     {
       "category": "Sequential",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:6:66: Non-constant expression in bin range; values must be constants (IEEE 1800-2023 19.5)\n                               : ... note: In instance 'celox_suite_tb.dut'\n    6 |  covergroup cg(int k) @(posedge clk); coverpoint q { bins hit = {k}; bins other = default; } endgroup\n      |                                                                  ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.054 for more assistance.\n%Error: Internal Error: <case>/source_0.sv:6:59: ../V3Covergroup.cpp:1041: buildBinCondition returned nullptr for non-ignore/non-illegal bin\n                                               : ... note: In instance 'celox_suite_tb.dut'\n    6 |  covergroup cg(int k) @(posedge clk); coverpoint q { bins hit = {k}; bins other = default; } endgroup\n      |                                                           ^~~\n                        ... This fatal error may be caused by the earlier error(s); resolve those first.\n",
+      "expectation": "Simulation",
+      "name": "covergroup::instances_of_a_generate_loop_sample_their_own",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:6:22: Non-constant expression in array bins range; range bounds must be constants (IEEE 1800-2023 19.5)\n                               : ... note: In instance 'celox_suite_tb.dut'\n    6 |   coverpoint a {bins b[] = { [l:h] };}\n      |                      ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.054 for more assistance.\n%Error: Exiting due to 1 error(s)\n",
       "expectation": "Simulation",
       "name": "covergroup::merged_instances_unite_bins_by_name",
       "phase": "compile",
       "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "covergroup::named_events_sample_their_triggers at 995:2: expect_output: expected [50, 32, 52, 10, 51, 32, 52, 10], got [48, 32, 48, 10, 48, 32, 48, 10]",
+      "expectation": "Simulation",
+      "name": "covergroup::named_events_sample_their_triggers",
+      "phase": "execute",
+      "status": "mismatch",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []

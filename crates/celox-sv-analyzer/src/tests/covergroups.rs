@@ -348,10 +348,6 @@ fn unsupported_covergroup_constructs_are_rejected_where_used() {
             "covergroup cross with or matches selection (IEEE 1800-2023 19.6.1.2)",
         ),
         (
-            "bit clk; covergroup cg @(posedge clk); endgroup",
-            "covergroup sampling event (IEEE 1800-2023 19.3)",
-        ),
-        (
             "task automatic t; endtask covergroup cg @@(begin t); endgroup",
             "covergroup block event (IEEE 1800-2023 19.3)",
         ),
@@ -3123,6 +3119,7 @@ fn strobe_follows_the_sampling_event() {
         "covergroup cg with function sample(bit v); type_option.strobe = 1; coverpoint v; endgroup",
         "covergroup cg; type_option.strobe = 1'b1; endgroup",
         "covergroup cg; type_option.strobe = 0; endgroup",
+        "bit clk; covergroup cg @(posedge clk); type_option.strobe = 0; endgroup",
     ] {
         analyze(&format!("module Top; {declaration} cg c = new; endmodule"))
             .unwrap_or_else(|error| panic!("{declaration}: {error}"));
@@ -3133,7 +3130,6 @@ fn strobe_follows_the_sampling_event() {
             "2 - 1",
             "covergroup strobe sampling (IEEE 1800-2023 19.7.1)",
         ),
-        ("0", "covergroup sampling event (IEEE 1800-2023 19.3)"),
     ] {
         let error = rejected(
             "",
@@ -3149,4 +3145,323 @@ fn strobe_follows_the_sampling_event() {
         );
         assert_eq!(error.tracking_issue(), COVERGROUPS_ISSUE);
     }
+}
+
+/// The sampler processes of `module`: what samples each covergroup instance
+/// that a declaration constructs at the clocking event of its type, when the
+/// event is not one a flip-flop shaped procedure waits for.
+fn samplers(module: &crate::ir::Module) -> Vec<&crate::ir::InitialProcess> {
+    module
+        .initial_processes()
+        .iter()
+        .filter(|process| {
+            process
+                .site()
+                .is_some_and(|site| site.construct == "covergroup sampling")
+        })
+        .collect()
+}
+
+/// The flip-flop shaped procedures of `module` that sample covergroup
+/// instances at edges.
+fn edge_samplers(module: &crate::ir::Module) -> Vec<&crate::ir::FfProcess> {
+    module
+        .ff_processes()
+        .iter()
+        .filter(|process| {
+            process
+                .site()
+                .is_some_and(|site| site.construct == "covergroup sampling")
+        })
+        .collect()
+}
+
+/// The hidden handle variables of the sites of `module`.
+fn site_handles(module: &crate::ir::Module) -> Vec<&str> {
+    module
+        .signals()
+        .iter()
+        .filter(|signal| signal.name().starts_with("%covergroup_site"))
+        .map(|signal| {
+            assert_eq!(signal.r#type().kind(), crate::ir::TypeKind::Object);
+            signal.name()
+        })
+        .collect()
+}
+
+/// Whether `stmt` is the call of `N::$sample` with a hidden handle of
+/// `handles`.
+fn samples_a_site(stmt: &crate::ir::Stmt, handles: &[&str]) -> bool {
+    use crate::ir::{Expr, Stmt};
+    matches!(stmt, Stmt::Call { name, args, .. }
+        if name.ends_with("::$sample")
+            && matches!(args.as_slice(), [Some(Expr::Ident(handle))] if handles.contains(&handle.as_str())))
+}
+
+#[test]
+fn clocked_covergroups_sample_the_instances_of_their_declarations() {
+    use crate::ir::{Expr, FfEdge, Stmt};
+    use crate::procedural::{EventEdge, LoopKind};
+    // 19.3: an instance that a declaration of a module or a program
+    // constructs is sampled at the clocking event of its type, one sampler
+    // for each declaration (in a generate loop, one per iteration), with
+    // the instance in a hidden variable. The event is bound where the type
+    // is declared: the clock of the module, not that of the generate block.
+    //
+    // One edge of a one-bit variable is sampled by a flip-flop shaped
+    // `always`, as `always @(posedge clk) c.sample();` is, so that a sample
+    // runs with the flip-flops of the edge; one procedure samples every
+    // site of the type, in the order of the declarations, and an `iff` is
+    // checked in its body.
+    let ir = analyze(
+        "module Top; bit clk, en; bit [3:0] d; \
+         covergroup cg @(posedge clk iff en); coverpoint d; endgroup \
+         cg c = new; \
+         for (genvar i = 0; i < 2; i++) begin : g bit clk; cg x = new(); end \
+         covergroup fall @(negedge clk); endgroup fall f = new; \
+         endmodule",
+    )
+    .unwrap();
+    let top = module(&ir, "Top");
+    let handles = site_handles(top);
+    assert_eq!(handles.len(), 4, "{handles:?}");
+    assert!(samplers(top).is_empty());
+    let procedures = edge_samplers(top);
+    let [guarded, fall] = procedures.as_slice() else {
+        panic!("{procedures:?}");
+    };
+    // The clock of the module, not that of the generate block.
+    let events = |process: &crate::ir::FfProcess| {
+        process
+            .events()
+            .iter()
+            .map(|event| (event.edge(), event.signal().to_owned()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(events(guarded), [(FfEdge::Pos, "clk".to_owned())]);
+    assert_eq!(events(fall), [(FfEdge::Neg, "clk".to_owned())]);
+    assert!(!guarded.is_always_ff() && !fall.is_always_ff());
+    // Procedures of the analysis, which draw no seed (18.14.1).
+    assert!(guarded.is_synthetic() && fall.is_synthetic());
+    assert_eq!(guarded.body().len(), 3);
+    for (stmt, handle) in guarded.body().iter().zip(&handles[..3]) {
+        let Stmt::If {
+            condition,
+            then_body,
+            else_body,
+        } = stmt
+        else {
+            panic!("{stmt:?}");
+        };
+        assert_eq!(*condition, Expr::Ident("en".into()));
+        assert!(else_body.is_empty());
+        assert!(matches!(then_body.as_slice(), [call] if samples_a_site(call, &[handle])));
+    }
+    assert!(matches!(fall.body(), [call] if samples_a_site(call, &handles[3..])));
+    // Any other event, and every event of a program, which runs in the
+    // Reactive region set (24.3.1), is waited for by a process of each
+    // site, `initial forever begin @(event); N::$sample(handle); end`,
+    // which draws no seed and is no `always` (a level-sensitive `always`
+    // would run once at time zero in two-state simulation).
+    let ir = analyze(
+        "module Top; bit clk, en, a, b; bit [1:0] bus; event e; \
+         covergroup change @(clk); endgroup change c1 = new; \
+         covergroup levels @(a or b); endgroup levels c2 = new; \
+         covergroup named @e; endgroup named c3 = new; \
+         covergroup guards @(posedge a iff en or posedge b); endgroup guards c4 = new; \
+         covergroup mixed @(posedge a or b); endgroup mixed c5 = new; \
+         covergroup both @(edge clk); endgroup both c6 = new; \
+         covergroup list @(posedge a or negedge b); endgroup list c7 = new; \
+         covergroup wide @(posedge bus); endgroup wide c8 = new; \
+         endmodule \
+         program prog(input bit clk); covergroup pc @(posedge clk); endgroup pc p = new; endprogram",
+    )
+    .unwrap();
+    for (name, count) in [("Top", 8), ("prog", 1)] {
+        let scope = module(&ir, name);
+        let handles = site_handles(scope);
+        assert_eq!(handles.len(), count, "{name}: {handles:?}");
+        assert!(edge_samplers(scope).is_empty(), "{name}");
+        let processes = samplers(scope);
+        assert_eq!(processes.len(), count, "{name}");
+        for process in processes {
+            assert!(process.is_synthetic() && !process.repeats(), "{name}");
+            assert_eq!(process.kind(), celox_design::ProcessKind::Regular);
+            let [
+                Stmt::Loop {
+                    kind: LoopKind::Forever,
+                    body,
+                    ..
+                },
+            ] = process.body()
+            else {
+                panic!("{name}: {:?}", process.body());
+            };
+            let (wait, [call]) = body.split_at(body.len() - 1) else {
+                panic!("{name}: {body:?}");
+            };
+            assert!(samples_a_site(call, &handles), "{call:?}");
+            match wait {
+                [Stmt::WaitEvent(items)] if name == "prog" => {
+                    assert!(matches!(items.as_slice(), [item] if item.edge == EventEdge::Pos));
+                }
+                [Stmt::WaitEvent(items)] => assert!(
+                    items.len() > 1
+                        || items
+                            .iter()
+                            .any(|item| matches!(item.edge, EventEdge::Any | EventEdge::Both))
+                        || matches!(&items[0].expr, Expr::Ident(name) if name == "bus"),
+                    "{items:?}"
+                ),
+                [Stmt::Eval(_)] => {}
+                wait => panic!("{name}: {wait:?}"),
+            }
+        }
+    }
+    // The declaration alone, a variable of the type, its methods and
+    // `sample()` analyze (19.8: the methods "can be invoked procedurally at
+    // any time").
+    for items in [
+        "",
+        "cg c;",
+        "cg c; real r; initial begin c.sample(); r = c.get_inst_coverage(); c.stop(); end",
+        "real r; initial r = cg::get_coverage();",
+        "cg c = new; real r; initial begin c.sample(); c.option.at_least = 2; c = null; end",
+    ] {
+        let source = format!(
+            "module Top; bit clk; covergroup cg @(posedge clk); endgroup {items} endmodule"
+        );
+        let ir = analyze(&source).unwrap_or_else(|error| panic!("{source}: {error}"));
+        assert_eq!(
+            edge_samplers(module(&ir, "Top")).len(),
+            usize::from(items.contains("= new;")),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn clocking_events_the_analysis_does_not_support_are_rejected_where_used() {
+    // What stays unsupported of clocking events is rejected where the type
+    // is constructed or used, with a text that maps to the tracking issue.
+    let constructed = "covergroup sampling event of a constructed instance (IEEE 1800-2023 19.3)";
+    for (before, items, construct) in [
+        // A `new` that is not the initializer of a declaration (C15).
+        (
+            "",
+            "bit clk; covergroup cg @(posedge clk); endgroup cg c; initial c = new;",
+            constructed,
+        ),
+        (
+            "",
+            "bit clk; covergroup cg @(posedge clk); endgroup cg c = new; initial c = new;",
+            constructed,
+        ),
+        (
+            "",
+            "bit clk; covergroup cg @(posedge clk); endgroup cg a[2] = '{new, new};",
+            constructed,
+        ),
+        (
+            "",
+            "bit clk; covergroup cg @(posedge clk); endgroup \
+             class K; cg h; function new(); h = new; endfunction endclass K k = new;",
+            constructed,
+        ),
+        // 19.3: "A clocking event may refer to arguments of the covergroup."
+        (
+            "",
+            "bit clk; covergroup cg(bit x) @(posedge x); endgroup cg c = new(clk);",
+            "covergroup sampling event that names an argument of the covergroup (IEEE 1800-2023 19.3)",
+        ),
+        (
+            "",
+            "bit clk, clk_en; covergroup cg(bit clk_en) @(posedge clk iff clk_en); endgroup \
+             cg c = new(1);",
+            "covergroup sampling event that names an argument of the covergroup (IEEE 1800-2023 19.3)",
+        ),
+        // No process home in a package or the compilation unit.
+        (
+            "package p; bit clk; covergroup cg @(posedge clk); endgroup endpackage",
+            "p::cg c = new;",
+            "covergroup sampling event of a covergroup declared in a package or the compilation unit (IEEE 1800-2023 19.3)",
+        ),
+        (
+            "package p; bit clk; covergroup cg @(posedge clk); endgroup endpackage",
+            "real r; initial r = p::cg::get_coverage();",
+            "covergroup sampling event of a covergroup declared in a package or the compilation unit (IEEE 1800-2023 19.3)",
+        ),
+        (
+            "bit clk; covergroup cg @(posedge clk); endgroup",
+            "cg c = new;",
+            "covergroup sampling event of a covergroup declared in a package or the compilation unit (IEEE 1800-2023 19.3)",
+        ),
+        // An embedded covergroup is constructed by its class (C15).
+        (
+            "",
+            "class K; bit clk; covergroup cg @(posedge clk); endgroup \
+             function new(); cg = new; endfunction endclass K k = new;",
+            "covergroup sampling event of a covergroup embedded in a class (IEEE 1800-2023 19.3, 19.4)",
+        ),
+        // `ref` formals (C14).
+        (
+            "",
+            "bit clk; int v; covergroup cg(ref int r) @(posedge clk); endgroup cg c = new(v);",
+            "covergroup ref argument (IEEE 1800-2023 19.3)",
+        ),
+        // An event the analysis does not support in any event control.
+        (
+            "",
+            "bit clk; event e; covergroup cg @(posedge clk or e); endgroup cg c = new;",
+            "covergroup sampling event (event control mixing named events with other events)",
+        ),
+    ] {
+        let error = rejected(before, items);
+        assert_eq!(
+            error,
+            AnalyzerError::Unsupported(construct.to_string()),
+            "{before} {items}"
+        );
+        assert_eq!(error.tracking_issue(), COVERGROUPS_ISSUE, "{items}");
+    }
+    // A package that declares an instance of its own clocked covergroup.
+    let source = "package p; bit clk; covergroup cg @(posedge clk); endgroup cg c = new; \
+                  endpackage module Top; import p::*; endmodule";
+    let error = analyze(source).map(|_| ()).unwrap_err().into_error();
+    assert!(
+        matches!(&error, AnalyzerError::Unsupported(text) if text.starts_with("covergroup sampling event of a covergroup declared in a package")),
+        "{error}"
+    );
+    // The coverage event is one of a clocking event, a sample method and a
+    // block event (Syntax 19-1): a covergroup declares at most one.
+    for header in [
+        "@(posedge clk) with function sample(bit v)",
+        "with function sample(bit v) @(posedge clk)",
+        "@(posedge clk) @@(begin t)",
+    ] {
+        let source = format!(
+            "module Top; bit clk; task automatic t; endtask covergroup cg {header}; endgroup endmodule"
+        );
+        let error = analyze(&source).map(|_| ()).unwrap_err().into_error();
+        assert!(
+            matches!(&error, AnalyzerError::Parse(text) if text.contains("expected `;`")),
+            "{source}: {error:?}"
+        );
+    }
+    // A covergroup with a clocking event declared in an interface is
+    // rejected for every use, also in an interface with ports that nothing
+    // but its instance names, which is elaborated as a module is.
+    let source = "interface ifc(input bit clk); covergroup ic @(posedge clk); endgroup \
+                  ic i = new; endinterface \
+                  module Top; bit clk; ifc f(.clk(clk)); endmodule";
+    let error = analyze(source).map(|_| ()).unwrap_err().into_error();
+    assert_eq!(
+        error,
+        AnalyzerError::Unsupported(
+            "covergroup sampling event of a covergroup declared in an interface (IEEE 1800-2023 19.3, 25.3)"
+                .into()
+        ),
+        "{source}"
+    );
+    assert_eq!(error.tracking_issue(), COVERGROUPS_ISSUE);
 }

@@ -1476,7 +1476,13 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             | "covergroup::merged_instances_unite_bins_by_name"
                             | "covergroup::coverage_queries_count_bins_by_reference"
                             | "covergroup::coverpoints_and_crosses_report_their_coverage"
-                            | "covergroup::stop_and_start_control_collection",
+                            | "covergroup::stop_and_start_control_collection"
+                            | "covergroup::clocking_events_sample_at_each_edge"
+                            | "covergroup::clocking_event_forms_sample_their_occurrences"
+                            | "covergroup::named_events_sample_their_triggers"
+                            | "covergroup::instances_of_a_generate_loop_sample_their_own"
+                            | "covergroup::clocked_instances_take_stop_start_and_sample"
+                            | "covergroup::clocking_events_of_nba_updated_clocks_sample_before_the_updates",
                         ) => ("compile_error", "compile", "Invalid module item"),
                         ("icarus", "covergroup::set_expression_is_the_values_of_a_bin") => (
                             "compile_error",
@@ -1576,6 +1582,43 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "compile_error",
                             "compile",
                             "Unsupported: 'stop' of coverpoint or cross 'cb'",
+                        ),
+                        ("verilator", "covergroup::clocking_events_sample_at_each_edge") => (
+                            "compile_error",
+                            "compile",
+                            "Unsupported: arguments of 'get_inst_coverage' of coverpoint or cross 'early'",
+                        ),
+                        (
+                            "verilator",
+                            "covergroup::clocking_event_forms_sample_their_occurrences",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            // "8 8" ... "2 8" expected, "0 0" displayed five times.
+                            "expect_output: expected [56, 32, 56, 10, 56, 32, 56, 10, 56, 32, 56, 10, 52, 32, 56, 10, 50, 32, 56, 10, 50, 53, 46, 48, 48, 10], got [48, 32, 48, 10, 48, 32, 48, 10, 48, 32, 48, 10, 48, 32, 48, 10, 48, 32, 48, 10, 50, 53, 46, 48, 48, 10]",
+                        ),
+                        ("verilator", "covergroup::named_events_sample_their_triggers") => (
+                            "mismatch",
+                            "execute",
+                            // "2 4" and "3 4" expected, "0 0" displayed twice.
+                            "expect_output: expected [50, 32, 52, 10, 51, 32, 52, 10], got [48, 32, 48, 10, 48, 32, 48, 10]",
+                        ),
+                        (
+                            "verilator",
+                            "covergroup::instances_of_a_generate_loop_sample_their_own",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "Non-constant expression in bin range; values must be constants",
+                        ),
+                        (
+                            "verilator",
+                            "covergroup::clocked_instances_take_stop_start_and_sample",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            // "3 8" and "37.50" expected, "0 0" and "50.00" displayed.
+                            "expect_output: expected [51, 32, 56, 10, 51, 55, 46, 53, 48, 10], got [48, 32, 48, 10, 53, 48, 46, 48, 48, 10]",
                         ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
