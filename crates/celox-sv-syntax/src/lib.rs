@@ -16,5 +16,7 @@ pub use encoding::SourceEncoding;
 pub use lexer::{Token, TokenKind, lex};
 pub use nodes::*;
 pub use parser::{Declarations, ParseError, ParseErrorKind};
-pub use preprocess::{IncludePolicy, Options, Preprocessed, Preprocessor};
+pub use preprocess::{
+    IncludePolicy, Options, PreprocessWarning, PreprocessWarningKind, Preprocessed, Preprocessor,
+};
 pub use source::{Error, Expansion, ExpansionId, FileId, Origin, SourceFile, SourceMap, Span};

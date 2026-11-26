@@ -324,6 +324,11 @@ Celox が意図的に受理している標準外構文および互換拡張で�
   1度だけ実行する手続きでキーワード無しの宣言も受け付け、`implicit_static_initializer` 警告
   （既定 `warn`、strict mode で `error`）を出します。`always` 内の実行時初期化子に
   `static` も `automatic` も無い場合は拒否します。
+- **`` `include `` のファイル名の後のセミコロン（22.4）。**
+  IEEE 1800-2023 22.4 は `` `include `` 指令の行のファイル名の後に空白とコメントしか許しません。
+  Celox は他のシミュレータと同様にそこのセミコロン（`` `include "uvm_macros.svh"; ``）を無視し、
+  `include_trailing_semicolon` 警告（既定 `warn`、strict mode で `error`）を出します。
+  ファイル名の後のそれ以外の字句は拒否します。
 - **時間尺度の有無が混在する場合の既定値フォールバック（3.14.2.3）。**
   一部の設計要素だけ時間単位・精度（宣言・継承・`` `timescale ``）を持ち他が持たない場合に
   エラーとせず、`mixed_timescale` 警告（strict mode で `error`）を出して該当要素に

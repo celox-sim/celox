@@ -186,14 +186,16 @@ fn run(options: &Options) -> Result<(), String> {
                 .source_encoding
                 .read(path)
                 .map_err(|error| format!("{}: {error}", path.display()))?;
-            celox_sv_analyzer::syntax::preprocess_source_with_encoding(
+            let expanded = celox_sv_analyzer::syntax::preprocess_source_with_encoding(
                 &text,
                 path,
                 &options.defines,
                 &includes,
                 options.source_encoding,
             )
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+            report_preprocessor_warnings(&expanded.warnings);
+            Ok::<_, String>(expanded.text)
         })
         .collect::<Result<_, _>>()?;
     if options.mode == Mode::Preprocessing {
@@ -545,6 +547,18 @@ impl tracing::Subscriber for PhaseTimingReport {
     }
     fn enter(&self, _: &tracing::span::Id) {}
     fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// Print what the preprocessor accepted on stderr, as the driver's other
+/// compilation warnings are.
+#[allow(clippy::disallowed_macros)] // CLI diagnostics intentionally use stderr.
+fn report_preprocessor_warnings(warnings: &[celox_sv_analyzer::syntax::SourceWarning]) {
+    for warning in celox_frontend_sv::FrontendWarning::preprocessor(warnings) {
+        eprintln!(
+            "{}",
+            celox::render_diagnostic(&celox::CompilationWarning::SystemVerilog(warning))
+        );
+    }
 }
 
 #[allow(clippy::disallowed_macros)] // CLI diagnostics intentionally use stderr.
@@ -1005,7 +1019,8 @@ endmodule
             &options.defines,
             &includes,
         )
-        .unwrap();
+        .unwrap()
+        .text;
         for directive in [
             "`timescale 1ns/1ps",
             "`default_nettype none",

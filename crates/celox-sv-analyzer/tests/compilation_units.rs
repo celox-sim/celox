@@ -17,7 +17,7 @@ fn ordered_files_share_macros_and_directives_but_separate_calls_do_not() {
             Path::new("last.sv"),
         ),
     ];
-    let text = preprocess_sources(&sources, &[], &[]).unwrap();
+    let text = preprocess_sources(&sources, &[], &[]).unwrap().text;
     assert!(
         text.split_whitespace()
             .collect::<String>()
@@ -56,7 +56,7 @@ fn later_files_retain_builtin_locations_and_preprocessing_diagnostics() {
             Path::new("later.sv"),
         ),
     ];
-    let text = preprocess_sources(&sources, &[], &[]).unwrap();
+    let text = preprocess_sources(&sources, &[], &[]).unwrap().text;
     assert!(
         text.split_whitespace().collect::<String>().contains("N=2"),
         "{text}"
@@ -84,7 +84,7 @@ fn serialized_macro_operators_remain_distinct_tokens() {
             ),
         ],
     ] {
-        let expanded = preprocess_sources(&sources, &[], &[]).unwrap();
+        let expanded = preprocess_sources(&sources, &[], &[]).unwrap().text;
         assert!(!expanded.contains("--1"), "{expanded}");
         parse_source(&expanded, Path::new("unit.sv")).unwrap();
     }
