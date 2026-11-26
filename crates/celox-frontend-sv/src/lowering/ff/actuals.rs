@@ -115,8 +115,9 @@ impl Ff<'_, '_> {
         Ok((id, name))
     }
 
-    /// [`Self::capture_system_actual`] of a class property of integral type,
-    /// `h.p`, or an element of a container, `q[i]`, or a select of one: its
+    /// [`Self::capture_system_actual`] of a class property, `h.p`, or an
+    /// element of a container, `q[i]`, of integral type or holding a handle
+    /// (written whole), or a select of an integral one: its
     /// object, container and index are evaluated now, in that order, into
     /// temporaries, and its select positions frozen as a variable's are.
     pub(super) fn capture_place_actual(
@@ -161,7 +162,7 @@ impl Ff<'_, '_> {
                     layout,
                 },
                 [Some(container), Some(index)],
-            ) if layout.handle.is_none() => {
+            ) if layout.handle.is_none() || select.is_none() => {
                 // A container variable names its elements; the container
                 // of a property is the one of the property's object.
                 let container = match container {
@@ -219,10 +220,14 @@ impl Ff<'_, '_> {
         let float = self.m.expr_float_precision(&load);
         let variable = self.m.variables.get_mut(&id).expect("a temporary");
         variable.float = float;
-        // The local of a property holding a handle keeps its object.
-        if let ObjectOp::Store(field) = &store
-            && let Some(handle) = field.handle
-        {
+        // The local of a property or an element holding a handle keeps its
+        // object, written whole.
+        let handle = match &store {
+            ObjectOp::Store(field) => field.handle,
+            ObjectOp::Container { layout, .. } => layout.handle,
+            _ => None,
+        };
+        if let Some(handle) = handle {
             variable.value_kind = match handle {
                 sv::ir::HandleProperty::Object => celox_design::ValueKind::ObjRef,
                 sv::ir::HandleProperty::String => celox_design::ValueKind::StrRef,
