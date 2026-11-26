@@ -31,6 +31,7 @@ Celox は IEEE Std 1800™-2023 が規定する SystemVerilog を実装します
 - **検証・設計構造ブロック:** `bind`、`checker`、`config`、clocking ブロックと clocking drive、ユーザー定義プリミティブ（UDP）、`specify` ブロック。covergroup は一部に対応します。[カバーグループ](#covergroups)を参照してください。
 - **union と配列・コンテナの混在型:** `tagged` union、unpacked union、packed union の代入パターン、`chandle` の固定長 unpacked 配列（`chandle a[4]`、typedef 経由を含む）、動的コンテナの固定長 unpacked 配列（`int a[2][$]`、typedef 経由を含む）、多次元固定長 unpacked 配列を要素とする動的コンテナ（`int a[][2][3]`）。
 - **制御フロー:** `disable fork` 以外の `disable` 文。宣言初期化子、`final`、`always_comb`、`always_ff` 内の `fork`（これらの文脈にはスケジューラ用のプロセス基盤がありません）。
+- **集合帰属:** 制約以外の `inside` 式・`case inside` 項目の集合に置いた unpacked 配列（`x inside {arr}`。`arr` の要素を表す、11.4.13）。配列の要素（`x inside {arr[0]}`）と、制約内の配列プロパティは対応しています。
 - **時刻・システムタスク:** `wait_order`、および未実装の IEEE 1800-2023 / Annex D システムタスク・関数。Celox は標準が定義する全タスク・関数名を認識しており、未対応のものは未使用パラメータや関数本体に書かれた場合も含め名前付きで報告します（例: `$q_initialize`）。
 
 ## 部分対応の機能 {#partial-support}

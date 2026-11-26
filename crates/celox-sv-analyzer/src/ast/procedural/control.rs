@@ -1974,6 +1974,12 @@ impl BodyBuilder<'_, '_, '_> {
         expression_binding::typed_string(&self.tree, self.session, id, native, &self.dims)
     }
 
+    /// Whether native expression `id` is an unpacked array.
+    fn unpacked_array_typed(&mut self, id: celox_sv_syntax::ExprId) -> bool {
+        let native = self.syntax().declarations();
+        expression_binding::unpacked_array(&self.tree, self.session, id, native, &self.dims)
+    }
+
     pub(super) fn native_case_labels(
         &mut self,
         labels: &[celox_sv_syntax::CaseMatch],
@@ -1987,6 +1993,16 @@ impl BodyBuilder<'_, '_, '_> {
         labels
             .iter()
             .map(|label| match label {
+                // An unpacked array in the set of a `case inside` item
+                // stands for its elements (11.4.13), which is not
+                // implemented; a `case` item is singular (12.5).
+                celox_sv_syntax::CaseMatch::Expression(id) if self.unpacked_array_typed(*id) => {
+                    Err(unsupported(if inside {
+                        "an unpacked array in the set of inside"
+                    } else {
+                        "an unpacked array as a case item"
+                    }))
+                }
                 celox_sv_syntax::CaseMatch::Expression(id) if chandles => {
                     self.native_chandle_value(*id).map(CaseLabel::Value)
                 }

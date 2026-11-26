@@ -32,6 +32,7 @@ These constructs and clauses are not implemented and are always rejected at comp
 - **Verification and design-level blocks:** `bind`, `checker`, `config`, clocking blocks and clocking drives, user-defined primitives (UDP), and `specify` blocks. Covergroups are supported in part; see [Coverage groups](#covergroups).
 - **Unions and mixed array/container types:** `tagged` unions, unpacked unions, packed union assignment patterns, fixed-size unpacked arrays of `chandle` (`chandle a[4]`, including via `typedef`), fixed-size unpacked arrays of dynamic containers (`int a[2][$]`, including via `typedef`), and dynamic containers of multidimensional fixed-size unpacked arrays (`int a[][2][3]`).
 - **Control flow:** `disable` statements other than `disable fork`; `fork` inside declaration initializers, `final`, `always_comb`, and `always_ff` (no process scheduler in those contexts).
+- **Set membership:** unpacked arrays in the set of an `inside` expression or `case inside` item outside constraints (`x inside {arr}`, which stands for the elements of `arr`, 11.4.13); elements of arrays (`x inside {arr[0]}`) are supported, and so are array properties in constraints.
 - **Timing and system tasks:** `wait_order`, and any unimplemented IEEE 1800-2023 or Annex D system task/function. Celox knows every standard name and reports unsupported ones by name wherever written, including in unused parameters and function bodies (e.g., `$q_initialize`).
 
 ## Partially supported features {#partial-support}
