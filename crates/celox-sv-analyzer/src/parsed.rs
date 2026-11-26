@@ -1432,20 +1432,29 @@ mod native_interface_tests {
             .iter()
             .flat_map(|process| process.body())
             .filter_map(|statement| {
-                if let ir::Stmt::SystemTask { args, .. } = statement
+                if let ir::Stmt::SystemTask { args, home, .. } = statement
                     && let Some(ir::SystemTaskArg::Str(message)) = args.first()
                 {
-                    Some(message.as_str())
+                    Some((message.as_str(), home.clone()))
                 } else {
                     None
                 }
             })
             .collect::<Vec<_>>();
+        // The task names the instance it runs in by its site, which `%m`
+        // names (see `interface_binding::bind_instances`).
+        let instance = |name: &str| {
+            Some(celox_design::SiteHome::Path {
+                up: Some(0),
+                down: Vec::new(),
+                within: Some(name.to_owned()),
+            })
+        };
         assert_eq!(
             messages,
             [
-                "Time scale of (%m.info[1]) is 100ps / 10fs",
-                "Time scale of (%m.info[2]) is 100ps / 10fs",
+                ("Time scale of (%m) is 100ps / 10fs", instance("info[1]")),
+                ("Time scale of (%m) is 100ps / 10fs", instance("info[2]")),
             ]
         );
     }
