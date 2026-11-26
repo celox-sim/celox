@@ -4056,6 +4056,41 @@ fn modules_carry_only_the_package_subroutines_they_can_call() {
 }
 
 #[test]
+fn static_locals_of_other_packages_give_a_package_no_state() {
+    // The static local of a subroutine is a variable of the package that
+    // declares the subroutine (IEEE 1800-2023 6.21). A package that only
+    // calls it has no variables, and so no state module: one would run the
+    // other package's initializers and lower everything they reach again,
+    // as a compilation unit importing nothing but reaching UVM through
+    // virtual interface calls did.
+    let code = "package a; function automatic int next(); static int calls; calls++; return calls; endfunction endpackage\n\
+                package b; function automatic int twice(); return a::next() + a::next(); endfunction endpackage\n\
+                module Top(output int y); assign y = b::twice(); endmodule";
+    let packages = analyze_packages(&[(code, Path::new("statics.sv"))]).unwrap();
+    let states = packages
+        .state_modules()
+        .map(|module| module.name().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(states, ["a"]);
+}
+
+#[test]
+fn static_locals_of_escaped_subroutine_names_give_their_package_state() {
+    // A package's own subroutine keeps its static locals as the package's
+    // variables (IEEE 1800-2023 6.21), also when its escaped name contains
+    // `::`, which is no qualification (5.6.1).
+    let code = "package p; function automatic int \\a::next (); static int calls; calls++; return calls; endfunction\n\
+                function automatic int twice(); return \\a::next () + \\a::next (); endfunction endpackage\n\
+                module Top(output int y); assign y = p::twice(); endmodule";
+    let packages = analyze_packages(&[(code, Path::new("escaped.sv"))]).unwrap();
+    let states = packages
+        .state_modules()
+        .map(|module| module.name().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(states, ["p"]);
+}
+
+#[test]
 fn analyzes_package_variables_into_a_state_module() {
     // A package variable is one object: the package's state module holds it,
     // and a module's signal for it names that variable.
