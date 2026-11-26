@@ -6283,3 +6283,56 @@ endmodule
 "#;
     same_as_inlined(source, 2, 2, &["a", "b"]);
 }
+
+#[test]
+fn structure_output_actuals_shared_with_forks() {
+    // An automatic structure that a fork's child shares with its parent
+    // lives in a box (IEEE 1800-2023 9.3.2), and an output actual of it is
+    // the box's members, written when the call returns (13.5): the task
+    // that makes the call goes out of line like any other.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int total, output int count);
+    typedef struct { int lo; logic [7:0] hi; string s; } cfg_s;
+    class Conv;
+        static function void from_class(input int w, output cfg_s o);
+            o.lo = w; o.hi = w + 1; o.s = $sformatf("c%0d", w);
+        endfunction
+    endclass
+    class Proxy;
+        int total;
+        string names;
+        task run(int n);
+            for (int i = 0; i < n; i++) begin
+                cfg_s s;
+                Conv::from_class(i + 2, s);
+                fork
+                    begin #1 total += s.lo + s.hi; names = {names, s.s}; end
+                join_none
+                #2;
+            end
+        endtask
+    endclass
+    initial begin
+        Proxy p = new;
+        p.run(3);
+        #5 total = p.total;
+        count = p.names == "c2c3c4";
+    end
+endmodule
+"#;
+    assert!(
+        function_units(source, true) > function_units(source, false),
+        "the task goes out of line"
+    );
+    for four_state in [false, true] {
+        for backend in backends() {
+            for forced in [false, true] {
+                assert_eq!(
+                    simulate(source, four_state, forced, backend, 20, &["total", "count"]),
+                    Ok(vec![value(21), value(1)]),
+                    "{backend}, four-state {four_state}, forced {forced}"
+                );
+            }
+        }
+    }
+}
