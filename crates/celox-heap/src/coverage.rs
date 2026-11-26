@@ -33,6 +33,15 @@
 //! about each value while the instance is constructed
 //! ([`op::FILTER_NEXT`]), unless an earlier construction of the type handed
 //! over the same values: its bins are taken then.
+//!
+//! A cross (19.6) has a bin for each choice of one bin of every coverpoint
+//! it crosses, among the bins that count towards their coverage. Its
+//! declarations give some of these cross products a bin of their own
+//! (19.6.1) or take them out as ignored or illegal (19.6.2, 19.6.3); the
+//! others are its automatic bins, unless `option.cross_retain_auto_bins`
+//! is clear. The cross products are never listed: an instance has a
+//! counter for each automatic bin that was sampled, and the number of bins
+//! comes from the bins of the coverpoints (19.11.2).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -44,6 +53,7 @@ use serde::{Deserialize, Serialize};
 use crate::{Fault, Handle, Heap, NULL};
 
 mod compute;
+mod cross;
 mod descriptor;
 mod report;
 mod shape;
@@ -52,9 +62,10 @@ mod tests;
 mod value;
 
 pub use descriptor::{
-    BinArray, BinDescriptor, BinFilter, BinKind, BinValues, Bound, Constant, FilterDescriptor,
-    GroupTypeOptions, InputDescriptor, ItemTypeOptions, Operand, OptionId, OptionInit, OptionValue,
-    PointDescriptor, PointType, RangeDescriptor, TypeDescriptor, TypeOptionId, ValueType,
+    BinArray, BinDescriptor, BinFilter, BinKind, BinValues, Bound, Constant, CrossBinDescriptor,
+    CrossDescriptor, FilterDescriptor, GroupTypeOptions, InputDescriptor, ItemTypeOptions,
+    MAX_SELECT_DEPTH, Operand, OptionId, OptionInit, OptionValue, PointDescriptor, PointType,
+    RangeDescriptor, Select, TypeDescriptor, TypeOptionId, ValueType,
 };
 pub use report::{
     BinReport, BinReportKind, CoverItemKind, CoverItemReport, CoverageReport,
@@ -62,7 +73,8 @@ pub use report::{
 };
 pub use shape::{RangeValue, Resolved, ResolvedItem, resolve, resolve_warnings, value_count};
 
-use descriptor::OptionKind;
+use cross::{CrossScratch, Crossed};
+use descriptor::{Level, OptionKind};
 use shape::{BinClass, Item, PointOptions, PointShape, SetInput, Shape, ValueKey, bin_name};
 use value::{KeyValue, Matcher, bias, low_ones, numeric, ones};
 
@@ -95,10 +107,44 @@ pub const MAX_WILDCARD_EXPANSION: usize = 1 << 16;
 /// of further values are counted together.
 pub const MAX_DEFAULT_ARRAY: usize = 1 << 12;
 
+/// The most classes of cross products that the bins of a cross tell apart
+/// (19.6.1). The bins of a crossed coverpoint are of one class when every
+/// `binsof` term of the cross selects all of them or none, and the cross
+/// products of one choice of a class for every coverpoint are a class of
+/// cross products: a cross without bins of its own has one, and the cross
+/// `c` of 19.6.1.1 has nine, as its terms tell `a1`, `a2` and the other
+/// bins of `a` apart and `b2`, `b4` and the other bins of `b`. A
+/// construction that needs more is a [`Fault::Coverage`].
+///
+/// With `type_option.merge_instances`, the automatic bins of the instances
+/// of a type are united by name (19.11.3). Where the instances have
+/// different bins, their number is found by classes too: the bins of a
+/// coverpoint are of one class when each instance has all of them in one
+/// of its classes or has none of them (see [`MAX_CROSS_WORK`]).
+pub const MAX_CROSS_CLASSES: usize = 1 << 20;
+
+/// The most steps that sorting the cross products of a cross into its
+/// declared bins takes in a construction, and that uniting the automatic
+/// bins of a cross over the instances of a type with
+/// `type_option.merge_instances` takes in a `get_coverage`,
+/// `get_inst_coverage` or `$get_coverage` (19.11.3). A step is looking at
+/// one class of cross products, at one declared bin that may hold it or at
+/// one coverpoint of an instance that may have it. Beyond it the
+/// construction or the query is a [`Fault::Coverage`]. The union is found
+/// once for each set of bins the instances of a type have, and the report
+/// and [`Heap::overall_coverage`] find it however many steps it takes.
+pub const MAX_CROSS_WORK: u64 = 1 << 26;
+
+/// The most uncovered automatic bins that the report lists of a cross,
+/// whatever `option.cross_num_print_missing` asks for; the others are
+/// counted in `omitted_bins`.
+pub const MAX_CROSS_MISSING_ROWS: usize = 1 << 12;
+
 /// The coverage operations. `key` is the key of a covergroup type (see
 /// [`type_key`]), `object` the handle of an instance, `item` an item of the
-/// type: 0 for the covergroup, `k + 1` for coverpoint `k`. An integral value
-/// is passed in 64-bit words of its value and mask planes, zero extended.
+/// type: 0 for the covergroup, `k + 1` for coverpoint `k`, and after the
+/// coverpoints the crosses in their order. An integral value is passed in
+/// 64-bit words of its value and mask planes, zero extended.
 ///
 /// An operation on a key that is not registered, or on an item the type does
 /// not have, is a [`Fault::Coverage`], and one on a handle that names no
@@ -157,15 +203,18 @@ pub mod op {
     /// `predicates(object, bits)`: word `y` of the predicate bits of item
     /// `x` in the sample in progress, bit 0 of word 0 being predicate 0: a
     /// clear bit is a guard that does not hold (19.5.1) or a `with` filter
-    /// that does not keep the sampled value. The bits of a word that is not
+    /// that does not keep the sampled value. For a cross they are its guard
+    /// and the guards of its bins (19.6). The bits of a word that is not
     /// handed over are set.
     pub const PREDICATES: u64 = 11;
     /// `sample_end(object)`: count the sample in progress in the bins of
     /// the instance: the number of illegal bins hit, whose text
-    /// [`MESSAGE`] gives, one line for each. A value or predicate word of an
-    /// item that is not a coverpoint of the type, a word it does not have
-    /// and the values of a [`POINTS`] call that do not fit a word are a
-    /// fault, unless the instance is not collecting.
+    /// [`MESSAGE`] gives, one line for each. A cross is sampled when each of
+    /// its coverpoints counted the sample in a bin that takes part in the
+    /// cross. A value word of an item that is not a coverpoint of the type,
+    /// a predicate word of one that is neither that nor a cross, a word an
+    /// item does not have and the values of a [`POINTS`] call that do not
+    /// fit a word are a fault, unless the instance is not collecting.
     pub const SAMPLE_END: u64 = 12;
     /// `inst_coverage(object, item)`: what `get_inst_coverage` of the item
     /// gives (19.8): with `x` 0 the coverage as the bits of an `f64`, with 1
@@ -270,7 +319,45 @@ struct TypeEntry {
     formal_words: Vec<u32>,
     /// The coverpoint and the bin declaration that each filter is of.
     filter_bins: Vec<(u32, u32)>,
+    /// The automatic bins of each cross united over the instances, which
+    /// the checkpoint does not keep: they follow from the shapes.
+    #[serde(skip)]
+    unions: UnionCache,
 }
+
+/// The number of automatic bins of each cross of a type as the union of
+/// its instances (19.11.3), for the shapes the type had when it was found.
+/// A type only gains shapes, and each shape is that of an instance, so the
+/// number of shapes tells whether it is still that of the instances. It is
+/// derived from the rest of the type and is equal to any other.
+#[derive(Clone, Debug, Default)]
+struct UnionCache {
+    /// The number of shapes it was found for.
+    shapes: usize,
+    /// None until it is found, or what keeps it from being found.
+    counts: Option<Result<Vec<u128>, String>>,
+    /// How many unions of instances of different bins were looked for to
+    /// find it, since the type was registered.
+    found: u64,
+}
+
+impl UnionCache {
+    /// The counts, if they are those of `shapes` shapes and were found.
+    fn fresh(&self, shapes: usize) -> Option<&[u128]> {
+        match &self.counts {
+            Some(Ok(counts)) if self.shapes == shapes => Some(counts),
+            _ => None,
+        }
+    }
+}
+
+impl PartialEq for UnionCache {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for UnionCache {}
 
 impl TypeEntry {
     /// Whether the constructions of the type that hand over the same
@@ -302,6 +389,8 @@ struct ShapeInputs {
     /// The words of the elements of each set.
     sets: Vec<Vec<u64>>,
     points: Vec<PointOptions>,
+    /// `option.cross_retain_auto_bins` of each cross.
+    retain: Vec<bool>,
     distribute_first: bool,
 }
 
@@ -312,7 +401,8 @@ struct TypeOptions {
     comment: Vec<u8>,
     merge_instances: bool,
     distribute_first: bool,
-    points: Vec<ItemTypeValues>,
+    /// The type options of the coverpoints, then of the crosses.
+    items: Vec<ItemTypeValues>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -334,8 +424,8 @@ struct Instance {
     building: Option<Box<Building>>,
     /// Whether the object of the handle was not collected yet.
     live: bool,
-    /// Whether the covergroup and each coverpoint collect (19.8): a
-    /// coverpoint is sampled when both do.
+    /// Whether the covergroup and each coverpoint and cross collect (19.8):
+    /// an item is sampled when it and the covergroup do.
     collecting: bool,
     item_collecting: Vec<bool>,
     options: InstanceOptions,
@@ -346,6 +436,9 @@ struct Instance {
     /// The `default` bin arrays of the coverpoints, by their number in the
     /// shape.
     default_arrays: Vec<DefaultArray>,
+    /// By cross, the hits of its automatic bins that were sampled, by the
+    /// key of their cross product in the shape.
+    crosses: Vec<FxHashMap<u128, u64>>,
     /// The samples taken while the covergroup was collecting.
     samples: u64,
 }
@@ -429,12 +522,17 @@ struct InstanceOptions {
     detect_overlap: bool,
     per_instance: bool,
     get_inst_coverage: bool,
-    points: Vec<ItemOptions>,
+    cross_num_print_missing: i32,
+    cross_retain_auto_bins: bool,
+    /// The options of the coverpoints, then of the crosses.
+    items: Vec<ItemOptions>,
 }
 
-/// The options of a coverpoint of an instance. Those the covergroup's are
-/// the default of (Table 19-2) have a value once they are assigned; weight,
-/// goal and comment are the coverpoint's own.
+/// The options of a coverpoint or cross of an instance. Those the
+/// covergroup's are the default of (Table 19-2) have a value once they are
+/// assigned; weight, goal and comment are the item's own. A coverpoint has
+/// no cross option and a cross none of the automatic bins and the overlap
+/// of a coverpoint (19.10).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct ItemOptions {
     weight: i32,
@@ -443,6 +541,8 @@ struct ItemOptions {
     at_least: Option<i32>,
     auto_bin_max: Option<i32>,
     detect_overlap: Option<bool>,
+    cross_num_print_missing: Option<i32>,
+    cross_retain_auto_bins: Option<bool>,
 }
 
 /// The value of an option member.
@@ -464,7 +564,9 @@ fn weight_value(weight: i32) -> Result<i32, String> {
 }
 
 impl InstanceOptions {
-    fn new(name: Vec<u8>, points: usize) -> Self {
+    /// The default options of an instance of `items` coverpoints and
+    /// crosses.
+    fn new(name: Vec<u8>, items: usize) -> Self {
         Self {
             name,
             weight: 1,
@@ -475,7 +577,9 @@ impl InstanceOptions {
             detect_overlap: false,
             per_instance: false,
             get_inst_coverage: false,
-            points: vec![
+            cross_num_print_missing: 0,
+            cross_retain_auto_bins: true,
+            items: vec![
                 ItemOptions {
                     weight: 1,
                     goal: 100,
@@ -483,28 +587,58 @@ impl InstanceOptions {
                     at_least: None,
                     auto_bin_max: None,
                     detect_overlap: None,
+                    cross_num_print_missing: None,
+                    cross_retain_auto_bins: None,
                 };
-                points
+                items
             ],
         }
     }
 
-    /// The least hits a bin of coverpoint `point` is covered with.
-    fn at_least(&self, point: usize) -> i32 {
-        self.points[point].at_least.unwrap_or(self.at_least)
+    /// The least hits a bin of the coverpoint or cross of index `item`
+    /// among the items is covered with.
+    fn at_least(&self, item: usize) -> i32 {
+        self.items[item].at_least.unwrap_or(self.at_least)
     }
 
     fn point_options(&self, point: usize) -> PointOptions {
-        let options = &self.points[point];
+        let options = &self.items[point];
         PointOptions {
             auto_bin_max: options.auto_bin_max.unwrap_or(self.auto_bin_max),
             detect_overlap: options.detect_overlap.unwrap_or(self.detect_overlap),
         }
     }
 
-    fn set(&mut self, item: u32, option: OptionId, value: OptionArg) -> Result<(), String> {
+    /// `option.cross_retain_auto_bins` of the cross of index `item` among
+    /// the items.
+    fn retain_auto_bins(&self, item: usize) -> bool {
+        self.items[item]
+            .cross_retain_auto_bins
+            .unwrap_or(self.cross_retain_auto_bins)
+    }
+
+    /// `option.cross_num_print_missing` of the cross of index `item` among
+    /// the items.
+    fn num_print_missing(&self, item: usize) -> i32 {
+        self.items[item]
+            .cross_num_print_missing
+            .unwrap_or(self.cross_num_print_missing)
+    }
+
+    /// Assign member `option` of item `item`, which is of `level` if the
+    /// type has it.
+    fn set(
+        &mut self,
+        level: Option<Level>,
+        item: u32,
+        option: OptionId,
+        value: OptionArg,
+    ) -> Result<(), String> {
         let wrong = || format!("item {item} has no option `{}`", option.name());
-        if item == 0 {
+        let level = level
+            .filter(|&level| option.applies_to(level))
+            .ok_or_else(wrong)?;
+        if level == Level::Group {
             match (option, value) {
                 (OptionId::Name, OptionArg::Text(value)) => self.name = value,
                 (OptionId::Weight, OptionArg::Int(value)) => self.weight = weight_value(value)?,
@@ -517,26 +651,45 @@ impl InstanceOptions {
                 (OptionId::GetInstCoverage, OptionArg::Bit(value)) => {
                     self.get_inst_coverage = value
                 }
+                (OptionId::CrossNumPrintMissing, OptionArg::Int(value)) => {
+                    self.cross_num_print_missing = value
+                }
+                (OptionId::CrossRetainAutoBins, OptionArg::Bit(value)) => {
+                    self.cross_retain_auto_bins = value
+                }
                 _ => return Err(wrong()),
             }
             return Ok(());
         }
-        let point = self.points.get_mut(item as usize - 1).ok_or_else(wrong)?;
+        let options = self.items.get_mut(item as usize - 1).ok_or_else(wrong)?;
         match (option, value) {
-            (OptionId::Weight, OptionArg::Int(value)) => point.weight = weight_value(value)?,
-            (OptionId::Goal, OptionArg::Int(value)) => point.goal = value,
-            (OptionId::Comment, OptionArg::Text(value)) => point.comment = value,
-            (OptionId::AtLeast, OptionArg::Int(value)) => point.at_least = Some(value),
-            (OptionId::AutoBinMax, OptionArg::Int(value)) => point.auto_bin_max = Some(value),
-            (OptionId::DetectOverlap, OptionArg::Bit(value)) => point.detect_overlap = Some(value),
+            (OptionId::Weight, OptionArg::Int(value)) => options.weight = weight_value(value)?,
+            (OptionId::Goal, OptionArg::Int(value)) => options.goal = value,
+            (OptionId::Comment, OptionArg::Text(value)) => options.comment = value,
+            (OptionId::AtLeast, OptionArg::Int(value)) => options.at_least = Some(value),
+            (OptionId::AutoBinMax, OptionArg::Int(value)) => options.auto_bin_max = Some(value),
+            (OptionId::DetectOverlap, OptionArg::Bit(value)) => {
+                options.detect_overlap = Some(value)
+            }
+            (OptionId::CrossNumPrintMissing, OptionArg::Int(value)) => {
+                options.cross_num_print_missing = Some(value)
+            }
+            (OptionId::CrossRetainAutoBins, OptionArg::Bit(value)) => {
+                options.cross_retain_auto_bins = Some(value)
+            }
             _ => return Err(wrong()),
         }
         Ok(())
     }
 
-    fn get(&self, item: u32, option: OptionId) -> Result<OptionArg, String> {
+    /// Member `option` of item `item`, which is of `level` if the type has
+    /// it.
+    fn get(&self, level: Option<Level>, item: u32, option: OptionId) -> Result<OptionArg, String> {
         let wrong = || format!("item {item} has no option `{}`", option.name());
-        if item == 0 {
+        let level = level
+            .filter(|&level| option.applies_to(level))
+            .ok_or_else(wrong)?;
+        if level == Level::Group {
             return Ok(match option {
                 OptionId::Name => OptionArg::Text(self.name.clone()),
                 OptionId::Weight => OptionArg::Int(self.weight),
@@ -547,17 +700,21 @@ impl InstanceOptions {
                 OptionId::DetectOverlap => OptionArg::Bit(self.detect_overlap),
                 OptionId::PerInstance => OptionArg::Bit(self.per_instance),
                 OptionId::GetInstCoverage => OptionArg::Bit(self.get_inst_coverage),
+                OptionId::CrossNumPrintMissing => OptionArg::Int(self.cross_num_print_missing),
+                OptionId::CrossRetainAutoBins => OptionArg::Bit(self.cross_retain_auto_bins),
             });
         }
         let index = item as usize - 1;
-        let point = self.points.get(index).ok_or_else(wrong)?;
+        let options = self.items.get(index).ok_or_else(wrong)?;
         Ok(match option {
-            OptionId::Weight => OptionArg::Int(point.weight),
-            OptionId::Goal => OptionArg::Int(point.goal),
-            OptionId::Comment => OptionArg::Text(point.comment.clone()),
+            OptionId::Weight => OptionArg::Int(options.weight),
+            OptionId::Goal => OptionArg::Int(options.goal),
+            OptionId::Comment => OptionArg::Text(options.comment.clone()),
             OptionId::AtLeast => OptionArg::Int(self.at_least(index)),
             OptionId::AutoBinMax => OptionArg::Int(self.point_options(index).auto_bin_max),
             OptionId::DetectOverlap => OptionArg::Bit(self.point_options(index).detect_overlap),
+            OptionId::CrossNumPrintMissing => OptionArg::Int(self.num_print_missing(index)),
+            OptionId::CrossRetainAutoBins => OptionArg::Bit(self.retain_auto_bins(index)),
             OptionId::Name | OptionId::PerInstance | OptionId::GetInstCoverage => {
                 return Err(wrong());
             }
@@ -574,13 +731,15 @@ impl TypeOptions {
             comment: options.comment.clone().into_bytes(),
             merge_instances: options.merge_instances,
             distribute_first: options.distribute_first,
-            points: descriptor
+            items: descriptor
                 .points
                 .iter()
-                .map(|point| ItemTypeValues {
-                    weight: point.type_options.weight,
-                    goal: point.type_options.goal,
-                    comment: point.type_options.comment.clone().into_bytes(),
+                .map(|point| &point.type_options)
+                .chain(descriptor.crosses.iter().map(|cross| &cross.type_options))
+                .map(|options| ItemTypeValues {
+                    weight: options.weight,
+                    goal: options.goal,
+                    comment: options.comment.clone().into_bytes(),
                 })
                 .collect(),
         }
@@ -603,11 +762,11 @@ impl TypeOptions {
             }
             return Ok(());
         }
-        let point = self.points.get_mut(item as usize - 1).ok_or_else(wrong)?;
+        let options = self.items.get_mut(item as usize - 1).ok_or_else(wrong)?;
         match (option, value) {
-            (TypeOptionId::Weight, OptionArg::Int(value)) => point.weight = weight_value(value)?,
-            (TypeOptionId::Goal, OptionArg::Int(value)) => point.goal = value,
-            (TypeOptionId::Comment, OptionArg::Text(value)) => point.comment = value,
+            (TypeOptionId::Weight, OptionArg::Int(value)) => options.weight = weight_value(value)?,
+            (TypeOptionId::Goal, OptionArg::Int(value)) => options.goal = value,
+            (TypeOptionId::Comment, OptionArg::Text(value)) => options.comment = value,
             _ => return Err(wrong()),
         }
         Ok(())
@@ -624,11 +783,11 @@ impl TypeOptions {
                 TypeOptionId::DistributeFirst => OptionArg::Bit(self.distribute_first),
             });
         }
-        let point = self.points.get(item as usize - 1).ok_or_else(wrong)?;
+        let options = self.items.get(item as usize - 1).ok_or_else(wrong)?;
         Ok(match option {
-            TypeOptionId::Weight => OptionArg::Int(point.weight),
-            TypeOptionId::Goal => OptionArg::Int(point.goal),
-            TypeOptionId::Comment => OptionArg::Text(point.comment.clone()),
+            TypeOptionId::Weight => OptionArg::Int(options.weight),
+            TypeOptionId::Goal => OptionArg::Int(options.goal),
+            TypeOptionId::Comment => OptionArg::Text(options.comment.clone()),
             TypeOptionId::MergeInstances | TypeOptionId::DistributeFirst => return Err(wrong()),
         })
     }
@@ -680,6 +839,8 @@ pub(crate) struct Scratch {
     present: Option<u64>,
     descriptors: FxHashMap<u64, Vec<u8>>,
     messages: Vec<String>,
+    /// What counting a sample in the crosses uses.
+    cross: CrossScratch,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -727,8 +888,9 @@ impl Registry {
         }
     }
 
-    /// Bytes of hit counters, of the values `default` bin arrays count, and
-    /// of names and comments.
+    /// Bytes of hit counters, of the values `default` bin arrays count, of
+    /// the automatic cross bins that were sampled, and of names and
+    /// comments.
     pub(crate) fn content_size(&self) -> usize {
         let types: usize = self
             .types
@@ -737,9 +899,9 @@ impl Registry {
                 entry.options.comment.len()
                     + entry
                         .options
-                        .points
+                        .items
                         .iter()
-                        .map(|point| point.comment.len())
+                        .map(|item| item.comment.len())
                         .sum::<usize>()
             })
             .sum();
@@ -753,14 +915,15 @@ impl Registry {
                     .iter()
                     .map(|array| array.hits.len())
                     .sum();
+                let products: usize = instance.crosses.iter().map(FxHashMap::len).sum();
                 instance.counts.len() * 8
-                    + values * 24
+                    + (values + products) * 24
                     + options.name.len()
                     + options.comment.len()
                     + options
-                        .points
+                        .items
                         .iter()
-                        .map(|point| point.comment.len())
+                        .map(|item| item.comment.len())
                         .sum::<usize>()
             })
             .sum();
@@ -794,6 +957,7 @@ impl Registry {
             formal_words: word_starts(descriptor.formals.iter().map(|ty| Some(ty.width))),
             filter_bins,
             descriptor,
+            unions: UnionCache::default(),
         });
         self.by_key.insert(key, index);
     }
@@ -818,16 +982,17 @@ impl Registry {
             })),
             live: true,
             collecting: true,
-            item_collecting: vec![true; descriptor.points.len()],
+            item_collecting: vec![true; descriptor.items()],
             // The name of an instance is the tool's choice until it is
             // assigned (Table 19-1).
             options: InstanceOptions::new(
                 format!("{}#{ordinal}", descriptor.name).into_bytes(),
-                descriptor.points.len(),
+                descriptor.items(),
             ),
             formals: vec![0; entry.formal_words.last().copied().unwrap_or(0) as usize],
             counts: Vec::new(),
             default_arrays: Vec::new(),
+            crosses: Vec::new(),
             samples: 0,
         });
         self.by_handle.insert(handle, index);
@@ -1009,7 +1174,9 @@ impl Registry {
                     }
                 }
             };
-            instance.options.set(init.item, init.option, value)?;
+            instance
+                .options
+                .set(descriptor.level(init.item), init.item, init.option, value)?;
         }
         let named = |input: u32| {
             descriptor
@@ -1017,6 +1184,7 @@ impl Registry {
                 .iter()
                 .any(|init| init.value == OptionValue::StringInput(input))
         };
+        let points = descriptor.points.len();
         let key = ShapeInputs {
             words: building.words.clone(),
             strings: descriptor
@@ -1030,8 +1198,11 @@ impl Registry {
                 .map(|(_, (_, bytes))| bytes.clone())
                 .collect(),
             sets: std::mem::take(&mut building.sets),
-            points: (0..descriptor.points.len())
+            points: (0..points)
                 .map(|point| instance.options.point_options(point))
+                .collect(),
+            retain: (points..descriptor.items())
+                .map(|cross| instance.options.retain_auto_bins(cross))
                 .collect(),
             distribute_first: entry.options.distribute_first,
         };
@@ -1169,6 +1340,36 @@ impl Registry {
     /// take the shape of an earlier construction that read the same values
     /// or make one. The result is the warnings of the shape for this
     /// instance.
+    /// Unite the automatic bins of the crosses of type `ty` over its
+    /// instances where its coverage is of the union
+    /// (`type_option.merge_instances`) and the type does not keep them for
+    /// its shapes yet: the error where that takes more than
+    /// [`MAX_CROSS_WORK`] steps, which the type keeps as well.
+    fn refresh_unions(&mut self, ty: usize) -> Result<(), String> {
+        let entry = &self.types[ty];
+        if !entry.options.merge_instances || entry.descriptor.crosses.is_empty() {
+            return Ok(());
+        }
+        let shapes = entry.shapes.len();
+        if entry.unions.shapes != shapes || entry.unions.counts.is_none() {
+            let mut found = entry.unions.found;
+            let counts = (0..entry.descriptor.crosses.len())
+                .map(|cross| {
+                    compute::united_automatic(self, entry, cross, MAX_CROSS_WORK, &mut found)
+                })
+                .collect::<Result<Vec<u128>, String>>();
+            self.types[ty].unions = UnionCache {
+                shapes,
+                counts: Some(counts),
+                found,
+            };
+        }
+        match &self.types[ty].unions.counts {
+            Some(Err(reason)) => Err(reason.clone()),
+            _ => Ok(()),
+        }
+    }
+
     fn build(&mut self, instance: usize) -> Result<Vec<String>, String> {
         self.prepare(instance)?;
         let Self {
@@ -1208,6 +1409,7 @@ impl Registry {
                         keeps: &keeps,
                         options: &key.points,
                         distribute_first: key.distribute_first,
+                        retain: &key.retain,
                     },
                 )?;
                 let shape = entry.shapes.len() as u32;
@@ -1222,6 +1424,7 @@ impl Registry {
         let shape = &entry.shapes[shape as usize];
         instance.counts = vec![0; shape.counters as usize];
         instance.default_arrays = vec![DefaultArray::default(); shape.arrays as usize];
+        instance.crosses = vec![FxHashMap::default(); shape.crosses.len()];
         let name = String::from_utf8_lossy(&instance.options.name);
         Ok(shape
             .warnings
@@ -1237,16 +1440,26 @@ impl Registry {
 
     /// Count the sample that `sampled` holds in the bins of instance
     /// `instance`, unless it is not built or not collecting, and add a line
-    /// to `illegal` for each hit of an illegal bin (19.5.6). A value or a
-    /// predicate word of an item that is not a coverpoint of the type, a
-    /// word it does not have and a pack that does not fit a word are
-    /// errors, which only wrong code causes: counting stops there and the
-    /// sample is not one of the instance.
+    /// to `illegal` for each hit of an illegal bin (19.5.6, 19.6.3). A
+    /// value word of an item that is not a coverpoint of the type, a
+    /// predicate word of one that is neither that nor a cross, a word an
+    /// item does not have and a pack that does not fit a word are errors,
+    /// which only wrong code causes: counting stops there and the sample is
+    /// not one of the instance.
+    ///
+    /// A cross is sampled once the coverpoints are: when the cross and each
+    /// of its coverpoints are collecting, its guard holds and each of its
+    /// coverpoints counted the sample in a bin that takes part in the cross
+    /// (19.6.1: "every coverage point in the cross matches its
+    /// corresponding bin in the cross product"). A coverpoint that is not
+    /// sampled, or whose value is in a bin whose guard does not hold only,
+    /// leaves its crosses without a sample.
     fn sample(
         &mut self,
         instance: usize,
         sampled: &[Sampled],
         illegal: &mut Vec<String>,
+        scratch: &mut CrossScratch,
     ) -> Result<(), String> {
         let Self {
             types, instances, ..
@@ -1266,15 +1479,16 @@ impl Registry {
                 .filter(|&index| index < points.len())
                 .ok_or_else(|| format!("item {item} is not a coverpoint"))
         };
-        // Whether predicate `bit` of coverpoint `point` holds: the bits
-        // follow the values, and a sample has a few words of them at most.
-        let holds = |point: usize, bit: u32| {
+        // Whether predicate `bit` of the coverpoint or cross of index
+        // `index` among the items holds: the bits follow the values, and a
+        // sample has a few words of them at most.
+        let holds = |index: usize, bit: u32| {
             sampled
                 .iter()
                 .rev()
                 .find_map(|sampled| match *sampled {
                     Sampled::Predicates { item, word, bits }
-                        if item as usize == point + 1 && word == bit / 64 =>
+                        if item as usize == index + 1 && word == bit / 64 =>
                     {
                         Some(bits >> (bit % 64) & 1 != 0)
                     }
@@ -1282,6 +1496,14 @@ impl Registry {
                 })
                 .unwrap_or(true)
         };
+        // Only a type with a cross notes the bins that count the sample.
+        let crossing = !shape.crosses.is_empty();
+        scratch.hits.clear();
+        if crossing {
+            scratch.spans.clear();
+            scratch.spans.resize(points.len(), (0, 0));
+        }
+        let CrossScratch { hits, spans, .. } = &mut *scratch;
         // The illegal bins that the value being counted hit.
         let mut hit: Vec<u32> = Vec::new();
         let mut count = |point: usize,
@@ -1290,6 +1512,7 @@ impl Registry {
                          instance: &mut Instance,
                          illegal: &mut Vec<String>| {
             let ty = &points[point].ty;
+            let start = hits.len() as u32;
             count_value(
                 ty,
                 &shape.points[point],
@@ -1299,7 +1522,11 @@ impl Registry {
                 &mut instance.counts,
                 &mut instance.default_arrays,
                 &mut hit,
+                crossing.then_some(&mut *hits),
             );
+            if crossing {
+                spans[point] = (start, hits.len() as u32);
+            }
             for bin in hit.drain(..) {
                 illegal.push(format!(
                     "illegal_bins `{}` of coverpoint `{}` of covergroup `{}` (instance `{}`): \
@@ -1382,13 +1609,50 @@ impl Registry {
                     at += length;
                 }
                 Sampled::Predicates { item, word, .. } => {
-                    let point = coverpoint(item)?;
-                    if word >= points[point].predicates.div_ceil(64) {
+                    let predicates = match descriptor.level(item) {
+                        Some(Level::Point) => points[item as usize - 1].predicates,
+                        Some(Level::Cross) => {
+                            descriptor.crosses[item as usize - 1 - points.len()].predicates
+                        }
+                        Some(Level::Group) | None => {
+                            return Err(format!("item {item} is not a coverpoint or cross"));
+                        }
+                    };
+                    if word >= predicates.div_ceil(64) {
                         return Err(format!("the predicates of item {item} have no word {word}"));
                     }
                     at += 1;
                 }
             }
+        }
+        for (index, cross) in shape.crosses.iter().enumerate() {
+            let item = points.len() + index;
+            let declared = &descriptor.crosses[index];
+            if !instance.item_collecting[item] || declared.iff.is_some_and(|bit| !holds(item, bit))
+            {
+                continue;
+            }
+            let crossed = Crossed {
+                cross,
+                points: &shape.points,
+            };
+            let name = &instance.options.name;
+            cross.sample(
+                scratch,
+                &|bit| holds(item, bit),
+                &mut instance.counts,
+                &mut instance.crosses[index],
+                &mut |bin, product| {
+                    illegal.push(format!(
+                        "illegal_bins `{}` of cross `{}` of covergroup `{}` (instance `{}`): {}",
+                        declared.bins[bin as usize].name,
+                        declared.name,
+                        descriptor.name,
+                        String::from_utf8_lossy(name),
+                        crossed.name(descriptor, product.iter().copied()),
+                    ));
+                },
+            );
         }
         instance.samples += 1;
         Ok(())
@@ -1412,7 +1676,8 @@ fn show_sample(ty: &PointType, value: &[u64], mask: &[u64]) -> String {
 /// Count the value of the words `value` with the x and z bits `mask`, least
 /// significant word first, in the bins of a coverpoint of type `ty`, where
 /// `holds` tells whether a predicate bit of the sample is set, and add the
-/// illegal bins it hits to `illegal`.
+/// illegal bins it hits to `illegal` and the `bins` bins that count it, but
+/// for `default` bins, to `counted` if there is one.
 ///
 /// A value with an x or z bit is only in a bin that holds exactly it
 /// (19.5.4), so in no automatic bin (19.5.3). A value of an ignore or
@@ -1429,6 +1694,7 @@ fn count_value(
     counts: &mut [u64],
     arrays: &mut [DefaultArray],
     illegal: &mut Vec<u32>,
+    mut counted: Option<&mut Vec<u32>>,
 ) {
     // Whether the value is in a bin of a declaration or an automatic bin.
     let mut defined = false;
@@ -1445,8 +1711,14 @@ fn count_value(
             return;
         }
         counts[bin.counter as usize] += 1;
-        if bin.kind == BinKind::Illegal {
-            illegal.push(index);
+        match bin.kind {
+            BinKind::Illegal => illegal.push(index),
+            BinKind::Bins => {
+                if let Some(counted) = counted.as_deref_mut() {
+                    counted.push(index);
+                }
+            }
+            BinKind::Ignore => {}
         }
     };
     // The value as a `default` bin array names it.
@@ -1625,7 +1897,12 @@ impl Heap {
         self.coverage_scratch.present = None;
         messages.clear();
         if let Some(instance) = self.cover_instance(object) {
-            let result = self.coverage.sample(instance, &sampled, &mut messages);
+            let result = self.coverage.sample(
+                instance,
+                &sampled,
+                &mut messages,
+                &mut self.coverage_scratch.cross,
+            );
             self.cover_check(instance, result);
         }
         // The next sample notes its values in the same allocation.
@@ -1643,7 +1920,10 @@ impl Heap {
             return (0.0, 0, 0);
         };
         let ty = self.coverage.instances[instance].ty as usize;
-        if !self.cover_item(ty, item) {
+        // The coverage of the type is what an instance gives unless it
+        // tracks its own (Table 19-1).
+        let own = self.coverage.instances[instance].options.get_inst_coverage;
+        if !self.cover_item(ty, item) || !(own || self.cover_mergeable(ty)) {
             return (0.0, 0, 0);
         }
         let score = compute::instance(&self.coverage, instance, item);
@@ -1651,9 +1931,15 @@ impl Heap {
     }
 
     /// What `get_coverage` of item `item` of the type of `key` gives (IEEE
-    /// 1800-2023 19.8, 19.11), as [`Heap::inst_coverage`] does.
+    /// 1800-2023 19.8, 19.11), as [`Heap::inst_coverage`] does. With
+    /// `type_option.merge_instances`, a cross whose automatic bins cannot
+    /// be united over the instances within [`MAX_CROSS_WORK`] steps is a
+    /// [`Fault::Coverage`].
     pub fn type_coverage(&mut self, key: u64, item: u32) -> (f64, u64, u64) {
-        let Some(ty) = self.cover_type(key).filter(|&ty| self.cover_item(ty, item)) else {
+        let Some(ty) = self
+            .cover_type(key)
+            .filter(|&ty| self.cover_item(ty, item) && self.cover_mergeable(ty))
+        else {
             return (0.0, 0, 0);
         };
         let score = compute::of_type(&self.coverage, ty, item);
@@ -1663,7 +1949,7 @@ impl Heap {
     /// Whether type `ty` has item `item`, or a fault.
     fn cover_item(&mut self, ty: usize, item: u32) -> bool {
         let descriptor = &self.coverage.types[ty].descriptor;
-        let has = item as usize <= descriptor.points.len();
+        let has = descriptor.level(item).is_some();
         if !has {
             let reason = format!("type `{}`: no item {item}", descriptor.name);
             self.cover_fault(reason);
@@ -1671,8 +1957,29 @@ impl Heap {
         has
     }
 
+    /// Whether the coverage of type `ty` can be asked for, or a fault: with
+    /// `type_option.merge_instances`, the automatic bins of its crosses are
+    /// united over the instances first, unless the type keeps them for its
+    /// shapes (see [`MAX_CROSS_WORK`]).
+    fn cover_mergeable(&mut self, ty: usize) -> bool {
+        match self.coverage.refresh_unions(ty) {
+            Ok(()) => true,
+            Err(reason) => {
+                let entry = &self.coverage.types[ty];
+                let reason = format!("type `{}`: {reason}", entry.descriptor.name);
+                self.cover_fault(reason);
+                false
+            }
+        }
+    }
+
     /// What `$get_coverage` gives (IEEE 1800-2023 19.9): the coverage of
-    /// all covergroup types in percent.
+    /// all covergroup types in percent. This, like
+    /// [`Heap::coverage_report`], unites the automatic bins of the crosses
+    /// of a type with `type_option.merge_instances` however many steps that
+    /// takes, where the type does not keep them already (see
+    /// [`MAX_CROSS_WORK`]); the operation [`op::OVERALL`] is a
+    /// [`Fault::Coverage`] beyond the limit.
     pub fn overall_coverage(&self) -> f64 {
         compute::overall(&self.coverage)
     }
@@ -1684,9 +1991,10 @@ impl Heap {
     pub fn set_cover_option(&mut self, object: Handle, item: u32, option: OptionId, value: u64) {
         if let Some(instance) = self.cover_instance(object) {
             let value = self.cover_option_value(option.kind(), value);
+            let level = self.cover_level(instance, item);
             let result = self.coverage.instances[instance]
                 .options
-                .set(item, option, value);
+                .set(level, item, option, value);
             self.cover_check(instance, result);
         }
     }
@@ -1699,13 +2007,24 @@ impl Heap {
         let Some(instance) = self.cover_instance(object) else {
             return 0;
         };
-        match self.coverage.instances[instance].options.get(item, option) {
+        let level = self.cover_level(instance, item);
+        match self.coverage.instances[instance]
+            .options
+            .get(level, item, option)
+        {
             Ok(value) => self.cover_option_result(value),
             Err(reason) => {
                 self.cover_check(instance, Err(reason));
                 0
             }
         }
+    }
+
+    /// What item `item` of the type of instance `instance` is, if the type
+    /// has it.
+    fn cover_level(&self, instance: usize, item: u32) -> Option<Level> {
+        let ty = self.coverage.instances[instance].ty as usize;
+        self.coverage.types[ty].descriptor.level(item)
     }
 
     fn cover_option_value(&self, kind: OptionKind, value: u64) -> OptionArg {
@@ -1883,7 +2202,13 @@ impl Heap {
             op::SAMPLE_END => self.cover_sample_end(object),
             op::INST_COVERAGE => result(self.inst_coverage(object, b as u32)),
             op::TYPE_COVERAGE => result(self.type_coverage(a, b as u32)),
-            op::OVERALL => self.overall_coverage().to_bits(),
+            op::OVERALL => {
+                if (0..self.coverage.types.len()).all(|ty| self.cover_mergeable(ty)) {
+                    self.overall_coverage().to_bits()
+                } else {
+                    0
+                }
+            }
             op::COLLECT => {
                 if let Some(index) = self.cover_instance(object) {
                     let instance = &mut self.coverage.instances[index];
@@ -1951,9 +2276,13 @@ impl Heap {
     }
 
     /// The coverage of every covergroup type that has an instance, with
-    /// the bins of the types and of the instances and their hits.
+    /// the bins of the types and of the instances and their hits. Of a
+    /// cross it lists the bins that were sampled and as many of the others
+    /// as `option.cross_num_print_missing` asks for, up to
+    /// [`MAX_CROSS_MISSING_ROWS`], so what it lists does not grow with the
+    /// number of cross products. It finds the coverage of each type once.
     pub fn coverage_report(&self) -> CoverageReport {
-        report::report(&self.coverage)
+        report::report(&self.coverage, &mut 0)
     }
 
     /// Whether a covergroup was constructed: the heap keeps coverage, which

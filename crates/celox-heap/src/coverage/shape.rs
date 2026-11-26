@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use num_bigint::{BigInt, BigUint};
 use serde::{Deserialize, Serialize};
 
+use super::cross::{CrossInputs, CrossShape};
 use super::descriptor::{
     BinArray, BinDescriptor, BinFilter, BinKind, BinValues, Bound, Constant, Operand,
     PointDescriptor, PointType, RangeDescriptor, TypeDescriptor, ValueType,
@@ -389,11 +390,14 @@ fn resolve_range(
     }
 }
 
-/// The bins of the coverpoints of an instance.
+/// The bins of the coverpoints and crosses of an instance.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Shape {
     pub points: Vec<PointShape>,
-    /// The number of hit counters an instance of the shape has.
+    pub crosses: Vec<CrossShape>,
+    /// The number of hit counters an instance of the shape has: those of
+    /// the bins of the coverpoints, then those of the bins that the crosses
+    /// declare.
     pub counters: u32,
     /// The number of `default` bin arrays, each of which an instance keeps
     /// the sampled values of.
@@ -440,6 +444,15 @@ pub(crate) struct BinShape {
     pub filter: Option<u32>,
 }
 
+impl BinShape {
+    /// Whether the bin counts towards coverage: it is a `bins` bin with a
+    /// value (19.11.1) that is no `default` bin (19.5). These are the bins
+    /// of a coverpoint that a cross has cross products of (19.6).
+    pub(crate) fn coverable(&self) -> bool {
+        self.kind == BinKind::Bins && self.class == BinClass::Value && !self.empty
+    }
+}
+
 /// What the values of a bin are.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum BinClass {
@@ -460,6 +473,13 @@ pub(crate) struct BinId {
     /// The bin declaration, or 0 for an automatic bin.
     pub decl: u32,
     pub tag: NameTag,
+}
+
+impl BinId {
+    /// Whether the bin is an automatic bin, of no declaration.
+    pub(crate) fn automatic(&self) -> bool {
+        matches!(self.tag, NameTag::Auto(..) | NameTag::Member(_))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -540,7 +560,7 @@ pub(crate) struct PointOptions {
 }
 
 /// The key of value `value` of type `ty`.
-fn key(ty: &PointType, value: &BigInt) -> BigUint {
+pub(crate) fn key(ty: &PointType, value: &BigInt) -> BigUint {
     BigUint::try_from(value + BigInt::from(bias(ty.width, ty.signed))).unwrap_or_default()
 }
 
@@ -610,6 +630,8 @@ pub(crate) struct Construction<'a> {
     /// `type_option.distribute_first`: a filter is applied to the values
     /// of a bin array once they are distributed (19.5.1.1).
     pub distribute_first: bool,
+    /// `option.cross_retain_auto_bins` of each cross.
+    pub retain: &'a [bool],
 }
 
 /// The values of the declaration `bin` of `point` in their order, before any
@@ -1069,6 +1091,7 @@ pub(crate) fn build(
 ) -> Result<Shape, String> {
     let mut shape = Shape {
         points: Vec::with_capacity(descriptor.points.len()),
+        crosses: Vec::with_capacity(descriptor.crosses.len()),
         counters: 0,
         arrays: 0,
         warnings: Vec::new(),
@@ -1144,6 +1167,15 @@ pub(crate) fn build(
             defaults,
             default_array,
         });
+    }
+    let inputs = CrossInputs {
+        descriptor,
+        points: &shape.points,
+        inputs: construction.inputs,
+    };
+    for (cross, &retain) in descriptor.crosses.iter().zip(construction.retain) {
+        let cross = inputs.build(cross, retain, &mut shape.counters, &mut shape.warnings)?;
+        shape.crosses.push(cross);
     }
     Ok(shape)
 }
@@ -1554,7 +1586,7 @@ impl PointBuilder<'_> {
 }
 
 /// `range` with its operands evaluated from the constants and `inputs`.
-fn evaluate<'a>(
+pub(crate) fn evaluate<'a>(
     range: &'a RangeDescriptor,
     inputs: &'a [Option<Constant>],
 ) -> Result<RangeValue<'a>, String> {

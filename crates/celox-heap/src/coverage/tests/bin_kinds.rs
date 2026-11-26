@@ -2381,8 +2381,8 @@ fn a_bin_counts_while_its_guard_holds() {
     );
     // Predicates of what is no coverpoint, and a word they have not.
     for (item, word, reason) in [
-        (3, 0, "item 3 is not a coverpoint"),
-        (0, 0, "item 0 is not a coverpoint"),
+        (3, 0, "item 3 is not a coverpoint or cross"),
+        (0, 0, "item 0 is not a coverpoint or cross"),
         (1, 2, "the predicates of item 1 have no word 2"),
         (2, 0, "the predicates of item 2 have no word 0"),
     ] {

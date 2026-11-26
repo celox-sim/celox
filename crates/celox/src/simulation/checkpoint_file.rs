@@ -16,8 +16,10 @@ const MAGIC: &[u8; 8] = b"CELOXCP1";
 // illegal and wildcard bins of a covergroup with the sets and filters of its
 // constructions. Version 12 keeps, with what decides the bins of a
 // construction of a covergroup, the strings its `with` filters read, and
-// with a filter whether its constructions share their bins.
-const VERSION: u32 = 12;
+// with a filter whether its constructions share their bins. Version 13 keeps
+// the crosses of a covergroup: their bins, their options and the hits of the
+// automatic cross bins that were sampled.
+const VERSION: u32 = 13;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CheckpointFileError {
