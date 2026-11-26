@@ -859,3 +859,42 @@ sv_backends! {
         assert_eq!(sim.get(ints), BigUint::from(6100u32));
     }
 }
+
+sv_backends! {
+    // An output actual may be an element of a container that holds handles
+    // or strings, written whole after the call (IEEE 1800-2023 13.5.2), as
+    // UVM environments fetch their agents' configurations into an array:
+    // `uvm_config_db#(cfg)::get(this, "", name, cfgs[i])`.
+    fn handle_and_string_elements_are_output_actuals(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+                class cfg; int v; function new(int x); v = x; endfunction endclass
+                class env;
+                    cfg dyn[];
+                    cfg q[$];
+                    cfg by_name[string];
+                    string names[$];
+                    static function bit get(int i, output cfg c); c = new(i); return 1; endfunction
+                    static function void name(int i, output string s); s = $sformatf("n%0d", i); endfunction
+                    function int build();
+                        int sum = 0;
+                        dyn = new[2];
+                        q.push_back(null);
+                        names.push_back("");
+                        foreach (dyn[i]) void'(get(i + 1, dyn[i]));
+                        void'(get(10, q[0]));
+                        void'(get(100, by_name["a"]));
+                        name(7, names[0]);
+                        sum = dyn[0].v + dyn[1].v + q[0].v + by_name["a"].v;
+                        return names[0] == "n7" ? sum : -1;
+                    endfunction
+                endclass
+                module Top(output int sum);
+                    initial begin env e; e = new; sum = e.build(); end
+                endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("handle_element_outputs.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("sum")), BigUint::from(113u8));
+    }
+}
