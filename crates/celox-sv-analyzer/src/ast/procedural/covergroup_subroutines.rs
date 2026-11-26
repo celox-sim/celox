@@ -202,6 +202,7 @@ impl Site<'_> {
                 .iter()
                 .map(|local| local.name.clone())
                 .collect(),
+            result_leaves: Vec::new(),
             persistent_locals: Vec::new(),
             return_type: parts
                 .result

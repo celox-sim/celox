@@ -556,6 +556,7 @@ pub(super) fn lower_class(
                 .iter()
                 .map(|local| local.name.clone())
                 .collect(),
+            result_leaves: Vec::new(),
             persistent_locals: Vec::new(),
             return_type: Some(ir_type.clone()),
             params: vec![SubroutineParam {
@@ -685,6 +686,7 @@ pub(super) fn lower_cast(
             .iter()
             .map(|local| local.name.clone())
             .collect(),
+        result_leaves: Vec::new(),
         persistent_locals: Vec::new(),
         return_type: Some(ir_int),
         params: vec![

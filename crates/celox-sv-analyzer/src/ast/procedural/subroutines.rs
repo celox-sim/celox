@@ -1244,12 +1244,14 @@ pub(in crate::ast) fn lower_subroutine(
         // value of a `return` is taken.
         before_returns(&mut body, &aggregate_epilogue, return_var.as_deref());
     }
+    let mut result_members = Vec::new();
     if let Some((result, leaves)) = result_leaves {
         body.push(Stmt::Assign {
             lhs: LValue::Ident(result),
-            rhs: Expr::Concat(leaves.into_iter().map(Expr::Ident).collect()),
+            rhs: Expr::Concat(leaves.iter().cloned().map(Expr::Ident).collect()),
             nonblocking: false,
         });
+        result_members = leaves;
     }
     body.extend(aggregate_epilogue);
     builder.pop_scope();
@@ -1307,6 +1309,7 @@ pub(in crate::ast) fn lower_subroutine(
             .map(|r#type| interface_type(builder.session, tree, r#type, declaration_env, item)),
         params: lowered_params,
         return_var,
+        result_leaves: result_members,
         body,
         sensitivity_body: std::mem::take(&mut builder.sensitivity_body),
         class_member: class.is_some(),

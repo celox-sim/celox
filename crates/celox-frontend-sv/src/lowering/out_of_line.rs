@@ -731,7 +731,18 @@ fn static_names(subroutine: &sv::ir::Subroutine) -> Vec<&String> {
         .params
         .iter()
         .map(|param| &param.name)
+        // The members of a formal or result of unpacked structure type,
+        // which the body works on, are its storage; those of a `ref` formal
+        // name the actual's.
+        .chain(
+            subroutine
+                .params
+                .iter()
+                .filter(|param| !param.direction.is_reference())
+                .flat_map(|param| &param.leaves),
+        )
         .chain(&subroutine.return_var)
+        .chain(&subroutine.result_leaves)
         .chain(&subroutine.persistent_locals)
         .collect();
     for stmt in &subroutine.body {

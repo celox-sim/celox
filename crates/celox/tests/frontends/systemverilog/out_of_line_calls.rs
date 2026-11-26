@@ -6283,3 +6283,44 @@ endmodule
 "#;
     same_as_inlined(source, 2, 2, &["a", "b"]);
 }
+
+#[test]
+fn static_storage_of_unpacked_structure_formals_and_results() {
+    // The members of a formal or result of unpacked structure type of a
+    // static subroutine are its static storage (IEEE 1800-2023 13.3.1),
+    // which a unit that inlines the subroutine writes like any other.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int total, output int seen);
+    typedef struct { int id; logic [7:0] len; } pkt_s;
+    logic clk = 0;
+    always #5 clk = ~clk;
+    task sample(inout pkt_s p, input int k);
+        @(posedge clk);
+        p.id = p.id + k; p.len = p.len + 1; seen++;
+    endtask
+    function pkt_s make(int k); pkt_s r; r.id = k; r.len = 8'(k + 1); return r; endfunction
+    function pkt_s make2(int k); make2.id = k * 2; make2.len = 8'(k); endfunction
+    class Mon;
+        int total;
+        task run(int n);
+            repeat (n) begin
+                pkt_s p, q;
+                p = make(n); q = make2(n);
+                sample(p, 10);
+                total += p.id + p.len + q.id + q.len;
+            end
+        endtask
+    endclass
+    initial begin
+        Mon m = new;
+        m.run(3);
+        total = m.total;
+    end
+endmodule
+"#;
+    same_as_default(source, 1, 4, 40, &["total", "seen"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 40, &["total", "seen"]),
+        Ok(vec![value(81), value(3)])
+    );
+}

@@ -213,6 +213,7 @@ fn wrapper(
         is_task: false,
         automatic: true,
         automatic_locals,
+        result_leaves: Vec::new(),
         persistent_locals: Vec::new(),
         return_type: result.map(|r#type| ir(session, r#type)),
         params,
