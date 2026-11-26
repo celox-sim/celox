@@ -29,16 +29,15 @@ impl ResolvedScope {
         }
     }
 
-    fn message(&self, interface_prefix: Option<&str>) -> String {
+    /// The report of the time scale. A relative scope is under the one `%m`
+    /// names: the site's, which in an interface instance names the instance
+    /// (see `interface_binding::bind_instances`).
+    fn message(&self) -> String {
         let literal_name = |name: &str| name.replace('%', "%%");
         let display = match &self.display {
             DisplayScope::Absolute(name) => literal_name(name),
             DisplayScope::Relative(path) => {
                 let mut name = "%m".to_string();
-                if let Some(prefix) = interface_prefix {
-                    name.push('.');
-                    name.push_str(prefix);
-                }
                 if !path.is_empty() {
                     name.push('.');
                     name.push_str(&literal_name(path));
@@ -973,7 +972,6 @@ impl Timescales {
         call: celox_sv_syntax::ExprId,
         tree: &SyntaxTree,
         site: system_functions::CallSite,
-        prefix: Option<&str>,
         interface_types: &HashMap<String, String>,
     ) -> Converted<String> {
         let source = key(tree);
@@ -983,7 +981,7 @@ impl Timescales {
         let design = extended.as_ref().unwrap_or(self);
         design
             .resolve(call, tree, &design.units[&source], site, interface_types)
-            .map(|scope| scope.message(prefix))
+            .map(|scope| scope.message())
     }
 }
 
@@ -992,7 +990,6 @@ pub(super) fn print_message(
     tree: &AnalysisContext<'_>,
     site: system_functions::CallSite,
 ) -> Converted<String> {
-    let prefix = tree.interface_instance.clone();
     {
         let context = &*tree.timescale;
         if let Some(prepared) = &context.prepared
@@ -1007,15 +1004,11 @@ pub(super) fn print_message(
                     site,
                     &scope::imported(tree).interface_types,
                 )
-                .map(|scope| scope.message(prefix.as_deref()))
+                .map(|scope| scope.message())
         } else {
-            context.design.print_message(
-                call,
-                tree,
-                site,
-                prefix.as_deref(),
-                &scope::imported(tree).interface_types,
-            )
+            context
+                .design
+                .print_message(call, tree, site, &scope::imported(tree).interface_types)
         }
     }
 }

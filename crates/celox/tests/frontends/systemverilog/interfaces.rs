@@ -606,3 +606,90 @@ sv_backends! {
         assert_eq!(sim.get(sim.signal("valid")), BigUint::from(1u8));
     }
 }
+
+/// The processes of an interface instance run in it, so their reports name
+/// its scope (IEEE 1800-2023 20.10) as their `%m` does (21.2.1.5): an
+/// element of an instance array, an instance in a generate block, and an
+/// instance in an instance, and an assertion's report under the instance.
+#[test]
+fn reports_of_interface_instances_name_the_instance() {
+    let source = "`timescale 1ns/1ns
+        interface inner(input clk, input a);
+            always @(posedge clk) if (a) $error(\"inner %m\");
+        endinterface
+        interface chk(input clk, input a);
+            inner i(.*);
+            A1: assert property (@(posedge clk) !a);
+            initial $display(\"in %m\");
+            always @(posedge clk) if (a) begin : blk $display(\"blk %m\"); end
+        endinterface
+        module Top;
+            logic clk = 0, a = 0;
+            always #10 clk = ~clk;
+            chk c[2] (.*);
+            for (genvar g = 0; g < 1; g++) begin : gen
+                chk d(.*);
+            end
+            initial begin @(negedge clk); a = 1; @(negedge clk); a = 0; end
+        endmodule";
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("scopes.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        sim.run_until(50).unwrap();
+        let mut reports = Vec::new();
+        let mut displays = Vec::new();
+        for event in sim.drain_runtime_events() {
+            match event {
+                celox::RuntimeEvent::Report(report) => reports.push((
+                    String::from_utf8(report.message).unwrap(),
+                    report.scope.unwrap_or_default(),
+                    report.assertion.and_then(|assertion| assertion.label),
+                )),
+                celox::RuntimeEvent::Display { message } => {
+                    displays.push(String::from_utf8(message).unwrap())
+                }
+                _ => {}
+            }
+        }
+        reports.sort();
+        displays.sort();
+        let report = |message: &str, scope: &str, label: Option<&str>| {
+            (
+                message.to_owned(),
+                scope.to_owned(),
+                label.map(str::to_owned),
+            )
+        };
+        let mut expected = vec![
+            report("inner Top.c[0].i", "Top.c[0].i", None),
+            report("inner Top.c[1].i", "Top.c[1].i", None),
+            report("inner Top.gen[0].d.i", "Top.gen[0].d.i", None),
+        ];
+        for scope in ["Top.c[0]", "Top.c[1]", "Top.gen[0].d"] {
+            let failure = reports
+                .iter()
+                .find(|(_, at, label)| at == scope && label.as_deref() == Some("A1"))
+                .unwrap_or_else(|| panic!("{scope}: {reports:?}"));
+            expected.push(failure.clone());
+        }
+        expected.sort();
+        assert_eq!(reports, expected, "four-state {four_state}");
+        assert_eq!(
+            displays,
+            [
+                "blk Top.c[0].blk",
+                "blk Top.c[1].blk",
+                "blk Top.gen[0].d.blk",
+                "in Top.c[0]",
+                "in Top.c[1]",
+                "in Top.gen[0].d",
+            ],
+            "four-state {four_state}"
+        );
+    }
+}
