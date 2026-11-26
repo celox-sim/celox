@@ -26,6 +26,31 @@ sv_backends! {
         assert_eq!(sim.get(sim.signal("y")), 9u8.into());
     }
 
+    /// The variables Celox declares for a clocking block of an SV interface
+    /// (IEEE 1800-2023 clause 14) are no members of its Veryl contract. The
+    /// block is a process, which a `Simulation` runs.
+    fn sv_interfaces_with_clocking_blocks_bind_in_veryl(sim) {
+        @setup {
+            let veryl = "module Top(y: output logic<8>) { inst bus: $sv::Bus; assign bus.req = 8; assign y = bus.rsp; }";
+            let sv = "interface Bus; logic clk; logic [7:0] req, rsp; assign rsp = req + 1; clocking cb @(posedge clk); input req; output rsp; endclocking endinterface";
+        }
+        @build celox::Simulation::from_sources(vec![(veryl, Path::new("top.veryl"))], "Top").with_sv_sources(vec![(sv, Path::new("bus.sv"))]);
+        sim.run_until(1).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 9u8.into());
+    }
+
+    /// A member that the interface writes only by synchronous drives
+    /// (IEEE 1800-2023 14.16) is one it drives, which a Veryl instance reads.
+    fn sv_interface_clocking_drives_reach_veryl(sim) {
+        @setup {
+            let veryl = "module Top(y: output logic<8>) { inst bus: $sv::Bus; assign y = bus.q; }";
+            let sv = "`timescale 1ns/1ns\ninterface Bus; bit clk; logic [7:0] q; always #5 clk = ~clk; clocking cb @(posedge clk); output q; endclocking initial cb.q <= 8'd5; endinterface";
+        }
+        @build celox::Simulation::from_sources(vec![(veryl, Path::new("top.veryl"))], "Top").with_sv_sources(vec![(sv, Path::new("bus.sv"))]);
+        sim.run_until(10).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 5u8.into());
+    }
+
     fn reserves_authored_interface_names_for_generated_modules(sim) {
         @setup {
             let veryl = "module Child #(param K: u32 = 1)(a: input logic<8>, y: output logic<8>) { inst bus: $sv::Bus; assign bus.req = a; assign y = bus.rsp + K; }";

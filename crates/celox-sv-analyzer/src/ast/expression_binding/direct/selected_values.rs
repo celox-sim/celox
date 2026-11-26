@@ -59,6 +59,7 @@ pub(in crate::ast::expression_binding) fn path(
     dimensions: &PackedDimensions,
 ) -> Converted<(Vec<String>, Option<String>)> {
     let authored = root;
+    clocking::reject_foreign(root, native, tree, session, dimensions)?;
     // A member through a virtual interface is selected in its template,
     // which the caller applies to the member of each instance.
     if let Some((_, ty, member)) =

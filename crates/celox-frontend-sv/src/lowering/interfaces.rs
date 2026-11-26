@@ -13,6 +13,10 @@ pub struct InterfaceSignature {
     pub has_behavior: bool,
     pub header_dependent_cast: bool,
     pub time_declarations: String,
+    /// The members Celox declares for the interface's clocking blocks,
+    /// which the interface's instances bind but no contract of another
+    /// language names.
+    pub internal: Vec<String>,
 }
 
 pub fn interface_signatures(
@@ -85,6 +89,7 @@ fn interface_signatures_collecting(
                 has_behavior: prototype.has_behavior,
                 header_dependent_cast: prototype.header_dependent_cast,
                 time_declarations: prototype.time_declarations,
+                internal: prototype.internal,
             })
         })
         .collect()
