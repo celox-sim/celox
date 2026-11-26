@@ -1054,6 +1054,12 @@ impl BodyBuilder<'_, '_, '_> {
                                 "deferred assertion action other than one display or severity task call",
                             ));
                         }
+                        // A labeled assertion is a labeled statement, which
+                        // `%m` in its actions names (IEEE 1800-2023 21.2.1.5),
+                        // until the assertion ends.
+                        if let Some(label) = statement.label.clone() {
+                            jobs.push(self.enter_scope_name(&label));
+                        }
                         jobs.push(Job::AssertionThen {
                             concurrent,
                             condition,
