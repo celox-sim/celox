@@ -1126,6 +1126,26 @@
     "sv_cross_retain_auto_bins_ignored": {
       "title": "option.cross_retain_auto_bins = 0 keeps the automatic bins of a cross beside the bins it declares, set for the covergroup or for the cross: with two coverpoints of two bins, a cross with bins b = binsof(cp.lo) has three bins, where it has b alone",
       "standard": "IEEE 1800-2023 19.7 (Table 19-1, Table 19-2), 19.11.2"
+    },
+    "sv_procedural_item_options_ignored": {
+      "title": "An instance option of a coverpoint assigned in a procedure after construction, c.ca.option.weight = 3 or c.cb.option.at_least = 2, does not change the coverage of the instance",
+      "standard": "IEEE 1800-2023 19.7, 19.11"
+    },
+    "sv_definition_options_read_as_x": {
+      "title": "An option member that the definition assigns reads as x in a procedure: option.weight = w of the covergroup and option.goal = 80 of a coverpoint read through c.option.weight and c.ca.option.goal",
+      "standard": "IEEE 1800-2023 19.7, 19.10"
+    },
+    "sv_item_type_option_weight_ignored": {
+      "title": "With type_option.merge_instances, the coverage of the type does not weigh its coverpoints by their type_option.weight",
+      "standard": "IEEE 1800-2023 19.7.1, 19.11.3"
+    },
+    "sv_merge_instances_by_bin_name": {
+      "title": "With type_option.merge_instances and option.get_inst_coverage, the gt example of 19.11.3 (bins b[] = { [l:h] } of instances new(0,1) and new(1,2)) gives 100.00 for gt::get_coverage() and for both instances, where the clause gives 66.6667, 100.0 and 50.0",
+      "standard": "IEEE 1800-2023 19.11.3, Table 19-1"
+    },
+    "sv_coverpoint_stop_stops_the_covergroup": {
+      "title": "stop() of one coverpoint keeps the other coverpoints of the instance from counting samples until it is started again",
+      "standard": "IEEE 1800-2023 19.8 (Table 19-5)"
     }
   },
   "cases": [
@@ -5926,6 +5946,46 @@
       "classification": "xezim_bug",
       "bug": "sv_cross_retain_auto_bins_ignored",
       "note": "The covergroup sets option.cross_retain_auto_bins = 0, the default of its crosses (Table 19-2: \"Yes (default for crosses)\"). When false, \"all automatically generated bins are removed by the presence of any explicit cross bin\" (Table 19-1): kept, with bins b = binsof(cp.lo), has the one bin b; nothing, with only an ignore_bins, has no bin and does not contribute (19.11.2); retained sets the option back to 1 and has b and the automatic bins <hi,lo> and <hi,hi>. The samples <lo,lo> and <hi,hi> cover cp, cq and kept and two of the three bins of retained: 91.67. xezim 0.11.4 displays 76.67, the coverage with the automatic bins kept in kept and nothing; a probe that also sets the option to 0 in a cross of its own and displays the coverage of each cross gives kept 66.67, nothing 50.00, retained 66.67 and 66.67 for that cross, so the option is ignored at both levels. Verilator 5.054 ignores the option too (\"Ignoring unsupported coverage cross option\")."
+    },
+    {
+      "suite": "sv",
+      "name": "covergroup::options_assigned_after_construction_change_the_coverage",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_procedural_item_options_ignored",
+      "note": "19.7 lets a procedure assign an instance option after construction (its example: g1.a.option.weight = 3). ca covers 2 of 3 bins and cb 2 of 4: 58.33; with c.ca.option.weight = 3 the instance coverage is (3 x 66.67 + 50) / 4 = 62.50 (19.11), and with c.cb.option.at_least = 2 cb covers 1 of 4: 56.25. xezim 0.11.4 displays 58.33 three times. Verilator 5.054 rejects the assignments (\"Unsupported: 'option' of coverpoint or cross\")."
+    },
+    {
+      "suite": "sv",
+      "name": "covergroup::option_members_read_back_what_is_assigned",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_definition_options_read_as_x",
+      "note": "option and its members are built-in members of the covergroup and of each coverpoint (19.7, 19.10), and the definition's option.weight = w (w = 4) and option.goal = 80 are their values in the instance. xezim 0.11.4 displays \"first of the instance x x 3\": the members assigned in the procedure (name, comment, at_least of ca) read back, those of the definition read as x. Verilator 5.054 rejects option of a coverpoint."
+    },
+    {
+      "suite": "sv",
+      "name": "covergroup::type_options_weigh_the_merged_items",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_item_type_option_weight_ignored",
+      "note": "The example of 19.7.1 gives the type coverage with merge_instances as ((merge of a) x 3 + (merge of b) x 5) / (3 + 5); a has 3 of 4 bins in the union and b 2 of 4: (75 x 3 + 50 x 5) / 8 = 59.375, displayed 59.38. xezim 0.11.4 displays 62.50, the unweighted mean, and reads gc::b::type_option.weight back as 5. Verilator 5.054 does not resolve gc::a:: (\"Package/class for ':: reference' not found\")."
+    },
+    {
+      "suite": "sv",
+      "name": "covergroup::merged_instances_unite_bins_by_name",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_merge_instances_by_bin_name",
+      "note": "The case is the gt example of 19.11.3, which states the results: gt::get_coverage() is 66.6667 (b[0], b[1], b[2], two covered), gv1.get_inst_coverage() 100.0 and gv2.get_inst_coverage() 50.0 with option.get_inst_coverage = 1. xezim 0.11.4 displays 100.00 three times. Verilator 5.054 rejects bins of the arguments (\"Non-constant expression in array bins range\")."
+    },
+    {
+      "suite": "sv",
+      "name": "covergroup::stop_and_start_control_collection",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_coverpoint_stop_stops_the_covergroup",
+      "note": "Table 19-5 gives start() and stop() to a coverpoint: c.cb.stop() stops cb alone. ca counts the samples 0, 2 and 3 (3 of 4 bins), cb 0 and 3 (2 of 4). xezim 0.11.4 displays 2 4 for ca as well, so the sample of 2 taken while cb was stopped is not counted in ca. Verilator 5.054 rejects stop() of a coverpoint."
     }
   ]
 }

@@ -45,6 +45,14 @@ pub(in crate::ast) fn string_value(expr: &Expr, dimensions: &PackedDimensions) -
             matches!(**op, crate::system_functions::ObjectOp::Load(field)
             if field.handle == Some(crate::system_functions::HandleProperty::String))
                 || matches!(**op, ObjectOp::Pattern(_))
+                // A member of the options of a covergroup that is a string.
+                || matches!(
+                    &**op,
+                    ObjectOp::Coverage(
+                        op @ (crate::system_functions::CoverageOp::GetOption { .. }
+                            | crate::system_functions::CoverageOp::GetTypeOption { .. })
+                    ) if op.returns_string()
+                )
                 || matches!(**op, ObjectOp::Container { op: ContainerOp::Get | ContainerOp::PopFront | ContainerOp::PopBack, ref layout } if layout.handle == Some(crate::system_functions::HandleProperty::String))
                 || matches!(
                     **op,
@@ -289,6 +297,16 @@ pub(in crate::ast) fn native_string(
             unpacked_structs::native_member(ungroup(id, native), native, &session.types, dimensions)
                 .and_then(|name| dimensions.get(&name))
                 .is_some_and(|ty| ty.string)
+        }
+        // A member of the options of a covergroup that is a string (IEEE
+        // 1800-2023 19.10).
+        ExprKind::Member { .. }
+            if super::super::covergroups::result_type(tree, session, id, native, dimensions)
+                .is_some_and(|ty| {
+                    matches!(session.types.data(ty), semantic_types::TyData::String)
+                }) =>
+        {
+            true
         }
         // A string property of a class object.
         _ => objects::property(tree, session, id, native, dimensions)

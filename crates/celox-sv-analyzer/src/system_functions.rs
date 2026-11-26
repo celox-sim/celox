@@ -1597,6 +1597,35 @@ pub enum CoverageOp {
     /// sampled value. The second argument is their concatenation, `count`
     /// bits with predicate 0 in the lowest.
     Predicates { item: u32, count: u32 },
+    /// Start (`start`) or stop collecting for item `item` of the instance
+    /// in the argument (19.8): item 0 is the covergroup.
+    Collect { item: u32, start: bool },
+    /// Assign the value in the second argument to member `option` of
+    /// `option` of item `item` of the instance in the first (19.7):
+    /// `set_inst_name` assigns `option.name` of the covergroup, item 0.
+    SetOption {
+        item: u32,
+        option: celox_heap::coverage::OptionId,
+    },
+    /// Member `option` of `option` of item `item` of the instance in the
+    /// argument (19.7, 19.10).
+    GetOption {
+        item: u32,
+        option: celox_heap::coverage::OptionId,
+    },
+    /// Assign the value in the second argument to member `option` of
+    /// `type_option` of item `item` of the type of the key in the first
+    /// (19.7.1).
+    SetTypeOption {
+        item: u32,
+        option: celox_heap::coverage::TypeOptionId,
+    },
+    /// Member `option` of `type_option` of item `item` of the type of the
+    /// key in the argument (19.7.1, 19.10).
+    GetTypeOption {
+        item: u32,
+        option: celox_heap::coverage::TypeOptionId,
+    },
 }
 
 /// Which result of a coverage query (IEEE 1800-2023 19.8).
@@ -1626,7 +1655,12 @@ impl CoverageOp {
             | Self::Point { .. }
             | Self::Message
             | Self::SetPush { .. }
-            | Self::Predicates { .. } => (32, false),
+            | Self::Predicates { .. }
+            | Self::Collect { .. }
+            | Self::SetOption { .. }
+            | Self::SetTypeOption { .. } => (32, false),
+            Self::GetOption { option, .. } => Self::option_type(option.kind()),
+            Self::GetTypeOption { option, .. } => Self::option_type(option.kind()),
             Self::Formal { width, signed, .. } | Self::FilterItem { width, signed, .. } => {
                 (*width as usize, *signed)
             }
@@ -1635,6 +1669,29 @@ impl CoverageOp {
                 CoverageQuery::Covered | CoverageQuery::Total => (32, true),
             },
             Self::Overall => (64, false),
+        }
+    }
+
+    /// The width and signedness of a member of `kind` (19.10): an `int`, a
+    /// `bit`, or the handle of a `string`.
+    fn option_type(kind: celox_heap::coverage::OptionKind) -> (usize, bool) {
+        match kind {
+            celox_heap::coverage::OptionKind::Int => (32, true),
+            celox_heap::coverage::OptionKind::Bit => (1, false),
+            celox_heap::coverage::OptionKind::Text => (32, false),
+        }
+    }
+
+    /// Whether the result is the handle of a `string`: the text of the
+    /// warnings or illegal bins of an instance, or an option member that is
+    /// a `string` (19.10).
+    pub fn returns_string(&self) -> bool {
+        use celox_heap::coverage::OptionKind;
+        match self {
+            Self::Message => true,
+            Self::GetOption { option, .. } => option.kind() == OptionKind::Text,
+            Self::GetTypeOption { option, .. } => option.kind() == OptionKind::Text,
+            _ => false,
         }
     }
 
@@ -1903,6 +1960,12 @@ impl fmt::Display for ObjectOp {
                     "covergroup bin filter"
                 }
                 CoverageOp::Predicates { .. } => "covergroup sample value",
+                CoverageOp::Collect { start: true, .. } => "covergroup start",
+                CoverageOp::Collect { start: false, .. } => "covergroup stop",
+                CoverageOp::SetOption { .. } => "covergroup option assignment",
+                CoverageOp::GetOption { .. } => "covergroup option",
+                CoverageOp::SetTypeOption { .. } => "covergroup type_option assignment",
+                CoverageOp::GetTypeOption { .. } => "covergroup type_option",
             },
         })
     }

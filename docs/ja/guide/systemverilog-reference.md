@@ -203,13 +203,13 @@ program の region と `$exit` に関する差異は[標準準拠コードに影
 
 ### カバーグループ {#covergroups}
 
-covergroup（19 節）は型です。モジュール、program、パッケージ、コンパイル単位、generate ブロックで宣言でき、クラスに埋め込めます（19.4）。`new` は covergroup の引数でインスタンスを構築します。`sample()` は、`with function sample` 宣言の引数でインスタンスをサンプルします。`get_inst_coverage()`、`get_coverage()`、`T::get_coverage()`、`$get_coverage()` はカバレッジを返します。結果は `Simulation::coverage()` で読みます（[カバレッジ](#coverage)を参照）。
+covergroup（19 節）は型です。モジュール、program、パッケージ、コンパイル単位、generate ブロックで宣言でき、クラスに埋め込めます（19.4）。`new` は covergroup の引数でインスタンスを構築します。`sample()` は、`with function sample` 宣言の引数でインスタンスをサンプルします。`get_inst_coverage()`、`get_coverage()`、`T::get_coverage()`、`$get_coverage()` はカバレッジを返します。カバーポイントやクロスのカバレッジ（`c.cp.get_inst_coverage()`、`T::cp::get_coverage()`）も、カバー済みビン数とビン数を 2 つの `int` 変数に受け取る形（`c.get_coverage(covered, total)`）も使えます。`start()`、`stop()`、`set_inst_name()` はインスタンスを制御します（19.8）。結果は `Simulation::coverage()` で読みます（[カバレッジ](#coverage)を参照）。
 
 カバーポイント（19.5）は任意のビット幅の整数型です。ラベル、独自の型、`iff` ガードを付けられ、ガードの式を先に評価します。式とガードは、covergroup の引数と `sample` の引数、埋め込み covergroup ならクラスのメンバ、スコープの名前の順に名前を解決します。ビンは、19.5.3 の自動ビン（列挙型のものを含む）か、値に対して宣言するビン（19.5.1〜19.5.6）です。値と範囲のリスト（許容差付きの範囲 `[a +/- b]`、`[a +%- b]` を含む）、`with` 式が残す値、配列の要素のいずれかを、1 つのビン、値ごとのビン（`bins b[]`）、指定した個数のビン（`bins b[N]`）にまとめます。`default` ビン、`ignore_bins`、`illegal_bins`、`wildcard` ビンも使え、どのビンにもガード（`iff`）を付けられます。ビンの値には、定数、covergroup の引数、それらを引数とする関数呼び出しを書けます。関数呼び出しは構築時に評価するため、同じ型のインスタンスでもビンが異なることがあります。不正な値（illegal）のサンプルはエラーとして報告します。
 
 クロス（19.6）は、covergroup の 2 つ以上のカバーポイントまたは変数をクロスします。変数（整数型の変数やネット、埋め込み covergroup のクラスのプロパティ、covergroup または `sample` の引数）には専用のカバーポイントを作ります。クロスは、各カバーポイントのカバレッジに寄与するビンの組み合わせごとにビンを持ちます。クロスの `bins`、`ignore_bins`、`illegal_bins` は、選択式が選ぶ組み合わせを受け持ちます。選択式には `binsof(cp)` と `binsof(cp.bin)`、`intersect {...}`、`!`、`&&`、`||`、括弧、すべての組み合わせを選ぶクロス自身の識別子を書けます。クロスとその各ビンにはガード（`iff`）を付けられます。不正な組み合わせのサンプルはエラーとして報告します。
 
-定義内では `option.name`、`comment`、`per_instance`、`weight`、`goal`、`at_least`、`auto_bin_max`、`cross_num_print_missing`、`cross_retain_auto_bins` に、19.10 が定めるレベルで代入できます。値には `new` のスコープの任意の式を書けます。
+定義内では `option` のすべてのメンバに、19.10 が定めるレベルで代入できます。値には `new` のスコープの任意の式を書けます。`type_option` のメンバには `real_interval` を除き定数で代入できます（19.7.1）。手続きからは、インスタンスとその項目の `option` のメンバ（`c.option.weight = 2;`、`c.cp.option.at_least = 3;`）と、型とその項目の `type_option` のメンバを、`::` 経由でもインスタンス経由でも（`T::type_option.comment = "x";`、`T::cp::type_option.weight = 3;`、`c.type_option.merge_instances = 1;`）読み書きできます。ただし規格が定義内でしか設定できないとするメンバ（19.7、19.7.1）は除きます。
 
 **未対応**の列の構文は、covergroup の宣言位置ではなく、その `new` やメソッドを書いた位置でエラーになります。何も構築しない covergroup は宣言内容によらず受理し、その型の変数も受理します。例外は、括弧で囲んだ選択の前の `!` と条件演算子を使うクロスの集合式で、これらは covergroup の宣言位置でパーサがエラーにします。いずれも、19 節の未対応分を追跡する [#4294](https://github.com/celox-sim/celox/issues/4294) を示します。
 
@@ -219,11 +219,11 @@ covergroup（19 節）は型です。モジュール、program、パッケージ
 | **カバーポイント（19.5）** | 任意のビット幅の整数型のカバーポイント。ラベル、独自の型、`iff` ガードの有無は問いません | `real` 型のカバーポイント。列挙子に x や z のビットを持つ列挙型のカバーポイント。clocking ブロックの信号のカバーポイント（clocking ブロックは未対応です） |
 | **ビン（19.5）** | 19.5.3 の自動ビン（列挙型のものを含む）。値と範囲のビン（`bins b = {0, [1:3], [8:$]};`）。値は、定数、covergroup の引数、それらを引数とする関数呼び出し。ビン配列（`bins b[]`、`bins b[N]`）。オペランドが整数の許容差付きの範囲（`[a +/- b]`、`[a +%- b]`）。`default` と `default[]` のビン。`ignore_bins` と `illegal_bins`。`wildcard` ビン。ビンのガード（`bins b = {1} iff (en);`）。`with` フィルタ（`bins b[] = {[0:255]} with (item % 3 == 0);`、`bins b = cp with (f(item));`）。集合式のビン（`bins b[] = S;`。要素が整数の配列パラメータ、または要素が 64 ビット以下の整数である動的配列・キュー・埋め込み covergroup のクラスの定数配列） | 遷移ビンと `default sequence` のビン（19.5.2）。`bins b[N] = default`（値の分配を規格が定めていません）。ビン配列、`ignore_bins`、`illegal_bins` の `with` フィルタで、値が定数かつ 1,048,576 個を超えるもの（`int` のカバーポイントでの `ignore_bins b = cp with (...)` など。配列でない `bins` のビンでは使えます。[カバレッジ](#coverage)を参照）。ビン配列やそのようなフィルタの下にある、値の範囲が 65,536 個を超えるワイルドカード値。上記以外の形の集合式（代入パターン、連接、パラメータでない固定長配列、文字列・ハンドル・64 ビットを超える要素の配列）。`real` のオペランドを持つ許容差付きの範囲。整数型でないビンの値 |
 | **クロス（19.6）** | カバーポイントと整数型の変数やネット（変数には専用のカバーポイントを作ります）のクロス。ラベルと `iff` ガードの有無は問いません。`binsof(cp)` と `binsof(cp.bin)` の選択式による `bins`、`ignore_bins`、`illegal_bins`。`intersect {...}` の値は、定数、covergroup の引数、それらを引数とする関数呼び出し。`!`、`&&`、`\|\|`、括弧、クロスの識別子（`bins all = X;`）。クロスのビンのガード | 選択式の `with` と `matches`（19.6.1.2）。クロスの集合式と、クロス本体で宣言した関数（19.6.1.3、19.6.1.4）。括弧で囲んだ選択の前の `!`（`!(binsof(a) && binsof(b))`）と条件演算子を使うクロスの集合式（どちらも covergroup の宣言位置でエラーになります）。同じ項目を 2 度挙げるクロス。クロスがクロスしないカバーポイントの `binsof`。括弧を通して 32 段を超えて交互に入れ子になる `&&` と `\|\|`。サンプル時にしかビンに振り分けられない値と交わる `intersect` のリスト（[カバレッジ](#coverage)を参照） |
-| **オプション（19.7）** | 定義内での `option.name`、`comment`、`per_instance`、`weight`、`goal`、`at_least`、`auto_bin_max`、`cross_num_print_missing`、`cross_retain_auto_bins` への代入（19.10 が定めるレベルで、値は `new` のスコープの任意の式） | `type_option` への代入。`option` のメンバのうち `detect_overlap` と `get_inst_coverage` |
+| **オプション（19.7、19.7.1）** | 定義内での `option` の全メンバ（19.10 が定めるレベル）。定義内で定数を代入する `type_option` のメンバ: `weight`、`goal`、`comment`（文字列リテラル）、`merge_instances`、`distribute_first`、およびクロッキングイベントのない covergroup では効果のない `strobe`（19.3）。手続きからの、インスタンスとその項目の `option` のメンバ、型とその項目の `type_option` のメンバ（`::` 経由またはインスタンス経由）の読み出しと `=` による代入 | `type_option.real_interval`（real のカバーポイントは未対応）。手続きからの `type_option.strobe` の読み出し。文字列パラメータなど、文字列リテラルでない `type_option.comment`。他の演算子（`+=`、`++`）や `<=` によるメンバへの代入。インクリメントや複合代入が書き込む場所の選択でのメンバの読み出し（`arr[c.cp.option.weight]++`）。構造体全体としての `option` と `type_option`。クロッキングイベントを持つ covergroup の `type_option.strobe = 1`（`covergroup strobe sampling`。クロッキングイベント自体が未対応） |
 | **サンプリング（19.3、19.8.1）** | `sample()` | clocking イベント（`covergroup cg @(posedge clk);`）やブロックイベント（`@@(begin f)`）付きで宣言した covergroup。sequence のマッチ項目内の `sample()` |
 | **引数（19.3、19.8.1）** | covergroup の引数と、`with function sample` 宣言の引数 | covergroup やその sample メソッドの `ref` 引数。unpacked 型の引数。カバーポイントが読む covergroup の引数のうち、整数型、文字列、クラスハンドルのいずれでもないもの（`real` など） |
 | **`let` 宣言（11.12）** | — | covergroup の名前より後では `let` を展開しません。引数の型や既定値、カバーポイントの式、クロスする変数、ガード、ビンの値、`intersect` の値、`with` 式、オプションの値が `let` を参照する covergroup はエラーになります（covergroup または `sample` の引数が同じ名前を持つ場合は、その引数を指します。`with` 式の中の `item` は、同名の宣言があってもビンの値を指します） |
-| **メソッド（19.8）** | `sample()`、`get_inst_coverage()`、`get_coverage()`、`T::get_coverage()`、`$get_coverage()`。埋め込み covergroup のメソッドを、その変数（クラス内の `cg`、`obj.cg`）に対して呼ぶこと | `start()`、`stop()`、`set_inst_name()`。`ref int` 引数付きの `get_coverage` と `get_inst_coverage`。カバーポイントとクロスのメソッド。`option` と `type_option` のメンバの読み書き。条件式など、ハンドルを返す他の式に対する埋め込み covergroup のメソッド呼び出し |
+| **メソッド（19.8）** | `sample()`、`get_inst_coverage()`、`get_coverage()`、`T::get_coverage()`、`$get_coverage()`。2 つの `ref int` 引数付きの `get_coverage` と `get_inst_coverage`。`start()`、`stop()`、`set_inst_name()`。表 19-5 がカバーポイントとクロスに与えるメソッド（`c.cp.get_inst_coverage()`、`c.x.stop()`、`T::cp::get_coverage()`）。埋め込み covergroup のメソッドを、その変数（クラス内の `cg`、`obj.cg`）に対して呼ぶこと | 条件式など、ハンドルを返す他の式に対する埋め込み covergroup のメソッド呼び出し |
 | **構築（19.3、19.4）** | covergroup の引数を取る `new`。クラスの `new` メソッド内での、埋め込み covergroup への `cg = new;` または `this.cg = new;` による代入 | covergroup ハンドルを渡す浅いコピーの `new`（8.12）。`new` メソッド内での、クラスの他のハンドルを通した埋め込み covergroup への代入（`other.cg = new;`）。このメソッドの外での代入は、19.4 が定めるとおりエラーです |
 | **型名（20.6.1）** | — | covergroup 型、その変数、それを含む配列や構造体の `$typename`（20.6.1 にはその名前の規則がありません） |
 | **結果（19.9）** | `Simulation::coverage()` と `Simulator::coverage()`（[カバレッジ](#coverage)を参照） | カバレッジデータベース。[カバレッジデータベースはありません](#deviations-standard-code)を参照してください |
@@ -470,8 +470,43 @@ covergroup 型ごとに、インスタンス、サンプル数、`$get_coverage`
   ソースファイルごとの型です。
 - **`null` への `sample()` は何もサンプルしません。** コンストラクタが作らなかった
   埋め込み covergroup（19.4）でも、それ以外の covergroup 変数でも同じです。
-  ハンドル経由の `get_coverage()` は型のカバレッジを返し、ハンドルを読みません。
-  `null` への `get_inst_coverage()` は実行時エラーです。
+  ハンドル経由の `get_coverage()` と `type_option` は型のものであり、ハンドルを
+  読みません。`null` への `get_inst_coverage()`、`start()`、`stop()`、
+  `set_inst_name()`、`option` は実行時エラーです。型の操作では、covergroup を
+  指す式も評価しません。`f().get_coverage()` や `f().type_option.weight` では、
+  クラスの static メンバをオブジェクトなしで読むのと同じく `f` を呼びません
+  （8.9、19.7.1）。
+- **手続きから代入したオプション**は、値を 19.10 がメンバに与える型へ、その型の
+  変数と同じく変換して受け取り（real は丸め、x と z のビットは 0）、その時点から効きます。インスタンスが持つヒット
+  はそのままで、`at_least`、`weight`、`merge_instances` は数え方だけを変えます。
+  covergroup の `option.at_least` は、自身の値を代入していない各カバーポイントと
+  クロスの値です。項目がそれを読んだ後に手続きが代入した場合も同じです（表
+  19-2）。covergroup の `weight`、`goal`、`comment` は項目の値にはなりません
+  （19.7）。`goal` はどの数値も変えず、レポートに表示されます。負の重みは
+  シミュレーションをエラーで終了します（「shall be a non-negative integral
+  value」、表 19-1）。`set_inst_name(s)` は `option.name` に代入します。
+  代入するまでの `option.name` は `<type>#<n>` です。インスタンスと型の
+  オプションはチェックポイントに含まれます。
+- **`start()` と `stop()`** は、covergroup とその各カバーポイント・クロスが
+  収集するかどうかをそれぞれ独立に設定します。インスタンスは収集する状態で
+  始まります。項目は、自身と covergroup がともに収集するときにサンプルを数えます。
+  停止した covergroup はサンプルの何も評価せず、停止したカバーポイントは、ガードが
+  偽のカバーポイントと同じく、そのクロスにサンプルを渡さず、illegal ビンの
+  ヒットも報告しません。
+- **2 引数の形**では、`get_inst_coverage` は項目（またはインスタンスの全項目）の
+  カバー済みビン数とビン数を、`get_coverage` はそれらのインスタンス全体の和を
+  返します（19.8）。`merge_instances` がないとき、この和は `option.weight` が 0 の
+  インスタンスのビンも数えます。メソッドが返すカバレッジはそのインスタンスを
+  除きます（19.11.3）。`type_option.merge_instances` のもとでは、`get_coverage` は
+  インスタンスのビンの和集合の値を返します（19.11.3）。`merge_instances` があり
+  `option.get_inst_coverage` がないとき、`get_inst_coverage` は `get_coverage`
+  と同じ値を返します（表 19-1）。`merge_instances` がなければ常にインスタンスの
+  カバレッジです。
+- **`option.detect_overlap`** は、カバーポイントの重なるビンの組ごとに、
+  インスタンスを構築する `new` の `$warning` レポートで警告します（表 19-1）。
+- **`type_option.strobe`** は効果を持ちません。「only applies to the scheduling
+  of samples triggered by a clocking event」（19.3）であり、クロッキングイベントを
+  持つ covergroup は未対応です。
 - **項目のない covergroup にカバレッジはありません。** カバーポイントもクロスも
   宣言しない covergroup の `get_inst_coverage()` と `get_coverage()` は 0 で、
   `$get_coverage()` には寄与しません。寄与する covergroup がデザインに無いとき、

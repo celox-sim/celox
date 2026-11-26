@@ -205,13 +205,13 @@ For `expect (property_spec) action_block` (16.17), the executing process makes o
 
 ### Coverage groups {#covergroups}
 
-A covergroup (clause 19) is a type: declared in a module, a program, a package, the compilation unit or a generate block, or embedded in a class (19.4). `new` constructs an instance, with the arguments of the covergroup; `sample()` samples it, with the arguments of a `with function sample` declaration; `get_inst_coverage()`, `get_coverage()`, `T::get_coverage()` and `$get_coverage()` give coverage. The results are read through `Simulation::coverage()` (see [Coverage](#coverage)).
+A covergroup (clause 19) is a type: declared in a module, a program, a package, the compilation unit or a generate block, or embedded in a class (19.4). `new` constructs an instance, with the arguments of the covergroup; `sample()` samples it, with the arguments of a `with function sample` declaration; `get_inst_coverage()`, `get_coverage()`, `T::get_coverage()` and `$get_coverage()` give coverage, also of a coverpoint or cross (`c.cp.get_inst_coverage()`, `T::cp::get_coverage()`) and with the covered bins and the bins in two `int` variables (`c.get_coverage(covered, total)`); `start()`, `stop()` and `set_inst_name()` control an instance (19.8). The results are read through `Simulation::coverage()` (see [Coverage](#coverage)).
 
 A coverpoint (19.5) is of an integral type of any width: with or without a label, with a type of its own, and with an `iff` guard, whose expression is evaluated first. Its expression and its guard read the arguments of the covergroup and of `sample`, then the members of the class of an embedded covergroup, then the names of the scope. Its bins are the automatic bins of 19.5.3, also those of an enumeration, or the bins it declares for values (19.5.1 to 19.5.6): one bin, a bin for each value (`bins b[]`) or a number of bins (`bins b[N]`) of a list of values and ranges, also ranges with a tolerance (`[a +/- b]`, `[a +%- b]`), of the values a `with` expression keeps, or of the elements of an array; `default` bins; `ignore_bins` and `illegal_bins`; `wildcard` bins; and a guard on any of them (`iff`). A bin value is a constant, an argument of the covergroup or a call of a function with these, which the construction evaluates, so the instances of one type may differ in their bins. A sample of an illegal value is reported as an error.
 
 A cross (19.6) crosses two or more coverpoints of the covergroup, or variables, which get a coverpoint of their own: an integral variable or net, a property of the class of an embedded covergroup, or an argument of the covergroup or of `sample`. It has a bin for each combination of bins of its coverpoints that take part in their coverage, and its `bins`, `ignore_bins` and `illegal_bins` take the combinations their select expressions select: `binsof(cp)` and `binsof(cp.bin)`, with `intersect {...}`, `!`, `&&`, `||`, parentheses, and the identifier of the cross itself, which selects every combination. A cross and each of its bins may have a guard (`iff`). A sample of an illegal combination is reported as an error.
 
-The definition may assign `option.name`, `comment`, `per_instance`, `weight`, `goal`, `at_least`, `auto_bin_max`, `cross_num_print_missing` and `cross_retain_auto_bins`, each at the levels 19.10 gives it, with any expression of the scope of `new` as the value.
+The definition may assign every member of `option`, each at the levels 19.10 gives it, with any expression of the scope of `new` as the value, and the members of `type_option` but `real_interval`, with a constant (19.7.1). A procedure reads and writes the members of `option` of an instance and of its items (`c.option.weight = 2;`, `c.cp.option.at_least = 3;`) and of `type_option` of the type and of its items, through the type or through an instance (`T::type_option.comment = "x";`, `T::cp::type_option.weight = 3;`, `c.type_option.merge_instances = 1;`), but for the members the standard lets only the definition set (19.7, 19.7.1).
 
 A construct of the **Not supported** column is rejected where a `new` or a method of the covergroup is written, not where the covergroup is declared: a covergroup that nothing constructs is accepted whatever it declares, and so is a variable of its type. The exceptions are `!` before a parenthesized selection and a conditional cross set expression, which the parser rejects where the covergroup is declared. All of them point to [#4294](https://github.com/celox-sim/celox/issues/4294), which tracks what is left of clause 19.
 
@@ -221,11 +221,11 @@ A construct of the **Not supported** column is rejected where a `new` or a metho
 | **Coverpoints (19.5)** | Coverpoints of an integral type of any width, with or without a label, with a type of their own, and with an `iff` guard | A coverpoint of a `real` type; one of an enumeration whose enumerators have x or z bits; a coverpoint of a signal of a clocking block (clocking blocks are not supported) |
 | **Bins (19.5)** | The automatic bins of 19.5.3, also those of an enumeration; bins of values and ranges (`bins b = {0, [1:3], [8:$]};`) whose values are constants, arguments of the covergroup or calls of functions with these; bin arrays (`bins b[]`, `bins b[N]`); ranges with a tolerance (`[a +/- b]`, `[a +%- b]`) of integral operands; `default` and `default[]` bins; `ignore_bins` and `illegal_bins`; `wildcard` bins; a guard on a bin (`bins b = {1} iff (en);`); `with` filters (`bins b[] = {[0:255]} with (item % 3 == 0);`, `bins b = cp with (f(item));`); bins of a set expression (`bins b[] = S;`) that is an array parameter with integral elements, or a dynamic array, a queue or a constant array of the class of an embedded covergroup with integral elements of at most 64 bits | Transition bins and `default sequence` bins (19.5.2); `bins b[N] = default` (the standard does not say how the values are distributed); a `with` filter on a bin array, on `ignore_bins` or on `illegal_bins` whose values are constants and more than 1,048,576, such as `ignore_bins b = cp with (...)` on an `int` coverpoint (on one `bins` bin such a filter is supported, see [Coverage](#coverage)); a wildcard value of more than 65,536 ranges of values in a bin array or under such a filter; a set expression of any other form: an assignment pattern, a concatenation, a fixed-size array that is no parameter, an array of strings, handles or elements of more than 64 bits; a tolerance range with a `real` operand; a bin value that is not integral |
 | **Crosses (19.6)** | Crosses of coverpoints and of integral variables or nets (a variable gets a coverpoint of its own), with or without a label, with an `iff` guard; `bins`, `ignore_bins` and `illegal_bins` of select expressions of `binsof(cp)` and `binsof(cp.bin)`, with `intersect {...}` lists whose values are constants, arguments of the covergroup or calls of functions with these, `!`, `&&`, `\|\|`, parentheses and the identifier of the cross (`bins all = X;`); a guard on a cross bin | `with` and `matches` in a select expression (19.6.1.2); cross set expressions and functions declared in a cross body (19.6.1.3, 19.6.1.4); `!` before a parenthesized selection (`!(binsof(a) && binsof(b))`) and a conditional cross set expression, both rejected where the covergroup is declared; a cross that lists one item twice; `binsof` of a coverpoint that the cross does not cross; `&&` and `\|\|` that alternate through more than 32 levels of parentheses; an `intersect` list that meets values only a sample sorts into bins (see [Coverage](#coverage)) |
-| **Options (19.7)** | `option.name`, `comment`, `per_instance`, `weight`, `goal`, `at_least`, `auto_bin_max`, `cross_num_print_missing` and `cross_retain_auto_bins` assigned in the definition, each at the levels 19.10 gives it, with any expression of the scope of `new` as the value | `type_option` assignments; the `option` members `detect_overlap` and `get_inst_coverage` |
+| **Options (19.7, 19.7.1)** | Every member of `option` in the definition, at the levels 19.10 gives it; the members of `type_option` in the definition with a constant value: `weight`, `goal`, `comment` (a string literal), `merge_instances`, `distribute_first`, and `strobe`, which has no effect on a covergroup without a clocking event (19.3); in a procedure, the members of `option` of an instance and of its items, and of `type_option` of the type and of its items, through `::` or through an instance, read and assigned with `=` | `type_option.real_interval` (real coverpoints are not supported); `type_option.strobe` read in a procedure; a `type_option.comment` that is no string literal, such as a string parameter; a member assigned with another operator (`+=`, `++`) or with `<=`; a member read in the select of a place that an increment or a compound assignment writes (`arr[c.cp.option.weight]++`); `option` or `type_option` used as a whole structure; `type_option.strobe = 1` of a covergroup with a clocking event (`covergroup strobe sampling`), as clocking events are not supported |
 | **Sampling (19.3, 19.8.1)** | `sample()` | A covergroup declared with a clocking event (`covergroup cg @(posedge clk);`) or a block event (`@@(begin f)`); `sample()` in a sequence match item |
 | **Arguments (19.3, 19.8.1)** | The arguments of a covergroup and of its `with function sample` declaration | `ref` arguments of a covergroup or of its sample method; arguments of unpacked type; an argument of the covergroup that a coverpoint reads and that is not of an integral type, a string or a class handle, such as a `real` |
 | **`let` declarations (11.12)** | — | A `let` is not expanded in what follows the name of a covergroup: a covergroup whose argument types or defaults, coverpoint expressions, crossed variables, guards, bin values, `intersect` values, `with` expressions or option values name one is rejected, unless an argument of the covergroup or of `sample` has the name (`item` in a `with` expression is the value of the bin, whatever is named so) |
-| **Methods (19.8)** | `sample()`, `get_inst_coverage()`, `get_coverage()`, `T::get_coverage()`, and `$get_coverage()`; a method of an embedded covergroup called on its variable (`cg` in the class, `obj.cg`) | `start()`, `stop()` and `set_inst_name()`; `get_coverage` and `get_inst_coverage` with `ref int` arguments; the methods of coverpoints and crosses; reading or writing `option` and `type_option` members; a method of an embedded covergroup called on another expression that gives the handle, such as a conditional expression |
+| **Methods (19.8)** | `sample()`, `get_inst_coverage()`, `get_coverage()`, `T::get_coverage()`, and `$get_coverage()`; `get_coverage` and `get_inst_coverage` with two `ref int` arguments; `start()`, `stop()` and `set_inst_name()`; the methods Table 19-5 gives coverpoints and crosses (`c.cp.get_inst_coverage()`, `c.x.stop()`, `T::cp::get_coverage()`); a method of an embedded covergroup called on its variable (`cg` in the class, `obj.cg`) | A method of an embedded covergroup called on another expression that gives the handle, such as a conditional expression |
 | **Construction (19.3, 19.4)** | `new` with the arguments of the covergroup; in the `new` method of its class, an embedded covergroup assigned as `cg = new;` or `this.cg = new;` | `new` with a covergroup handle as a shallow copy (8.12); an embedded covergroup assigned through another handle of the class (`other.cg = new;`) in the `new` method (outside that method the assignment is the error 19.4 makes it) |
 | **Type names (20.6.1)** | — | `$typename` of a covergroup type, of a variable of one, or of an array or structure that holds one (20.6.1 has no rule for the name) |
 | **Results (19.9)** | `Simulation::coverage()` and `Simulator::coverage()` (see [Coverage](#coverage)) | The coverage database; see [No coverage database](#deviations-standard-code) |
@@ -526,9 +526,49 @@ advances no time.
   source file.
 - **`sample()` on `null` samples nothing**, for an embedded covergroup that
   the constructor did not create (19.4) and for any other covergroup
-  variable. `get_coverage()` through a handle gives the coverage of the type
-  and does not read the handle; `get_inst_coverage()` on `null` is a runtime
-  error.
+  variable. `get_coverage()` and `type_option` through a handle are those of
+  the type and do not read the handle; `get_inst_coverage()`, `start()`,
+  `stop()`, `set_inst_name()` and `option` on `null` are a runtime error.
+  The expression that names the covergroup of an operation of the type is
+  not evaluated either: in `f().get_coverage()` or `f().type_option.weight`
+  `f` is not called, as a static member of a class is read without its
+  object (8.9, 19.7.1).
+- **Options assigned in a procedure** take the value converted to the type
+  19.10 gives the member, as a variable of that type takes it (a `real` is
+  rounded, x and z bits are 0), and count from then on: the hits an
+  instance has are those it had, and `at_least`, `weight` or
+  `merge_instances` change only how they are counted. `option.at_least` of a
+  covergroup is that of each of its coverpoints and crosses that does not
+  assign its own, also when a procedure assigns it after the item read it
+  (Table 19-2); `weight`, `goal` and `comment` of the covergroup are not
+  those of its items (19.7). `goal` changes no number and is shown in the
+  report. A negative weight ends the simulation with an error ("shall be a
+  non-negative integral value", Table 19-1). `set_inst_name(s)` assigns
+  `option.name`, which is `<type>#<n>` until it is assigned. The options of
+  the instances and of the types are part of a checkpoint.
+- **`start()` and `stop()`** set whether the covergroup and each of its
+  coverpoints and crosses collect, each on its own; an instance starts
+  collecting. An item counts a sample where it and the covergroup collect: a
+  stopped covergroup evaluates nothing of a sample, and a stopped coverpoint
+  leaves its crosses without the sample, as one whose guard is false does,
+  and reports no hit of its illegal bins.
+- **With two arguments** `get_inst_coverage` gives the covered bins and the
+  bins of the item, or of all items of the instance, and `get_coverage`
+  their sums over the instances (19.8); with `type_option.merge_instances`
+  `get_coverage` gives those of the union of the bins of the instances
+  (19.11.3). Without `merge_instances`, these sums count the bins of every
+  instance, also of one whose `option.weight` is 0, which the coverage the
+  method returns leaves out (19.11.3). With `type_option.merge_instances` and
+  without
+  `option.get_inst_coverage`, `get_inst_coverage` gives what `get_coverage`
+  does (Table 19-1); without `merge_instances` it is always the coverage of
+  the instance.
+- **`option.detect_overlap`** warns of each pair of overlapping bins of a
+  coverpoint with a `$warning` report of the `new` that constructs the
+  instance (Table 19-1).
+- **`type_option.strobe`** has no effect: it "only applies to the scheduling
+  of samples triggered by a clocking event" (19.3), and a covergroup with a
+  clocking event is not supported.
 - **A covergroup without items has no coverage.** `get_inst_coverage()` and
   `get_coverage()` of a covergroup that declares no coverpoint or cross are
   0, and it takes no part in `$get_coverage()`, which is 100 when no

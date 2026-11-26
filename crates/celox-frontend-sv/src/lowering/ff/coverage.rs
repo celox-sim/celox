@@ -275,7 +275,44 @@ impl Ff<'_, '_> {
                 self.store(temp, SIROffset::Static(0), width, value);
                 Ok(sv::ir::Expr::Ident(name))
             }
+            CoverageOp::SetOption { item, option } => {
+                let value = self.coverage_option_value(arg(1)?, option.kind())?;
+                let object = self.handle(arg(0)?)?;
+                self.coverage_helper_call(
+                    op::SET_OPTION,
+                    u64::from(*item),
+                    u64::from(option.code()),
+                    &[object, value],
+                );
+                Ok(done)
+            }
+            CoverageOp::SetTypeOption { item, option } => {
+                let value = self.coverage_option_value(arg(1)?, option.kind())?;
+                let key = self.integer_of_width(arg(0)?, 64, false)?;
+                self.coverage_helper_call(
+                    op::SET_TYPE_OPTION,
+                    u64::from(*item),
+                    u64::from(option.code()),
+                    &[key, value],
+                );
+                Ok(done)
+            }
             _ => unreachable!("a coverage operation without a value operand"),
+        }
+    }
+
+    /// The value `expr` assigns to an option member of `kind` (IEEE
+    /// 1800-2023 19.10): the bits of an `int` or a `bit`, with 0 for an x
+    /// or z bit as the member holds it, or the handle of a `string`.
+    fn coverage_option_value(
+        &mut self,
+        expr: &sv::ir::Expr,
+        kind: coverage::OptionKind,
+    ) -> Result<RegisterId, sv::AnalyzerError> {
+        match kind {
+            coverage::OptionKind::Text => self.handle(expr),
+            coverage::OptionKind::Int => self.integer_of_width(expr, 32, true),
+            coverage::OptionKind::Bit => self.integer_of_width(expr, 1, false),
         }
     }
 
@@ -302,6 +339,8 @@ impl Ff<'_, '_> {
                 | CoverageOp::SetPush { .. }
                 | CoverageOp::FilterItem { .. }
                 | CoverageOp::Predicates { .. }
+                | CoverageOp::SetOption { .. }
+                | CoverageOp::SetTypeOption { .. }
         ) {
             return self.coverage_value_call(op, args);
         }
@@ -313,6 +352,7 @@ impl Ff<'_, '_> {
                 | CoverageOp::Register(_)
                 | CoverageOp::New { .. }
                 | CoverageOp::TypeCoverage { .. }
+                | CoverageOp::GetTypeOption { .. }
         );
         let mut args = args
             .iter()
@@ -429,6 +469,33 @@ impl Ff<'_, '_> {
                 self.coverage_helper_call(sub, what, 0, &[target, item])
             }
             CoverageOp::Overall => self.coverage_helper_call(op::OVERALL, 0, 0, &[]),
+            CoverageOp::Collect { item, start } => {
+                let object = first("collect")?;
+                self.coverage_helper_call(
+                    op::COLLECT,
+                    u64::from(*item),
+                    u64::from(*start),
+                    &[object],
+                )
+            }
+            CoverageOp::GetOption { item, option } => {
+                let object = first("option")?;
+                self.coverage_helper_call(
+                    op::GET_OPTION,
+                    u64::from(*item),
+                    u64::from(option.code()),
+                    &[object],
+                )
+            }
+            CoverageOp::GetTypeOption { item, option } => {
+                let key = first("type option")?;
+                self.coverage_helper_call(
+                    op::GET_TYPE_OPTION,
+                    u64::from(*item),
+                    u64::from(option.code()),
+                    &[key],
+                )
+            }
             CoverageOp::Input { .. }
             | CoverageOp::InputString { .. }
             | CoverageOp::FormalSet { .. }
@@ -438,15 +505,25 @@ impl Ff<'_, '_> {
             | CoverageOp::Message
             | CoverageOp::SetPush { .. }
             | CoverageOp::FilterItem { .. }
-            | CoverageOp::Predicates { .. } => unreachable!("handled by coverage_value_call"),
+            | CoverageOp::Predicates { .. }
+            | CoverageOp::SetOption { .. }
+            | CoverageOp::SetTypeOption { .. } => unreachable!("handled by coverage_value_call"),
         };
-        let (width, signed) = op.result_type();
+        let (width, signed) = if op.returns_string() {
+            (celox_design::HANDLE_WIDTH, false)
+        } else {
+            op.result_type()
+        };
         let value = self.b.alloc_bit(width, signed);
         self.b.emit(SIRInstruction::Slice(value, result, 0, width));
         let (temp, name) = self.m.temp("coverage", width, signed, false);
         let variable = self.m.variables.get_mut(&temp).unwrap();
         if matches!(op, CoverageOp::New { .. }) {
             variable.value_kind = celox_design::ValueKind::ObjRef;
+        }
+        // An option member that is a `string` is the handle of one.
+        if op.returns_string() {
+            variable.value_kind = celox_design::ValueKind::StrRef;
         }
         // A coverage is a `real`, whose bits the helper returns.
         if op.is_real() {

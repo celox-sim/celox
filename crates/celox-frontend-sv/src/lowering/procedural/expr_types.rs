@@ -42,11 +42,11 @@ impl ProcModule<'_> {
                     || matches!(**op, sv::ir::ObjectOp::Container { op: sv::ir::ContainerOp::Get | sv::ir::ContainerOp::PopFront | sv::ir::ContainerOp::PopBack, ref layout } if layout.handle == Some(sv::ir::HandleProperty::String))
                     || matches!(
                         **op,
-                        sv::ir::ObjectOp::Pattern(_)
-                            | sv::ir::ObjectOp::GetRandstate
-                            // The text of the warnings of a covergroup.
-                            | sv::ir::ObjectOp::Coverage(sv::ir::CoverageOp::Message)
+                        sv::ir::ObjectOp::Pattern(_) | sv::ir::ObjectOp::GetRandstate
                     )
+                    // The text of the warnings of a covergroup, and an
+                    // option member that is a `string`.
+                    || matches!(&**op, sv::ir::ObjectOp::Coverage(op) if op.returns_string())
                     || matches!(
                         **op,
                         sv::ir::ObjectOp::Stream(

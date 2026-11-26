@@ -1765,7 +1765,7 @@ No assertions or exclusions are weakened.
 
 ### Covergroups
 
-The 27 `covergroup::*` cases check what IEEE 1800-2023 fixes of covergroups.
+The 34 `covergroup::*` cases check what IEEE 1800-2023 fixes of covergroups.
 Five are of a covergroup without items: a variable of a covergroup type holds
 a handle or `null` (19.3), `new` and `sample` take the arguments of the
 covergroup and of its sample method, by position, by name and by default
@@ -1805,8 +1805,20 @@ of a cross and of a cross bin and that of a crossed coverpoint (19.6),
 `option.cross_retain_auto_bins` 0 of the covergroup as the default of its
 crosses (Tables 19-1 and 19-2, 19.11.2), and `!binsof`, `&&`, `||`,
 parentheses, an `intersect` list of arguments and of a function call and the
-identifier of the cross (19.6.1, 19.6.1.2). Celox passes all of them on
-every backend.
+identifier of the cross (19.6.1, 19.6.1.2). Seven are of the options and
+the predefined methods, with the examples of the standard: options of a
+coverpoint assigned after construction change the coverage
+(`g1.a.option.weight = 3` of 19.7, and `at_least`), a procedure reads back
+the members of `option` of the covergroup and of a coverpoint, `type_option`
+weights assigned through `gc::a::` before any instance weigh the merged
+coverpoints (the example of 19.7.1: 59.38), `merge_instances` unites the bins
+of the instances by name (the `gt` example of 19.11.3: 66.67, 100.00 and
+50.00 with `option.get_inst_coverage`), `get_coverage` and
+`get_inst_coverage` with two `ref int` arguments count the bins (the example
+of 19.8, with the values as arguments of `sample`: totals 2, 5, 6 and 16), the
+methods of a coverpoint and of a cross (Table 19-5), and `stop()` and
+`start()` of the covergroup and of a coverpoint (19.8). Celox passes all of
+them on every backend.
 
 Verilator 5.054 passes 18 cases. It keeps the embedded covergroup in a
 shallow copy (`covergroup::shallow_copy_has_no_embedded_covergroup` reads the
@@ -1833,7 +1845,12 @@ coverage cross option": `covergroup::cross_retain_auto_bins_removes_the_automati
 displays 76.67 for 91.67), and it ignores an `intersect` value that is no
 constant ("Unsupported: non-constant or non-integral 'intersect' value":
 `covergroup::cross_select_expressions_combine_binsof_conditions` displays
-72.55 for 75.76). xezim 0.11.4 passes 17. It keeps
+72.55 for 75.76). Of the options and methods it passes none: it rejects
+`option` and `stop()` of a coverpoint ("Unsupported: 'option' of coverpoint
+or cross", "Unsupported: 'stop' of coverpoint or cross"), does not resolve a
+coverpoint or cross after `::` (`cg::x::get_coverage(...)`: "Package/class
+for ':: reference' not found"), and rejects the bins of the arguments of the
+`gt` example as before. xezim 0.11.4 passes 19. It keeps
 the embedded covergroup in a shallow copy too, compares a covergroup variable
 that nothing assigned with `null` as `x`
 (`covergroup::handles_are_null_until_constructed`,
@@ -1855,7 +1872,19 @@ not parse a range with a tolerance. Of the crosses it fails one: it keeps
 the automatic bins of a cross where `option.cross_retain_auto_bins` is 0,
 of the covergroup and of the cross alike (`covergroup::cross_retain_auto_bins_removes_the_automatic_bins`
 displays 76.67; a probe that displays each cross gives the coverage with
-the automatic bins). The two tools disagree with each other
+the automatic bins). Of the options and methods it passes the counts by
+reference and the methods of coverpoints and crosses; it ignores the options
+of a coverpoint assigned in a procedure
+(`covergroup::options_assigned_after_construction_change_the_coverage` stays
+at 58.33), reads the options a definition assigns as x
+(`covergroup::option_members_read_back_what_is_assigned`), does not weigh
+the merged coverpoints by `type_option.weight`
+(`covergroup::type_options_weigh_the_merged_items` displays 62.50 for
+59.38), gives 100.00 for each of the three values of the `gt` example
+(`covergroup::merged_instances_unite_bins_by_name`), and does not count in a
+coverpoint the sample taken while another coverpoint is stopped
+(`covergroup::stop_and_start_control_collection` displays `2 4` for `3 4`).
+The two tools disagree with each other
 where each fails: xezim passes the bin arrays with 70 bins and the crosses of
 variables and of `intersect` lists of arguments, and Verilator passes the
 ignored values, the wildcard bins and the `with` expressions.

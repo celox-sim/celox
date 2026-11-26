@@ -1469,7 +1469,14 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             | "covergroup::cross_of_variables_has_a_bin_for_each_pair_of_bins"
                             | "covergroup::cross_retain_auto_bins_removes_the_automatic_bins"
                             | "covergroup::cross_select_expressions_combine_binsof_conditions"
-                            | "covergroup::ignored_and_illegal_cross_products_are_no_bins",
+                            | "covergroup::ignored_and_illegal_cross_products_are_no_bins"
+                            | "covergroup::options_assigned_after_construction_change_the_coverage"
+                            | "covergroup::option_members_read_back_what_is_assigned"
+                            | "covergroup::type_options_weigh_the_merged_items"
+                            | "covergroup::merged_instances_unite_bins_by_name"
+                            | "covergroup::coverage_queries_count_bins_by_reference"
+                            | "covergroup::coverpoints_and_crosses_report_their_coverage"
+                            | "covergroup::stop_and_start_control_collection",
                         ) => ("compile_error", "compile", "Invalid module item"),
                         ("icarus", "covergroup::set_expression_is_the_values_of_a_bin") => (
                             "compile_error",
@@ -1528,6 +1535,47 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "execute",
                             // "75.76" expected, "72.55" displayed.
                             "expect_output: expected [55, 53, 46, 55, 54, 10], got [55, 50, 46, 53, 53, 10]",
+                        ),
+                        (
+                            "verilator",
+                            "covergroup::options_assigned_after_construction_change_the_coverage",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "Unsupported: 'option' of coverpoint or cross 'ca'",
+                        ),
+                        ("verilator", "covergroup::option_members_read_back_what_is_assigned") => (
+                            "compile_error",
+                            "compile",
+                            "Unsupported: 'option' of coverpoint or cross 'ca'",
+                        ),
+                        ("verilator", "covergroup::type_options_weigh_the_merged_items") => (
+                            "compile_error",
+                            "compile",
+                            "Package/class for ':: reference' not found: 'a'",
+                        ),
+                        ("verilator", "covergroup::merged_instances_unite_bins_by_name") => (
+                            "compile_error",
+                            "compile",
+                            "Non-constant expression in array bins range",
+                        ),
+                        ("verilator", "covergroup::coverage_queries_count_bins_by_reference") => (
+                            "compile_error",
+                            "compile",
+                            "Package/class for ':: reference' not found: 'x'",
+                        ),
+                        (
+                            "verilator",
+                            "covergroup::coverpoints_and_crosses_report_their_coverage",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "Package/class for ':: reference' not found: 'pb'",
+                        ),
+                        ("verilator", "covergroup::stop_and_start_control_collection") => (
+                            "compile_error",
+                            "compile",
+                            "Unsupported: 'stop' of coverpoint or cross 'cb'",
                         ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")

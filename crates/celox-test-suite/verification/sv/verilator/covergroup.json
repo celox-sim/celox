@@ -68,11 +68,33 @@
     },
     {
       "category": "Sequential",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:14:13: Package/class for ':: reference' not found: 'x'\n   14 |   void'(cg::x::get_coverage(covered,total)); $display(\"%0d %0d\", covered, total);\n      |             ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.054 for more assistance.\n%Error: Exiting due to 1 error(s)\n",
+      "expectation": "Simulation",
+      "name": "covergroup::coverage_queries_count_bins_by_reference",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
       "name": "covergroup::coverpoint_guard_skips_the_sample",
       "phase": "execute",
       "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:13:64: Package/class for ':: reference' not found: 'pb'\n   13 |   $display(\"%0.2f %0.2f %0.2f\", c1.pa.get_inst_coverage(), cg::pb::get_coverage(), c1.pa.get_coverage());\n      |                                                                ^~\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.054 for more assistance.\n%Error: <case>/source_0.sv:14:57: Package/class for ':: reference' not found: 'x'\n   14 |   $display(\"%0.2f %0.2f\", c2.x.get_inst_coverage(), cg::x::get_coverage());\n      |                                                         ^\n%Error: Exiting due to 2 error(s)\n",
+      "expectation": "Simulation",
+      "name": "covergroup::coverpoints_and_crosses_report_their_coverage",
+      "phase": "compile",
+      "status": "compile_error",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
@@ -211,6 +233,39 @@
     },
     {
       "category": "Sequential",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:6:22: Non-constant expression in array bins range; range bounds must be constants (IEEE 1800-2023 19.5)\n                               : ... note: In instance 'celox_suite_tb.dut'\n    6 |   coverpoint a {bins b[] = { [l:h] };}\n      |                      ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.054 for more assistance.\n%Error: Exiting due to 1 error(s)\n",
+      "expectation": "Simulation",
+      "name": "covergroup::merged_instances_unite_bins_by_name",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Warning-COVERIGN: <case>/source_0.sv:5:22: Ignoring unsupported coverage option: 'goal'\n    5 |   ca: coverpoint a { option.goal = 80; }\n      |                      ^~~~~~\n                   ... For warning description see https://verilator.org/warn/COVERIGN?v=5.054\n                   ... Use \"/* verilator lint_off COVERIGN */\" and lint_on around source to disable this message.\n%Error-UNSUPPORTED: <case>/source_0.sv:11:5: Unsupported: 'option' of coverpoint or cross 'ca'\n                                           : ... note: In instance 'celox_suite_tb.dut'\n   11 |   c.ca.option.at_least = 3;\n      |     ^~\n                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.054\n%Error-UNSUPPORTED: <case>/source_0.sv:13:14: Unsupported: 'option' of coverpoint or cross 'ca'\n                                            : ... note: In instance 'celox_suite_tb.dut'\n   13 |            c.ca.option.goal, c.ca.option.at_least);\n      |              ^~\n%Error-UNSUPPORTED: <case>/source_0.sv:13:32: Unsupported: 'option' of coverpoint or cross 'ca'\n                                            : ... note: In instance 'celox_suite_tb.dut'\n   13 |            c.ca.option.goal, c.ca.option.at_least);\n      |                                ^~\n%Error: Exiting due to 3 error(s)\n",
+      "expectation": "Simulation",
+      "name": "covergroup::option_members_read_back_what_is_assigned",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error-UNSUPPORTED: <case>/source_0.sv:13:5: Unsupported: 'option' of coverpoint or cross 'ca'\n                                           : ... note: In instance 'celox_suite_tb.dut'\n   13 |   c.ca.option.weight = 3;\n      |     ^~\n                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.054\n%Error-UNSUPPORTED: <case>/source_0.sv:15:5: Unsupported: 'option' of coverpoint or cross 'cb'\n                                           : ... note: In instance 'celox_suite_tb.dut'\n   15 |   c.cb.option.at_least = 2;\n      |     ^~\n%Error: Exiting due to 2 error(s)\n",
+      "expectation": "Simulation",
+      "name": "covergroup::options_assigned_after_construction_change_the_coverage",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
       "name": "covergroup::options_of_a_definition",
@@ -255,9 +310,31 @@
     },
     {
       "category": "Sequential",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error-UNSUPPORTED: <case>/source_0.sv:14:5: Unsupported: 'stop' of coverpoint or cross 'cb'\n                                           : ... note: In instance 'celox_suite_tb.dut'\n   14 |   c.cb.stop();\n      |     ^~\n                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.054\n%Error-UNSUPPORTED: <case>/source_0.sv:16:5: Unsupported: 'start' of coverpoint or cross 'cb'\n                                           : ... note: In instance 'celox_suite_tb.dut'\n   16 |   c.cb.start();\n      |     ^~\n%Error-UNSUPPORTED: <case>/source_0.sv:18:32: Unsupported: arguments of 'get_inst_coverage' of coverpoint or cross 'ca'\n                                            : ... note: In instance 'celox_suite_tb.dut'\n   18 |   void'(c.ca.get_inst_coverage(covered, total)); $display(\"%0d %0d\", covered, total);\n      |                                ^~~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:19:32: Unsupported: arguments of 'get_inst_coverage' of coverpoint or cross 'cb'\n                                            : ... note: In instance 'celox_suite_tb.dut'\n   19 |   void'(c.cb.get_inst_coverage(covered, total)); $display(\"%0d %0d\", covered, total);\n      |                                ^~~~~~~\n%Error: Exiting due to 4 error(s)\n",
+      "expectation": "Simulation",
+      "name": "covergroup::stop_and_start_control_collection",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error-UNSUPPORTED: <case>/source_0.sv:5:17: Unsupported: +/- range\n    5 |    bins near = {[11 +/- 1]};\n      |                 ^\n                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.054\n%Error-UNSUPPORTED: <case>/source_0.sv:6:16: Unsupported: +%- range\n    6 |    bins pct = {[7 +%- 25]};\n      |                ^\n%Error: Exiting due to 2 error(s)\n",
       "expectation": "Simulation",
       "name": "covergroup::tolerance_ranges_of_a_bin",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:10:7: Package/class for ':: reference' not found: 'a'\n   10 |   gc::a::type_option.weight = 3;\n      |       ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.054 for more assistance.\n%Error: <case>/source_0.sv:11:7: Package/class for ':: reference' not found: 'b'\n   11 |   gc::b::type_option.weight = 5;\n      |       ^\n%Error: <case>/source_0.sv:18:55: Package/class for ':: reference' not found: 'a'\n   18 |   $display(\"%0.2f %0.2f %0d\", gc::get_coverage(), gc::a::get_coverage(), gc::b::type_option.weight);\n      |                                                       ^\n%Error: <case>/source_0.sv:18:78: Package/class for ':: reference' not found: 'b'\n   18 |   $display(\"%0.2f %0.2f %0d\", gc::get_coverage(), gc::a::get_coverage(), gc::b::type_option.weight);\n      |                                                                              ^\n%Error: Exiting due to 4 error(s)\n",
+      "expectation": "Simulation",
+      "name": "covergroup::type_options_weigh_the_merged_items",
       "phase": "compile",
       "status": "compile_error",
       "stronger_than_sv": false,

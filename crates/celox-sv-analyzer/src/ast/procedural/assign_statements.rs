@@ -85,8 +85,39 @@ impl BodyBuilder<'_, '_, '_> {
         self.prepare_pattern_values(left)?;
         self.prepare_pattern_values(right)?;
         // A member of the options of a covergroup (IEEE 1800-2023 19.7) is
-        // no variable the scope declares: its assignment is that of the
-        // covergroup, which is rejected as what it is.
+        // no variable the scope declares: its assignment is a coverage
+        // operation of the covergroup.
+        if let Some((mut assigned, member_type)) = covergroups::option_assignment(
+            &self.tree,
+            self.session,
+            left,
+            right,
+            op,
+            nonblocking,
+            self.syntax().declarations(),
+            &self.dims,
+        )? {
+            self.rename_expr(&mut assigned);
+            let mut stmts = Vec::new();
+            // An `int` or `bit` member takes the value as a variable of its
+            // type is assigned it (19.10): converted to the type, real
+            // values rounded and x and z bits 0.
+            if let Some(ty) = member_type
+                && let Expr::Call { args, .. } = &mut assigned
+                && let Some(Some(value)) = args.get_mut(1)
+            {
+                let local = self.declare("$option", ty);
+                stmts.push(Stmt::Assign {
+                    lhs: LValue::Ident(local.clone()),
+                    rhs: std::mem::replace(value, Expr::Ident(local)),
+                    nonblocking: false,
+                });
+            }
+            stmts.push(Stmt::Eval(assigned));
+            return Ok(stmts);
+        }
+        // Another predefined member of a covergroup is no variable either,
+        // and is rejected as what it is.
         covergroups::value(
             &self.tree,
             self.session,

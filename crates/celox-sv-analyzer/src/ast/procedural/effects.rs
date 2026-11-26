@@ -1557,6 +1557,8 @@ impl BodyBuilder<'_, '_, '_> {
         {
             return Err(unsupported("increment or decrement of a string"));
         }
+        // A member of the options of a covergroup is assigned with `=` only.
+        covergroups::check_place(&self.tree, self.session, operand, native, &self.dims)?;
         // The operator evaluates the address of a place once, before it reads
         // it, as an assignment operator does (11.4.2, 11.4.1).
         if let Ok(LValue::Object { .. }) = expression_binding::variable_lvalue(
