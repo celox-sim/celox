@@ -238,10 +238,12 @@ fn members_of(
     module: &crate::ir::Module,
     enumerations: &[(String, Type)],
 ) -> Vec<VirtualInterfaceMember> {
-    // Member bounds may name the interface's constants.
+    // Member bounds may name the interface's constants, and those of the
+    // packages it uses, through their imports too (IEEE 1800-2023 26.3).
     let constants = module
-        .parameters()
+        .imported_parameters()
         .iter()
+        .chain(module.parameters())
         .filter_map(|parameter| Some((parameter.name().to_owned(), parameter.resolved_value()?)))
         .collect::<ConstEnv>();
     module
