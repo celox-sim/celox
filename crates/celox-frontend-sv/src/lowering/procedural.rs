@@ -131,7 +131,7 @@ pub(super) struct RuntimeReports {
 }
 
 /// The sites of the module's function units.
-#[derive(Default)]
+#[derive(Debug, Default, Clone)]
 pub(super) struct FunctionSites {
     /// The host request sites of the module's function units, which every
     /// process of the module lists after its own (see

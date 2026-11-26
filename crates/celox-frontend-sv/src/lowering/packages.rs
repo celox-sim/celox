@@ -99,6 +99,7 @@ pub(super) fn lower_package_states(
     warnings: &mut Vec<crate::warning::PendingWarning>,
     force_out_of_line: bool,
     recursion_report: Option<&Path>,
+    home: Option<std::sync::Arc<out_of_line::Home>>,
 ) -> Result<Vec<(String, ModuleId, LoweredSvModule)>, sv::AnalyzerError> {
     let PackageStates {
         states,
@@ -115,6 +116,19 @@ pub(super) fn lower_package_states(
                 force_out_of_line,
                 recursion_report.is_some(),
             ));
+            // And call the root's functions instead where they serve (see
+            // `out_of_line::Home`), when the two keep time alike.
+            if let (Some(home), Ok(time_scale), Some(functions)) = (
+                &home,
+                &time_scale,
+                calls.as_mut().and_then(|graph| graph.out_of_line.as_mut()),
+            ) && home.time_scale == *time_scale
+            {
+                functions.home = Some(out_of_line::HomeLink::new(
+                    std::sync::Arc::clone(home),
+                    &name,
+                ));
+            }
             let report_source = recursion_report.map(|_| module.clone());
             let lowered = lower_module(
                 std::borrow::Cow::Owned(module),
@@ -139,11 +153,28 @@ pub(super) fn lower_package_states(
             }
             let mut lowered = lowered?;
             if let Some(functions) = calls.as_ref().and_then(|graph| graph.out_of_line.as_ref()) {
-                out_of_line::attach_functions(
-                    &mut lowered.sim_module,
-                    functions.units(),
-                    functions.frames(),
-                );
+                out_of_line::attach_functions(&mut lowered.sim_module, functions);
+                // The variables that name those of the root's function
+                // sites (see `ProcModule::list_home_sites`).
+                if let Some(link) = &functions.home {
+                    for (own, target) in &link.bound {
+                        match target {
+                            out_of_line::Mirror::Home(id) => {
+                                lowered.sim_module.hierarchical_bindings.insert(
+                                    *own,
+                                    celox_frontend_core::symbolic::artifact::HierarchicalBinding {
+                                        start: celox_frontend_core::symbolic::artifact::HierarchicalStart::Root,
+                                        path: Vec::new(),
+                                        targets: vec![(link.home.module, *id)],
+                                    },
+                                );
+                            }
+                            out_of_line::Mirror::Package(package, variable) => lowered
+                                .package_variables
+                                .push((*own, package.clone(), variable.clone())),
+                        }
+                    }
+                }
             }
             lowered.sim_module.time_precision = Some(
                 celox_design::TimePrecision::try_from(global_precision)

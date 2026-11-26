@@ -92,7 +92,11 @@
 //! out of line only if the function writes no module variable and reads
 //! none the process writes, so both see the same values.
 
+mod home;
 mod policy;
+
+pub(crate) use home::Home;
+pub(super) use home::{HomeLink, Mirror};
 
 use super::procedural::{
     ProcModule, SystemTaskKind, collect_calls, default_calls, expr_idents, stmt_calls,
@@ -347,9 +351,37 @@ pub(super) struct Function {
     /// calls of the unit: defaults that call each other then recurse at run
     /// time, as any recursion, instead of expanding at the call forever.
     pub omitted: Option<(usize, Vec<usize>)>,
+    /// For a function of the root module that this module calls instead of
+    /// lowering its own (see [`Home`]), its index among the root's: it has
+    /// no unit, and only the slots of its formals and result name variables
+    /// of this module.
+    pub import: Option<u32>,
 }
 
 impl Function {
+    /// The function without its unit and what its lowering kept for the
+    /// calls of its callers: the frame a call builds.
+    pub fn frame_only(&self) -> Self {
+        Self {
+            key: self.key.clone(),
+            places: self.places.clone(),
+            slots: self.slots.clone(),
+            unit: None,
+            size: self.size,
+            offsets: self.offsets.clone(),
+            reads: HashSet::default(),
+            writes: HashSet::default(),
+            callees: Vec::new(),
+            size_patches: Vec::new(),
+            random: self.random,
+            dist_seed: self.dist_seed,
+            resume: self.resume,
+            calls: Vec::new(),
+            omitted: self.omitted.clone(),
+            import: self.import,
+        }
+    }
+
     /// The slot of variable `id`.
     pub fn slot(&self, id: SourceVarId) -> Option<usize> {
         self.slots.iter().position(|slot| slot.id == id)
@@ -398,6 +430,9 @@ pub(crate) struct OutOfLine {
     /// The fully inlined size of each subroutine, in statements (see
     /// [`ProcModule::mark_recursive`]).
     inlined_sizes: HashMap<String, u64>,
+    /// The root module, whose functions the module may call instead of
+    /// lowering its own (see [`Home`]).
+    pub(super) home: Option<HomeLink>,
 }
 
 /// The fully inlined size, in statements, above which a subroutine goes out
@@ -534,32 +569,35 @@ impl OutOfLine {
         false
     }
 
-    /// The function units, by the indices their calls name.
-    pub(super) fn units(&self) -> Vec<FunctionUnit<Addr>> {
+    /// The function units, by the indices their calls name; `None` for a
+    /// function of the root (see [`Function::import`]).
+    fn units(&self) -> Vec<Option<FunctionUnit<Addr>>> {
         self.functions
             .iter()
-            .map(|function| FunctionUnit {
-                unit: function
-                    .unit
-                    .clone()
-                    .expect("every function body is lowered once the module is"),
-                frame: FrameLayout {
-                    size: function.size,
-                    slots: function
-                        .slots
-                        .iter()
-                        .zip(&function.offsets)
-                        .map(|(slot, &offset)| FrameSlot {
-                            addr: frame_addr(slot.address),
-                            offset,
-                            width: slot.width,
-                            four_state: slot.four_state,
-                            handle: slot.kind != celox_design::ValueKind::Bits,
-                            element_width: slot.element_width,
-                        })
-                        .collect(),
-                },
-                effects: Default::default(),
+            .map(|function| {
+                function.import.is_none().then(|| FunctionUnit {
+                    unit: function
+                        .unit
+                        .clone()
+                        .expect("every function body is lowered once the module is"),
+                    frame: FrameLayout {
+                        size: function.size,
+                        slots: function
+                            .slots
+                            .iter()
+                            .zip(&function.offsets)
+                            .map(|(slot, &offset)| FrameSlot {
+                                addr: frame_addr(slot.address),
+                                offset,
+                                width: slot.width,
+                                four_state: slot.four_state,
+                                handle: slot.kind != celox_design::ValueKind::Bits,
+                                element_width: slot.element_width,
+                            })
+                            .collect(),
+                    },
+                    effects: Default::default(),
+                })
             })
             .collect()
     }
@@ -567,9 +605,10 @@ impl OutOfLine {
     /// What the runtime reads in a saved frame of each function, in the
     /// order of [`Self::units`] (see [`celox_design::FunctionFrame`]); the
     /// callees are module-local function indices.
-    pub(super) fn frames(&self) -> Vec<celox_design::FunctionFrame> {
+    fn frames(&self) -> Vec<celox_design::FunctionFrame> {
         self.functions
             .iter()
+            .filter(|function| function.import.is_none())
             .map(|function| celox_design::FunctionFrame {
                 size: function.size,
                 resume: function.resume.map(|slot| {
@@ -791,30 +830,13 @@ impl StorageIndex {
 /// The functions of `module` a unit of it calls, directly or through other
 /// functions, in `module.functions` with the calls renumbered: a function
 /// lowered for a call that then stayed inlined (from an `always_ff`
-/// process, say) is dropped.
-pub(super) fn attach_functions(
-    module: &mut SimModule,
-    mut functions: Vec<FunctionUnit<Addr>>,
-    mut frames: Vec<celox_design::FunctionFrame>,
-) {
-    fn calls<A>(unit: &ExecutionUnit<A>, called: &mut Vec<usize>) {
-        for block in unit.blocks.values() {
-            for instruction in &block.instructions {
-                if let SIRInstruction::Call { function, .. } = instruction {
-                    called.push(function.0 as usize);
-                }
-            }
-        }
-    }
-    fn renumber<A>(unit: &mut ExecutionUnit<A>, kept: &[Option<u32>]) {
-        for block in unit.blocks.values_mut() {
-            for instruction in &mut block.instructions {
-                if let SIRInstruction::Call { function, .. } = instruction {
-                    function.0 = kept[function.0 as usize].expect("a called function is kept");
-                }
-            }
-        }
-    }
+/// process, say) is dropped. The functions of the root that `functions`
+/// imports (see [`Home`]) follow the module's own, in
+/// `module.imported_functions`. Returns the new index of each function.
+pub(super) fn attach_functions(module: &mut SimModule, functions: &OutOfLine) -> Vec<Option<u32>> {
+    let units = functions.units();
+    let frames = functions.frames();
+    let home = functions.home.as_ref().map(|link| link.home.module);
     // A store of a function unit repeats at every call, so each signal a
     // unit stores gets counters, as one a kernel may store twice between
     // two checks does: assembly counts the stores of a signal a wait or an
@@ -824,8 +846,9 @@ pub(super) fn attach_functions(
         .iter()
         .map(|slots| slots.signal)
         .collect();
-    let stored: Vec<SourceVarId> = functions
+    let stored: Vec<SourceVarId> = units
         .iter()
+        .flatten()
         .flat_map(|function| function.unit.blocks.values())
         .flat_map(|block| &block.instructions)
         .filter_map(celox_frontend_core::watch::write_destination)
@@ -841,37 +864,53 @@ pub(super) fn attach_functions(
             calls(unit, &mut work);
         }
     }
-    let mut reached = vec![false; functions.len()];
+    let mut reached = vec![false; units.len()];
     while let Some(function) = work.pop() {
-        if !std::mem::replace(&mut reached[function], true) {
-            calls(&functions[function].unit, &mut work);
+        if !std::mem::replace(&mut reached[function], true)
+            && let Some(unit) = &units[function]
+        {
+            calls(&unit.unit, &mut work);
         }
     }
-    if reached.iter().all(|&reached| reached) {
-        module.functions = functions;
-        module.function_frames = frames;
-        return;
-    }
-    let mut next = 0;
-    let kept: Vec<Option<u32>> = reached
+    let imports = functions
+        .functions
         .iter()
-        .map(|&reached| {
-            reached.then(|| {
+        .map(|function| function.import)
+        .collect::<Vec<_>>();
+    if reached.iter().all(|&reached| reached) && imports.iter().all(Option::is_none) {
+        module.functions = units.into_iter().flatten().collect();
+        module.function_frames = frames;
+        return (0..reached.len() as u32).map(Some).collect();
+    }
+    // The module's own functions first, then the imported ones.
+    let mut next = 0;
+    let mut kept: Vec<Option<u32>> = reached
+        .iter()
+        .zip(&imports)
+        .map(|(&reached, import)| {
+            (reached && import.is_none()).then(|| {
                 next += 1;
                 next - 1
             })
         })
         .collect();
-    let mut position = 0;
-    functions.retain(|_| {
-        position += 1;
-        reached[position - 1]
-    });
-    let mut position = 0;
-    frames.retain(|_| {
-        position += 1;
-        reached[position - 1]
-    });
+    let mut imported = Vec::new();
+    for (position, import) in imports.iter().enumerate() {
+        if let (true, Some(import)) = (reached[position], import) {
+            kept[position] = Some(next);
+            next += 1;
+            imported.push((home.expect("an import has a home"), *import));
+        }
+    }
+    // `frames` lists the module's own functions only.
+    let (mut functions, mut frames): (Vec<FunctionUnit<Addr>>, Vec<_>) = units
+        .into_iter()
+        .enumerate()
+        .filter_map(|(position, unit)| Some((position, unit?)))
+        .zip(frames)
+        .filter(|((position, _), _)| reached[*position])
+        .map(|((_, unit), frame)| (unit, frame))
+        .unzip();
     for function in &mut functions {
         renumber(&mut function.unit, &kept);
     }
@@ -888,49 +927,74 @@ pub(super) fn attach_functions(
     for_each_unit_mut(module, &kept);
     module.functions = functions;
     module.function_frames = frames;
+    module.imported_functions = imported;
+    kept
+}
 
-    fn for_each_unit_mut(module: &mut SimModule, kept: &[Option<u32>]) {
-        let units = module
-            .event_bodies
-            .values_mut()
-            .flat_map(|body| body.sample.iter_mut().chain([&mut body.publish]))
-            .chain(
-                module
-                    .split_commit_ff_blocks
-                    .values_mut()
-                    .flat_map(|split| [&mut split.active, &mut split.nba]),
-            )
-            .chain(
-                module
-                    .parallel_ff_parts
-                    .values_mut()
-                    .flatten()
-                    .flat_map(|part| [&mut part.evaluate, &mut part.apply]),
-            )
-            .chain(
-                module
-                    .processes
-                    .iter_mut()
-                    .map(|process| &mut process.kernel),
-            )
-            .chain(
-                module
-                    .next_state
-                    .evaluations
-                    .values_mut()
-                    .flatten()
-                    .filter_map(|batch| match batch {
-                        EdgeEvaluation::Procedure(unit) => Some(unit),
-                        EdgeEvaluation::Graph(_) => None,
-                    }),
-            );
-        for unit in units {
-            renumber(unit, kept);
-        }
-        for path in &mut module.comb_blocks {
-            if let LogicPathTarget::Process { unit, .. } = &mut path.target {
-                renumber(unit, kept);
+/// The functions the calls of `unit` enter, added to `called`.
+fn calls<A>(unit: &ExecutionUnit<A>, called: &mut Vec<usize>) {
+    for block in unit.blocks.values() {
+        for instruction in &block.instructions {
+            if let SIRInstruction::Call { function, .. } = instruction {
+                called.push(function.0 as usize);
             }
+        }
+    }
+}
+
+/// Renumber the calls of `unit` by `kept`.
+fn renumber<A>(unit: &mut ExecutionUnit<A>, kept: &[Option<u32>]) {
+    for block in unit.blocks.values_mut() {
+        for instruction in &mut block.instructions {
+            if let SIRInstruction::Call { function, .. } = instruction {
+                function.0 = kept[function.0 as usize].expect("a called function is kept");
+            }
+        }
+    }
+}
+
+/// Renumber the calls of every unit of `module` by `kept`.
+fn for_each_unit_mut(module: &mut SimModule, kept: &[Option<u32>]) {
+    let units = module
+        .event_bodies
+        .values_mut()
+        .flat_map(|body| body.sample.iter_mut().chain([&mut body.publish]))
+        .chain(
+            module
+                .split_commit_ff_blocks
+                .values_mut()
+                .flat_map(|split| [&mut split.active, &mut split.nba]),
+        )
+        .chain(
+            module
+                .parallel_ff_parts
+                .values_mut()
+                .flatten()
+                .flat_map(|part| [&mut part.evaluate, &mut part.apply]),
+        )
+        .chain(
+            module
+                .processes
+                .iter_mut()
+                .map(|process| &mut process.kernel),
+        )
+        .chain(
+            module
+                .next_state
+                .evaluations
+                .values_mut()
+                .flatten()
+                .filter_map(|batch| match batch {
+                    EdgeEvaluation::Procedure(unit) => Some(unit),
+                    EdgeEvaluation::Graph(_) => None,
+                }),
+        );
+    for unit in units {
+        renumber(unit, kept);
+    }
+    for path in &mut module.comb_blocks {
+        if let LogicPathTarget::Process { unit, .. } = &mut path.target {
+            renumber(unit, kept);
         }
     }
 }

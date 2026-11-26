@@ -620,6 +620,18 @@ fn lower_module_with_overrides(
         &constants,
         &parameter_types,
     )?;
+    // A state module names the package variables of the root's function
+    // sites by its own variables of them (see `out_of_line::Home`).
+    if let Some(link) = calls
+        .as_deref_mut()
+        .and_then(|graph| graph.out_of_line.as_mut())
+        .and_then(|functions| functions.home.as_mut())
+    {
+        link.aliases = package_variables
+            .iter()
+            .map(|(id, package, variable)| ((package.clone(), variable.clone()), *id))
+            .collect();
+    }
     // The level-sensitive lowering below changes processes only: one table
     // of the subroutines serves every lowering of the module.
     let tables = procedural::ModuleTables::new(module, shared.no_covergroups);
@@ -722,6 +734,7 @@ fn lower_module_with_overrides(
         nba_switches,
         host_request_sites,
         event_assignments,
+        unit_sites,
     ) = lower_initial_processes(
         module,
         &tables,
@@ -759,7 +772,7 @@ fn lower_module_with_overrides(
 
     Ok(LoweredSvModule {
         edge_schedule,
-        source: module.clone(),
+        source: std::sync::Arc::new(module.clone()),
         implicit_nets_allowed,
         sim_module: SimModule {
             testbench_variables: Default::default(),
@@ -835,6 +848,7 @@ fn lower_module_with_overrides(
         interconnect_resolutions: HashMap::default(),
         interconnect_element_resolutions: HashMap::default(),
         calls: None,
+        unit_sites,
     })
 }
 
