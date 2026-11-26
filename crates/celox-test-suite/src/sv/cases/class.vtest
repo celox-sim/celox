@@ -7281,3 +7281,52 @@ endmodule
 "#)
   (top Top) (run_until 1)
   (assert_eq now 7) (assert_eq seen 1))
+
+; The bit-vector functions count bits of the values they name in constraints,
+; of rand array elements in a loop too, and an infeasible count fails the call
+; (IEEE 1800-2023 18.6.3, 20.9).
+(case constraint_bit_vector_functions
+  (source "constraint_bit_counts.sv" #"
+module Top(output bit done);
+    class C;
+        rand bit [2:0] size;
+        rand bit [7:0] strobe[$];
+        rand bit [15:0] w;
+        rand bit [7:0] h, z, u, k;
+        logic [7:0] s;
+        constraint c0 { strobe.size() == 4; size < 3; }
+        constraint c1 { foreach (strobe[i]) $countones(strobe[i]) == 1 << size; }
+        constraint c2 { $onehot(w); $onehot0(h); $countbits(z, '0) == 3; }
+        constraint c3 { $countbits(k, 1'b1, 1'b0) == 8; $countbits(k, 'x, 'z) == 0; }
+        constraint c4 { $isunknown(s) -> u[0] == 1; !$isunknown(s) -> u[0] == 0; }
+    endclass
+    class Over;
+        rand bit [7:0] x;
+        constraint c { $countones(x) > 8; }
+    endclass
+    C c;
+    Over o;
+    bit [7:0] mask = 8'b0110_0001;
+    initial begin
+        c = new;
+        c.srandom(5);
+        for (int n = 0; n < 24; n++) begin
+            c.s = n % 2 ? 8'b1x : 8'd3;
+            if (!c.randomize()) $fatal(1, "randomize");
+            foreach (c.strobe[i])
+                if ($countones(c.strobe[i]) != (1 << c.size)) $fatal(1, "countones");
+            if (!$onehot(c.w) || !$onehot0(c.h) || $countbits(c.z, '0) != 3) $fatal(1, "counts");
+            if (c.u[0] != $isunknown(c.s)) $fatal(1, "isunknown");
+        end
+        o = new;
+        o.x = 5;
+        if (o.randomize() || o.x != 5) $fatal(1, "infeasible count");
+        // An inline constraint counts the bits of a caller's variable.
+        o.c.constraint_mode(0);
+        if (!o.randomize() with { $countones(x) == $countones(mask) + 5; } || $countones(o.x) != 8)
+            $fatal(1, "inline count");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
