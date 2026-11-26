@@ -268,6 +268,112 @@ pub(in crate::ast) fn initial_processes_from_scope(
             }
             continue;
         }
+        // The process of a clocking block, and the event it triggers (see
+        // `clocking`).
+        if let celox_sv_syntax::BodyItemKind::Clocking(clocking) =
+            tree.declarations().body_item(item.id).kind
+        {
+            if !item.scope_name().is_empty() {
+                return Err(unsupported("clocking block in a generate block"));
+            }
+            let Some(block) = clocking::block(tree.declarations(), clocking)? else {
+                continue;
+            };
+            let event = block
+                .declaration
+                .event
+                .ok_or_else(|| unsupported("default clocking (IEEE 1800-2023 14.12)"))?;
+            let (item_dimensions, literals) = views.get(item);
+            let mut builder = BodyBuilder::new(
+                tree,
+                session,
+                item_dimensions,
+                state,
+                system_functions::Body::Process,
+            );
+            let wait = builder.native_timing_control(event)?;
+            let mut bodies = vec![(
+                "clocking block",
+                vec![Stmt::Loop {
+                    kind: LoopKind::Forever,
+                    init: Vec::new(),
+                    condition: None,
+                    step: Vec::new(),
+                    body: clocking::process(&block, wait),
+                }],
+            )];
+            // The signals that inputs of a delay skew sample, delayed.
+            for var in &block.vars {
+                if let Some(clocking::InputSkew::Delay(value)) = var.input {
+                    let ticks =
+                        clocking::delay_ticks(value, tree, builder.session, item_dimensions)?;
+                    let (first, round) = clocking::skew_process(&block.name, &var.name, ticks);
+                    bodies.push((
+                        "clocking block input skew",
+                        vec![
+                            first,
+                            Stmt::Loop {
+                                kind: LoopKind::Forever,
+                                init: Vec::new(),
+                                condition: None,
+                                step: Vec::new(),
+                                body: round,
+                            },
+                        ],
+                    ));
+                }
+            }
+            let mut init = vec![Stmt::Assign {
+                lhs: LValue::Ident(block.name.clone()),
+                rhs: events::new_event(),
+                nonblocking: false,
+            }];
+            for stmt in bodies
+                .iter_mut()
+                .flat_map(|(_, body)| body.iter_mut())
+                .chain(&mut init)
+            {
+                substitute_stmt_constants(tree, builder.session, stmt, &item.env, literals);
+                qualify_stmt(item, stmt);
+                substitute_stmt_constants(
+                    tree,
+                    builder.session,
+                    stmt,
+                    const_env,
+                    parameter_literals,
+                );
+            }
+            let site = |construct| {
+                process_site(
+                    construct,
+                    tree.declarations().body_item(item.id).tokens,
+                    tree,
+                )
+            };
+            initializers.push(InitialProcess {
+                creation_order,
+                site: site("clocking block event"),
+                condition: None,
+                body: init,
+                kind: celox_design::ProcessKind::Initializer,
+                validation_body: Vec::new(),
+                synthetic: true,
+                repeats: false,
+            });
+            for (construct, body) in bodies {
+                processes.push(InitialProcess {
+                    creation_order,
+                    site: site(construct),
+                    condition: None,
+                    body,
+                    kind: celox_design::ProcessKind::Regular,
+                    validation_body: Vec::new(),
+                    synthetic: true,
+                    repeats: true,
+                });
+            }
+            continue;
+        }
         // The process of each instance of a sequential UDP (see
         // `primitives`).
         if let celox_sv_syntax::BodyItemKind::LogicGate(gate) =

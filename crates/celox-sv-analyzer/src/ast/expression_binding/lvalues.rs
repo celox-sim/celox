@@ -20,6 +20,7 @@ pub(in crate::ast) fn variable_lvalue(
     // A member of the options of a covergroup is no variable (IEEE
     // 1800-2023 19.10).
     super::super::covergroups::check_place(tree, session, root, native, dimensions)?;
+    clocking::reject_write(root, native, tree, session, dimensions)?;
     if let Some(place) = direct::object_place(root, native, tree, session, dimensions)? {
         return Ok(place);
     }
@@ -38,6 +39,7 @@ pub(in crate::ast) fn net_lvalue(
     ) {
         unpacked_structs::check_operands(ungroup(root, native), native, tree, session, dimensions)?;
     }
+    clocking::reject_write(root, native, tree, session, dimensions)?;
     // No continuous assignment drives a chandle (6.14).
     chandles::check_target(false, root, tree, native, dimensions, session)?;
     if direct::member_context(root, native, tree, session, dimensions)?

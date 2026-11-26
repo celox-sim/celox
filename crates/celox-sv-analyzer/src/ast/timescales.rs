@@ -1105,6 +1105,36 @@ pub(super) fn delay_literal(
     let Some((number, exponent)) = time_literal_parts(text) else {
         return Ok(None);
     };
+    scaled_delay(node, number, Some(exponent), tree).map(Some)
+}
+
+/// A fixed-point real literal (`0.5`) used as a delay, in time units of the
+/// declaring scope: rounded at the scope's precision before converting to
+/// global scheduler ticks, as a time literal is (3.14.1, 5.7.2).
+pub(super) fn fixed_point_delay(
+    node: celox_sv_syntax::ExprId,
+    text: &str,
+    tree: &AnalysisContext<'_>,
+) -> Converted<Option<u64>> {
+    let digits =
+        |part: &str| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit() || c == '_');
+    match text.split_once('.') {
+        Some((whole, fraction)) if digits(whole) && digits(fraction) => {
+            scaled_delay(node, text, None, tree).map(Some)
+        }
+        _ => Ok(None),
+    }
+}
+
+/// The global scheduler ticks of `number` times ten to `exponent`, or to
+/// the time unit of the scope of `node` without one, rounded at that
+/// scope's precision.
+fn scaled_delay(
+    node: celox_sv_syntax::ExprId,
+    number: &str,
+    exponent: Option<i32>,
+    tree: &AnalysisContext<'_>,
+) -> Converted<u64> {
     let context = &*tree.timescale;
     let source = key(tree);
     let extended = (!context.design.units.contains_key(&source))
@@ -1115,6 +1145,7 @@ pub(super) fn delay_literal(
     let at = tree.declarations().expression(node).tokens.start;
     let scale =
         scope_at(&unit.scopes, &unit.parents, at).map_or(unit.scale, |i| unit.scopes[i].scale);
+    let exponent = exponent.unwrap_or(scale.unit);
     let global_precision = design.precision.unwrap_or(DEFAULT.precision);
     let number = number.replace('_', "");
     let fraction = number
@@ -1142,9 +1173,7 @@ pub(super) fn delay_literal(
             (precision_units + (&divisor / 2u8)) / divisor
         }
     };
-    Ok(Some(u64::try_from(ticks).map_err(|_| {
-        unsupported("time literal delay exceeds scheduler range")
-    })?))
+    u64::try_from(ticks).map_err(|_| unsupported("time literal delay exceeds scheduler range"))
 }
 
 /// A time literal in an expression: a realtime value scaled to the time unit

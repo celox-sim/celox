@@ -133,6 +133,11 @@ pub enum AnalyzerError {
     /// its clause.
     #[error("invalid covergroup: {0}")]
     InvalidCovergroup(String),
+    /// A clocking block declaration or a use of a clocking block that the
+    /// standard makes illegal (IEEE 1800-2023 clause 14); the text names the
+    /// rule and its clause.
+    #[error("invalid clocking block: {0}")]
+    InvalidClocking(String),
     /// An embedded covergroup variable is assigned only in the `new` method
     /// of the class that declares the covergroup (IEEE 1800-2023 19.4).
     #[error(

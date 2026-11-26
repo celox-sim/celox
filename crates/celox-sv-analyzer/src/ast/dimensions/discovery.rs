@@ -1532,6 +1532,7 @@ fn hides(
                 | BodyItemKind::TypeAlias(_)
                 | BodyItemKind::Subroutine(_)
                 | BodyItemKind::Dpi(_)
+                | BodyItemKind::Clocking(_)
                 | BodyItemKind::Instance(_) => imports::item_names(id, tree).contains(wanted),
                 BodyItemKind::Unconverted { category, .. } if category == "class" => {
                     imports::item_names(id, tree).contains(wanted)
