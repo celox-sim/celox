@@ -787,6 +787,10 @@ pub(super) fn place_actual(actual: &sv::ir::Expr) -> bool {
     }
 }
 
+/// The store of `value` into the property that `actual` reads through a
+/// hidden variable holding its object for the whole call (see
+/// [`references::holds_object_for_calls`]): a property of the object of a
+/// reference formal, or the box of a variable a fork shares.
 pub(super) fn forwarded_property(
     actual: &sv::ir::Expr,
     value: sv::ir::Expr,
@@ -804,7 +808,7 @@ pub(super) fn forwarded_property(
     else {
         return None;
     };
-    handle.starts_with(references::OBJECT_TEMP).then(|| {
+    references::holds_object_for_calls(handle).then(|| {
         sv::ir::Stmt::Eval(sv::ir::Expr::Call {
             callee: sv::ir::Callee::Object(Box::new(sv::ir::ObjectOp::Store(*field))),
             args: vec![Some(sv::ir::Expr::Ident(handle.clone())), Some(value)],
