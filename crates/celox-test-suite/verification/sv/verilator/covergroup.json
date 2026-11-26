@@ -101,6 +101,39 @@
     },
     {
       "category": "Sequential",
+      "detail": "covergroup::constructed_instances_of_a_divided_clock_sample_before_the_updates at 1257:2: expect_output: expected [51, 32, 51, 32, 51, 32, 51, 32, 51, 32, 51, 32, 51, 55, 46, 53, 48, 10], got [48, 32, 48, 32, 48, 32, 48, 32, 48, 32, 48, 32, 51, 55, 46, 53, 48, 10]",
+      "expectation": "Simulation",
+      "name": "covergroup::constructed_instances_of_a_divided_clock_sample_before_the_updates",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "covergroup::constructed_instances_take_stop_start_and_sample at 1204:2: expect_output: expected [51, 32, 56, 10, 51, 55, 46, 53, 48, 10], got [48, 32, 48, 10, 53, 48, 46, 48, 48, 10]",
+      "expectation": "Simulation",
+      "name": "covergroup::constructed_instances_take_stop_start_and_sample",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:12:14: syntax error, unexpected new, expecting IDENTIFIER-for-type\n   12 |  cg a[2] = '{new, new};\n      |              ^~~\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.054 for more assistance.\n%Error: Exiting due to 1 error(s)\n",
+      "expectation": "Simulation",
+      "name": "covergroup::constructions_of_declaration_initializers_sample",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:5:18: Non-constant expression in bin range; range bounds must be constants (IEEE 1800-2023 19.5)\n                               : ... note: In instance 'celox_suite_tb.dut'\n    5 |    bins below = {[0:lo]};\n      |                  ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.054 for more assistance.\n%Error: <case>/source_0.sv:6:20: Non-constant expression in bin range; range bounds must be constants (IEEE 1800-2023 19.5)\n                               : ... note: In instance 'celox_suite_tb.dut'\n    6 |    bins between = {[lo + 1:hi]};\n      |                    ^\n%Error: <case>/source_0.sv:7:18: Non-constant expression in bin range; range bounds must be constants (IEEE 1800-2023 19.5)\n                               : ... note: In instance 'celox_suite_tb.dut'\n    7 |    bins above = {[hi + 1:$]};\n      |                  ^\n%Error: Exiting due to 3 error(s)\n",
       "expectation": "Simulation",
       "name": "covergroup::constructor_arguments_set_the_bins",
@@ -233,6 +266,28 @@
     },
     {
       "category": "Sequential",
+      "detail": "covergroup::embedded_covergroup_samples_through_a_virtual_interface at 1178:2: expect_output: expected [51, 32, 49, 54, 10], got [48, 32, 48, 10]",
+      "expectation": "Simulation",
+      "name": "covergroup::embedded_covergroup_samples_through_a_virtual_interface",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator build exit status: 2; see <case>/build.log\nmake: Entering directory '<case>/obj'\ng++ -O0  -I.  -MMD -I/nix/store/3ijs52kzm68s2jpx2n8igld31zfpzry3-verilator-5.054/share/verilator/include -I/nix/store/3ijs52kzm68s2jpx2n8igld31zfpzry3-verilator-5.054/share/verilator/include/vltstd -DVERILATOR=1 -DVM_COVERAGE=1 -DVM_SC=0 -DVM_TIMING=1 -DVM_TRACE=0 -DVM_TRACE_FST=0 -DVM_TRACE_VCD=0 -DVM_TRACE_SAIF=0 -DVM_VPI=1 -faligned-new -fcf-protection=none -Wno-bool-operation -Wno-int-in-bool-context -Wno-shadow -Wno-sign-compare -Wno-subobject-linkage -Wno-tautological-compare -Wno-uninitialized -Wno-unused-but-set-parameter -Wno-unused-but-set-variable -Wno-unused-parameter -Wno-unused-variable  -DVM_PREFIX_INCLUDE=\"<Vdut.h>\" -DVM_PREFIX_INCLUDE_DPI=\"<Vdut__Dpi.h>\"   -O0   -fcoroutines -c -o Vdut__ALL.o Vdut__ALL.cpp\nIn file included from /nix/store/8sjgd7q3mdks1rb7rbcv0sallhvrhai5-gcc-15.3.0/include/c++/15.3.0/x86_64-unknown-linux-gnu/bits/os_defines.h:39,\n                 from /nix/store/8sjgd7q3mdks1rb7rbcv0sallhvrhai5-gcc-15.3.0/include/c++/15.3.0/x86_64-unknown-linux-gnu/bits/c++config.h:727,\n                 from /nix/store/8sjgd7q3mdks1rb7rbcv0sallhvrhai5-gcc-15.3.0/include/c++/15.3.0/cstddef:51,\n                 from /nix/store/3ijs52kzm68s2jpx2n8igld31zfpzry3-verilator-5.054/share/verilator/include/verilatedos.h:403,\n                 from /nix/store/3ijs52kzm68s2jpx2n8igld31zfpzry3-verilator-5.054/share/verilator/include/verilated.h:43,\n                 from Vdut__pch.h:20,\n                 from Vdut.cpp:4,\n                 from Vdut_vm_classes_0.cpp:2,\n                 from Vdut__ALL.cpp:3:\n/nix/store/lbjwxax9n0457lgd83rqwpd1l9lgfl7r-glibc-2.42-84-dev/include/features.h:435:4: warning: #warning _FORTIFY_SOURCE requires compiling with optimization (-O) [-Wcpp]\n  435 | #  warning _FORTIFY_SOURCE requires compiling with optimization (-O)\n      |    ^~~~~~~\nIn file included from Vdut_vm_classes_0.cpp:3:\nVdut___024root__0.cpp: In function ‘bool Vdut___024root___eval_nba(Vdut___024root*)’:\nVdut___024root__0.cpp:121:75: error: cannot convert ‘Vdut___024root*’ to ‘Vdut_Top__03a__03aC*’\n  121 |                 Vdut_Top__03a__03aC___nba_sequent__TOP__Top__03a__03aC__0(vlSelf);\n      |                                                                           ^~~~~~\n      |                                                                           |\n      |                                                                           Vdut___024root*\nVdut___024root__0.cpp:106:85: note: initializing argument 1 of ‘void Vdut_Top__03a__03aC___nba_sequent__TOP__Top__03a__03aC__0(Vdut_Top__03a__03aC*)’\n  106 | void Vdut_Top__03a__03aC___nba_sequent__TOP__Top__03a__03aC__0(Vdut_Top__03a__03aC* vlSelf);\n      |                                                                ~~~~~~~~~~~~~~~~~~~~~^~~~~~\nIn file included from Vdut_vm_classes_0.cpp:7:\nVdut_Top__03a__03aC__Vclpkg__0.cpp: In function ‘void Vdut_Top__03a__03aC___nba_sequent__TOP__Top__03a__03aC__0(Vdut_Top__03a__03aC*)’:\nVdut_Top__03a__03aC__Vclpkg__0.cpp:138:226: error: ‘vlSymsp’ was not declared in this scope\n  138 |     VL_NULL_CHECK(vlSelfRef.on_signal, \"<case>/source_0.sv\", 11)->__VnoInFunc_sample(vlSymsp);\n      |                                                                                                                                                                                                                                  ^~~~~~~\nmake: *** [/nix/store/3ijs52kzm68s2jpx2n8igld31zfpzry3-verilator-5.054/share/verilator/include/verilated.mk:300: Vdut__ALL.o] Error 1\nmake: Leaving directory '<case>/obj'\n%Error: 'make -C <case>/obj -f Vdut.mk -j 1 OPT_FAST=-O0 OPT_SLOW=-O0' exited with 2\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.054 for more assistance.\n%Error: Command Failed ulimit -s unlimited 2>/dev/null; exec /nix/store/3ijs52kzm68s2jpx2n8igld31zfpzry3-verilator-5.054/bin/verilator_bin --cc --exe --build -j 1 --vpi --public-flat-rw --timing --assert --coverage-user -Wno-fatal --x-initial 0 --x-assign 0 --prefix Vdut --top-module celox_suite_tb --Mdir <case>/obj -CFLAGS -O0 -MAKEFLAGS OPT_FAST=-O0\\ OPT_SLOW=-O0 <case>/timescale.sv <case>/source_0.sv <case>/testbench.sv <case>/harness.cpp\n",
+      "expectation": "Simulation",
+      "name": "covergroup::embedded_covergroups_sample_at_events_of_their_class",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
       "name": "covergroup::handles_are_null_until_constructed",
@@ -337,6 +392,17 @@
       "name": "covergroup::options_of_a_definition",
       "phase": "execute",
       "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "native testbench failed: exit status: 1; see runtime.log and protocol.log\n",
+      "expectation": "Simulation",
+      "name": "covergroup::procedural_constructions_sample_at_their_clocking_events",
+      "phase": "execute",
+      "status": "runtime_error",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []

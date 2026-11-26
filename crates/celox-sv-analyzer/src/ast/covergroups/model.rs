@@ -56,11 +56,13 @@ pub(in crate::ast) struct Covergroup {
     /// them from item 1: the declared coverpoints, those of the variables
     /// the crosses cross, then the crosses (see `compile::Layout`).
     pub items: Vec<Item>,
-    /// The clocking event of a type a module or a program declares, at
-    /// which the instance of each declaration with an initializer of the
-    /// type is sampled (19.3; see `procedural::covergroup_sites`). An event
-    /// in the file of [`Self::declaration`], bound in the scope that
-    /// declares the type.
+    /// The clocking event of the type, at which each of its instances is
+    /// sampled (19.3): the instance of a declaration of a module or a
+    /// program with an initializer by a sampler of the scope (see
+    /// `procedural::covergroup_sites`), any other by the process that
+    /// [`Self::spawn_subroutine`] starts. An event in the file of
+    /// [`Self::declaration`], bound in the scope that declares the type, or
+    /// in the class of an embedded one.
     pub event: Option<TimingControlId>,
     /// Why the type cannot be constructed or sampled: something it declares
     /// is not supported, or its header does not bind. The declaration
@@ -94,6 +96,15 @@ impl Covergroup {
     /// The subroutine that samples an instance.
     pub fn sample_subroutine(&self) -> String {
         format!("{}::$sample", self.name)
+    }
+
+    /// The subroutine that starts sampling an instance at the clocking
+    /// event of the type and returns its handle, which a `new` of a type
+    /// with one calls with the instance it constructs, unless a declaration
+    /// of a module or a program constructs it (19.3; see
+    /// `procedural::covergroup_subroutines`).
+    pub fn spawn_subroutine(&self) -> String {
+        format!("{}::$spawn", self.name)
     }
 
     /// The subroutine of `get_inst_coverage(ref int, ref int)` of an
@@ -163,6 +174,12 @@ pub(in crate::ast) const ITEM_FORMAL: &str = "$item";
 /// Whether subroutine `name` samples an instance of a covergroup.
 pub(in crate::ast) fn is_sampler(name: &str) -> bool {
     is_class(name) && name.ends_with("::$sample")
+}
+
+/// Whether subroutine `name` starts the sampler of an instance of a
+/// covergroup with a clocking event (see [`Covergroup::spawn_subroutine`]).
+pub(in crate::ast) fn is_spawner(name: &str) -> bool {
+    is_class(name) && name.ends_with("::$spawn")
 }
 
 /// Whether subroutine `name` constructs an instance of a covergroup.
@@ -400,10 +417,9 @@ pub(in crate::ast) fn build(
 }
 
 /// Why the instances of covergroup `declaration`, of `model`, cannot be
-/// sampled at its clocking event `event` (IEEE 1800-2023 19.3): only the
-/// instances a module or a program declares with an initializer are (see
-/// `procedural::covergroup_sites`), and the event of such a type may not
-/// name an argument of the covergroup.
+/// sampled at its clocking event `event` (IEEE 1800-2023 19.3): the
+/// covergroups of interfaces are not supported, and the event may not name
+/// an argument of the covergroup.
 fn clocking_rejection(
     tree: &AnalysisContext<'_>,
     declaration: &celox_sv_syntax::CovergroupDeclaration,
@@ -411,11 +427,6 @@ fn clocking_rejection(
     event: TimingControlId,
 ) -> Option<AnalyzerError> {
     let native = tree.declarations();
-    if model.owner.is_some() {
-        return Some(unsupported(
-            "covergroup sampling event of a covergroup embedded in a class (IEEE 1800-2023 19.3, 19.4)",
-        ));
-    }
     let unit = classes::enclosing_unit(native, declaration.tokens);
     // Covergroups of interfaces are not supported: a clocked one is
     // rejected for every use, also in an interface that is elaborated as a
@@ -423,11 +434,6 @@ fn clocking_rejection(
     if unit.is_some_and(|unit| unit.kind == celox_sv_syntax::UnitKind::Interface) {
         return Some(unsupported(
             "covergroup sampling event of a covergroup declared in an interface (IEEE 1800-2023 19.3, 25.3)",
-        ));
-    }
-    if unit.is_none_or(|unit| unit.kind == celox_sv_syntax::UnitKind::Package) {
-        return Some(unsupported(
-            "covergroup sampling event of a covergroup declared in a package or the compilation unit (IEEE 1800-2023 19.3)",
         ));
     }
     // "A clocking event may refer to arguments of the covergroup" (19.3).

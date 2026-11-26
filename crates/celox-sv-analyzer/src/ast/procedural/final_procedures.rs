@@ -13,6 +13,10 @@ pub(super) fn validate(subroutines: &[&Subroutine], processes: &[InitialProcess]
     let mut forbidden = HashSet::default();
     let mut calls = Vec::new();
     let mut schedules = HashSet::default();
+    // The subroutines that start the sampler of a covergroup instance (an
+    // unseeded fork, see `Stmt::Fork`), themselves or through those they
+    // call.
+    let mut samplers = HashSet::default();
     let mut runtime_calls = Vec::new();
     for subroutine in subroutines {
         let (invalid, _, callees, _) = effects(
@@ -30,10 +34,17 @@ pub(super) fn validate(subroutines: &[&Subroutine], processes: &[InitialProcess]
         if schedules_events {
             schedules.insert(subroutine.name.clone());
         }
+        let mut starts = false;
+        for stmt in &subroutine.body {
+            stmt.walk(&mut |stmt| starts |= matches!(stmt, Stmt::Fork { unseeded: true, .. }));
+        }
+        if starts {
+            samplers.insert(subroutine.name.clone());
+        }
         runtime_calls.push((&subroutine.name, callees));
     }
     loop {
-        let previous = (forbidden.len(), schedules.len());
+        let previous = (forbidden.len(), schedules.len(), samplers.len());
         for (name, callees) in &calls {
             if callees.iter().any(|callee| forbidden.contains(callee)) {
                 forbidden.insert((*name).clone());
@@ -43,8 +54,11 @@ pub(super) fn validate(subroutines: &[&Subroutine], processes: &[InitialProcess]
             if callees.iter().any(|callee| schedules.contains(callee)) {
                 schedules.insert((*name).clone());
             }
+            if callees.iter().any(|callee| samplers.contains(callee)) {
+                samplers.insert((*name).clone());
+            }
         }
-        if previous == (forbidden.len(), schedules.len()) {
+        if previous == (forbidden.len(), schedules.len(), samplers.len()) {
             break;
         }
     }
@@ -73,6 +87,17 @@ pub(super) fn validate(subroutines: &[&Subroutine], processes: &[InitialProcess]
             )));
         }
         let (_, _, callees, _) = effects(process.body.iter(), &definitions);
+        // The sampler of a covergroup instance embedded in a class, or of
+        // a type of a package or the compilation unit, is a process its
+        // construction starts (19.3), which a final procedure may not
+        // start; no event occurs after it anyway. An instance of a type of
+        // a module or a program joins a list of the type, which needs no
+        // process.
+        if callees.iter().any(|callee| samplers.contains(callee)) {
+            return Err(unsupported(
+                "covergroup sampling event of an instance constructed in a final procedure (IEEE 1800-2023 9.2.3, 19.3)",
+            ));
+        }
         if let Some(callee) = callees
             .iter()
             .filter(|callee| schedules.contains(*callee))

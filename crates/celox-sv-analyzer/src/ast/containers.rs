@@ -197,6 +197,32 @@ fn dimensioned(
     container_type(base, kind, index_type, key_enum_values, None, tree, context)
 }
 
+/// The type of a queue of `base` elements (IEEE 1800-2023 7.10), as `T
+/// q[$]` declares one in `context`, bound to its semantic type there.
+pub(super) fn queue_of(
+    base: Type,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    context: &PackedDimensions,
+) -> Converted<Type> {
+    let mut ty = container_type(
+        base,
+        ContainerKind::Queue { capacity: 0 },
+        None,
+        None,
+        None,
+        tree,
+        context,
+    )?;
+    semantic_types::bind_declared(
+        &mut session.types,
+        &tree.functions,
+        &mut ty,
+        &context.const_env,
+    );
+    Ok(ty)
+}
+
 /// The type of a container of kind `kind` of `base` elements, indexed by
 /// `index_type` for an associative array, holding the fixed-size array
 /// with range `fixed`.

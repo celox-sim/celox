@@ -122,6 +122,15 @@ pub enum StmtBase<E, L> {
     /// Concurrent child processes (IEEE 1800-2023 9.3.2).
     Fork {
         join: celox_design::ForkJoin,
+        /// A `join_none` fork the analysis makes, whose child is a process
+        /// of the analysis rather than of the source: it draws no seed from
+        /// the random number generator of the forking process, which keeps
+        /// the random values of that process those of the source (18.14.1),
+        /// and it is no child of that process, which `wait fork`, `disable
+        /// fork` and `kill()` of it do not see (9.6.1, 9.6.3, 9.7). Only
+        /// the sampler of a covergroup instance that a procedure constructs
+        /// is one (19.3). Always false for a fork of the source.
+        unseeded: bool,
         branches: Vec<Vec<StmtBase<E, L>>>,
     },
     Break,
@@ -441,8 +450,13 @@ impl<E, L> StmtBase<E, L> {
                 step: body(step, fe, fl),
                 body: body(loop_body, fe, fl),
             },
-            StmtBase::Fork { join, branches } => StmtBase::Fork {
+            StmtBase::Fork {
                 join,
+                unseeded,
+                branches,
+            } => StmtBase::Fork {
+                join,
+                unseeded,
                 branches: branches.into_iter().map(|b| body(b, fe, fl)).collect(),
             },
             StmtBase::Break => StmtBase::Break,

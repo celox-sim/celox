@@ -20,6 +20,11 @@
 //! @(event); N::$sample(handle); end`, with the wait at the top of its loop
 //! so that it can be a compiled kernel. Neither runs before the first event
 //! or draws a seed of its own.
+//!
+//! An instance that any other `new` constructs, a declaration of a
+//! package or the compilation unit, or of a type of another scope,
+//! included, is sampled by the process that `N::$spawn` starts (see
+//! `covergroup_subroutines::spawn`).
 
 use super::*;
 use crate::ast::covergroups::{self, Covergroup};
@@ -112,7 +117,15 @@ pub(super) fn initializer(
     else {
         return Ok(None);
     };
-    if !covergroups::is_class(&class) {
+    // A site is a declaration of a module or a program of a type of its
+    // own: the type of a package or the compilation unit is sampled where
+    // that scope binds its event (see `N::$spawn`), and a package has no
+    // process to sample with.
+    let scope_unit = tree.root_unit().ok().map(|unit| unit.kind);
+    if !covergroups::is_class(&class)
+        || !session.covergroups.contains_key(&class)
+        || scope_unit.is_none_or(|kind| kind == celox_sv_syntax::UnitKind::Package)
+    {
         return Ok(None);
     }
     let Ok(model) = covergroups::model(tree, session, item_dimensions, &class, None) else {
@@ -196,7 +209,7 @@ fn one_bit(
 /// for by a process: the frontend runs two edge procedures that call the
 /// sampling subroutine of one type as processes, which see the nonblocking
 /// assignments of their edge.
-fn edge_procedure(wait: &[Stmt], one_bit: bool, call: &Stmt) -> Option<FfProcess> {
+fn edge_procedure(wait: &[Stmt], one_bit: bool, sample: &[Stmt]) -> Option<FfProcess> {
     let [Stmt::WaitEvent(items)] = wait else {
         return None;
     };
@@ -217,10 +230,10 @@ fn edge_procedure(wait: &[Stmt], one_bit: bool, call: &Stmt) -> Option<FfProcess
     let body = match &item.iff {
         Some(condition) => vec![Stmt::If {
             condition: condition.clone(),
-            then_body: vec![call.clone()],
+            then_body: sample.to_vec(),
             else_body: Vec::new(),
         }],
-        None => vec![call.clone()],
+        None => sample.to_vec(),
     };
     let mut process = FfProcess::new(vec![FfEvent::new(edge, signal.clone())], body);
     // As `always @(posedge clk) c.sample();` is.
@@ -248,8 +261,45 @@ pub(super) fn sampler<'a>(
     parameter_literals: &HashMap<String, Expr>,
     site: &Site,
 ) -> Converted<Sampler> {
-    let model = &site.model;
-    let event = model.event.expect("a site samples at an event");
+    let call = Stmt::Call {
+        name: site.model.sample_subroutine(),
+        args: vec![Some(Expr::Ident(site.handle.clone()))],
+        arg_order: vec![0],
+    };
+    sampler_of(
+        tree,
+        session,
+        state,
+        active,
+        views,
+        const_env,
+        parameter_literals,
+        &site.model,
+        site.creation_order,
+        site.tokens,
+        |_| vec![call],
+    )
+}
+
+/// The procedure that runs the statements `sample` makes at the clocking
+/// event of `model`, bound and qualified where the covergroup is declared
+/// (see [`sampler`]), and that has the site of item `tokens` and
+/// `creation_order`.
+#[allow(clippy::too_many_arguments)]
+fn sampler_of<'a>(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    state: &mut BodyState<'_>,
+    active: &'a [generate::Item],
+    views: &mut generate::ScopeViews<'a>,
+    const_env: &ConstEnv,
+    parameter_literals: &HashMap<String, Expr>,
+    model: &Covergroup,
+    creation_order: usize,
+    tokens: celox_sv_syntax::TokenRange,
+    sample: impl FnOnce(&mut BodyBuilder<'_, '_, '_>) -> Vec<Stmt>,
+) -> Converted<Sampler> {
+    let event = model.event.expect("a sampler samples at an event");
     let Some(declaring) = active.iter().find(|item| {
         matches!(tree.declarations().body_item(item.id).kind,
             celox_sv_syntax::BodyItemKind::Covergroup(id) if id == model.declaration
@@ -280,6 +330,7 @@ pub(super) fn sampler<'a>(
             }
             error => error,
         })?;
+    let mut sample = sample(&mut builder);
     drop(builder);
     let bit = matches!(body.as_slice(), [Stmt::WaitEvent(items)]
         if matches!(items.as_slice(), [item]
@@ -290,26 +341,21 @@ pub(super) fn sampler<'a>(
         qualify_stmt(declaring, stmt);
         substitute_stmt_constants(scoped, session, stmt, const_env, parameter_literals);
     }
-    let call = Stmt::Call {
-        name: model.sample_subroutine(),
-        args: vec![Some(Expr::Ident(site.handle.clone()))],
-        arg_order: vec![0],
-    };
     let program = tree
         .root_unit()
         .is_ok_and(|unit| unit.kind == celox_sv_syntax::UnitKind::Program);
-    if !program && let Some(mut procedure) = edge_procedure(&body, bit, &call) {
-        procedure.creation_order = site.creation_order;
-        procedure.site = process_site("covergroup sampling", site.tokens, tree);
+    if !program && let Some(mut procedure) = edge_procedure(&body, bit, &sample) {
+        procedure.creation_order = creation_order;
+        procedure.site = process_site("covergroup sampling", tokens, tree);
         return Ok(Sampler::Edge {
             covergroup: model.name.clone(),
             procedure,
         });
     }
-    body.push(call);
+    body.append(&mut sample);
     Ok(Sampler::Process(InitialProcess {
-        creation_order: site.creation_order,
-        site: process_site("covergroup sampling", site.tokens, tree),
+        creation_order,
+        site: process_site("covergroup sampling", tokens, tree),
         condition: None,
         body: vec![Stmt::Loop {
             kind: LoopKind::Forever,
@@ -329,4 +375,276 @@ pub(super) fn sampler<'a>(
         // simulation runs once at time zero (see `InitialProcess::repeats`).
         repeats: false,
     }))
+}
+
+/// The instances of a covergroup type of a module or a program that `new`s
+/// other than the initializers of declarations construct (19.3): the
+/// first [`INLINE_INSTANCES`] in hidden handle variables of the scope, any
+/// more in a hidden queue, with a hidden count. `N::$spawn` adds an
+/// instance, and the sampler of the type walks them at its event, so that
+/// no process is started for an instance and the sampler is a procedure the
+/// compiled scheduler runs: at one edge of a one-bit variable the flip-flop
+/// shaped procedure of the type (see [`SiteParts::add`]), at any other event
+/// one process of the type. The handles keep the instances for the rest of
+/// the simulation.
+#[derive(Debug, Clone)]
+pub(in crate::ast) struct InstanceList {
+    /// The variables of the first instances, in the order of construction.
+    pub slots: Vec<String>,
+    /// The number of instances.
+    pub count: String,
+    /// The queue of the instances after the first [`INLINE_INSTANCES`].
+    pub overflow: String,
+    pub overflow_layout: system_functions::ContainerLayout,
+}
+
+/// How many instances of a type an [`InstanceList`] holds in variables of
+/// their own before it uses its queue, whose operations are calls of the
+/// heap.
+pub(in crate::ast) const INLINE_INSTANCES: usize = 4;
+
+fn count_literal(value: usize) -> Expr {
+    Expr::Literal(format!("32'd{value}"))
+}
+
+impl InstanceList {
+    /// The statements of `N::$spawn` that add instance `handle`.
+    pub(in crate::ast) fn add(&self, handle: &Expr) -> Vec<Stmt> {
+        let count = || Expr::Ident(self.count.clone());
+        let mut add = vec![Stmt::Eval(containers::call(
+            system_functions::ContainerOp::PushBack,
+            self.overflow_layout.clone(),
+            vec![Expr::Ident(self.overflow.clone()), handle.clone()],
+        ))];
+        for (index, slot) in self.slots.iter().enumerate().rev() {
+            add = vec![Stmt::If {
+                condition: Expr::Binary {
+                    left: Box::new(count()),
+                    op: BinaryOp::Eq,
+                    right: Box::new(count_literal(index)),
+                },
+                then_body: vec![Stmt::Assign {
+                    lhs: LValue::Ident(slot.clone()),
+                    rhs: handle.clone(),
+                    nonblocking: false,
+                }],
+                else_body: add,
+            }];
+        }
+        add.push(Stmt::Assign {
+            lhs: LValue::Ident(self.count.clone()),
+            rhs: Expr::Binary {
+                left: Box::new(count()),
+                op: BinaryOp::Add,
+                right: Box::new(count_literal(1)),
+            },
+            nonblocking: false,
+        });
+        add
+    }
+
+    /// Whether the list holds more than `than` instances.
+    fn more(&self, than: usize) -> Expr {
+        Expr::Binary {
+            left: Box::new(Expr::Ident(self.count.clone())),
+            op: BinaryOp::Gt,
+            right: Box::new(count_literal(than)),
+        }
+    }
+
+    /// The statements that sample the instances of the variables of the
+    /// list with `sample`, the sampling subroutine of the type.
+    fn walk_slots(&self, sample: &str) -> Vec<Stmt> {
+        self.slots
+            .iter()
+            .enumerate()
+            .map(|(index, slot)| Stmt::If {
+                condition: self.more(index),
+                then_body: vec![sample_call(sample, Expr::Ident(slot.clone()))],
+                else_body: Vec::new(),
+            })
+            .collect()
+    }
+
+    /// The statement that samples the instances of the queue of the list
+    /// with `sample`, with `index` the variable of the position in it.
+    fn walk_overflow(&self, sample: &str, index: &str) -> Stmt {
+        let queue = || Expr::Ident(self.overflow.clone());
+        let position = || Expr::Ident(index.to_owned());
+        Stmt::If {
+            condition: self.more(self.slots.len()),
+            then_body: vec![Stmt::Loop {
+                kind: LoopKind::For,
+                init: vec![Stmt::Local {
+                    name: index.to_owned(),
+                    init: Some(Expr::Literal("0".into())),
+                }],
+                condition: Some(Expr::Binary {
+                    left: Box::new(position()),
+                    op: BinaryOp::Lt,
+                    right: Box::new(containers::call(
+                        system_functions::ContainerOp::Size,
+                        self.overflow_layout.clone(),
+                        vec![queue()],
+                    )),
+                }),
+                step: vec![Stmt::Assign {
+                    lhs: LValue::Ident(index.to_owned()),
+                    rhs: Expr::Binary {
+                        left: Box::new(position()),
+                        op: BinaryOp::Add,
+                        right: Box::new(Expr::Literal("1".into())),
+                    },
+                    nonblocking: false,
+                }],
+                body: vec![sample_call(
+                    sample,
+                    containers::call(
+                        system_functions::ContainerOp::Get,
+                        self.overflow_layout.clone(),
+                        vec![queue(), position()],
+                    ),
+                )],
+            }],
+            else_body: Vec::new(),
+        }
+    }
+}
+
+/// The call of sampling subroutine `sample` with `handle`.
+fn sample_call(sample: &str, handle: Expr) -> Stmt {
+    Stmt::Call {
+        name: sample.to_owned(),
+        args: vec![Some(handle)],
+        arg_order: vec![0],
+    }
+}
+
+/// The instance lists and their samplers of the covergroup types of the
+/// scope that a `new` other than the initializer of a declaration
+/// constructs (see [`InstanceList`]), which `session` has recorded while
+/// the bodies of the scope were bound: the lists go to `session` for the
+/// `N::$spawn` the scope makes later, their variables to `parts`, and
+/// each sampler to `parts` (at an edge, merged with the procedure of the
+/// declarations of the type, after them) or to `processes`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn constructed<'a>(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    state: &mut BodyState<'_>,
+    active: &'a [generate::Item],
+    views: &mut generate::ScopeViews<'a>,
+    const_env: &ConstEnv,
+    parameter_literals: &HashMap<String, Expr>,
+    dimensions: &PackedDimensions,
+    parts: &mut SiteParts,
+    processes: &mut Vec<InitialProcess>,
+) -> Converted<()> {
+    let own = tree.root_unit().is_ok_and(|unit| {
+        matches!(
+            unit.kind,
+            celox_sv_syntax::UnitKind::Module | celox_sv_syntax::UnitKind::Program
+        )
+    });
+    if !own {
+        return Ok(());
+    }
+    for name in session.covergroup_spawn_requests.clone() {
+        if session.covergroup_instance_lists.contains_key(&name) {
+            continue;
+        }
+        let Some(model) = session.covergroups.get(&name).cloned() else {
+            continue;
+        };
+        if model.rejection.is_some() || model.event.is_none() || model.owner.is_some() {
+            continue;
+        }
+        let number = session.covergroup_instance_lists.len();
+        let handle = classes::handle(&mut session.types, &model.name);
+        let slots = (0..INLINE_INSTANCES)
+            .map(|slot| format!("%covergroup_instance{number}_{slot}"))
+            .collect::<Vec<_>>();
+        let count = format!("%covergroup_instance_count{number}");
+        let overflow = format!("%covergroup_instances{number}");
+        let queue = containers::queue_of(handle.clone(), tree, session, dimensions)?;
+        let overflow_layout = queue
+            .container()
+            .expect("a queue is a container")
+            .layout
+            .clone();
+        for slot in &slots {
+            parts.signals.push((slot.clone(), handle.clone()));
+        }
+        parts
+            .signals
+            .push((count.clone(), classes::unsigned_type(32)));
+        parts.signals.push((overflow.clone(), queue));
+        let list = InstanceList {
+            slots,
+            count,
+            overflow,
+            overflow_layout,
+        };
+        let declaration = tree.declarations().covergroup(model.declaration);
+        let creation_order = active
+            .iter()
+            .position(|item| {
+                matches!(tree.declarations().body_item(item.id).kind,
+                    celox_sv_syntax::BodyItemKind::Covergroup(id) if id == model.declaration)
+            })
+            .unwrap_or(0);
+        let sample = model.sample_subroutine();
+        let mut overflow = None;
+        let sampler = sampler_of(
+            tree,
+            session,
+            state,
+            active,
+            views,
+            const_env,
+            parameter_literals,
+            &model,
+            creation_order,
+            declaration.tokens,
+            |builder| {
+                let index = builder.declare("$covergroup_instance", int_type());
+                let mut walk = list.walk_slots(&sample);
+                overflow = Some(list.walk_overflow(&sample, &index));
+                walk.extend(overflow.clone());
+                walk
+            },
+        )?;
+        match sampler {
+            // The flip-flop shaped procedure walks the queue too: it runs
+            // the loop only when the queue holds instances, at little cost
+            // otherwise.
+            Sampler::Edge {
+                covergroup,
+                procedure,
+            } => parts.add(covergroup, procedure),
+            // A process pays for a loop at each run, used or not: the queue
+            // has a process of its own, which waits until it holds an
+            // instance.
+            Sampler::Process(mut process) => {
+                let overflow = overflow.expect("the walk was made");
+                let slots = list.walk_slots(&sample);
+                let mut queued = process.clone();
+                let Some(Stmt::Loop { body, .. }) = process.body.first_mut() else {
+                    unreachable!("a sampler process is a loop");
+                };
+                body.retain(|stmt| *stmt != overflow);
+                let Some(Stmt::Loop { body, .. }) = queued.body.first_mut() else {
+                    unreachable!("a sampler process is a loop");
+                };
+                body.retain(|stmt| !slots.contains(stmt));
+                queued
+                    .body
+                    .insert(0, Stmt::Wait(list.more(list.slots.len())));
+                processes.push(process);
+                processes.push(queued);
+            }
+        }
+        session.covergroup_instance_lists.insert(name, list);
+    }
+    Ok(())
 }

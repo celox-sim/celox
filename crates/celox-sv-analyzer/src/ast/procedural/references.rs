@@ -739,7 +739,7 @@ fn check_formal(
         }
         // Processes a fork-join_any or fork-join_none spawns may outlive
         // the call (9.3.2).
-        if let Stmt::Fork { join, branches } = stmt
+        if let Stmt::Fork { join, branches, .. } = stmt
             && *join != celox_design::ForkJoin::All
         {
             let mut used = false;

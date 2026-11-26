@@ -529,10 +529,26 @@ impl Aliases<'_, '_> {
             return Ok(alias);
         }
         let unsupported_type = || {
-            unsupported(format!(
-                "hierarchical call `{}` of a subroutine that names `{name}` of this type",
-                self.call.written
-            ))
+            // The variables of the analysis are named as the source knows
+            // them: the instance list of a covergroup type with a clocking
+            // event that the subroutine constructs an instance of (IEEE
+            // 1800-2023 19.3).
+            unsupported(if name.starts_with("%covergroup_instance") {
+                format!(
+                    "hierarchical call `{}` of a subroutine that constructs an instance of a covergroup with a clocking event of its scope",
+                    self.call.written
+                )
+            } else if name.starts_with('%') {
+                format!(
+                    "hierarchical call `{}` of a subroutine that names a variable of the analysis",
+                    self.call.written
+                )
+            } else {
+                format!(
+                    "hierarchical call `{}` of a subroutine that names `{name}` of this type",
+                    self.call.written
+                )
+            })
         };
         let r#type = resolved_type(self.elaborated, ir_type).ok_or_else(unsupported_type)?;
         let ir_type = ir_type

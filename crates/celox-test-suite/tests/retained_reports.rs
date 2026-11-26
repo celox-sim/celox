@@ -1482,8 +1482,17 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             | "covergroup::named_events_sample_their_triggers"
                             | "covergroup::instances_of_a_generate_loop_sample_their_own"
                             | "covergroup::clocked_instances_take_stop_start_and_sample"
-                            | "covergroup::clocking_events_of_nba_updated_clocks_sample_before_the_updates",
+                            | "covergroup::clocking_events_of_nba_updated_clocks_sample_before_the_updates"
+                            | "covergroup::procedural_constructions_sample_at_their_clocking_events"
+                            | "covergroup::constructed_instances_take_stop_start_and_sample"
+                            | "covergroup::constructed_instances_of_a_divided_clock_sample_before_the_updates",
                         ) => ("compile_error", "compile", "Invalid module item"),
+                        (
+                            "icarus",
+                            "covergroup::embedded_covergroups_sample_at_events_of_their_class"
+                            | "covergroup::embedded_covergroup_samples_through_a_virtual_interface"
+                            | "covergroup::constructions_of_declaration_initializers_sample",
+                        ) => ("compile_error", "compile", "Invalid class item"),
                         ("icarus", "covergroup::set_expression_is_the_values_of_a_bin") => (
                             "compile_error",
                             "compile",
@@ -1619,6 +1628,63 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "execute",
                             // "3 8" and "37.50" expected, "0 0" and "50.00" displayed.
                             "expect_output: expected [51, 32, 56, 10, 51, 55, 46, 53, 48, 10], got [48, 32, 48, 10, 53, 48, 46, 48, 48, 10]",
+                        ),
+                        (
+                            "verilator",
+                            "covergroup::constructed_instances_take_stop_start_and_sample",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            // "3 8" and "37.50" expected, "0 0" and "50.00" displayed.
+                            "expect_output: expected [51, 32, 56, 10, 51, 55, 46, 53, 48, 10], got [48, 32, 48, 10, 53, 48, 46, 48, 48, 10]",
+                        ),
+                        (
+                            "verilator",
+                            "covergroup::constructed_instances_of_a_divided_clock_sample_before_the_updates",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            // "3" six times and "37.50" expected, "0" six times
+                            // and the expected 37.50 displayed.
+                            "expect_output: expected [51, 32, 51, 32, 51, 32, 51, 32, 51, 32, 51, 32, 51, 55, 46, 53, 48, 10], got [48, 32, 48, 32, 48, 32, 48, 32, 48, 32, 48, 32, 51, 55, 46, 53, 48, 10]",
+                        ),
+                        (
+                            "verilator",
+                            "covergroup::embedded_covergroup_samples_through_a_virtual_interface",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            // "3 16" expected, "0 0" displayed.
+                            "expect_output: expected [51, 32, 49, 54, 10], got [48, 32, 48, 10]",
+                        ),
+                        (
+                            "verilator",
+                            "covergroup::procedural_constructions_sample_at_their_clocking_events",
+                        ) => (
+                            // "Null pointer dereferenced" at the covergroup
+                            // declaration when the instances are sampled.
+                            "runtime_error",
+                            "execute",
+                            "native testbench failed: exit status: 1",
+                        ),
+                        (
+                            "verilator",
+                            "covergroup::embedded_covergroups_sample_at_events_of_their_class",
+                        ) => (
+                            // The C++ it generates for the embedded
+                            // covergroups does not compile ("cannot convert
+                            // 'Vdut___024root*' to 'Vdut_Top__03a__03aC*'").
+                            "compile_error",
+                            "compile",
+                            "Verilator build exit status: 2",
+                        ),
+                        (
+                            "verilator",
+                            "covergroup::constructions_of_declaration_initializers_sample",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "syntax error, unexpected new, expecting IDENTIFIER-for-type",
                         ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")

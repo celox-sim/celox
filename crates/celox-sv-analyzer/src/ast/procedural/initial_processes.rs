@@ -451,6 +451,20 @@ pub(in crate::ast) fn initial_processes_from_scope(
             repeats,
         });
     }
+    // The covergroup types whose instances other `new`s construct, which
+    // the bodies of the scope have all been bound for now (19.3).
+    covergroup_sites::constructed(
+        root,
+        session,
+        state,
+        &active,
+        &mut views,
+        const_env,
+        parameter_literals,
+        packed_dimensions,
+        &mut parts,
+        &mut processes,
+    )?;
     initializers.extend(processes);
     Ok((initializers, parts))
 }

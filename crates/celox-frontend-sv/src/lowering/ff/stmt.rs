@@ -237,19 +237,31 @@ impl Ff<'_, '_> {
                 }
                 Ok(true)
             }
-            sv::ir::Stmt::Fork { join, branches }
-                if self.kernel.is_none() && self.can_suspend_unit() =>
-            {
-                self.fork_in_unit(*join, branches)?;
+            sv::ir::Stmt::Fork {
+                join,
+                unseeded,
+                branches,
+            } if self.kernel.is_none() && self.can_suspend_unit() => {
+                self.fork_in_unit(*join, *unseeded, branches)?;
                 Ok(true)
             }
-            sv::ir::Stmt::Fork { join, branches } => {
+            sv::ir::Stmt::Fork {
+                join,
+                unseeded,
+                branches,
+            } => {
                 if self.kernel.is_none() {
                     return Err(unsupported("fork outside a timed process"));
                 }
                 self.activation.forked = true;
                 let (entries, continuation) = self
-                    .with_kernel(|kernel| kernel.fork(branches.len(), *join))
+                    .with_kernel(|kernel| {
+                        if *unseeded {
+                            kernel.fork_unseeded(branches.len())
+                        } else {
+                            kernel.fork(branches.len(), *join)
+                        }
+                    })
                     .map_err(kernel_error)?;
                 self.b.seal_block(SIRTerminator::Return);
                 let loops = std::mem::take(&mut self.scope.loops);

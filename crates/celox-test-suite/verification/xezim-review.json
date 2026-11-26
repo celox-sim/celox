@@ -1146,6 +1146,14 @@
     "sv_coverpoint_stop_stops_the_covergroup": {
       "title": "stop() of one coverpoint keeps the other coverpoints of the instance from counting samples until it is started again",
       "standard": "IEEE 1800-2023 19.8 (Table 19-5)"
+    },
+    "sv_constructed_covergroups_at_divided_clocks": {
+      "title": "Covergroup instances that a procedure constructs are never sampled at a rising edge of a clock that a flip-flop divides: with cg a[6] and foreach (a[i]) a[i] = new of covergroup cg @(posedge div), every instance has no sample",
+      "standard": "IEEE 1800-2023 19.3"
+    },
+    "sv_embedded_covergroup_events_of_properties": {
+      "title": "A covergroup embedded in a class is never sampled at a clocking event on a property of the class: @m_z, @(posedge clk_bit) of a bit property and @ev of an event property give no sample, where an event on a signal of the module samples",
+      "standard": "IEEE 1800-2023 19.3, 19.4"
     }
   },
   "cases": [
@@ -5986,6 +5994,22 @@
       "classification": "xezim_bug",
       "bug": "sv_coverpoint_stop_stops_the_covergroup",
       "note": "Table 19-5 gives start() and stop() to a coverpoint: c.cb.stop() stops cb alone. ca counts the samples 0, 2 and 3 (3 of 4 bins), cb 0 and 3 (2 of 4). xezim 0.11.4 displays 2 4 for ca as well, so the sample of 2 taken while cb was stopped is not counted in ca. Verilator 5.054 rejects stop() of a coverpoint."
+    },
+    {
+      "suite": "sv",
+      "name": "covergroup::embedded_covergroups_sample_at_events_of_their_class",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_embedded_covergroup_events_of_properties",
+      "note": "19.3 samples an instance at each occurrence of its clocking event, and 19.4's own example embeds covergroup cov1 @m_z in a class, an event on a property. The procedure sets v to 2, 4 and 6 and then changes m_z, raises clk_bit, triggers ev and raises the module's sclk, so each covergroup counts 3 of its 16 bins (18.75). xezim 0.11.4 displays 0.00 for the three covergroups on properties and 18.75 for the one on sclk, the same event control of the same class; it passes the embedded covergroup sampled at a virtual interface clock (embedded_covergroup_samples_through_a_virtual_interface)."
+    },
+    {
+      "suite": "sv",
+      "name": "covergroup::constructed_instances_of_a_divided_clock_sample_before_the_updates",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_constructed_covergroups_at_divided_clocks",
+      "note": "19.3 samples each instance at each occurrence of its clocking event. div rises at 5, 25 and 45, where r is 0, 1 and 2 before the nonblocking assignments of the edge, so each of the six instances covers 3 of 8 bins (37.50 for a[5].r). xezim 0.11.4 displays 0 for every instance and 0.00, so it takes no sample; it passes the declared instances of a divided clock (clocking_events_of_nba_updated_clocks_sample_before_the_updates) and the procedurally constructed ones of a clock that blocking assignments make (procedural_constructions_sample_at_their_clocking_events). Verilator 5.054 displays the expected 37.50 (and 0 for the bins it counts by reference, as in every case)."
     }
   ]
 }

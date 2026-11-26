@@ -124,6 +124,16 @@ pub(crate) struct Session {
     /// arguments (19.8): a module makes `N::$counts` and `N::$type_counts`
     /// of these alone.
     pub(super) covergroup_count_requests: Vec<String>,
+    /// Those of `covergroup_requests` with a clocking event that a `new`
+    /// other than the initializer of a declaration of the scope constructs
+    /// (19.3): a module makes `N::$spawn` of these alone.
+    pub(super) covergroup_spawn_requests: Vec<String>,
+    /// The hidden variables that hold the constructed instances of those of
+    /// `covergroup_spawn_requests` that a sampler of the scope walks (see
+    /// `procedural::covergroup_sites::InstanceList`), by type: `N::$spawn`
+    /// of such a type adds the instance to them instead of forking.
+    pub(super) covergroup_instance_lists:
+        HashMap<String, crate::ast::procedural::covergroup_sites::InstanceList>,
 }
 
 impl Session {

@@ -219,6 +219,17 @@ pub(in crate::ast) fn classify<'a>(
                 Some("an always_comb body")
             }
         };
+        if context.is_some() && effects.starts_sampler {
+            return Err(constructed_in(match process.kind {
+                CombProcessKind::AlwaysLatch => {
+                    "an always_latch procedure (IEEE 1800-2023 9.2.2.3, 19.3)"
+                }
+                CombProcessKind::ContinuousAssign => {
+                    "a continuous assignment (IEEE 1800-2023 10.3, 19.3)"
+                }
+                _ => "an always_comb procedure (IEEE 1800-2023 9.2.2.2, 19.3)",
+            }));
+        }
         if let Some(context) = context {
             if !blocks {
                 return Err(unsupported(format!(
@@ -299,6 +310,9 @@ pub(in crate::ast) fn classify<'a>(
             // (9.4.5, 10.4.2), as in the `always_ff` processes below.
             let effects = body_effects(controlled, &known, &definitions);
             if effects.suspends && !delayed_nonblocking_only(controlled, &timed, &definitions) {
+                if effects.starts_sampler {
+                    return Err(constructed_in(ALWAYS_FF));
+                }
                 return Err(unsupported("timed task call in always_ff"));
             }
         }
@@ -320,6 +334,9 @@ pub(in crate::ast) fn classify<'a>(
         // An `always_ff` that triggers an event runs in a process kernel too;
         // it only may not suspend.
         if blocks && !process.suspendable {
+            if effects.starts_sampler {
+                return Err(constructed_in(ALWAYS_FF));
+            }
             return Err(unsupported("timed task call in always_ff"));
         }
         let mut body = vec![Stmt::WaitEvent(
@@ -514,6 +531,11 @@ struct Effects {
     /// They call `$timeformat`, which sets the format of every module's
     /// `%t` in the design's state.
     time_format: bool,
+    /// They construct a covergroup instance whose sampler is a process the
+    /// construction starts (an unseeded fork, see `Stmt::Fork`): one
+    /// embedded in a class or of a type of a package or the compilation
+    /// unit (IEEE 1800-2023 19.3).
+    starts_sampler: bool,
 }
 
 impl Effects {
@@ -524,6 +546,7 @@ impl Effects {
             reads_process: self.reads_process || other.reads_process,
             nonblocking: self.nonblocking || other.nonblocking,
             time_format: self.time_format || other.time_format,
+            starts_sampler: self.starts_sampler || other.starts_sampler,
         }
     }
 
@@ -531,6 +554,19 @@ impl Effects {
     fn uses_kernel(self) -> bool {
         self.controls || self.reads_process
     }
+}
+
+/// Where [`constructed_in`] names an `always_ff` procedure.
+const ALWAYS_FF: &str = "an always_ff procedure (IEEE 1800-2023 9.2.2.4, 19.3)";
+
+/// The rejection of a covergroup instance whose sampler is a process its
+/// construction starts (`Effects::starts_sampler`), constructed in
+/// `place`, which may not start one; the instances of a type of a module
+/// or a program join a list instead and are accepted there.
+fn constructed_in(place: &str) -> AnalyzerError {
+    unsupported(format!(
+        "covergroup sampling event of an instance constructed in {place}"
+    ))
 }
 
 /// The effects of `statement` itself, without its child statements and
@@ -576,6 +612,9 @@ fn statement_effects(statement: &Stmt) -> Effects {
     } = statement
     {
         effects.time_format = true;
+    }
+    if let Stmt::Fork { unseeded: true, .. } = statement {
+        effects.starts_sampler = true;
     }
     for expr in lifetimes::stmt_exprs(statement) {
         effects = effects.union(expression_effects(expr));
