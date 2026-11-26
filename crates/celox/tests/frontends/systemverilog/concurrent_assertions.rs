@@ -285,3 +285,35 @@ fn assertion_actions_run_per_attempt_are_checked() {
         assert!(error.contains(reason), "{items}: {error}");
     }
 }
+
+/// `%m` names the labeled statement that calls the task (IEEE 1800-2023
+/// 21.2.1.5): in the action of a labeled deferred assertion, the assertion
+/// under the block that holds it.
+#[test]
+fn labeled_deferred_assertion_actions_name_the_label() {
+    let source = "`timescale 1ns/1ns
+        module Top;
+            bit a;
+            initial begin : blk
+                D1: assert #0 (a) else $display(\"D1 %m\");
+                F1: assert final (a) else $display(\"F1 %m\");
+            end
+        endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![(source, std::path::Path::new("labels.sv"))],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    sim.run_until(1).unwrap();
+    let mut displays: Vec<String> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => Some(String::from_utf8(message).unwrap()),
+            _ => None,
+        })
+        .collect();
+    displays.sort();
+    assert_eq!(displays, ["D1 Top.blk.D1", "F1 Top.blk.F1"]);
+}

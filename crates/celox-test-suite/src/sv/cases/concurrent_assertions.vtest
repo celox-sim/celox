@@ -566,3 +566,29 @@ endmodule"#)
 endmodule"#)
  (top Top) (run_until 21)
  (assert_eq failed 1))
+
+; IEEE 1800-2023 21.2.1.5: `%m` names the labeled statement that calls the
+; task, so in the actions of a labeled assertion it names the assertion,
+; under a named block that holds it. Each name is checked by its end, which
+; is the same under any top.
+(case labeled_assertion_actions_name_the_label
+ (source "labels.sv" #"module Top(output int named, unnamed);
+ bit clk, a = 1;
+ function automatic void check(string name, string tail);
+  if (name.len() > tail.len() && name.substr(name.len() - tail.len(), name.len() - 1) == tail)
+   named++;
+  else
+   unnamed++;
+ endfunction
+ A1: assert property (@(posedge clk) a) check($sformatf("%m"), ".A1");
+  else check($sformatf("%m"), ".A1");
+ always @(posedge clk) begin : blk
+  I1: assert (a) check($sformatf("%m"), ".blk.I1"); else check($sformatf("%m"), ".blk.I1");
+ end
+ initial begin
+  #1 clk = 1; #1 clk = 0;
+  a = 0; #1 clk = 1; #1 clk = 0;
+ end
+endmodule"#)
+ (top Top) (run_until 5)
+ (assert_eq named 4) (assert_eq unnamed 0))
