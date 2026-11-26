@@ -38,6 +38,18 @@ pub struct TypeDescriptor {
     /// The `with` filters that a construction evaluates for each value of a
     /// bin (19.5.1.1), by filter index.
     pub filters: Vec<FilterDescriptor>,
+    /// The crosses in declaration order (19.6). Cross `x` is the item after
+    /// the coverpoints: item `points.len() + 1 + x`.
+    pub crosses: Vec<CrossDescriptor>,
+}
+
+/// What an item of a covergroup type is: its `option` and `type_option`
+/// have the members of that level (19.10).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Level {
+    Group,
+    Point,
+    Cross,
 }
 
 impl TypeDescriptor {
@@ -54,13 +66,32 @@ impl TypeDescriptor {
             type_options: GroupTypeOptions::default(),
             sets: Vec::new(),
             filters: Vec::new(),
+            crosses: Vec::new(),
         }
     }
 
-    /// What makes the descriptor unusable, which only a wrong producer
-    /// causes: the operations index by what this accepts.
-    pub(crate) fn validate(&self) -> Result<(), String> {
-        let operand = |operand: &Operand| match operand {
+    /// The number of items but the covergroup: the coverpoints and the
+    /// crosses.
+    pub(crate) fn items(&self) -> usize {
+        self.points.len() + self.crosses.len()
+    }
+
+    /// What item `item` is, if the type has it.
+    pub(crate) fn level(&self, item: u32) -> Option<Level> {
+        let item = item as usize;
+        if item == 0 {
+            Some(Level::Group)
+        } else if item <= self.points.len() {
+            Some(Level::Point)
+        } else if item <= self.items() {
+            Some(Level::Cross)
+        } else {
+            None
+        }
+    }
+
+    fn validate_operand(&self, operand: &Operand) -> Result<(), String> {
+        match operand {
             Operand::Constant(constant) if constant.ty.width == 0 => {
                 Err("a constant of no bits".to_string())
             }
@@ -69,7 +100,116 @@ impl TypeDescriptor {
                 Some(InputDescriptor::Integral(ty)) if ty.width != 0 => Ok(()),
                 _ => Err(format!("input {index} is not an integral input")),
             },
+        }
+    }
+
+    fn validate_ranges(&self, ranges: &[RangeDescriptor]) -> Result<(), String> {
+        for range in ranges {
+            match range {
+                RangeDescriptor::Value(value) => self.validate_operand(value)?,
+                RangeDescriptor::Range { low, high } => {
+                    for bound in [low, high] {
+                        if let Bound::Operand(bound) = bound {
+                            self.validate_operand(bound)?;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// What is wrong with cross `cross`, as [`TypeDescriptor::validate`]
+    /// tells it.
+    fn validate_cross(&self, cross: &CrossDescriptor) -> Result<(), String> {
+        if cross.points.len() < 2 {
+            return Err(format!(
+                "cross `{}` of fewer than two coverpoints",
+                cross.name
+            ));
+        }
+        if let Some(&point) = cross
+            .points
+            .iter()
+            .find(|&&point| point as usize >= self.points.len())
+        {
+            return Err(format!(
+                "cross `{}` of coverpoint {point}, which is none",
+                cross.name
+            ));
+        }
+        if cross.type_options.weight < 0 {
+            return Err(format!("a negative type weight of `{}`", cross.name));
+        }
+        let predicate = |bit: u32| {
+            if bit < cross.predicates {
+                Ok(())
+            } else {
+                Err(format!("cross `{}` has no predicate bit {bit}", cross.name))
+            }
         };
+        if let Some(bit) = cross.iff {
+            predicate(bit)?;
+        }
+        for bin in &cross.bins {
+            let wrong = |what: &str| {
+                Err(format!(
+                    "bin `{}` of cross `{}` {what}",
+                    bin.name, cross.name
+                ))
+            };
+            if let Some(bit) = bin.iff {
+                predicate(bit)?;
+            }
+            // The terms that are left to look at, with how deep they are.
+            let mut terms = vec![(&bin.select, 0)];
+            while let Some((select, depth)) = terms.pop() {
+                match select {
+                    Select::BinsOf {
+                        position,
+                        bin: declaration,
+                        intersect,
+                        negate: _,
+                    } => {
+                        let Some(&point) = cross.points.get(*position as usize) else {
+                            return wrong(&format!(
+                                "selects bins of cross item {position}, which is none"
+                            ));
+                        };
+                        let point = &self.points[point as usize];
+                        if let Some(declaration) = declaration
+                            && *declaration as usize >= point.bins.len()
+                        {
+                            return wrong(&format!(
+                                "selects bin {declaration} of coverpoint `{}`, which is none",
+                                point.name
+                            ));
+                        }
+                        if let Some(ranges) = intersect {
+                            self.validate_ranges(ranges)?;
+                        }
+                    }
+                    Select::And(parts) | Select::Or(parts) => {
+                        if parts.is_empty() {
+                            return wrong("combines no selections");
+                        }
+                        if depth == MAX_SELECT_DEPTH {
+                            return wrong(&format!(
+                                "has a selection nested deeper than {MAX_SELECT_DEPTH}"
+                            ));
+                        }
+                        terms.extend(parts.iter().map(|part| (part, depth + 1)));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// What makes the descriptor unusable, which only a wrong producer
+    /// causes: the operations index by what this accepts.
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        let operand = |operand: &Operand| self.validate_operand(operand);
         if self.formals.iter().any(|formal| formal.width == 0) {
             return Err("a formal of no bits".into());
         }
@@ -113,18 +253,7 @@ impl TypeDescriptor {
                 }
                 match &bin.values {
                     BinValues::Ranges { ranges, filter } => {
-                        for range in ranges {
-                            match range {
-                                RangeDescriptor::Value(value) => operand(value)?,
-                                RangeDescriptor::Range { low, high } => {
-                                    for bound in [low, high] {
-                                        if let Bound::Operand(bound) = bound {
-                                            operand(bound)?;
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        self.validate_ranges(ranges)?;
                         match filter {
                             None => {}
                             Some(BinFilter::Predicate(bit)) => {
@@ -181,11 +310,14 @@ impl TypeDescriptor {
         if let Some(index) = asked.iter().position(|asked| !asked) {
             return Err(format!("filter {index} is of no bin"));
         }
+        for cross in &self.crosses {
+            self.validate_cross(cross)?;
+        }
         for init in &self.options {
-            if init.item as usize > self.points.len() {
+            let Some(level) = self.level(init.item) else {
                 return Err(format!("an option of item {}, which it has not", init.item));
-            }
-            if !init.option.applies_to(init.item) {
+            };
+            if !init.option.applies_to(level) {
                 return Err(format!(
                     "item {} has no option `{}`",
                     init.item,
@@ -424,6 +556,102 @@ impl FilterDescriptor {
     }
 }
 
+/// The deepest that the `&&` and `||` of a [`Select`] nest.
+pub const MAX_SELECT_DEPTH: usize = 32;
+
+/// A cross of coverpoints (19.6).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CrossDescriptor {
+    /// The name of the cross, as reports and messages show it.
+    pub name: String,
+    /// The coverpoints that are crossed, two at least, by their index among
+    /// [`TypeDescriptor::points`] and in the order the cross lists them. A
+    /// variable that a cross lists is the coverpoint of that variable
+    /// (19.6).
+    pub points: Vec<u32>,
+    /// The predicate bit of the `iff` guard of the cross: a sample with the
+    /// bit clear is none of the cross.
+    pub iff: Option<u32>,
+    /// The bins the cross declares, in declaration order (19.6.1). The
+    /// cross products that are in none of them are its automatic bins.
+    pub bins: Vec<CrossBinDescriptor>,
+    /// The type options of the cross (19.7.1).
+    pub type_options: ItemTypeOptions,
+    /// The number of predicate bits a sample hands over for the cross: its
+    /// guard and the guards of its bins.
+    pub predicates: u32,
+}
+
+impl CrossDescriptor {
+    /// The cross `name` of the coverpoints `points` without a guard or bins
+    /// of its own, with the default type options.
+    pub fn new(name: impl Into<String>, points: Vec<u32>) -> Self {
+        Self {
+            name: name.into(),
+            points,
+            iff: None,
+            bins: Vec::new(),
+            type_options: ItemTypeOptions::default(),
+            predicates: 0,
+        }
+    }
+}
+
+/// A bin declaration of a cross (19.6.1): a name and a count for the cross
+/// products that `select` selects.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CrossBinDescriptor {
+    /// The bin identifier, as reports and messages show it.
+    pub name: String,
+    /// `bins`, or `ignore_bins` and `illegal_bins`, whose cross products
+    /// are those of no other bin of the cross (19.6.2, 19.6.3).
+    pub kind: BinKind,
+    /// The select expression: the cross products of the bin.
+    pub select: Select,
+    /// The predicate bit of the `iff` guard of the declaration: a sample
+    /// with the bit clear does not count in the bin.
+    pub iff: Option<u32>,
+}
+
+impl CrossBinDescriptor {
+    /// `bins name = select` without a guard.
+    pub fn new(name: impl Into<String>, select: Select) -> Self {
+        Self {
+            name: name.into(),
+            kind: BinKind::Bins,
+            select,
+            iff: None,
+        }
+    }
+}
+
+/// A select expression of a cross bin (19.6.1): the cross products it
+/// selects.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Select {
+    /// `binsof(item)`, `binsof(item.bin)`, either with `intersect {…}`, and
+    /// the negation of each with `!`: the cross products whose bin of one
+    /// of the crossed coverpoints is a selected one.
+    BinsOf {
+        /// The coverpoint, by its position in [`CrossDescriptor::points`].
+        position: u32,
+        /// The bin declaration of the coverpoint whose bins are selected,
+        /// by its index among [`PointDescriptor::bins`]; every bin of the
+        /// coverpoint without one.
+        bin: Option<u32>,
+        /// Of those bins only the ones that hold a value of this range
+        /// list, which is resolved as that of a bin is (19.5.7).
+        intersect: Option<Vec<RangeDescriptor>>,
+        /// `!`: the bins of the coverpoint that are not selected so.
+        negate: bool,
+    },
+    /// `&&`: the cross products that every term selects. A chain of `&&`
+    /// is one node.
+    And(Vec<Select>),
+    /// `||`: the cross products that a term selects.
+    Or(Vec<Select>),
+}
+
 /// How many bins a declaration makes.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BinArray {
@@ -494,7 +722,7 @@ impl Default for GroupTypeOptions {
     }
 }
 
-/// The type options of a coverpoint (19.7.1, Table 19-4).
+/// The type options of a coverpoint or cross (19.7.1, Table 19-4).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ItemTypeOptions {
     pub weight: i32,
@@ -532,10 +760,16 @@ pub enum OptionId {
     DetectOverlap,
     PerInstance,
     GetInstCoverage,
+    /// `cross_num_print_missing`: how many uncovered automatic bins of a
+    /// cross a report lists.
+    CrossNumPrintMissing,
+    /// `cross_retain_auto_bins`: whether a cross keeps automatic bins beside
+    /// the bins it declares.
+    CrossRetainAutoBins,
 }
 
 impl OptionId {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 11] = [
         Self::Name,
         Self::Weight,
         Self::Goal,
@@ -545,6 +779,8 @@ impl OptionId {
         Self::DetectOverlap,
         Self::PerInstance,
         Self::GetInstCoverage,
+        Self::CrossNumPrintMissing,
+        Self::CrossRetainAutoBins,
     ];
 
     /// The number of the member in an operation code.
@@ -559,6 +795,8 @@ impl OptionId {
             Self::DetectOverlap => 6,
             Self::PerInstance => 7,
             Self::GetInstCoverage => 8,
+            Self::CrossNumPrintMissing => 9,
+            Self::CrossRetainAutoBins => 10,
         }
     }
 
@@ -579,22 +817,32 @@ impl OptionId {
             Self::DetectOverlap => "detect_overlap",
             Self::PerInstance => "per_instance",
             Self::GetInstCoverage => "get_inst_coverage",
+            Self::CrossNumPrintMissing => "cross_num_print_missing",
+            Self::CrossRetainAutoBins => "cross_retain_auto_bins",
         }
     }
 
     pub(crate) const fn kind(self) -> OptionKind {
         match self {
             Self::Name | Self::Comment => OptionKind::Text,
-            Self::Weight | Self::Goal | Self::AtLeast | Self::AutoBinMax => OptionKind::Int,
-            Self::DetectOverlap | Self::PerInstance | Self::GetInstCoverage => OptionKind::Bit,
+            Self::Weight
+            | Self::Goal
+            | Self::AtLeast
+            | Self::AutoBinMax
+            | Self::CrossNumPrintMissing => OptionKind::Int,
+            Self::DetectOverlap
+            | Self::PerInstance
+            | Self::GetInstCoverage
+            | Self::CrossRetainAutoBins => OptionKind::Bit,
         }
     }
 
-    /// Whether `item` has the member (19.10): a coverpoint has those of
-    /// its own `option` structure only.
-    pub(crate) const fn applies_to(self, item: u32) -> bool {
-        item == 0
-            || matches!(
+    /// Whether an item of `level` has the member (19.10): a coverpoint and
+    /// a cross have those of their own `option` structure only.
+    pub(crate) const fn applies_to(self, level: Level) -> bool {
+        match level {
+            Level::Group => true,
+            Level::Point => matches!(
                 self,
                 Self::Weight
                     | Self::Goal
@@ -602,7 +850,17 @@ impl OptionId {
                     | Self::AtLeast
                     | Self::AutoBinMax
                     | Self::DetectOverlap
-            )
+            ),
+            Level::Cross => matches!(
+                self,
+                Self::Weight
+                    | Self::Goal
+                    | Self::Comment
+                    | Self::AtLeast
+                    | Self::CrossNumPrintMissing
+                    | Self::CrossRetainAutoBins
+            ),
+        }
     }
 }
 
