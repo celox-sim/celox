@@ -894,6 +894,14 @@ impl Packages {
         };
         for index in order {
             let (name, tree) = &declarations[index];
+            // A specialization of a class template of a package analyzed
+            // before, for a class of another, may call that class's
+            // methods, as `uvm_object_registry#(T)` calls `T::new`: the
+            // package reaches them without importing their package, as a
+            // module does (see `Self::build_design_subroutines`).
+            if !packages.packages.is_empty() {
+                packages.build_design_subroutines();
+            }
             let package = analyze_package(name, tree, &packages, session)?;
             packages.packages.insert(
                 name.clone(),
