@@ -596,7 +596,7 @@ fn struct_member_place(
         index,
         layout: target.layout.clone(),
         element: target.element.clone(),
-        record: target.record.clone(),
+        record: target.record.clone().map(Box::new),
     };
     Ok(Some((
         ObjectPlace::Member {
@@ -652,7 +652,7 @@ pub(in crate::ast) fn object_place(
                 index,
                 layout: target.layout.clone(),
                 element: target.element.clone(),
-                record: target.record.clone(),
+                record: target.record.clone().map(Box::new),
             },
             element,
         )

@@ -89,7 +89,7 @@ impl ObjectPlace {
                 );
                 match record {
                     Some(record) => classes::object_call(
-                        crate::system_functions::ObjectOp::Unbox(record.clone()),
+                        crate::system_functions::ObjectOp::Unbox((**record).clone()),
                         vec![get],
                     ),
                     None => get,
@@ -162,7 +162,7 @@ impl ObjectPlace {
                     index.clone(),
                     match record {
                         Some(record) => classes::object_call(
-                            crate::system_functions::ObjectOp::Box(record.clone()),
+                            crate::system_functions::ObjectOp::Box((**record).clone()),
                             vec![value],
                         ),
                         None => value,

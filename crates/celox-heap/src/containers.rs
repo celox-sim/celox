@@ -27,6 +27,8 @@ pub fn is_container_value_op(code: u64) -> bool {
             | BOUND
             | MERGE
             | SIZED
+            | FILLED
+            | FILL_NULL
     )
 }
 
@@ -102,6 +104,13 @@ pub const BOUND: u64 = 106;
 /// elements combined, an element that is not equal in both taking the
 /// default of the layout (Table 7-1); otherwise an empty container.
 pub const MERGE: u64 = 107;
+/// `filled(a, b)`: container `a`, which holds a fixed-size unpacked array of
+/// `b` elements (IEEE 1800-2023 7.4), or, when `a` is null, a new one of
+/// `b` default elements of the layout (Table 7-1).
+pub const FILLED: u64 = 108;
+/// `fill_null(a, b)`: container `a` with each null element replaced by `b`,
+/// the default of its fixed-size unpacked array elements (see [`FILLED`]).
+pub const FILL_NULL: u64 = 109;
 /// `sized(a, b)`: container `a`, which a fixed-size unpacked array of `b`
 /// elements is assigned: a run-time error ([`Fault::ArraySize`]) unless `a`
 /// has `b` elements (IEEE 1800-2023 7.6). An empty container may be null.
@@ -890,6 +899,41 @@ impl Heap {
         }
         if op == MERGE {
             return self.merge(a as Handle, b as Handle, Layout(parameter)) as u64;
+        }
+        if op == FILLED {
+            if self.containers.contains_key(&(a as Handle)) {
+                return a;
+            }
+            let mut container = Container::empty(Layout(parameter));
+            container.contents = Contents::Sequence(
+                std::iter::repeat_n(Layout(parameter).default(), b as usize).collect(),
+            );
+            return self.publish_container(container, true).into();
+        }
+        if op == FILL_NULL {
+            let Some(source) = self.containers.get(&(a as Handle)) else {
+                return a;
+            };
+            let null = Element { value: 0, mask: 0 };
+            let fill = Element { value: b, mask: 0 };
+            let filled = |element: &Element| if *element == null { fill } else { *element };
+            let contents = match &source.contents {
+                Contents::Sequence(elements) if elements.iter().any(|e| *e == null) => {
+                    Contents::Sequence(elements.iter().map(filled).collect())
+                }
+                Contents::Associative(elements) if elements.values().any(|e| *e == null) => {
+                    Contents::Associative(
+                        elements
+                            .iter()
+                            .map(|(key, element)| (key.clone(), filled(element)))
+                            .collect(),
+                    )
+                }
+                _ => return a,
+            };
+            let mut container = (**source).clone();
+            container.contents = contents;
+            return self.publish_container(container, true).into();
         }
         if op == SIZED {
             let size = self
@@ -1802,6 +1846,32 @@ mod tests {
         assert_eq!(call(&mut heap, CLEAR, p, c, 0, 0), 0);
         call(&mut heap, NEW, p, u64::MAX, 0, 0);
         assert_eq!(heap.take_fault(), Some(Fault::NegativeArraySize));
+    }
+    #[test]
+    fn fixed_size_array_elements_default_to_arrays_of_defaults() {
+        let mut heap = Heap::new();
+        // A 4-state byte array, and a queue of its handles.
+        let inner = parameter(8, false, 0, 0, 0, false, false, false);
+        let outer = parameter(32, true, 2, 1, 0, false, false, false);
+        let default = call(&mut heap, FILLED, inner, 0, 2, 0);
+        assert_eq!(call(&mut heap, LEN, inner, default, 0, 0), 2);
+        assert_eq!(call(&mut heap, GET, inner, default, 1, 0), 0xff);
+        assert_eq!(call(&mut heap, GET_MASK, inner, default, 1, 0), 0xff);
+        // A container that holds the array is kept, and so is the default.
+        assert_eq!(call(&mut heap, FILLED, inner, default, 2, 0), default);
+        assert_eq!(call(&mut heap, FILLED, inner, 0, 2, 0), default);
+        let queue = call(&mut heap, NEW, outer, 3, 0, 0);
+        let queue = call(&mut heap, SET, outer, queue, 1, 77);
+        let filled = call(&mut heap, FILL_NULL, outer, queue, default, 0);
+        let elements: Vec<_> = (0..3)
+            .map(|index| call(&mut heap, GET, outer, filled, index, 0))
+            .collect();
+        assert_eq!(elements, [default, 77, default]);
+        assert_eq!(
+            call(&mut heap, FILL_NULL, outer, filled, default, 0),
+            filled
+        );
+        assert_eq!(call(&mut heap, FILL_NULL, outer, 0, default, 0), 0);
     }
     #[test]
     fn sized_containers_pass_through_and_others_fault() {

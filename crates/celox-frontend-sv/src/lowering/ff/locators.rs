@@ -165,6 +165,7 @@ impl Ff<'_, '_> {
                         handle: None,
                         enum_values: None,
                         key_enum_values: None,
+                        fixed_elements: None,
                     };
                     let seen = handle(self, "locator_seen");
                     let (_, position) = self.m.temp("locator_seen_index", 32, true, false);
@@ -239,6 +240,7 @@ impl Ff<'_, '_> {
                         handle: None,
                         enum_values: None,
                         key_enum_values: None,
+                        fixed_elements: None,
                     };
                     let seen = handle(self, "locator_seen");
                     stmts.push(local(
