@@ -78,7 +78,9 @@
 //! of `$urandom` and the seed of `$random`: the caller passes its own and
 //! takes the states back whenever the call returns, also when it suspends,
 //! and passes them again when it continues the call, which is drawing on
-//! them in place. A unit thereby serves every process. Static storage
+//! them in place. A unit thereby serves every process. A unit of the root
+//! that names its scope then takes the token of the calling scope (see
+//! [`OutOfLine::scope_callers`]), which a unit passes on. Static storage
 //! that the analyzer found observable (`persistent_locals`, IEEE 1800-2023
 //! 13.4.2) stays a module variable shared by every activation.
 //!
@@ -97,6 +99,7 @@ mod policy;
 
 pub(crate) use home::Home;
 pub(super) use home::{HomeLink, Mirror};
+pub(in crate::lowering) use policy::{site_names_scope, unknown_class_report};
 
 use super::procedural::{
     ProcModule, SystemTaskKind, collect_calls, default_calls, expr_idents, stmt_calls,
@@ -195,6 +198,11 @@ pub(super) struct ProcessState {
     /// only a process of its own, a kernel's, runs such a unit (see
     /// `celox_design::DeferredSite::ProcessAction`).
     pub deferred: bool,
+    /// Whether it makes a runtime event whose output names the scope that
+    /// issues it: a message, an assertion's report, a print of `%m`. A unit
+    /// of the root that state modules may call receives the caller's
+    /// token (see `Function::scope`).
+    pub scope: bool,
 }
 
 impl ProcessState {
@@ -211,6 +219,7 @@ impl ProcessState {
             waits: self.waits || other.waits,
             observes_events: self.observes_events || other.observes_events,
             deferred: self.deferred || other.deferred,
+            scope: self.scope || other.scope,
         }
     }
 }
@@ -334,6 +343,11 @@ pub(super) struct Function {
     /// of `$random`.
     pub random: Option<(usize, usize)>,
     pub dist_seed: Option<usize>,
+    /// For a unit of the root that names its scope (see
+    /// [`ProcessState::scope`]) while state modules may call the root's
+    /// units, the slot of the caller's scope token (see
+    /// [`OutOfLine::scope_callers`]).
+    pub scope: Option<usize>,
     /// For a unit that can suspend the calling process (see
     /// [`ProcessState::suspends`]), the slot of its resume point, which a
     /// call passes as zero to start the body and leaves as it is to
@@ -375,6 +389,7 @@ impl Function {
             size_patches: Vec::new(),
             random: self.random,
             dist_seed: self.dist_seed,
+            scope: self.scope,
             resume: self.resume,
             calls: Vec::new(),
             omitted: self.omitted.clone(),
@@ -433,7 +448,19 @@ pub(crate) struct OutOfLine {
     /// The root module, whose functions the module may call instead of
     /// lowering its own (see [`Home`]).
     pub(super) home: Option<HomeLink>,
+    /// For the root, the packages whose state modules may call its units:
+    /// a unit that names its scope receives a token of the scope that
+    /// calls it, zero for the root itself and `k` for the state module of
+    /// package `scope_callers[k - 1]`, and reports in that scope (see
+    /// [`Function::scope`]).
+    pub(super) scope_callers: Vec<String>,
+    /// The runtime event sites that report in the caller's scope (see
+    /// [`Self::scope_callers`]).
+    pub(super) scoped_sites: HashSet<u32>,
 }
+
+/// The width of a scope token (see [`OutOfLine::scope_callers`]).
+pub(super) const SCOPE_TOKEN_WIDTH: usize = 32;
 
 /// The fully inlined size, in statements, above which a subroutine goes out
 /// of line (see [`ProcModule::out_of_line_policy`]).

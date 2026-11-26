@@ -468,6 +468,9 @@ struct HierarchicalNames<'a> {
     /// Whether to lower each subroutine that can be out of line (see
     /// `AnalysisOptions::force_out_of_line_calls`).
     force_out_of_line: bool,
+    /// Whether the module is the root, whose units the state modules of the
+    /// packages may call (see `out_of_line::Home`).
+    home: bool,
     /// What the module's `always_ff` processes are lowered to besides their
     /// units.
     next_state: NextStateOptions<'a>,
@@ -536,6 +539,7 @@ impl<'a> HierarchicalNames<'a> {
             analyzed: None,
             recursion_report: None,
             force_out_of_line: false,
+            home: false,
             next_state: NextStateOptions::default(),
             properties: &NO_PROPERTIES,
             time_format: false,
