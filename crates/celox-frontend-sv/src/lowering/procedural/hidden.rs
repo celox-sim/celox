@@ -83,7 +83,7 @@ impl ProcModule<'_> {
         id
     }
 
-    pub(super) fn hidden(
+    pub(in crate::lowering) fn hidden(
         &mut self,
         name: String,
         width: usize,

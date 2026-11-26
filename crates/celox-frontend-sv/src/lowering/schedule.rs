@@ -1124,6 +1124,7 @@ fn schedule_sources_collecting(
         // frontend's largest.
         let last_attempt = !can_demote_level_lists(&lowered_modules, &demoted);
         let design_waits = DesignWaits::of(&lowered_modules);
+        let mut home = None;
         for (key, &module_id) in &module_ids {
             let (mut sim_module, mut calls) = if last_attempt {
                 let lowered = lowered_modules.get_mut(&module_id).unwrap();
@@ -1185,11 +1186,20 @@ fn schedule_sources_collecting(
             elaborated?;
             // Port expressions and processes share the module's call graph.
             if let Some(functions) = calls.as_ref().and_then(|graph| graph.out_of_line.as_ref()) {
-                out_of_line::attach_functions(
-                    &mut sim_module,
-                    functions.units(),
-                    functions.frames(),
-                );
+                let kept = out_of_line::attach_functions(&mut sim_module, functions);
+                // The state modules of the packages may call the root's
+                // functions instead of lowering their own.
+                if module_id == root_id && !hidden_root {
+                    home = out_of_line::Home::new(
+                        module_id,
+                        &key.name,
+                        lowered,
+                        &sim_module,
+                        functions,
+                        &kept,
+                    )
+                    .map(std::sync::Arc::new);
+                }
             }
             module_names.insert(module_id, key.name.clone());
             modules.insert(module_id, sim_module);
@@ -1222,6 +1232,7 @@ fn schedule_sources_collecting(
             warnings,
             analysis_options.force_out_of_line_calls,
             analysis_options.recursion_report.as_deref(),
+            home,
         )?;
         validate_package_variable_drivers([&root_key], &module_ids, &lowered_modules)?;
         let mut packages = Vec::new();

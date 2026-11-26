@@ -248,7 +248,7 @@ fn prepare_external_hierarchy_collecting(
             .collect();
         LoweredSvModule {
             edge_schedule: Default::default(),
-            source: dummy_ir.modules()[0].clone(),
+            source: std::sync::Arc::new(dummy_ir.modules()[0].clone()),
             implicit_nets_allowed: false,
             sim_module: signature.sim_module.clone(),
             signal_names: variables
@@ -270,6 +270,7 @@ fn prepare_external_hierarchy_collecting(
             interconnect_resolutions: HashMap::default(),
             interconnect_element_resolutions: HashMap::default(),
             calls: None,
+            unit_sites: Default::default(),
         }
     };
     let foreign_modules: HashMap<_, _> = foreign
@@ -600,7 +601,7 @@ fn prepare_external_hierarchy_collecting(
         // Port expressions and processes share the module's call graph, as
         // in a SystemVerilog hierarchy (see `schedule_sources`).
         if let Some(functions) = calls.as_ref().and_then(|graph| graph.out_of_line.as_ref()) {
-            out_of_line::attach_functions(&mut sim_module, functions.units(), functions.frames());
+            out_of_line::attach_functions(&mut sim_module, functions);
         }
         modules.insert(
             module_id,
@@ -646,6 +647,7 @@ fn prepare_external_hierarchy_collecting(
         false,
         warnings,
         force_out_of_line,
+        None,
         None,
     )?;
     // How often the design instantiates these modules is not known here;

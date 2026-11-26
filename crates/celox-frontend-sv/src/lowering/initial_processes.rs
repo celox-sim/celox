@@ -205,6 +205,7 @@ pub(super) fn lower_initial_processes(
         Vec<NbaSwitch<SourceVarId>>,
         Vec<celox_design::HostRequestSite<SourceVarId>>,
         Vec<(SourceVarId, Vec<sv::ir::Stmt>)>,
+        procedural::FunctionSites,
     ),
     sv::AnalyzerError,
 > {
@@ -302,6 +303,7 @@ pub(super) fn lower_initial_processes(
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            procedural::FunctionSites::default(),
         ));
     }
 
@@ -387,6 +389,10 @@ pub(super) fn lower_initial_processes(
         warnings,
     );
     pm.calls = calls;
+    // The kernels list the sites of the root's units they may call first
+    // (see `out_of_line::Home`); the hidden variables of the lowering above
+    // are gone, so the variables naming them are made here.
+    pm.list_home_sites();
     pm.runtime.event_sites = std::mem::take(runtime_event_sites);
     pm.runtime.errors = std::mem::take(runtime_errors);
     pm.externs.functions = std::mem::take(extern_functions);
@@ -505,5 +511,6 @@ pub(super) fn lower_initial_processes(
         nba_switches,
         host_request_sites,
         std::mem::take(&mut pm.event_assignments),
+        std::mem::take(&mut pm.function_sites),
     ))
 }
