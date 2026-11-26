@@ -706,6 +706,7 @@ impl<B: SimBackend> Simulator<B> {
                                     width: update.width as u64,
                                     value: update.value.0.to_bytes_le(),
                                     mask: update.value.1.to_bytes_le(),
+                                    drive: update.drive,
                                 },
                             )
                         })
@@ -721,6 +722,7 @@ impl<B: SimBackend> Simulator<B> {
                     width: update.width as u64,
                     value: update.value.0.to_bytes_le(),
                     mask: update.value.1.to_bytes_le(),
+                    drive: update.drive,
                 })
                 .collect(),
             domain_counters: self
@@ -748,6 +750,7 @@ impl<B: SimBackend> Simulator<B> {
                     width: update.width as u64,
                     value: update.value.0.to_bytes_le(),
                     mask: update.value.1.to_bytes_le(),
+                    drive: update.drive,
                 })
                 .collect(),
             ..ProcessRecord::default()
@@ -1006,6 +1009,8 @@ impl<B: SimBackend> Simulator<B> {
                         BigUint::from_bytes_le(&update.value),
                         BigUint::from_bytes_le(&update.mask),
                     ),
+                    drive: update.drive,
+                    at_event: Default::default(),
                 }),
                 None => unknown.push(update.target.clone()),
             }

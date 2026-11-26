@@ -291,6 +291,7 @@ impl LoopBounds<'_> {
             sv::ir::Stmt::DelayedNonblocking {
                 control,
                 assignment,
+                ..
             } => {
                 self.walk_stmt(control, loops, f);
                 self.walk_stmt(assignment, loops, f);

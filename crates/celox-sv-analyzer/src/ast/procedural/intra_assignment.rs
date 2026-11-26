@@ -68,6 +68,7 @@ impl BodyBuilder<'_, '_, '_> {
             output.push(Stmt::DelayedNonblocking {
                 control: Box::new(delay),
                 assignment: Box::new(assignment),
+                re_nba: false,
             });
             return Ok(output);
         }

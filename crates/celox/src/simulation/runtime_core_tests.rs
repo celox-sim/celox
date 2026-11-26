@@ -1256,6 +1256,7 @@ fn state_files_reject_queued_assignments_outside_their_target() {
             width: u64::MAX,
             value: vec![1],
             mask: Vec::new(),
+            drive: false,
         });
     assert!(matches!(
         sim.load_state(&file),
@@ -2771,6 +2772,8 @@ endprogram"#;
         lsb: 0,
         width: 32,
         value: (value.into(), 0u8.into()),
+        drive: false,
+        at_event: Default::default(),
     };
     parts.process_state.nba_queue.push(update(7));
     parts.process_state.re_nba_queue.push(update(11));

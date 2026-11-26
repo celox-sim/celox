@@ -925,10 +925,17 @@ fn ineligible_delayed_nonblocking(module: &sv::ir::Module, process: &sv::ir::FfP
             let sv::ir::Stmt::DelayedNonblocking {
                 control,
                 assignment,
+                re_nba,
             } = stmt
             else {
                 return;
             };
+            // A synchronous drive updates in the Re-NBA region, which no
+            // commit unit stages for.
+            if *re_nba {
+                ineligible = true;
+                return;
+            }
             let sv::ir::Stmt::Delay { amount, .. } = control.as_ref() else {
                 ineligible = true;
                 return;

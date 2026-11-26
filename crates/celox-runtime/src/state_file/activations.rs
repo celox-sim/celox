@@ -267,6 +267,7 @@ pub(super) fn get_extension(
                 width: get_u64(r)?,
                 value: get_len_bytes(r)?,
                 mask: get_len_bytes(r)?,
+                drive: false,
             })
         })
         .collect::<Result<_, StateFileError>>()?;

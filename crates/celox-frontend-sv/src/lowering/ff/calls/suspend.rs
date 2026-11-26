@@ -13,6 +13,7 @@ impl Ff<'_, '_> {
     pub(in crate::lowering::ff) fn unit_nonblocking(
         &mut self,
         delay: u64,
+        re_nba: bool,
         target: SourceVarId,
         lsb: usize,
         width: usize,
@@ -58,6 +59,7 @@ impl Ff<'_, '_> {
             position: slots,
             pending: None,
             unit: false,
+            re_nba,
         });
         let request = self.b.alloc_bit(celox_design::PROCESS_DELAY_WIDTH, false);
         self.b

@@ -44,14 +44,18 @@ impl Ff<'_, '_> {
         parts: &[sv::ir::LValue],
         rhs: &sv::ir::Expr,
     ) -> Result<(), sv::AnalyzerError> {
-        self.nonblocking_delayed(parts, rhs, 0)
+        self.nonblocking_delayed(parts, rhs, 0, false)
     }
 
+    /// [`Self::nonblocking`] with an intra-assignment delay of `delay`
+    /// ticks, whose update happens in the Re-NBA region if `re_nba` (a
+    /// synchronous drive, IEEE 1800-2023 14.16).
     pub(super) fn nonblocking_delayed(
         &mut self,
         parts: &[sv::ir::LValue],
         rhs: &sv::ir::Expr,
         delay: u64,
+        re_nba: bool,
     ) -> Result<(), sv::AnalyzerError> {
         let mut targets = Vec::with_capacity(parts.len());
         for part in parts {
@@ -128,7 +132,7 @@ impl Ff<'_, '_> {
             // unit suspends, as the kernel's own sites without a pending
             // flag are read (see `FunctionSites::nba`).
             if self.kernel.is_none() {
-                self.unit_nonblocking(delay, id, lsb, width, staged, position)?;
+                self.unit_nonblocking(delay, re_nba, id, lsb, width, staged, position)?;
                 continue;
             }
             // The staged value and position have objects of their own: a
@@ -156,6 +160,7 @@ impl Ff<'_, '_> {
                 position: slots,
                 pending: Some(pending),
                 unit: false,
+                re_nba,
             };
             let index = self.sites.nba.len() as u32;
             self.with_kernel(|kernel| {

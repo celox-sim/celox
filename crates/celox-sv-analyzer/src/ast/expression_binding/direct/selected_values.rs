@@ -71,7 +71,11 @@ pub(in crate::ast::expression_binding) fn path(
     if let Some((block, var, members)) =
         clocking::clockvar_path(root, native, tree, session, dimensions)
     {
-        let mut parts = vec![clocking::read(&block, &var, dimensions)?];
+        let mut parts = vec![if session.clockvar_drive == Some(ungroup(root, native)) {
+            var
+        } else {
+            clocking::read(&block, &var, dimensions)?
+        }];
         parts.extend(members);
         return Ok((parts, None));
     }

@@ -192,6 +192,249 @@ endmodule
         }
     }
 
+    /// 14.16, 9.6: a synchronous drive executed between clocking events is
+    /// scheduler work of its own, which neither `disable fork` cancels nor
+    /// `wait fork` waits for.
+    fn pending_drives_are_no_child_processes(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output logic [7:0] q, output int waited_at);
+    bit clk;
+    always #5 clk = ~clk;
+    clocking cb @(posedge clk);
+        output q;
+    endclocking
+    initial begin #2 cb.q[3:0] <= 4'h3; disable fork; end
+    initial begin #3 cb.q[7:4] <= 4'h5; wait fork; waited_at = $time; end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(true);
+        sim.run_until(10).unwrap();
+        for (name, value) in [("q", 0x53u32), ("waited_at", 3)] {
+            let signal = sim.signal(name);
+            assert_eq!(sim.get(signal), BigUint::from(value), "{name}");
+        }
+    }
+
+    /// 14.16: a synchronous drive updates its signal in the Re-NBA region
+    /// of the clocking event's slot plus the output skew; one executed
+    /// between clocking events matures at the next one. Of the drives of a
+    /// clockvar that mature in one Re-NBA region only the last is driven
+    /// (14.16.2): `a` never rises.
+    fn synchronous_drives_mature_in_the_re_nba_region(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output bit [7:0] q5, output bit [7:0] q6, output bit [7:0] r6, output bit [7:0] r7,
+           output bit [7:0] s6, output bit [7:0] s7, output bit [7:0] q16, output int rises);
+    bit clk, a;
+    bit [7:0] q, r, s;
+    always #5 clk = ~clk;
+    always @(posedge a) rises++;
+    clocking cb @(posedge clk);
+        output q, a;
+        output #1step r;
+        output #2 s;
+    endclocking
+    initial begin
+        #3 cb.q <= 7; cb.a <= 1;
+        @(cb);
+        q5 = q;
+        cb.q <= 9; cb.r <= 1; cb.s <= 2; cb.a <= 0;
+        #1 q6 = q; r6 = r; s6 = s;
+        #1 r7 = r; s7 = s;
+        @(cb);
+        cb.q[3:0] <= 4'hf;
+        #1 q16 = q;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(true);
+        sim.run_until(30).unwrap();
+        for (name, value) in [
+            ("q5", 0u32),
+            ("q6", 9),
+            ("r6", 0),
+            ("r7", 1),
+            ("s6", 0),
+            ("s7", 0),
+            ("q16", 0x0f),
+            ("rises", 0),
+        ] {
+            let signal = sim.signal(name);
+            assert_eq!(sim.get(signal), BigUint::from(value), "{name}");
+        }
+    }
+
+    /// 14.16.2: of the drives of a bit that mature together only the last
+    /// one is driven, also when another drive covers more bits: `q[0]`
+    /// never rises, `q` changes once, and the other bits of the wider drive
+    /// are still driven.
+    fn overlapping_drives_drive_the_last_value_of_each_bit(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output bit [3:0] q6, output int rises, output int waits, output int changes);
+    bit clk;
+    bit [3:0] q;
+    always #5 clk = ~clk;
+    // An edge of a vector is an edge of its least significant bit (9.4.2).
+    always @(posedge q) rises++;
+    initial forever begin @(posedge q); waits++; end
+    initial forever begin @(q); changes++; end
+    clocking cb @(posedge clk);
+        output q;
+    endclocking
+    initial begin
+        #3 cb.q <= 4'b0111; cb.q[1:0] <= 2'b10; cb.q[3] <= 1'b1;
+        @(cb);
+        #1 q6 = q;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(true);
+        sim.run_until(30).unwrap();
+        for (name, value) in [("q6", 0b1110u32), ("rises", 0), ("waits", 0), ("changes", 1)] {
+            let signal = sim.signal(name);
+            assert_eq!(sim.get(signal), BigUint::from(value), "{name}");
+        }
+    }
+
+    /// 14.16.2: of the drives that mature at one clocking event the last
+    /// executed is driven, bit by bit: a drive executed at the event is
+    /// later than one executed before it, whichever process runs first at
+    /// the event. `r` takes its high bits from the later of two drives
+    /// executed before the event and its low bits from the drive at it.
+    fn drives_at_the_event_are_later_than_drives_before_it(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output bit [7:0] q6, output bit [7:0] r6);
+    bit clk;
+    bit [7:0] q, r;
+    always #5 clk = ~clk;
+    clocking cb @(posedge clk);
+        output q, r;
+    endclocking
+    initial begin
+        #2 cb.r[7:4] <= 4'ha;
+        #1 cb.q <= 1; cb.r <= 8'h11;
+    end
+    initial begin
+        @(posedge clk);
+        cb.q <= 2;
+        cb.r[3:0] <= 4'h5;
+        #1 q6 = q; r6 = r;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(true);
+        sim.run_until(30).unwrap();
+        for (name, value) in [("q6", 2u32), ("r6", 0x15)] {
+            let signal = sim.signal(name);
+            assert_eq!(sim.get(signal), BigUint::from(value), "{name}");
+        }
+    }
+
+    /// 14.16.2: drives executed before a clocking event mature at it in
+    /// the order they were executed, whatever processes the runtime runs
+    /// them in: the drive through `fast` frees its process at 3, which the
+    /// second drive of `cb.q` may take over from the first.
+    fn drives_before_an_event_mature_in_their_order(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output bit [7:0] q6, output bit r4);
+    bit clk, fclk, r;
+    bit [7:0] q;
+    always #5 clk = ~clk;
+    always #1 fclk = ~fclk;
+    clocking cb @(posedge clk);
+        output q;
+    endclocking
+    clocking fast @(posedge fclk);
+        output r;
+    endclocking
+    initial begin
+        #2 fast.r <= 1;
+        cb.q <= 1;
+        #2 r4 = r;
+        cb.q <= 2;
+        #2 q6 = q;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(true);
+        sim.run_until(30).unwrap();
+        for (name, value) in [("q6", 2u32), ("r4", 1)] {
+            let signal = sim.signal(name);
+            assert_eq!(sim.get(signal), BigUint::from(value), "{name}");
+        }
+    }
+
+    /// 14.16.2: one drive statement executed twice before a clocking event
+    /// matures as two drives, the later driven, and the drives after them
+    /// mature at the next event (see the `clocking::drives_*` shared cases).
+    fn one_drive_statement_executed_twice_before_an_event(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output bit [7:0] q6, output bit [7:0] q16);
+    bit clk;
+    bit [7:0] q;
+    always #5 clk = ~clk;
+    clocking cb @(posedge clk);
+        output q;
+    endclocking
+    initial begin
+        for (int i = 1; i <= 2; i++) begin #1; cb.q <= i; end
+        #5 cb.q <= 7;
+    end
+    initial begin #6 q6 = q; #10 q16 = q; end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(true);
+        sim.run_until(30).unwrap();
+        for (name, value) in [("q6", 2u32), ("q16", 7)] {
+            let signal = sim.signal(name);
+            assert_eq!(sim.get(signal), BigUint::from(value), "{name}");
+        }
+    }
+
+    /// 14.3, 14.16.1: an inout clockvar reads the value sampled at the
+    /// latest clocking event, not the value its drive puts on the signal;
+    /// in a program the clocking block works alike (24.3).
+    fn inout_clockvars_read_their_samples(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output bit [23:0] seen);
+    bit clk;
+    bit [7:0] q, d;
+    always #5 clk = ~clk;
+    always @(posedge clk) d <= d + 1;
+    test t(clk, q, d, seen);
+endmodule
+program test(input bit clk, output bit [7:0] q, input bit [7:0] d, output bit [23:0] seen);
+    clocking cb @(posedge clk);
+        inout q;
+        input d;
+    endclocking
+    initial for (int i = 0; i < 3; i++) begin
+        @(cb);
+        cb.q <= cb.d + 8'd10;
+        #1 seen[i*8 +: 8] = cb.q;
+        #1;
+    end
+endprogram
+"#;
+        }
+        @build simulation(source).four_state(true);
+        sim.run_until(30).unwrap();
+        let seen = sim.signal("seen");
+        assert_eq!(sim.get(seen), BigUint::from(0x0b_0a_00u32));
+    }
+
     /// 14.13: what the Observed region samples settles in its time slot,
     /// also for a clocking block of a named event, which no process waits
     /// for through a signal: `q` follows `cb.d` at once.

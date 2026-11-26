@@ -35,6 +35,7 @@ mod randsequence;
 pub(super) mod references;
 pub(crate) mod static_references;
 pub(in crate::ast) mod subroutines;
+mod synchronous_drives;
 pub(super) mod timed_tasks;
 mod timing;
 mod until;
@@ -483,6 +484,14 @@ impl Names {
             }
         }
         None
+    }
+
+    /// Whether a scope of the body declares `source`: a variable or a local
+    /// parameter.
+    fn binds(&self, source: &str) -> bool {
+        self.scopes
+            .iter()
+            .any(|scope| scope.entries.iter().any(|entry| entry.source == source))
     }
 
     fn rename_name(&self, name: &mut String) {
