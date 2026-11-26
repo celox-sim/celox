@@ -200,6 +200,16 @@
         "github-actions"
       ],
       "enabled": false
+    },
+    {
+      "description": "vue-chartjs 5.3.6 was published without its JavaScript entry points (dist holds only type declarations), so the docs build cannot resolve the package.",
+      "matchManagers": [
+        "npm"
+      ],
+      "matchPackageNames": [
+        "vue-chartjs"
+      ],
+      "allowedVersions": "!/^5\\.3\\.6$/"
     }
   ],
   "nix": {
