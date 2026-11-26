@@ -248,6 +248,8 @@ pub struct ProcessRefs {
     /// ([`celox_design::ProcessSlots::program`]), which runs in the reactive
     /// region set.
     pub program: Option<SignalRef>,
+    /// See [`celox_design::ProcessSlots::assertion`].
+    pub assertion: bool,
     pub resume: SignalRef,
     /// A converted edge procedure starts by registering its event control
     /// before scheduled time-zero inputs are applied.
@@ -307,6 +309,7 @@ impl ProcessRefs {
             frame: None,
             kind: celox_design::ProcessKind::Regular,
             program: None,
+            assertion: false,
             resume: status,
             starts_with_event_wait: false,
             status,

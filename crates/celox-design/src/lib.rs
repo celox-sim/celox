@@ -1284,6 +1284,14 @@ pub struct ProcessSlots<A> {
     /// region set (24.3.1), and `$exit` and the end of the instance's
     /// kernels act on them together (24.7). `None` for design code.
     pub program: Option<A>,
+    /// For a process that runs the actions of a concurrent assertion (IEEE
+    /// 1800-2023 16.14), the assertion's own or the final procedure that
+    /// fails the pending attempts of a strong until property, `true`: it is
+    /// not an initial or always procedure, which a function that forks a
+    /// background process needs as its caller (13.4.4), so the runtime
+    /// stops the simulation when a function its actions call forks.
+    #[serde(default)]
+    pub assertion: bool,
     pub resume: A,
     pub status: A,
     pub delay: A,
@@ -1349,6 +1357,7 @@ impl<A> ProcessSlots<A> {
             requires_timed_simulation: self.requires_timed_simulation,
             const_delays: self.const_delays,
             program: self.program.map(&mut map),
+            assertion: self.assertion,
             resume: map(self.resume),
             status: map(self.status),
             delay: map(self.delay),

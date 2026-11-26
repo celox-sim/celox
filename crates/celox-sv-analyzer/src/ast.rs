@@ -954,6 +954,8 @@ pub struct InitialProcess {
     synthetic: bool,
     /// An `always` process: its body runs forever.
     repeats: bool,
+    /// See [`InitialProcess::runs_assertion_actions`].
+    assertion_actions: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -398,6 +398,7 @@ impl ScopeElaboration<'_> {
                     validation_body: Vec::new(),
                     synthetic: false,
                     repeats: false,
+                    assertion_actions: false,
                 },
             );
         }

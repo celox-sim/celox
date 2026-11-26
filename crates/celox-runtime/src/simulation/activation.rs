@@ -222,6 +222,9 @@ impl<B: SimBackend> SimulationState<B> {
             }
             .into());
         }
+        if !unseeded && self.model.processes[process].assertion {
+            return Err(assertion_action_fork());
+        }
         let first = (encoded & 0xffff) as usize;
         let count = ((encoded >> 16) & 0xffff) as usize;
         // A fork of a function unit the process is suspended inside: each
@@ -833,3 +836,18 @@ pub(super) fn event_probe<B: SimBackend>(
 
 #[cfg(test)]
 mod tests;
+
+/// The run-time error of a function called by a concurrent assertion's
+/// action that forks a background process: neither the assertion's process
+/// nor the final procedure that fails the pending attempts of a strong until
+/// property is an initial or always procedure (IEEE 1800-2023 13.4.4). The
+/// analyzer rejects the other forks of these processes.
+pub(super) fn assertion_action_fork() -> Halt {
+    SimulatorErrorCode::Runtime {
+        message: "background process scheduled by a function called from a concurrent \
+                  assertion action; IEEE 1800-2023 13.4.4 requires an initial/always process"
+            .into(),
+        signals: Vec::new(),
+    }
+    .into()
+}

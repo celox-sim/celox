@@ -362,6 +362,7 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                     .map(|frame| frame.map(|id| resolve(&id))),
                 kind: process.slots.kind,
                 program: process.slots.program.as_ref().map(resolve),
+                assertion: process.slots.assertion,
                 resume: resolve(&process.slots.resume),
                 starts_with_event_wait: process
                     .frame

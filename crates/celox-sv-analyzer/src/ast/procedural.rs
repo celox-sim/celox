@@ -371,6 +371,10 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
     /// needs: those that fail the attempts of a strong until property
     /// still pending when the simulation ends (see `until`).
     pub(super) assertion_finals: Vec<Vec<Stmt>>,
+    /// Whether the body is that of a module's concurrent assertion, whose
+    /// process runs the assertion's actions; an `expect` is a statement of
+    /// the procedure that holds it (16.17).
+    pub(super) concurrent_assertion: bool,
     pub(super) sensitivity_body: Vec<Stmt>,
     /// The name of the subroutine whose body this is, which the names of
     /// its variables carry (see [`Self::declare_static`], [`Self::declare`]).
@@ -839,6 +843,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             sensitivity_body: Vec::new(),
             disable_watchers: Vec::new(),
             assertion_finals: Vec::new(),
+            concurrent_assertion: false,
             owner: None,
             owned_locals: 0,
             named_blocks: Vec::new(),

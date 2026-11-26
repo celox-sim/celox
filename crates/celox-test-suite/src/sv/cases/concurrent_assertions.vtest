@@ -592,3 +592,39 @@ endmodule"#)
 endmodule"#)
  (top Top) (run_until 5)
  (assert_eq named 4) (assert_eq unnamed 0))
+
+; A function a concurrent assertion's action calls may fork a background
+; process on a path the action does not take, as UVM 1.2's reporting reaches
+; the fork of uvm_component::m_set_cl_verb (IEEE 1800-2023 13.4.4): the
+; initial procedure builds the object whose constructor forks, and each
+; action reads what the forked process wrote.
+(case assertion_actions_call_functions_that_may_fork
+ (source "action_forks.sv" #"package action_forks;
+ class root;
+  static root inst;
+  int spawned;
+  function new();
+   fork spawned++; join_none
+  endfunction
+  static function root get();
+   if (inst == null) inst = new;
+   return inst;
+  endfunction
+ endclass
+ function automatic int enabled();
+  root r = root::get();
+  return r.spawned;
+ endfunction
+endpackage
+module Top(output int passes, failures);
+ import action_forks::*;
+ bit clk, a = 1;
+ initial begin
+  void'(root::get());
+  #1 clk = 1; #1 clk = 0;
+  a = 0; #1 clk = 1; #1 clk = 0;
+ end
+ assert property (@(posedge clk) a) passes += enabled(); else failures += enabled();
+endmodule"#)
+ (top Top) (run_until 5)
+ (assert_eq passes 1) (assert_eq failures 1))
