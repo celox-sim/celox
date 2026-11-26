@@ -1080,6 +1080,7 @@ impl OptimizedSir {
         collect_comb_writes(&mut program);
 
         // Remove identity Stores for aliases validated by the layout
+        let mut aliases = crate::HashMap::default();
         if !program.layout_requirements.is_empty() {
             let aliased: crate::HashMap<AbsoluteAddr, AbsoluteAddr> = program
                 .layout_requirements
@@ -1111,8 +1112,9 @@ impl OptimizedSir {
                     .collect::<crate::HashMap<_, _>>();
                 crate::optimizer::sir::redirect_final_alias_accesses(&mut program, &redirected);
             }
+            aliases = aliased;
         }
-        rebuild_rtl_writes(&mut program);
+        rebuild_rtl_writes(&mut program, &aliases);
         program.layout_requirements.clear();
         let OptimizedSir {
             sir,
@@ -1170,7 +1172,14 @@ fn collect_comb_writes(program: &mut OptimizedSir) {
     program.runtime.runtime_schema.comb_writes = comb_writes;
 }
 
-fn rebuild_rtl_writes(program: &mut OptimizedSir) {
+/// Rebuild the bits design code writes (`RuntimeSchema::rtl_writes`) from
+/// the final units. An alias of `aliases` shares the storage of its
+/// canonical address: a write through either writes both, so that a wait
+/// on one of them is checked where design code writes the other.
+fn rebuild_rtl_writes(
+    program: &mut OptimizedSir,
+    aliases: &crate::HashMap<AbsoluteAddr, AbsoluteAddr>,
+) {
     let mut rtl_writes = crate::HashSet::default();
     for unit in program
         .sir
@@ -1260,6 +1269,27 @@ fn rebuild_rtl_writes(program: &mut OptimizedSir) {
                         }
                     }
                 }
+            }
+        }
+    }
+    if !aliases.is_empty() {
+        // The addresses sharing each canonical address's storage, it too.
+        let mut sharing: crate::HashMap<AbsoluteAddr, Vec<AbsoluteAddr>> =
+            crate::HashMap::default();
+        for (&alias, &canonical) in aliases {
+            sharing
+                .entry(canonical)
+                .or_insert_with(|| vec![canonical])
+                .push(alias);
+        }
+        let written: Vec<_> = rtl_writes.iter().copied().collect();
+        for atom in written {
+            let canonical = aliases.get(&atom.id).copied().unwrap_or(atom.id);
+            for &shared in sharing.get(&canonical).into_iter().flatten() {
+                rtl_writes.insert(VarAtomBase {
+                    id: shared,
+                    access: atom.access,
+                });
             }
         }
     }
