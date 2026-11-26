@@ -7229,3 +7229,55 @@ endmodule
 "#)
   (top Top) (run_until 2) (assert_eq done 1)
   (expect_output "9 9 10|17 17 18|9 9 10\n"))
+
+(case package_states_reach_specializations_for_other_packages
+  ; A specialization of a class template of one package for a class of
+  ; another calls that class's methods, as a factory's registry creates the
+  ; objects of its type parameter. Package `env` imports only `lib`, yet its
+  ; initializer reaches those methods through the specialization's override
+  ; (IEEE 1800-2023 8.25, 26.3).
+  (source "factory.sv" #"
+package lib;
+    virtual class base;
+        pure virtual function int id();
+    endclass
+    virtual class wrapper;
+        pure virtual function base create();
+    endclass
+    wrapper registered[$];
+    class registry #(type T = base) extends wrapper;
+        static registry #(T) me = get();
+        static function registry #(T) get();
+            if (me == null) begin me = new; registered.push_back(me); end
+            return me;
+        endfunction
+        function base create(); T t = new; return t; endfunction
+    endclass
+    function automatic int make_all();
+        int total = 0;
+        foreach (registered[i]) total += registered[i].create().id();
+        return total;
+    endfunction
+endpackage
+package seq;
+    import lib::*;
+    class s extends base;
+        typedef registry #(s) type_id;
+        int k;
+        function new(); k = 7; endfunction
+        function int id(); return k; endfunction
+    endclass
+endpackage
+package env;
+    import lib::*;
+    int n = make_all();
+endpackage
+module Top(output int now, output bit seen);
+    initial begin
+        #1 now = lib::make_all();
+        seen = env::n inside {0, 7};
+    end
+endmodule
+"#)
+  (top Top) (run_until 1)
+  (assert_eq now 7) (assert_eq seen 1))
