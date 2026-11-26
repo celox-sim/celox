@@ -73,6 +73,14 @@ pub enum Expr {
         array: usize,
         body: Box<Expr>,
     },
+    /// `body` for some element of array `array` of the program, as
+    /// [`Expr::Foreach`] loops over it: the disjunction of `body` for each,
+    /// false without elements. An array in the set of `inside` stands for
+    /// its elements (IEEE 1800-2023 11.4.13).
+    Any {
+        array: usize,
+        body: Box<Expr>,
+    },
     /// The index of the element of loop `level`, a 32-bit `int`.
     Index {
         level: u32,
@@ -578,7 +586,7 @@ impl Expr {
             | Self::Resize { value, .. }
             | Self::Unary { value, .. }
             | Self::CountBits { value, .. } => (Some(value), None, &[]),
-            Self::Foreach { body, .. } => (Some(body), None, &[]),
+            Self::Foreach { body, .. } | Self::Any { body, .. } => (Some(body), None, &[]),
             Self::DisableSoft {
                 variable,
                 condition,
@@ -618,7 +626,7 @@ impl Expr {
                 | Self::Resize { value, .. }
                 | Self::Unary { value, .. }
                 | Self::CountBits { value, .. } => (Some(value), None, &mut []),
-                Self::Foreach { body, .. } => (Some(body), None, &mut []),
+                Self::Foreach { body, .. } | Self::Any { body, .. } => (Some(body), None, &mut []),
                 Self::DisableSoft {
                     variable,
                     condition,
@@ -672,7 +680,7 @@ impl Expr {
     /// over it or its sum.
     fn names_elements(&self, index: usize) -> bool {
         self.any(&mut |expr| {
-            matches!(expr, Self::Sum(array) | Self::ElementAt { array, .. } | Self::Foreach { array, .. }
+            matches!(expr, Self::Sum(array) | Self::ElementAt { array, .. } | Self::Foreach { array, .. } | Self::Any { array, .. }
                 if *array == index)
         })
     }
@@ -729,7 +737,9 @@ impl Expr {
                 left.variables(base, size_base, names);
                 right.variables(base, size_base, names);
             }
-            Self::Foreach { body, .. } => body.variables(base, size_base, names),
+            Self::Foreach { body, .. } | Self::Any { body, .. } => {
+                body.variables(base, size_base, names)
+            }
             Self::Dist { membership, .. } => membership.variables(base, size_base, names),
             Self::Literal(..)
             | Self::Sum(_)
@@ -825,7 +835,7 @@ impl Expr {
                 None,
             ),
             Self::Member { .. } => return Err("constraint member of an unread handle".into()),
-            Self::Foreach { .. } | Self::Index { .. } | Self::Element { .. } => {
+            Self::Foreach { .. } | Self::Any { .. } | Self::Index { .. } | Self::Element { .. } => {
                 return Err("constraint loop outside its array".into());
             }
             Self::ElementAt { .. } => return Err("constraint element of an unread array".into()),
@@ -1388,7 +1398,8 @@ impl Heap {
     ) -> Result<Expr, String> {
         let boxed = |value: Expr| Box::new(value);
         Ok(match constraint {
-            Expr::Foreach { array, body } => {
+            Expr::Foreach { array, body } | Expr::Any { array, body } => {
+                let any = matches!(constraint, Expr::Any { .. });
                 let looped = program
                     .arrays
                     .get(*array)
@@ -1417,23 +1428,24 @@ impl Heap {
                     )?);
                     loops.pop();
                 }
-                // A balanced conjunction stays within the solver's depth.
-                fn all(mut each: Vec<Expr>) -> Expr {
+                // A balanced conjunction, or disjunction, stays within the
+                // solver's depth.
+                fn all(mut each: Vec<Expr>, any: bool) -> Expr {
                     match each.len() {
-                        0 => Expr::Literal(1, 1),
+                        0 => Expr::Literal(1, u64::from(!any)),
                         1 => each.pop().expect("one constraint"),
                         len => {
                             let right = each.split_off(len / 2);
                             Expr::Binary {
-                                op: "&&".into(),
-                                left: Box::new(all(each)),
-                                right: Box::new(all(right)),
+                                op: if any { "||" } else { "&&" }.into(),
+                                left: Box::new(all(each, any)),
+                                right: Box::new(all(right, any)),
                                 signed: false,
                             }
                         }
                     }
                 }
-                all(each)
+                all(each, any)
             }
             Expr::Index { level } => {
                 let &(_, index) = loops

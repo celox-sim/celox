@@ -105,7 +105,18 @@ fn bounded_clone(value: &Typed, budget: &mut usize) -> Result<Typed, String> {
     while let Some(value) = pending.pop() {
         charge(budget)?;
         match &value.kind {
-            Kind::Leaf(_) => {}
+            // A leaf is copied with the expression it holds, such as the
+            // body of an array membership.
+            Kind::Leaf(expr) => {
+                let mut exhausted = false;
+                expr.any(&mut |_| {
+                    exhausted = charge(budget).is_err();
+                    exhausted
+                });
+                if exhausted {
+                    return Err("constraint expression expansion limit".into());
+                }
+            }
             Kind::Context(child) | Kind::Unary(_, child) => pending.push(child),
             Kind::Binary(_, a, b) => pending.extend([a.as_ref(), b.as_ref()]),
         }
@@ -1518,6 +1529,49 @@ fn array_property<'p>(
         .filter(|(_, property)| property.constraint_array()))
 }
 
+/// The array of the program that array property `index` of the class,
+/// `property`, is, and its element type, for a loop over its elements:
+/// constraint `foreach` (IEEE 1800-2023 18.5.8.1), or a member of an
+/// `inside` set (11.4.13), as `what` names it.
+#[allow(clippy::too_many_arguments)]
+fn looped_array(
+    index: usize,
+    property: &Property,
+    what: &str,
+    properties: &[Property],
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    env: &ConstEnv,
+) -> Result<(usize, std::sync::Arc<ContainerType>), String> {
+    // The elements of a rand array are solver variables (18.5.8.1), which
+    // the solver holds as its scalars.
+    if (property.rand || property.randc) && !random_array(property, tree, session, env) {
+        return Err(format!(
+            "{what} a rand array of elements other than 2-state integral ones of at most 64 bits"
+        ));
+    }
+    // The solver iterates positions: those of a fixed-size array are its
+    // indices only from 0 (18.5.8.1).
+    if property.storage.as_ref().is_some_and(|storage| {
+        storage
+            .fixed
+            .is_some_and(|(left, right)| left != 0 || left > right)
+    }) {
+        return Err(format!(
+            "{what} a fixed-size array whose range is not [0:N-1]"
+        ));
+    }
+    visible(property, tree, session, env)?;
+    let array = properties[..index]
+        .iter()
+        .filter(|property| property.constraint_array())
+        .count();
+    Ok((
+        array,
+        property.array_storage().expect("an array property").clone(),
+    ))
+}
+
 /// The sum of the elements of array property `index` of the class, of the
 /// elements' type (IEEE 1800-2023 7.12.3): of a rand array, a sum of solver
 /// variables; of another, a value.
@@ -1851,40 +1905,20 @@ pub(in crate::ast) fn bind_inputs(
                 let (index, property) =
                     array_property(*array, native, properties, names, inputs, loops)?
                         .ok_or_else(|| format!("constraint foreach over `{name}`"))?;
-                // The elements of a rand array are solver variables
-                // (18.5.8.1), which the solver holds as its scalars.
-                if (property.rand || property.randc) && !random_array(property, tree, session, env)
-                {
-                    return Err(
-                        "constraint foreach over a rand array of elements other than 2-state integral ones of at most 64 bits"
-                            .into(),
-                    );
-                }
-                // The solver iterates positions: those of a fixed-size array
-                // are its indices only from 0 (IEEE 1800-2023 18.5.8.1).
-                if property
-                    .storage
-                    .as_ref()
-                    .is_some_and(|storage| storage.fixed.is_some_and(|(left, _)| left != 0))
-                    || property.storage.as_ref().is_some_and(|storage| {
-                        storage.fixed.is_some_and(|(left, right)| left > right)
-                    })
-                {
-                    return Err(
-                        "constraint foreach over a fixed-size array whose range is not [0:N-1]"
-                            .into(),
-                    );
-                }
-                visible(property, tree, session, env)?;
-                let array = properties[..index]
-                    .iter()
-                    .filter(|property| property.constraint_array())
-                    .count();
+                let (array, element) = looped_array(
+                    index,
+                    property,
+                    "constraint foreach over",
+                    properties,
+                    tree,
+                    session,
+                    env,
+                )?;
                 let mut inner = loops.to_vec();
                 inner.push(Loop {
                     variable: instances::normalize_identifier(&variable.spelling),
                     array: index,
-                    element: property.array_storage().expect("an array property").clone(),
+                    element,
                 });
                 let body = expression(
                     *body,
@@ -2113,11 +2147,40 @@ pub(in crate::ast) fn bind_inputs(
                 // Determine the context across every member and range endpoint
                 // before expanding comparisons, so arithmetic cannot truncate
                 // differently depending on which alternative is being tested.
+                // An array property in the set stands for its elements
+                // (11.4.13), each compared in the loop over it that the
+                // member is, with the elements' type in the context.
                 let mut members = Vec::new();
                 let mut width = value.width;
                 let mut signed = value.signed;
                 for item in items {
                     use celox_sv_syntax::DimensionKind;
+                    if let DimensionKind::Index(id) = item.kind
+                        && let Some((index, property)) =
+                            array_property(id, native, properties, names, inputs, loops)?
+                    {
+                        let what = "a constraint `inside` set of";
+                        let (array, element) =
+                            looped_array(index, property, what, properties, tree, session, env)?;
+                        if !solver_element(&element, tree, session, env) {
+                            return Err(format!(
+                                "{what} an array of elements other than 2-state integral ones of at most 64 bits"
+                            ));
+                        }
+                        let element = Typed {
+                            kind: Kind::Leaf(ConstraintExpr::Element {
+                                level: loops.len() as u32,
+                                member: None,
+                                width: element.layout.width,
+                            }),
+                            width: element.layout.width,
+                            signed: element.layout.signed,
+                        };
+                        width = width.max(element.width);
+                        signed &= element.signed;
+                        members.push((element, None, Some(array)));
+                        continue;
+                    }
                     let (low, high) = match item.kind {
                         DimensionKind::Index(id) => (recurse(session, budget, id)?, None),
                         DimensionKind::Range { left, right } => (
@@ -2130,14 +2193,45 @@ pub(in crate::ast) fn bind_inputs(
                         width = width.max(operand.width);
                         signed &= operand.signed;
                     }
-                    members.push((low, high));
+                    members.push((low, high, None));
                 }
                 let value = sized(value, width, signed);
                 let mut alternatives = Vec::new();
-                for (low, high) in members {
+                for (low, high, array) in members {
                     charge(budget)?;
                     let left = bounded_clone(&value, budget)?;
                     let low = sized(low, width, signed);
+                    if let Some(array) = array {
+                        // The member's loop is at level `loops.len()`: a
+                        // loop of a membership in the left operand at that
+                        // level or deeper is one level further in.
+                        let mut left_value = emit(left, None);
+                        let level = loops.len() as u32;
+                        left_value.rewrite(&mut |expr| match expr {
+                            ConstraintExpr::Element { level: inner, .. }
+                            | ConstraintExpr::Index { level: inner }
+                                if *inner >= level =>
+                            {
+                                *inner += 1;
+                            }
+                            _ => {}
+                        });
+                        let left = Typed {
+                            kind: Kind::Leaf(left_value),
+                            width,
+                            signed,
+                        };
+                        let equal = relation("==", left, low);
+                        alternatives.push(Typed {
+                            kind: Kind::Leaf(ConstraintExpr::Any {
+                                array,
+                                body: Box::new(emit(equal, None)),
+                            }),
+                            width: 1,
+                            signed: false,
+                        });
+                        continue;
+                    }
                     let predicate = if let Some(high) = high {
                         relation(
                             "&&",
