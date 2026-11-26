@@ -569,3 +569,40 @@ sv_backends! {
         assert_eq!(sim.get(sim.signal("back_size")), BigUint::from(2u8));
     }
 }
+
+sv_backends! {
+    // A module instantiates an interface with ports and connects members of
+    // its own interface port, which has no modport, to them (IEEE 1800-2023
+    // 25.3): the interface's port directions tell which connections write
+    // the members, as a bus functional model's agent wires its driver.
+    fn interface_instances_connect_members_of_interface_ports(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+            interface bus_if(input logic clk);
+              logic [7:0] data;
+              logic valid;
+            endinterface
+            interface drv_bfm(input logic clk, output logic [7:0] data, output logic valid);
+              task drive(input logic [7:0] v);
+                @(posedge clk); data <= v; valid <= 1;
+              endtask
+            endinterface
+            module agent(bus_if intf);
+              drv_bfm drv(.clk(intf.clk), .data(intf.data), .valid(intf.valid));
+              initial drv.drive(8'h5a);
+            endmodule
+            module Top(output logic [7:0] data, output logic valid);
+              logic clk = 0;
+              always #5 clk = ~clk;
+              bus_if intf(.clk(clk));
+              agent a(.intf(intf));
+              assign data = intf.data;
+              assign valid = intf.valid;
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("interface_instance_ports.sv"))], "Top");
+        sim.run_until(30).unwrap();
+        assert_eq!(sim.get(sim.signal("data")), BigUint::from(0x5au8));
+        assert_eq!(sim.get(sim.signal("valid")), BigUint::from(1u8));
+    }
+}
