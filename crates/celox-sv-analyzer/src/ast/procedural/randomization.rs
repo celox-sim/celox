@@ -920,6 +920,7 @@ fn lower_methods(
                 .iter()
                 .map(|local| local.name.clone())
                 .collect(),
+            result_leaves: Vec::new(),
             persistent_locals,
             return_type: return_var.as_ref().map(|_| {
                 convert_type(

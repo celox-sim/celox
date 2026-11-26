@@ -996,6 +996,11 @@ pub struct SubroutineBase<E, L, T> {
     /// The local that holds a function's result: the function name used as
     /// a variable inside its body. `None` for a task or a `void` function.
     pub return_var: Option<String>,
+    /// The local names of the members of a result of unpacked structure
+    /// type, in the order of its flat value, which a body assigning the
+    /// result through the function's name works on and assembles the
+    /// result from (IEEE 1800-2023 13.4.1); empty for other results.
+    pub result_leaves: Vec<String>,
     pub body: Vec<StmtBase<E, L>>,
     /// Non-executable source retained for syntactic implicit sensitivity.
     pub sensitivity_body: Vec<StmtBase<E, L>>,
@@ -1048,6 +1053,7 @@ impl<E, L, T> SubroutineBase<E, L, T> {
                 })
                 .collect(),
             return_var: self.return_var,
+            result_leaves: self.result_leaves,
             body: self.body.into_iter().map(|stmt| stmt.map(fe, fl)).collect(),
             sensitivity_body: self
                 .sensitivity_body
