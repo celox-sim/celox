@@ -61,6 +61,11 @@ pub(in crate::ast) struct Registry {
     declarations: HashMap<String, Rc<DeclarationScope>>,
     /// What the last analysis of each package lowered for its classes.
     lowered: HashMap<String, Rc<crate::ast::procedural::Lowered>>,
+    /// Of each package, the classes whose specializations may extend a
+    /// class of the scopes that ask for them, when nothing else hides a
+    /// name the package qualifies with its own (see `specialize`): its
+    /// syntax and imports tell them, the same for every analysis.
+    open: HashMap<String, Option<HashSet<String>>>,
 }
 
 impl Registry {
@@ -518,9 +523,16 @@ fn specialize(
     // The classes whose specializations may extend a class of the scopes
     // that ask for them, when nothing else hides a name the package
     // qualifies with its own.
-    let open = packages::self_qualified_names_are_plain(name, &context, |package| {
-        owner.imports.package_scopes.contains(package)
-    })?;
+    let open = match session.foreign.open.get(name) {
+        Some(open) => open.clone(),
+        None => {
+            let open = packages::self_qualified_names_are_plain(name, &context, |package| {
+                owner.imports.package_scopes.contains(package)
+            })?;
+            session.foreign.open.insert(name.into(), open.clone());
+            open
+        }
+    };
     let mut package = packages::analyze_package_with_symbols(
         name,
         &context,
