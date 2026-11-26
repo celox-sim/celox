@@ -138,6 +138,38 @@ pub(in crate::ast) fn construct(
     dimensions: &PackedDimensions,
     class_name: &str,
 ) -> Converted<Expr> {
+    construction(
+        tree, session, arguments, native, dimensions, class_name, false,
+    )
+}
+
+/// `new`, `new()` or `new(arguments)` of covergroup type `class_name` as
+/// the initializer of a declaration of a module or a program, which may be
+/// of a type with a clocking event (see `procedural::covergroup_sites`).
+pub(in crate::ast) fn construct_at_site(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    arguments: &[Argument],
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+    class_name: &str,
+) -> Converted<Expr> {
+    construction(
+        tree, session, arguments, native, dimensions, class_name, true,
+    )
+}
+
+/// [`construct`], at a declaration that samples the instance at the
+/// clocking event of its type if `site`.
+fn construction(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    arguments: &[Argument],
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+    class_name: &str,
+    site: bool,
+) -> Converted<Expr> {
     let model = model(
         tree,
         session,
@@ -154,6 +186,14 @@ pub(in crate::ast) fn construct(
         });
     }
     let model = model.usable()?;
+    // An instance is sampled at the clocking event of its type only where
+    // a declaration of a module or a program constructs it: another `new`
+    // would need a process that the construction starts (19.3).
+    if model.event.is_some() && !site {
+        return Err(unsupported(
+            "covergroup sampling event of a constructed instance (IEEE 1800-2023 19.3)",
+        ));
+    }
     request(session, model);
     let name = model.new_subroutine();
     let leading = usize::from(model.owner.is_some());

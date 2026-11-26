@@ -933,6 +933,8 @@ pub enum CombProcessKind {
 pub struct FfProcess {
     always_ff: bool,
     suspendable: bool,
+    /// A procedure of the analysis, not of the source.
+    synthetic: bool,
     creation_order: usize,
     site: Option<crate::procedural::ProcessSite>,
     events: Vec<FfEvent>,

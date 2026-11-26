@@ -921,6 +921,49 @@ endmodule
     assert_eq!(draws(true, true), plain);
 }
 
+/// 18.14.1: the sampler of a clocking event is no process of the source, so
+/// giving a covergroup a clocking event does not change the random stimulus
+/// of the processes declared after it, whichever shape the sampler has: the
+/// edge-sensitive procedure of `@(posedge clk)` or the process of `@(clk)`.
+/// A procedure the source writes takes a seed, and so changes it.
+#[test]
+fn clocking_events_do_not_change_random_stimulus() {
+    let draws = |event: &str, written: &str| {
+        let source = format!(
+            "`timescale 1ns/1ns
+module Top(output int unsigned a, b, output int done);
+    bit clk = 0;
+    bit [1:0] d;
+    covergroup cg {event}; coverpoint d; endgroup
+    cg c = new;
+    {written}
+    always #1 clk = ~clk;
+    initial begin
+        a = $urandom;
+        @(posedge clk);
+        b = $urandom;
+        done = 1;
+    end
+endmodule
+"
+        );
+        let mut sim = simulation(&source).four_state(false).build().unwrap();
+        sim.run_until(3).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        ["a", "b"].map(|name| {
+            let signal = sim.signal(name);
+            sim.get(signal)
+        })
+    };
+    let plain = draws("", "");
+    assert_ne!(plain[0], plain[1], "the stimulus is random");
+    assert_eq!(draws("@(posedge clk)", ""), plain);
+    assert_eq!(draws("@(negedge clk iff d == 0)", ""), plain);
+    assert_eq!(draws("@(clk)", ""), plain);
+    assert_ne!(draws("", "always @(posedge clk) c.sample();"), plain);
+}
+
 /// A covergroup that a class declares and nothing constructs is a property
 /// that stays `null`: the class builds, also one with coverpoints, which
 /// are not supported yet, and a local of the name of the covergroup hides
@@ -5783,5 +5826,814 @@ endmodule
     for (name, value) in [("bits_type", 32u8), ("bits_instance", 32), ("bits_bit", 1)] {
         let signal = sim.signal(name);
         assert_eq!(sim.get(signal), BigUint::from(value), "{name}");
+    }
+}
+
+/// The design of the tests of clocking events: `clk` toggles every 5 time
+/// units from 0, so its rising edges are at 5, 15, 25 and 35 and its falling
+/// edges at 10, 20, 30 and 40 up to time 42; a flip-flop counts the rising
+/// edges into `q`, and `en` toggles with a nonblocking assignment at each of
+/// them. `items` are among the module's items.
+fn clocked(items: &str) -> String {
+    format!(
+        r#"`timescale 1ns/1ns
+module Top;
+    bit clk = 0;
+    bit en = 0;
+    bit [2:0] q = 0;
+    always #5 clk = ~clk;
+    always_ff @(posedge clk) q <= q + 3'd1;
+    always @(posedge clk) en <= ~en;
+{items}
+endmodule
+"#
+    )
+}
+
+/// The value bins `b[0]` to `b[7]` of a coverpoint of `q` that were hit.
+fn q_bins(values: &[(u64, u64)]) -> Vec<(String, u64)> {
+    values
+        .iter()
+        .map(|(value, hits)| (format!("b[{value}]"), *hits))
+        .collect()
+}
+
+sv_backends! {
+    /// 19.3: an instance that a declaration constructs is sampled at each
+    /// occurrence of the clocking event of its type, `posedge`, `negedge`,
+    /// `edge`, any change, `iff` (9.4.2.3) and `or` or comma lists
+    /// (9.4.2.1), and at no other time: a value that a nonblocking
+    /// assignment of the same edge updates is sampled before the update,
+    /// and the edges of an `or` list in different delta cycles of one time
+    /// step are two samples.
+    fn static_instances_sample_at_their_clocking_events(sim) {
+        @setup {
+            let source = clocked(
+                "    bit s = 0;
+    initial #7 s = 1;
+    covergroup pos @(posedge clk); coverpoint q { bins b[] = {[0:7]}; } endgroup
+    covergroup neg @(negedge clk); coverpoint q { bins b[] = {[0:7]}; } endgroup
+    covergroup both @(edge clk); endgroup
+    covergroup change @(clk); endgroup
+    covergroup level @(s); endgroup
+    covergroup gated @(posedge clk iff en); coverpoint q { bins b[] = {[0:7]}; } endgroup
+    covergroup listed @(posedge clk or negedge clk); endgroup
+    covergroup comma @(posedge clk, posedge en); endgroup
+    pos p = new;
+    neg n = new;
+    both b = new;
+    change a = new;
+    level l = new;
+    gated g = new;
+    listed o = new;
+    comma m = new;",
+            );
+        }
+        @build simulation(&source).four_state(false);
+        sim.run_until(42).unwrap();
+        let report = sim.coverage();
+        assert_eq!(
+            all_samples(&report),
+            expected(&[
+                ("Top.both", &[8]),
+                ("Top.change", &[8]),
+                ("Top.comma", &[6]),
+                ("Top.gated", &[2]),
+                ("Top.level", &[1]),
+                ("Top.listed", &[8]),
+                ("Top.neg", &[4]),
+                ("Top.pos", &[4]),
+            ])
+        );
+        let point = "q";
+        assert_eq!(
+            hit(bins(&report, "Top.pos", 0, point)),
+            q_bins(&[(0, 1), (1, 1), (2, 1), (3, 1)])
+        );
+        assert_eq!(
+            hit(bins(&report, "Top.neg", 0, point)),
+            q_bins(&[(1, 1), (2, 1), (3, 1), (4, 1)])
+        );
+        assert_eq!(
+            hit(bins(&report, "Top.gated", 0, point)),
+            q_bins(&[(1, 1), (3, 1)])
+        );
+    }
+}
+
+/// The same in both state modes, at every optimization level and with each
+/// dead-store policy: no sample before the first event, `@(s)` in two-state
+/// mode included, which an `always @(s)` would run once at time zero.
+#[test]
+fn static_instances_sample_alike_in_every_mode() {
+    let source = clocked(
+        "    logic s = 0;
+    initial #7 s = 1;
+    covergroup pos @(posedge clk); coverpoint q { bins b[] = {[0:7]}; } endgroup
+    covergroup level @(s); endgroup
+    covergroup change @(clk); endgroup
+    pos p = new;
+    level l = new;
+    change a = new;",
+    );
+    for four_state in [false, true] {
+        for level in [
+            celox::OptLevel::O0,
+            celox::OptLevel::O1,
+            celox::OptLevel::O2,
+        ] {
+            for policy in [
+                celox::DeadStorePolicy::Off,
+                celox::DeadStorePolicy::PreserveTopPorts,
+                celox::DeadStorePolicy::PreserveAllPorts,
+            ] {
+                let context = format!("four_state={four_state} {level:?} {policy:?}");
+                let mut sim = simulation(&source)
+                    .four_state(four_state)
+                    .opt_level(level)
+                    .dead_store_policy(policy)
+                    .build()
+                    .unwrap_or_else(|error| panic!("{context}: {error}"));
+                sim.run_until(6).unwrap();
+                assert_eq!(
+                    all_samples(&sim.coverage()),
+                    expected(&[("Top.change", &[1]), ("Top.level", &[0]), ("Top.pos", &[1])]),
+                    "{context}"
+                );
+                sim.run_until(42).unwrap();
+                let report = sim.coverage();
+                assert_eq!(
+                    all_samples(&report),
+                    expected(&[("Top.change", &[8]), ("Top.level", &[1]), ("Top.pos", &[4])]),
+                    "{context}"
+                );
+                assert_eq!(
+                    hit(bins(&report, "Top.pos", 0, "q")),
+                    q_bins(&[(0, 1), (1, 1), (2, 1), (3, 1)]),
+                    "{context}"
+                );
+            }
+        }
+    }
+}
+
+sv_backends! {
+    /// A named event (15.5) and an `or` of two, as the clocking event: each
+    /// trigger is a sample.
+    fn static_instances_sample_at_named_events(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top;
+    event e, f;
+    covergroup one @e; endgroup
+    covergroup two @(e or f); endgroup
+    one o = new;
+    two t = new;
+    initial begin
+        #1 -> e;
+        #1 -> f;
+        #1 -> e;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(5).unwrap();
+        assert_eq!(
+            all_samples(&sim.coverage()),
+            expected(&[("Top.one", &[2]), ("Top.two", &[3])])
+        );
+    }
+}
+
+sv_backends! {
+    /// A clock the host drives on an input sampled by an instance alone, with
+    /// no flip-flop on it: each rising edge is a sample.
+    fn static_instances_sample_a_host_clock_without_flip_flops(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(input bit clk, input bit [3:0] d);
+    covergroup cg @(posedge clk); coverpoint d { bins b[] = {[0:3]}; } endgroup
+    cg c = new;
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        let d = sim.signal("d");
+        sim.modify(|io| io.set(d, 2u8)).unwrap();
+        // Rising edges at 5, 15 and 25.
+        sim.add_clock("clk", 10, 5);
+        sim.run_until(32).unwrap();
+        let report = sim.coverage();
+        assert_eq!(samples(&report, "Top.cg"), [3]);
+        assert_eq!(hit(bins(&report, "Top.cg", 0, "d")), hits(&[("b[2]", 3)]));
+    }
+}
+
+sv_backends! {
+    /// What a covergroup instance does procedurally applies to one sampled at
+    /// its clocking event: `sample()` samples it once more (19.8: the
+    /// methods "can be invoked procedurally at any time"), and while it is
+    /// stopped the events give no sample (19.8, `stop()`/`start()`); its
+    /// options are those of any instance.
+    fn static_instances_take_procedural_methods_and_options(sim) {
+        @setup {
+            let source = clocked(
+                "    covergroup cg @(posedge clk);
+        option.at_least = 2;
+        coverpoint q { bins lo = {[0:1]}; bins hi = {[2:7]}; }
+    endgroup
+    cg c = new;
+    initial begin
+        #12 c.stop();
+        #10 c.start();
+        #1 c.sample();
+    end",
+            );
+        }
+        @build simulation(&source).four_state(false);
+        sim.run_until(42).unwrap();
+        let report = sim.coverage();
+        // Sampled at 5 (q = 0), 23 (q = 2, procedurally), 25 (q = 2) and 35
+        // (q = 3), not at 15 (stopped).
+        assert_eq!(samples(&report, "Top.cg"), [4]);
+        assert_eq!(bins(&report, "Top.cg", 0, "q"), hits(&[("lo", 1), ("hi", 3)]));
+        // Only `hi` reaches `at_least`.
+        assert!(close(group(&report, "Top.cg").instances[0].coverage, 50.0));
+    }
+}
+
+sv_backends! {
+    /// The sampler of a declaration samples the instance the declaration
+    /// constructs: assigning the variable later neither stops the sampling
+    /// of that instance nor samples another one twice.
+    fn static_sites_follow_the_instance_not_the_variable(sim) {
+        @setup {
+            let source = clocked(
+                "    covergroup cg @(posedge clk); endgroup
+    cg c = new, d = new;
+    cg e = new;
+    initial begin
+        #12 c = d;
+        e = null;
+    end",
+            );
+        }
+        @build simulation(&source).four_state(false);
+        sim.run_until(42).unwrap();
+        assert_eq!(samples(&sim.coverage(), "Top.cg"), [4, 4, 4]);
+    }
+}
+
+sv_backends! {
+    /// Declarations in generate blocks, a loop's included, each sample their
+    /// instance; the event is bound where the covergroup is declared, so a
+    /// block that declares a signal of the same name as the clock does not
+    /// change what the instance samples at. Two instances of a module each
+    /// sample theirs at their own clock, and an event may name the net of a
+    /// child instance.
+    fn static_sites_per_generate_block_and_instance(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Child(input bit clk, output bit slow);
+    covergroup cg @(posedge clk); endgroup
+    cg c = new;
+    bit half = 0;
+    always @(posedge clk) half <= ~half;
+    assign slow = half;
+endmodule
+module Top;
+    bit clk = 0, clk2 = 0;
+    always #5 clk = ~clk;
+    always #10 clk2 = ~clk2;
+    covergroup cg @(posedge clk); endgroup
+    for (genvar i = 0; i < 3; i++) begin : g
+        cg c = new;
+    end
+    if (1) begin : h
+        bit clk = 0;
+        cg c = new;
+        covergroup hc @(negedge clk); endgroup
+        hc x = new;
+        initial #12 clk = 1;
+        initial #17 clk = 0;
+    end
+    Child u1(.clk(clk), .slow());
+    Child u2(.clk(clk2), .slow());
+    covergroup child @(posedge u1.slow); endgroup
+    child k = new;
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(42).unwrap();
+        // `clk`: rising at 5, 15, 25, 35; `clk2`: at 10, 30; `u1.slow`: at 5
+        // and 25; `h.clk`: falling at 17.
+        assert_eq!(
+            all_samples(&sim.coverage()),
+            expected(&[
+                ("Child.cg", &[4, 2]),
+                ("Top.cg", &[4, 4, 4, 4]),
+                ("Top.child", &[2]),
+                ("Top.h.hc", &[1]),
+            ])
+        );
+    }
+}
+
+sv_backends! {
+    /// IEEE 1800-2023 19.3 samples "the instant the clocking event takes
+    /// place, as if the process triggering the event were to call the
+    /// built-in sample() method". The sampler of a declaration is a process
+    /// that waits for the event, which differs in three ways, pinned here:
+    /// (1) a process that makes the event occur several times without
+    /// suspending gives one sample, (2) the sample sees a blocking write that
+    /// the triggering process makes after the triggering write, and (3) an
+    /// event before the sampler first waits, at time zero by a process that
+    /// runs before it, is missed. Occurrences separated by `#0` are samples
+    /// each.
+    fn clocking_events_are_waited_for_by_a_process(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top;
+    bit early = 0, s = 0, t = 0, clk = 0;
+    bit [3:0] d = 0;
+    event e;
+    initial begin
+        early = 1;
+        #1 early = 0;
+        #1 early = 1;
+    end
+    covergroup first @(early); endgroup
+    covergroup first_edge @(posedge early); endgroup
+    covergroup twice @(posedge s); endgroup
+    covergroup apart @(posedge t); endgroup
+    covergroup triggered @e; endgroup
+    covergroup later @(posedge clk); coverpoint d { bins b[] = {[0:7]}; } endgroup
+    first f = new;
+    first_edge fe = new;
+    twice w = new;
+    apart a = new;
+    triggered g = new;
+    later l = new;
+    initial begin
+        #5 s = 1; s = 0; s = 1;
+        #1 t = 1; #0 t = 0; #0 t = 1;
+        #1 -> e; -> e;
+        #1 d = 1; clk = 1; d = 5;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(10).unwrap();
+        let report = sim.coverage();
+        assert_eq!(
+            all_samples(&report),
+            expected(&[
+                ("Top.apart", &[2]),
+                ("Top.first", &[2]),
+                ("Top.first_edge", &[2]),
+                ("Top.later", &[1]),
+                ("Top.triggered", &[1]),
+                ("Top.twice", &[1]),
+            ])
+        );
+        assert_eq!(hit(bins(&report, "Top.later", 0, "d")), hits(&[("b[5]", 1)]));
+    }
+}
+
+sv_backends! {
+    /// A program samples in the Reactive region set (IEEE 1800-2023 24.3.1):
+    /// the instance a declaration of a program constructs sees what the
+    /// nonblocking assignments of the design made at the edge.
+    fn program_sites_sample_in_the_reactive_region(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+program prog(input bit clk, input bit [2:0] q);
+    covergroup pc @(posedge clk); coverpoint q { bins b[] = {[0:7]}; } endgroup
+    pc c = new;
+endprogram
+module Top;
+    bit clk = 0;
+    bit [2:0] q = 0;
+    always #5 clk = ~clk;
+    always_ff @(posedge clk) q <= q + 3'd1;
+    prog p(.clk(clk), .q(q));
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(42).unwrap();
+        let report = sim.coverage();
+        assert_eq!(samples(&report, "prog.pc"), [4]);
+        assert_eq!(
+            hit(bins(&report, "prog.pc", 0, "q")),
+            q_bins(&[(1, 1), (2, 1), (3, 1), (4, 1)])
+        );
+    }
+}
+
+/// The untimed `Simulator` runs no process, so an instance sampled at its
+/// clocking event needs a `Simulation`.
+#[test]
+fn static_instances_require_simulation() {
+    let source = "`timescale 1ns/1ns\nmodule Top(input bit clk, input bit [3:0] d);\n    covergroup cg @(posedge clk); coverpoint d; endgroup\n    cg c = new;\nendmodule\n";
+    let sources = || vec![(source, Path::new("covergroup_clocked.sv"))];
+    celox::Simulation::from_sv_sources(sources(), "Top")
+        .build()
+        .unwrap();
+    let error = match Simulator::from_sv_sources(sources(), "Top").build() {
+        Ok(_) => panic!("a clocking event needs a Simulation"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            error.kind(),
+            celox::SimulatorErrorKind::ProcessRequiresSimulation(_)
+        ),
+        "{error:?}"
+    );
+}
+
+sv_backends! {
+    /// The clocking event may be an edge of a member of the interface
+    /// instance that a virtual interface variable of the module denotes
+    /// (25.9), followed as an event control on it is.
+    fn static_instance_virtual_interface_clock(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+interface ifc(input bit clk);
+endinterface
+module Top;
+    bit clk = 0, other = 0;
+    always #5 clk = ~clk;
+    always #2 other = ~other;
+    ifc i(.clk(clk));
+    ifc j(.clk(other));
+    virtual ifc vif = i;
+    covergroup cg @(posedge vif.clk); endgroup
+    cg c = new;
+    initial #20 vif = j;
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(19).unwrap();
+        // `clk` rises at 5 and 15.
+        assert_eq!(samples(&sim.coverage(), "Top.cg"), [2]);
+        // `other` rises at 22, 26 and 30.
+        sim.run_until(31).unwrap();
+        assert_eq!(samples(&sim.coverage(), "Top.cg"), [5]);
+    }
+}
+
+sv_backends! {
+    /// The third difference from 19.3 from the host: a rising edge of an
+    /// input that the host makes before the first `run_until`, before the
+    /// sampler first waits, is missed; the later ones are samples.
+    fn host_events_before_the_sampler_waits_are_missed(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(input bit go);
+    covergroup cg @(go); endgroup
+    cg c = new;
+    covergroup rising @(posedge go); endgroup
+    rising r = new;
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        let go = sim.signal("go");
+        sim.modify(|io| io.set(go, 1u8)).unwrap();
+        sim.run_until(1).unwrap();
+        // The change is missed by the process; the edge sampler, which runs
+        // with the flip-flops of the edge, samples it.
+        assert_eq!(
+            all_samples(&sim.coverage()),
+            expected(&[("Top.cg", &[0]), ("Top.rising", &[1])])
+        );
+        for (time, level) in [(2, 0u8), (3, 1), (4, 0), (5, 1)] {
+            sim.modify(|io| io.set(go, level)).unwrap();
+            sim.run_until(time).unwrap();
+        }
+        assert_eq!(
+            all_samples(&sim.coverage()),
+            expected(&[("Top.cg", &[4]), ("Top.rising", &[3])])
+        );
+    }
+}
+
+/// The design of the tests of clocks that nonblocking assignments update,
+/// up to time 82: `clk` toggles every 5 time units from 0 (rising at 5, 15,
+/// ..., 75), `div` is `clk` divided by two by a flip-flop (rising at 5, 25,
+/// 45, 65, falling at 15, 35, 55, 75), `div2` is `div` divided by two
+/// (rising at 5 and 45), `nclk` toggles by a nonblocking assignment every 5
+/// time units, `gclk` is `clk` gated by `en_g` from time 12 (rising at 15,
+/// 25, ..., 75), and `slow` is the output of a child instance that divides
+/// `clk` by two with a flip-flop. Each counter counts with a nonblocking
+/// assignment the events of the covergroup that samples it, so a sample at
+/// the k-th event, taken before the updates of the event, sees k - 1.
+fn nba_clocks(logic: &str, extra: &str) -> String {
+    format!(
+        r#"`timescale 1ns/1ns
+module Half(input {logic} clk, output {logic} slow);
+    {logic} half = 0;
+    always_ff @(posedge clk) half <= ~half;
+    assign slow = half;
+endmodule
+interface ifc(input {logic} clk);
+endinterface
+module Top;
+    {logic} clk = 0, div = 0, div2 = 0, nclk = 0, en_g = 0, slow;
+    {logic} gclk;
+    assign gclk = clk & en_g;
+    bit [3:0] r = 0, r2 = 0, q = 0, g = 0, h = 0, rn = 0, cn = 0;
+    always #5 clk = ~clk;
+    always #5 nclk <= ~nclk;
+    initial #12 en_g = 1;
+    always_ff @(posedge clk) div <= ~div;
+    always_ff @(posedge div) div2 <= ~div2;
+    Half u(.clk(clk), .slow(slow));
+    ifc i(.clk(div));
+    virtual ifc vif = i;
+    always_ff @(posedge div) r <= r + 4'd1;
+    always_ff @(posedge div2) r2 <= r2 + 4'd1;
+    always_ff @(posedge nclk) q <= q + 4'd1;
+    always_ff @(posedge gclk) g <= g + 4'd1;
+    always_ff @(posedge slow) h <= h + 4'd1;
+    always_ff @(negedge div) rn <= rn + 4'd1;
+    always_ff @(negedge clk) cn <= cn + 4'd1;
+    covergroup on_div @(posedge div); coverpoint r {{ bins b[] = {{[0:15]}}; }} endgroup
+    covergroup on_div2 @(posedge div2); coverpoint r2 {{ bins b[] = {{[0:15]}}; }} endgroup
+    covergroup on_nclk @(posedge nclk); coverpoint q {{ bins b[] = {{[0:15]}}; }} endgroup
+    covergroup on_gclk @(posedge gclk); coverpoint g {{ bins b[] = {{[0:15]}}; }} endgroup
+    covergroup on_child @(posedge u.slow); coverpoint h {{ bins b[] = {{[0:15]}}; }} endgroup
+    covergroup on_fall @(negedge div); coverpoint rn {{ bins b[] = {{[0:15]}}; }} endgroup
+    covergroup on_edge @(edge div); e: coverpoint r + rn {{ bins b[] = {{[0:15]}}; }} endgroup
+    covergroup on_list @(posedge div or negedge clk); l: coverpoint r + cn {{ bins b[] = {{[0:15]}}; }} endgroup
+    covergroup on_iff @(posedge div iff (r[0] == 0)); coverpoint r {{ bins b[] = {{[0:15]}}; }} endgroup
+    covergroup on_many @(posedge div); coverpoint r {{ bins b[] = {{[0:15]}}; }} endgroup
+    on_div c_div = new;
+    on_div2 c_div2 = new;
+    on_nclk c_nclk = new;
+    on_gclk c_gclk = new;
+    on_child c_child = new;
+    on_fall c_fall = new;
+    on_edge c_edge = new;
+    on_list c_list = new;
+    on_iff c_iff = new;
+    on_many c_many = new, d_many = new;
+    for (genvar k = 0; k < 2; k++) begin : gen
+        on_many c = new;
+    end
+{extra}
+endmodule
+"#
+    )
+}
+
+/// The bins `b[...]` that samples of `values`, in increasing order, hit,
+/// each with its hits.
+fn once(values: &[u64]) -> Vec<(String, u64)> {
+    let mut hits: Vec<(String, u64)> = Vec::new();
+    for value in values {
+        let name = format!("b[{value}]");
+        match hits.last_mut() {
+            Some((last, count)) if *last == name => *count += 1,
+            _ => hits.push((name, 1)),
+        }
+    }
+    hits
+}
+
+/// The samples of the designs of [`nba_clocks`]: each edge sampler sees what
+/// the flip-flops of its edge assigned before they assigned it.
+/// In four-state simulation `div`, which has both edge procedures and the
+/// declaration initializer 0, also falls at time zero, as every procedure of
+/// the falling edge sees.
+fn check_nba_clocks(report: &celox::CoverageReport, four_state: bool) {
+    let falls: &[u64] = if four_state {
+        &[0, 1, 2, 3, 4]
+    } else {
+        &[0, 1, 2, 3]
+    };
+    for (name, point, values) in [
+        ("Top.on_div", "r", &[0, 1, 2, 3][..]),
+        ("Top.on_div2", "r2", &[0, 1]),
+        ("Top.on_nclk", "q", &[0, 1, 2, 3, 4, 5, 6, 7]),
+        ("Top.on_gclk", "g", &[0, 1, 2, 3, 4, 5, 6]),
+        ("Top.on_child", "h", &[0, 1, 2, 3]),
+        ("Top.on_fall", "rn", falls),
+        ("Top.on_iff", "r", &[0, 2]),
+    ] {
+        assert_eq!(samples(report, name), [values.len() as u64], "{name}");
+        assert_eq!(hit(bins(report, name, 0, point)), once(values), "{name}");
+    }
+    // Several declarations of one type, also in a generate loop.
+    assert_eq!(samples(report, "Top.on_many"), [4; 4]);
+    for instance in 0..4 {
+        assert_eq!(
+            hit(bins(report, "Top.on_many", instance, "r")),
+            once(&[0, 1, 2, 3]),
+            "{instance}"
+        );
+    }
+}
+
+sv_backends! {
+    /// 19.3: "as if the process triggering the event were to call the
+    /// built-in sample() method" — at a clock that a flip-flop divides
+    /// (once and twice), one a nonblocking assignment toggles, a gated
+    /// clock and the output of a child instance, with `negedge`, an edge
+    /// with an `iff` and several declarations of one type, each sample sees
+    /// the values before the nonblocking assignments of its edge, as a
+    /// flip-flop of the edge does.
+    fn edges_of_nba_updated_clocks_sample_before_the_updates(sim) {
+        @setup { let source = nba_clocks("bit", ""); }
+        @build simulation(&source).four_state(false);
+        sim.run_until(82).unwrap();
+        check_nba_clocks(&sim.coverage(), false);
+    }
+}
+
+sv_backends! {
+    /// The same with four-state clocks.
+    fn edges_of_nba_updated_four_state_clocks_sample_before_the_updates(sim) {
+        @setup { let source = nba_clocks("logic", ""); }
+        @build simulation(&source).four_state(true);
+        sim.run_until(82).unwrap();
+        check_nba_clocks(&sim.coverage(), true);
+    }
+}
+
+sv_backends! {
+    /// A change event (`@(div)`), `edge`, an `or` list of edges, a named
+    /// event triggered at an edge and a clock read through a virtual
+    /// interface are waited for by a process,
+    /// which runs after the nonblocking assignments of the edge that makes
+    /// the event occur: the sample sees their values (a difference from
+    /// 19.3, documented). Here `div` is the divided clock of
+    /// [`nba_clocks`], and `r + rn` and `r` count its changes and rising
+    /// edges.
+    fn waited_events_of_nba_updated_clocks_sample_after_the_updates(sim) {
+        @setup {
+            let source = nba_clocks(
+                "bit",
+                "    event e;
+    always @(posedge div) -> e;
+    covergroup on_change @(div); e: coverpoint r + rn { bins b[] = {[0:15]}; } endgroup
+    covergroup on_named @e; coverpoint r { bins b[] = {[0:15]}; } endgroup
+    covergroup on_vif @(posedge vif.clk); coverpoint r { bins b[] = {[0:15]}; } endgroup
+    on_change c_change = new;
+    on_named c_named = new;
+    on_vif c_vif = new;",
+            );
+        }
+        @build simulation(&source).four_state(false);
+        sim.run_until(82).unwrap();
+        let report = sim.coverage();
+        check_nba_clocks(&report, false);
+        for (name, point, values) in [
+            ("Top.on_change", "e", &[1, 2, 3, 4, 5, 6, 7, 8][..]),
+            ("Top.on_edge", "e", &[1, 2, 3, 4, 5, 6, 7, 8]),
+            // `posedge div` sees the update of `r`, `negedge clk`, a
+            // blocking clock, not that of `cn`: 1 at 5 and 10, 2 at 20, 4 at
+            // 25 and 30, and so on.
+            ("Top.on_list", "l", &[1, 1, 2, 4, 4, 5, 7, 7, 8, 10, 10, 11]),
+            ("Top.on_named", "r", &[1, 2, 3, 4]),
+            ("Top.on_vif", "r", &[1, 2, 3, 4]),
+        ] {
+            assert_eq!(samples(&report, name), [values.len() as u64], "{name}");
+            assert_eq!(hit(bins(&report, name, 0, point)), once(values), "{name}");
+        }
+    }
+}
+
+sv_backends! {
+    /// Occurrences of an event that a process waits for, before the process
+    /// runs again, give one sample, from one process or from several: here
+    /// two processes that raise the two terms of `@(posedge a or posedge
+    /// b)`, or of `@(a or b)`, in the same time step, before the sampler,
+    /// which is created after them, runs; 19.3 counts two. An edge sampler
+    /// counts each edge of a process that makes several without suspending
+    /// once too (`s = 1; s = 0; s = 1;`), and the edges of different delta
+    /// cycles each.
+    fn occurrences_before_the_sampler_runs_again_are_one_sample(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top;
+    bit a = 0, b = 0, s = 0, t = 0;
+    always #5 a = ~a;
+    always #5 b = ~b;
+    covergroup edges @(posedge a or posedge b); endgroup
+    covergroup changes @(a or b); endgroup
+    covergroup twice @(posedge s); endgroup
+    covergroup apart @(posedge t); endgroup
+    edges e = new;
+    changes c = new;
+    twice w = new;
+    apart p = new;
+    initial begin
+        #2 s = 1; s = 0; s = 1;
+        #1 t = 1; #0 t = 0; #0 t = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(42).unwrap();
+        // `a` and `b` rise together at 5, 15, 25 and 35 and change together
+        // at every multiple of 5.
+        assert_eq!(
+            all_samples(&sim.coverage()),
+            expected(&[
+                ("Top.apart", &[2]),
+                ("Top.changes", &[8]),
+                ("Top.edges", &[4]),
+                ("Top.twice", &[1]),
+            ])
+        );
+    }
+}
+
+/// At time zero in four-state simulation: a declaration initializer
+/// (`logic d = 1;`) is no event (10.5); assignments of an `initial`
+/// procedure that make x 1 or 0 are edges (Table 9-2), which an edge
+/// sampler samples as the flip-flops of the edge run then, and which a
+/// sampler process misses when the procedure runs before it waits (it is
+/// declared first here). The later edges are samples of both.
+#[test]
+fn four_state_time_zero_edges() {
+    let source = r#"`timescale 1ns/1ns
+module Top;
+    logic d = 1;
+    logic a, b, c;
+    initial begin
+        a = 1; b = 0; c = 0;
+        #1 a = 0; b = 1; c = 1; d = 0;
+        #1 a = 1; b = 0; c = 0; d = 1;
+    end
+    covergroup declared @(posedge d); endgroup
+    covergroup rising @(posedge a); endgroup
+    covergroup falling @(negedge b); endgroup
+    covergroup change @(c); endgroup
+    declared w = new;
+    rising r = new;
+    falling f = new;
+    change h = new;
+endmodule
+"#;
+    let mut sim = simulation(source).four_state(true).build().unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(
+        all_samples(&sim.coverage()),
+        expected(&[
+            ("Top.change", &[0]),
+            ("Top.declared", &[0]),
+            ("Top.falling", &[1]),
+            ("Top.rising", &[1]),
+        ])
+    );
+    sim.run_until(5).unwrap();
+    assert_eq!(
+        all_samples(&sim.coverage()),
+        expected(&[
+            ("Top.change", &[2]),
+            ("Top.declared", &[1]),
+            ("Top.falling", &[2]),
+            ("Top.rising", &[2]),
+        ])
+    );
+}
+
+sv_backends! {
+    /// An edge sampler beside an edge-sensitive procedure of the design that
+    /// calls `sample()` of the same covergroup type runs as a process, as
+    /// two such procedures the design writes do, and so sees the
+    /// nonblocking assignments of an edge that the NBA region updates (a
+    /// difference from 19.3, documented): at the rising edges of the
+    /// divided clock `div`, at 5 and 25, the site samples `r` as 1 and 2,
+    /// not 0 and 1.
+    fn edge_samplers_beside_a_written_sample_of_the_type_run_as_processes(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top;
+    bit clk = 0, div = 0;
+    bit [3:0] r = 0;
+    always #5 clk = ~clk;
+    always_ff @(posedge clk) div <= ~div;
+    always_ff @(posedge div) r <= r + 4'd1;
+    covergroup cg @(posedge div); coverpoint r { bins b[] = {[0:15]}; } endgroup
+    cg c = new, e = new;
+    always @(negedge clk) e.sample();
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(42).unwrap();
+        let report = sim.coverage();
+        assert_eq!(samples(&report, "Top.cg"), [2, 6]);
+        assert_eq!(hit(bins(&report, "Top.cg", 0, "r")), once(&[1, 2]));
     }
 }

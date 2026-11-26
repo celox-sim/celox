@@ -205,7 +205,7 @@ For `expect (property_spec) action_block` (16.17), the executing process makes o
 
 ### Coverage groups {#covergroups}
 
-A covergroup (clause 19) is a type: declared in a module, a program, a package, the compilation unit or a generate block, or embedded in a class (19.4). `new` constructs an instance, with the arguments of the covergroup; `sample()` samples it, with the arguments of a `with function sample` declaration; `get_inst_coverage()`, `get_coverage()`, `T::get_coverage()` and `$get_coverage()` give coverage, also of a coverpoint or cross (`c.cp.get_inst_coverage()`, `T::cp::get_coverage()`) and with the covered bins and the bins in two `int` variables (`c.get_coverage(covered, total)`); `start()`, `stop()` and `set_inst_name()` control an instance (19.8). The results are read through `Simulation::coverage()` (see [Coverage](#coverage)).
+A covergroup (clause 19) is a type: declared in a module, a program, a package, the compilation unit or a generate block, or embedded in a class (19.4). `new` constructs an instance, with the arguments of the covergroup; `sample()` samples it, with the arguments of a `with function sample` declaration, and so does each occurrence of the clocking event of a covergroup of a module or a program (`covergroup cg @(posedge clk);`) for an instance that a declaration constructs (`cg c = new;`); `get_inst_coverage()`, `get_coverage()`, `T::get_coverage()` and `$get_coverage()` give coverage, also of a coverpoint or cross (`c.cp.get_inst_coverage()`, `T::cp::get_coverage()`) and with the covered bins and the bins in two `int` variables (`c.get_coverage(covered, total)`); `start()`, `stop()` and `set_inst_name()` control an instance (19.8). The results are read through `Simulation::coverage()` (see [Coverage](#coverage)).
 
 A coverpoint (19.5) is of an integral type of any width: with or without a label, with a type of its own, and with an `iff` guard, whose expression is evaluated first. Its expression and its guard read the arguments of the covergroup and of `sample`, then the members of the class of an embedded covergroup, then the names of the scope. Its bins are the automatic bins of 19.5.3, also those of an enumeration, or the bins it declares for values (19.5.1 to 19.5.6): one bin, a bin for each value (`bins b[]`) or a number of bins (`bins b[N]`) of a list of values and ranges, also ranges with a tolerance (`[a +/- b]`, `[a +%- b]`), of the values a `with` expression keeps, or of the elements of an array; `default` bins; `ignore_bins` and `illegal_bins`; `wildcard` bins; and a guard on any of them (`iff`). A bin value is a constant, an argument of the covergroup or a call of a function with these, which the construction evaluates, so the instances of one type may differ in their bins. A sample of an illegal value is reported as an error.
 
@@ -217,12 +217,12 @@ A construct of the **Not supported** column is rejected where a `new` or a metho
 
 | Aspect | Supported | Not supported |
 | --- | --- | --- |
-| **Declarations (19.3, 19.4)** | A covergroup of a module, a program, a package, the compilation unit or a generate block; a covergroup embedded in a class; variables of a covergroup type | `covergroup extends` (19.4.1); a covergroup declared in an interface, which rejects the interface; one declared in a checker or in a loop generate block; constructing or sampling a covergroup type that a module takes as a type parameter (it declares variables there) |
+| **Declarations (19.3, 19.4)** | A covergroup of a module, a program, a package, the compilation unit or a generate block; a covergroup embedded in a class; variables of a covergroup type | `covergroup extends` (19.4.1); a covergroup declared in an interface, which is rejected with the interface in most positions, and always when it has a clocking event; one declared in a checker or in a loop generate block; constructing or sampling a covergroup type that a module takes as a type parameter (it declares variables there) |
 | **Coverpoints (19.5)** | Coverpoints of an integral type of any width, with or without a label, with a type of their own, and with an `iff` guard | A coverpoint of a `real` type; one of an enumeration whose enumerators have x or z bits; a coverpoint of a signal of a clocking block (clocking blocks are not supported) |
 | **Bins (19.5)** | The automatic bins of 19.5.3, also those of an enumeration; bins of values and ranges (`bins b = {0, [1:3], [8:$]};`) whose values are constants, arguments of the covergroup or calls of functions with these; bin arrays (`bins b[]`, `bins b[N]`); ranges with a tolerance (`[a +/- b]`, `[a +%- b]`) of integral operands; `default` and `default[]` bins; `ignore_bins` and `illegal_bins`; `wildcard` bins; a guard on a bin (`bins b = {1} iff (en);`); `with` filters (`bins b[] = {[0:255]} with (item % 3 == 0);`, `bins b = cp with (f(item));`); bins of a set expression (`bins b[] = S;`) that is an array parameter with integral elements, or a dynamic array, a queue or a constant array of the class of an embedded covergroup with integral elements of at most 64 bits | Transition bins and `default sequence` bins (19.5.2); `bins b[N] = default` (the standard does not say how the values are distributed); a `with` filter on a bin array, on `ignore_bins` or on `illegal_bins` whose values are constants and more than 1,048,576, such as `ignore_bins b = cp with (...)` on an `int` coverpoint (on one `bins` bin such a filter is supported, see [Coverage](#coverage)); a wildcard value of more than 65,536 ranges of values in a bin array or under such a filter; a set expression of any other form: an assignment pattern, a concatenation, a fixed-size array that is no parameter, an array of strings, handles or elements of more than 64 bits; a tolerance range with a `real` operand; a bin value that is not integral |
 | **Crosses (19.6)** | Crosses of coverpoints and of integral variables or nets (a variable gets a coverpoint of its own), with or without a label, with an `iff` guard; `bins`, `ignore_bins` and `illegal_bins` of select expressions of `binsof(cp)` and `binsof(cp.bin)`, with `intersect {...}` lists whose values are constants, arguments of the covergroup or calls of functions with these, `!`, `&&`, `\|\|`, parentheses and the identifier of the cross (`bins all = X;`); a guard on a cross bin | `with` and `matches` in a select expression (19.6.1.2); cross set expressions and functions declared in a cross body (19.6.1.3, 19.6.1.4); `!` before a parenthesized selection (`!(binsof(a) && binsof(b))`) and a conditional cross set expression, both rejected where the covergroup is declared; a cross that lists one item twice; `binsof` of a coverpoint that the cross does not cross; `&&` and `\|\|` that alternate through more than 32 levels of parentheses; an `intersect` list that meets values only a sample sorts into bins (see [Coverage](#coverage)) |
-| **Options (19.7, 19.7.1)** | Every member of `option` in the definition, at the levels 19.10 gives it; the members of `type_option` in the definition with a constant value: `weight`, `goal`, `comment` (a string literal), `merge_instances`, `distribute_first`, and `strobe`, which has no effect on a covergroup without a clocking event (19.3); in a procedure, the members of `option` of an instance and of its items, and of `type_option` of the type and of its items, through `::` or through an instance, read and assigned with `=` | `type_option.real_interval` (real coverpoints are not supported); `type_option.strobe` read in a procedure; a `type_option.comment` that is no string literal, such as a string parameter; a member assigned with another operator (`+=`, `++`) or with `<=`; a member read in the select of a place that an increment or a compound assignment writes (`arr[c.cp.option.weight]++`); `option` or `type_option` used as a whole structure; `type_option.strobe = 1` of a covergroup with a clocking event (`covergroup strobe sampling`), as clocking events are not supported |
-| **Sampling (19.3, 19.8.1)** | `sample()` | A covergroup declared with a clocking event (`covergroup cg @(posedge clk);`) or a block event (`@@(begin f)`); `sample()` in a sequence match item |
+| **Options (19.7, 19.7.1)** | Every member of `option` in the definition, at the levels 19.10 gives it; the members of `type_option` in the definition with a constant value: `weight`, `goal`, `comment` (a string literal), `merge_instances`, `distribute_first`, and `strobe`, which has no effect on a covergroup without a clocking event (19.3); in a procedure, the members of `option` of an instance and of its items, and of `type_option` of the type and of its items, through `::` or through an instance, read and assigned with `=` | `type_option.real_interval` (real coverpoints are not supported); `type_option.strobe` read in a procedure; a `type_option.comment` that is no string literal, such as a string parameter; a member assigned with another operator (`+=`, `++`) or with `<=`; a member read in the select of a place that an increment or a compound assignment writes (`arr[c.cp.option.weight]++`); `option` or `type_option` used as a whole structure; `type_option.strobe = 1` of a covergroup with a clocking event (`covergroup strobe sampling`), as no sample is taken in the Postponed region |
+| **Sampling (19.3, 19.8.1)** | `sample()`; the clocking event of a covergroup of a module or a program, generate blocks included (`covergroup cg @(posedge clk);`), for each instance that a declaration of the module or program constructs with `new` as its initializer (`cg c = new;`, also in a loop generate block): any event control on signals, with edges, changes, `or` and comma lists and `iff` (9.4.2), on named events, on hierarchical names and on members of the interface instance a virtual interface variable of the scope denotes. The event is bound where the covergroup is declared. One `posedge` or `negedge` of a one-bit variable, with or without `iff`, samples with the flip-flops of the edge, before their nonblocking assignments; every other event is waited for by a process: see [Clocking events of covergroups](#deviations-standard-code) for how either differs from 19.3 | The clocking event of an instance that any other `new` constructs (`initial c = new;`, `c = new;` after the declaration, a class property, an array element: `covergroup sampling event of a constructed instance`); every use of a covergroup with a clocking event that is embedded in a class or declared in a package, the compilation unit or an interface, `sample()`, `get_coverage()` and the options included; a clocking event that names an argument of the covergroup (19.3: "A clocking event may refer to arguments of the covergroup"); clocking events under `Simulator` (see [Celox execution model](#celox-execution-model)); a block event (`@@(begin f)`); `sample()` in a sequence match item |
 | **Arguments (19.3, 19.8.1)** | The arguments of a covergroup and of its `with function sample` declaration | `ref` arguments of a covergroup or of its sample method; arguments of unpacked type; an argument of the covergroup that a coverpoint reads and that is not of an integral type, a string or a class handle, such as a `real` |
 | **`let` declarations (11.12)** | — | A `let` is not expanded in what follows the name of a covergroup: a covergroup whose argument types or defaults, coverpoint expressions, crossed variables, guards, bin values, `intersect` values, `with` expressions or option values name one is rejected, unless an argument of the covergroup or of `sample` has the name (`item` in a `with` expression is the value of the bin, whatever is named so) |
 | **Methods (19.8)** | `sample()`, `get_inst_coverage()`, `get_coverage()`, `T::get_coverage()`, and `$get_coverage()`; `get_coverage` and `get_inst_coverage` with two `ref int` arguments; `start()`, `stop()` and `set_inst_name()`; the methods Table 19-5 gives coverpoints and crosses (`c.cp.get_inst_coverage()`, `c.x.stop()`, `T::cp::get_coverage()`); a method of an embedded covergroup called on its variable (`cg` in the class, `obj.cg`) | A method of an embedded covergroup called on another expression that gives the handle, such as a conditional expression |
@@ -313,6 +313,46 @@ These accepted IEEE 1800-2023 constructs deliberately behave differently from th
   Read the coverage of covergroups with `Simulation::coverage()`. Immediate
   `cover` executes its pass statement; assertion coverage and the code
   coverage of clause 40 are not collected.
+- **Clocking events of covergroups.** IEEE 1800-2023 19.3 samples a
+  covergroup "the instant the clocking event takes place, as if the process
+  triggering the event were to call the built-in sample() method". Celox
+  samples the instances that declarations construct in one of two ways. An
+  event that is one `posedge` or `negedge` of a one-bit variable, with or
+  without `iff`, is an edge-sensitive procedure, `always @(posedge clk)
+  c.sample();`, one for all the declarations of the type; it runs with the
+  flip-flops of the edge and sees the values before their nonblocking
+  assignments, also at a clock that a flip-flop divides or that a
+  nonblocking assignment toggles. Every other event (`@(s)`, `@(edge s)`, a
+  list such as `@(posedge a or negedge b)`, a named event, a member read
+  through a virtual interface) and every event of a program is a process
+  of its own that waits for it, `initial forever begin @(event);
+  c.sample(); end`. They differ from 19.3 as follows:
+  - Several occurrences before the sampler runs again give one sample: a
+    process that makes the event occur several times without suspending
+    (`clk = 1; clk = 0; clk = 1;`, `-> e; -> e;`), and, for a process
+    sampler, occurrences that several processes make in one time step
+    before it runs (two processes raising the terms of `@(posedge a or
+    posedge b)` at the same time).
+  - The sample sees a blocking write that the triggering process makes
+    after the triggering write (`clk = 1; d = 5;` samples `d` as 5).
+  - A process sampler misses an occurrence before it first waits: one at
+    time zero by an `initial` procedure that runs before it, or by the host
+    before the first `run_until`. An edge sampler samples those, as the
+    flip-flops of the edge run then.
+  - A process sampler at an edge of a variable that the NBA region updates
+    (a divided clock, a clock toggled with `<=`) runs after the
+    nonblocking assignments of that edge and sees their values, as a
+    process the design writes with `initial forever @(...)` does
+    ([#4771](https://github.com/celox-sim/celox/issues/4771)).
+  - An edge sampler beside an edge-sensitive procedure that calls
+    `sample()` of the same covergroup type runs as a process, and so sees
+    the nonblocking assignments of an edge the NBA region updates, as two
+    such procedures the design writes do
+    ([#4771](https://github.com/celox-sim/celox/issues/4771)).
+
+  Occurrences separated by `#0` or in different delta cycles are each a
+  sample, and a value that a nonblocking assignment of a blocking clock's
+  edge updates is sampled before the update, as 19.3 has it.
 - **`$exit` outside a program warns.** A `$exit` call from anywhere other
   than a program thread is ignored, as 24.7 specifies, and Celox also
   reports a compilation warning (`exit_outside_program` in
@@ -566,9 +606,29 @@ advances no time.
 - **`option.detect_overlap`** warns of each pair of overlapping bins of a
   coverpoint with a `$warning` report of the `new` that constructs the
   instance (Table 19-1).
-- **`type_option.strobe`** has no effect: it "only applies to the scheduling
-  of samples triggered by a clocking event" (19.3), and a covergroup with a
-  clocking event is not supported.
+- **`type_option.strobe`** has no effect on a covergroup without a clocking
+  event: it "only applies to the scheduling of samples triggered by a
+  clocking event" (19.3). A nonzero value on one with a clocking event is
+  rejected (`covergroup strobe sampling`).
+- **The instance of a declaration is sampled, not the variable.** A
+  declaration `cg c = new;` of a covergroup with a clocking event samples
+  the instance it constructs at each occurrence of the event, whatever `c`
+  holds later: `c = null` or `c = d` neither stops that nor samples another
+  instance twice, and the instance is never freed. `sample()` and the other
+  methods of 19.8 apply to such an instance as to any ("These methods can be
+  invoked procedurally at any time"): `sample()` samples it once more, and a
+  stopped instance counts no sample of its event. No sample is taken before
+  the first occurrence of the event, also of a change event (`@(s)`) in
+  two-state simulation. In four-state simulation an assignment at time
+  zero that makes a variable 0 or 1 is an edge (Table 9-2) that an edge
+  sampler samples, as the flip-flops of the edge run then; a declaration
+  initializer is none (10.5).
+- **A program samples in the Reactive region set.** The instance a
+  declaration of a program constructs is sampled after the nonblocking
+  assignments of the design at the same event, as every process of a
+  program is scheduled (24.3.1): at a rising edge it sees the values the
+  flip-flops of the edge assigned. 19.3 can be read to sample where the event
+  occurs instead.
 - **A covergroup without items has no coverage.** `get_inst_coverage()` and
   `get_coverage()` of a covergroup that declares no coverpoint or cross are
   0, and it takes no part in `$get_coverage()`, which is 100 when no
@@ -793,8 +853,20 @@ which designs need the timed `Simulation` API and what the host can observe.
   and makes the design evaluate its whole combinational logic at each
   settle instead of the part a change reaches. Earlier releases ignored
   `cg c = new;`, so such a design built as a `Simulator` and had no handle
-  in its state. Covergroups are not available in the browser (WASI) build,
-  which has no heap.
+  in its state. An instance sampled at the clocking event of its type (`cg
+  c = new;` of a `covergroup cg @(posedge clk);`) needs `Simulation`, as
+  its declaration is a process. At one edge of a one-bit variable it is
+  sampled by an edge-sensitive procedure, which costs what `always
+  @(posedge clk) c.sample();` costs, one for all the declarations of the
+  type; at any other event by a process of each declaration, which costs
+  what `initial forever begin @(event); c.sample(); end` costs, a kernel of
+  the compiled scheduler (one that waits for a named event, or one of a
+  program, runs in the runtime's loop). Each declaration adds the hidden
+  handle variable that holds the instance, `%covergroup_site<n>`, which
+  the signal listings and waveforms show, as they show the hidden variables
+  of delayed continuous assignments. A covergroup with a clocking event
+  that no declaration constructs costs nothing. Covergroups are not available in the
+  browser (WASI) build, which has no heap.
 - **Host clocks.** `Simulation::add_clock` and `Simulation::schedule` move
   an event signal: a clock or asynchronous reset of an edge-sensitive
   `always`, or a one-bit input of a top-level module that a process waits

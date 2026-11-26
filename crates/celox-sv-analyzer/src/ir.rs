@@ -1917,6 +1917,7 @@ pub enum CombProcessKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FfProcess {
     always_ff: bool,
+    synthetic: bool,
     creation_order: usize,
     site: Option<ProcessSite>,
     events: Vec<FfEvent>,
@@ -1927,6 +1928,13 @@ impl FfProcess {
     /// Whether the source used the restricted always_ff procedure.
     pub fn is_always_ff(&self) -> bool {
         self.always_ff
+    }
+
+    /// A procedure the analysis generates (the sampler of a covergroup's
+    /// clocking event), which is no process of the source and so draws no
+    /// seed (IEEE 1800-2023 18.14.1).
+    pub fn is_synthetic(&self) -> bool {
+        self.synthetic
     }
 
     /// Position among elaborated module items, shared across process kinds.
@@ -1942,6 +1950,7 @@ impl FfProcess {
     pub(crate) fn new(events: Vec<FfEvent>, body: Vec<Stmt>) -> Self {
         Self {
             always_ff: false,
+            synthetic: false,
             creation_order: 0,
             site: None,
             events,
@@ -2972,6 +2981,7 @@ impl From<ast::FfProcess> for FfProcess {
                 .collect(),
         );
         result.always_ff = process.is_always_ff();
+        result.synthetic = process.is_synthetic();
         result.creation_order = process.creation_order();
         result.site = process.site().cloned();
         result

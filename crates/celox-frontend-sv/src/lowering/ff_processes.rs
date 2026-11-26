@@ -361,7 +361,11 @@ pub(super) fn lower_ff_processes(
         let extern_calls_before = pm.externs.calls;
         let mut lower_procedural = |pm: &mut procedural::ProcModule<'_>, body: &[sv::ir::Stmt]| {
             let clock = inferred_clock(pm, process);
-            let units = ff::Ff::new(pm, random_seeds[&(0, index)])
+            let random_seed = random_seeds
+                .get(&(0, index))
+                .copied()
+                .unwrap_or(UNSEEDED_PROCESS);
+            let units = ff::Ff::new(pm, random_seed)
                 .with_sparse_memories(shared_memories)
                 .with_shared_variables(shared_variables)
                 .with_alias_groups(same_instance_alias_groups)
