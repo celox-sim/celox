@@ -103,7 +103,11 @@ pub(super) fn expr_is_two_state(
             ObjectOp::Load(field) => !field.four_state,
             ObjectOp::Unbox(record) => !record.fields.iter().any(|field| field.four_state),
             ObjectOp::Container { op, layout } => {
+                // The elements of handles may be those of inner containers or
+                // of records, whose X and Z bits make an equality unknown.
                 layout.two_state
+                    && !(*op == ContainerOp::Equal
+                        && layout.handle == Some(crate::system_functions::HandleProperty::Object))
                     || !(op.reduction().is_some()
                         || matches!(
                             op,
