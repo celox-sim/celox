@@ -697,7 +697,14 @@ fn cross_bins_keep_their_select_expressions() {
             panic!("{:?}", syntax.covergroups[0].items)
         };
         assert_eq!(cross.label.as_ref().unwrap().value(), "cx");
-        let crossed = cross.items.iter().map(Name::value).collect::<Vec<_>>();
+        let crossed = cross
+            .items
+            .iter()
+            .map(|item| match &syntax.expression(*item).kind {
+                ExprKind::Name(name) => name.value(),
+                kind => panic!("{kind:?}"),
+            })
+            .collect::<Vec<_>>();
         assert_eq!(crossed, ["a", "b", "c"]);
         assert_eq!(text(&syntax, cross.iff.unwrap()), "en");
         let body = syntax.token_text(cross.body.unwrap());

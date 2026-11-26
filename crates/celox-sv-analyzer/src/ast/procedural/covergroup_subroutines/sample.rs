@@ -9,7 +9,7 @@
 //! error (19.5.6).
 
 use super::*;
-use celox_sv_syntax::{Coverpoint, CoverpointItem};
+use celox_sv_syntax::{CoverpointItem, CrossItem, TypeId};
 
 /// The names of the formals `formals` that the coverpoint expressions, the
 /// guards of the coverpoints and of their bins, and the coverpoint types
@@ -179,24 +179,23 @@ struct Point {
     predicates: Vec<String>,
 }
 
-/// The type of coverpoint `coverpoint`, named `name`: the type it declares,
-/// which its expression is then assigned to, else the type of its
-/// expression (19.5).
+/// The type of the coverpoint of expression `expression` named `name`: the
+/// type `data_type` it declares, which its expression is then assigned to,
+/// else the type of its expression (19.5).
 fn point_type(
     site: &Site<'_>,
     builder: &mut BodyBuilder<'_, '_, '_>,
-    coverpoint: &Coverpoint,
+    expression: ExprId,
+    data_type: Option<TypeId>,
     name: &str,
 ) -> Converted<(heap::PointType, Option<Type>)> {
     let model = site.model;
     let native = site.tree.declarations();
-    let declared = match coverpoint.data_type {
+    let declared = match data_type {
         Some(data_type) => {
             let ty = type_binding::bind(data_type, &builder.tree, builder.session, &builder.dims)?
                 .ok_or_else(|| unsupported("covergroup coverpoint type"))?;
-            builder.covergroup_assignable(coverpoint.expression, &ty, || {
-                format!("coverpoint `{name}`")
-            })?;
+            builder.covergroup_assignable(expression, &ty, || format!("coverpoint `{name}`"))?;
             Some(ty)
         }
         None => None,
@@ -212,7 +211,7 @@ fn point_type(
         None => expression_types::type_of(
             &builder.tree,
             builder.session,
-            coverpoint.expression,
+            expression,
             native,
             &builder.dims,
         )?,
@@ -281,7 +280,12 @@ fn point_type(
 
 /// What `N::$sample` knows of a coverpoint before it evaluates it.
 struct Typed<'x> {
-    coverpoint: &'x Coverpoint,
+    expression: ExprId,
+    /// The guard of the coverpoint.
+    iff: Option<ExprId>,
+    /// The bin declarations and options: none for the coverpoint of a
+    /// variable that a cross crosses (19.6).
+    items: &'x [CoverpointItem],
     descriptor: heap::PointDescriptor,
     /// The type the coverpoint declares.
     declared: Option<Type>,
@@ -299,7 +303,7 @@ impl Typed<'_> {
     }
 
     fn bins(&self) -> impl Iterator<Item = &Bins> {
-        self.coverpoint.items.iter().filter_map(|item| match item {
+        self.items.iter().filter_map(|item| match item {
             CoverpointItem::Bins(bins) => Some(bins),
             CoverpointItem::Option(_) => None,
         })
@@ -313,16 +317,24 @@ impl Typed<'_> {
 fn typed<'x>(
     site: &Site<'_>,
     builder: &mut BodyBuilder<'_, '_, '_>,
-    coverpoint: &'x Coverpoint,
+    coverpoint: &'x celox_sv_syntax::Coverpoint,
     item: usize,
 ) -> Converted<Typed<'x>> {
     let native = site.tree.declarations();
     let (name, generated) = covergroups::point_name(native, coverpoint, item);
-    let (ty, declared) = point_type(site, builder, coverpoint, &name)?;
+    let (ty, declared) = point_type(
+        site,
+        builder,
+        coverpoint.expression,
+        coverpoint.data_type,
+        &name,
+    )?;
     let mut descriptor = heap::PointDescriptor::new(name, ty);
     descriptor.generated_name = generated;
     let mut point = Typed {
-        coverpoint,
+        expression: coverpoint.expression,
+        iff: coverpoint.iff,
+        items: &coverpoint.items,
         descriptor,
         declared,
         bits: Vec::new(),
@@ -345,6 +357,102 @@ fn typed<'x>(
     Ok(point)
 }
 
+/// The coverpoint of variable `name`, item `item` of the type, that a cross
+/// crosses, written as the cross item `expression` (19.6): "as if it had
+/// been created by the statement `coverpoint V;`". The cross item is the
+/// identifier of a variable, "only for integral variables, not for real
+/// variables"; a constant is none.
+fn implicit<'x>(
+    site: &Site<'_>,
+    builder: &mut BodyBuilder<'_, '_, '_>,
+    name: &str,
+    expression: ExprId,
+) -> Converted<Typed<'x>> {
+    let model = site.model;
+    let native = site.tree.declarations();
+    let not_a_variable = || {
+        invalid(format!(
+            "a cross of covergroup `{}` crosses `{name}`, which is neither a coverpoint nor a variable (IEEE 1800-2023 19.6)",
+            model.display
+        ))
+    };
+    // Whether the name binds to nothing a sample may read: no argument or
+    // local, no member of the class of an embedded covergroup, nothing of
+    // the scope, such as the label of a coverpoint of another covergroup
+    // (19.6: "Attempts to cross items from different coverage groups shall
+    // result in a compiler error"). A name that is declared but that the
+    // analysis cannot type stays a rejection of what it does not support.
+    let undeclared = |builder: &BodyBuilder<'_, '_, '_>| {
+        builder.names.lookup(name).is_none()
+            && builder.dims.get(name).is_none()
+            && !super::construct::declared_constant(&builder.dims, name)
+            && !builder.dims.class_static_members.contains(name)
+            && site.class.is_none_or(|class| {
+                class.property(name).is_none()
+                    && class.aggregate(name).is_none()
+                    && class.method(name).is_none()
+            })
+    };
+    // The name of a function, which may be called without parentheses, is
+    // no value of its own.
+    let value = match builder.covergroup_value(expression, None) {
+        Ok(value) => value,
+        Err(_) if builder.dims.subroutine_directions.contains_key(name) || undeclared(builder) => {
+            return Err(not_a_variable());
+        }
+        Err(error) => return Err(error),
+    };
+    // A constant, or a function called without parentheses.
+    if matches!(
+        value,
+        Expr::Literal(_)
+            | Expr::Call {
+                callee: Callee::Subroutine(_),
+                ..
+            }
+    ) || builder.covergroup_constant(&value).is_some()
+    {
+        return Err(not_a_variable());
+    }
+    let ty = match expression_types::type_of(
+        &builder.tree,
+        builder.session,
+        expression,
+        native,
+        &builder.dims,
+    ) {
+        Ok(ty) => ty,
+        Err(_) if builder.dims.subroutine_directions.contains_key(name) || undeclared(builder) => {
+            return Err(not_a_variable());
+        }
+        Err(error) => return Err(error),
+    };
+    match builder.session.types.data(ty) {
+        semantic_types::TyData::Packed(_) => {}
+        semantic_types::TyData::Real | semantic_types::TyData::Shortreal => {
+            return Err(invalid(format!(
+                "a cross of covergroup `{}` crosses the real variable `{name}`: a cross shall not directly include a real variable (IEEE 1800-2023 19.6)",
+                model.display
+            )));
+        }
+        _ => {
+            return Err(invalid(format!(
+                "a cross of covergroup `{}` crosses `{name}`, which is not of an integral type: a cross item is a variable only of an integral one (IEEE 1800-2023 19.6)",
+                model.display
+            )));
+        }
+    }
+    let (ty, declared) = point_type(site, builder, expression, None, name)?;
+    Ok(Typed {
+        expression,
+        iff: None,
+        items: &[],
+        descriptor: heap::PointDescriptor::new(name, ty),
+        declared,
+        bits: Vec::new(),
+    })
+}
+
 /// Whether `condition` holds, in the variable `predicate`: an x or z is
 /// not true (12.4).
 fn holds(predicate: &str, condition: Expr) -> Stmt {
@@ -364,13 +472,9 @@ fn point(
     item: usize,
     sampling: &mut Vec<Stmt>,
 ) -> Converted<Point> {
-    let coverpoint = typed.coverpoint;
     let ty = &typed.descriptor.ty;
-    let guard = coverpoint
-        .iff
-        .map(|iff| builder.native_value(iff))
-        .transpose()?;
-    let mut value = builder.covergroup_value(coverpoint.expression, typed.declared.as_ref())?;
+    let guard = typed.iff.map(|iff| builder.native_value(iff)).transpose()?;
+    let mut value = builder.covergroup_value(typed.expression, typed.declared.as_ref())?;
     builder.rename_expr(&mut value);
     let local = builder.declare(&format!("$point{item}"), typed.local());
     let mut evaluate = vec![assign(&local, value)];
@@ -551,12 +655,16 @@ pub(super) fn body(
     // evaluates the coverpoints and hands their values over.
     let mut loads = Vec::new();
     let mut kept = Kept::default();
-    let bound = covergroups::Bound::of(site.declaration());
+    let bound = covergroups::Bound::of(native, site.declaration());
     let read = names_read(site, &bound, &model.new_formals);
     stored_formals(site, builder, &cg, &read, &mut kept, &mut loads)?;
+    let layout = covergroups::Layout::of(native, site.declaration());
     let mut typed_points = Vec::new();
-    for (index, coverpoint) in covergroups::coverpoints(site.declaration()).enumerate() {
+    for (index, coverpoint) in layout.declared.iter().enumerate() {
         typed_points.push(typed(site, builder, coverpoint, index + 1)?);
+    }
+    for (name, expression) in &layout.implicit {
+        typed_points.push(implicit(site, builder, name, *expression)?);
     }
     // A `with` filter that a sample evaluates reads the arguments too.
     let mut read = HashSet::default();
@@ -580,14 +688,90 @@ pub(super) fn body(
     for (index, typed) in typed_points.iter().enumerate() {
         points.push(point(builder, typed, index + 1, &mut sampling)?);
     }
+    // The guards of the crosses and of their bins, after the coverpoints
+    // (19.6). Those of the bins are evaluated where that of the cross
+    // holds: a sample that fails it is none of the cross.
+    let mut crosses = Vec::new();
+    let mut cross_calls = Vec::new();
+    for (index, (cross, _)) in layout.crosses.iter().enumerate() {
+        let bits = CrossBits::of(cross);
+        if bits.count != 0 {
+            let item = points.len() + 1 + index;
+            let predicates = (0..bits.count)
+                .map(|bit| {
+                    let predicate = builder.declare(
+                        &format!("$predicate{item}_{bit}"),
+                        packed_type(1, false, false),
+                    );
+                    sampling.push(assign(&predicate, Expr::Literal("1'b0".into())));
+                    predicate
+                })
+                .collect::<Vec<_>>();
+            let mut guarded = Vec::new();
+            let declared_bins = cross.body_items.iter().filter_map(|item| match item {
+                CrossItem::Bins(bins) => Some(bins),
+                _ => None,
+            });
+            for (bins, bit) in declared_bins.zip(&bits.bins) {
+                if let (Some(iff), Some(bit)) = (bins.iff, bit) {
+                    let condition = builder.native_value(iff)?;
+                    guarded.push(holds(&predicates[*bit as usize], condition));
+                }
+            }
+            match (cross.iff, bits.iff) {
+                (Some(iff), Some(bit)) => {
+                    let condition = builder.native_value(iff)?;
+                    let mut then_body = vec![assign(
+                        &predicates[bit as usize],
+                        Expr::Literal("1'b1".into()),
+                    )];
+                    then_body.extend(guarded);
+                    sampling.push(Stmt::If {
+                        condition,
+                        then_body,
+                        else_body: Vec::new(),
+                    });
+                }
+                _ => sampling.extend(guarded),
+            }
+            let mut parts = predicates
+                .iter()
+                .map(|predicate| Expr::Ident(predicate.clone()))
+                .collect::<Vec<_>>();
+            // A concatenation lists the highest bits first.
+            parts.reverse();
+            cross_calls.push(Stmt::Eval(coverage(
+                CoverageOp::Predicates {
+                    item: item as u32,
+                    count: bits.count,
+                },
+                vec![
+                    cg.clone(),
+                    if parts.len() == 1 {
+                        parts.remove(0)
+                    } else {
+                        Expr::Concat(parts)
+                    },
+                ],
+            )));
+        }
+        crosses.push(bits);
+    }
     sampling.extend(hand_over(&points, &cg));
-    // A sample of an illegal value is an error (19.5.6): the heap tells
-    // how many illegal bins the sample hit and has a line for each. Only a
-    // type with such a bin has the code.
+    sampling.extend(cross_calls);
+    // A sample of an illegal value is an error (19.5.6), and one of an
+    // illegal cross product (19.6.3): the heap tells how many illegal bins
+    // the sample hit and has a line for each. Only a type with such a bin
+    // has the code.
     let illegal = typed_points
         .iter()
         .flat_map(Typed::bins)
-        .any(|bins| bins.kind == BinsKind::IllegalBins);
+        .any(|bins| bins.kind == BinsKind::IllegalBins)
+        || layout.crosses.iter().any(|(cross, _)| {
+            cross.body_items.iter().any(
+                |item| matches!(item, CrossItem::Bins(bins) if bins.kind == BinsKind::IllegalBins),
+            )
+        });
     if illegal {
         sampling.extend(reported(
             site,
@@ -615,6 +799,7 @@ pub(super) fn body(
         points: Vec::new(),
         items: Vec::new(),
         bins: Vec::new(),
+        crosses,
     };
     for typed in typed_points {
         sampled.items.push(typed.local());

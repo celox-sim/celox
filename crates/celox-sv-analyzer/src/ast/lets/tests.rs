@@ -140,7 +140,8 @@ fn names_inside_covergroups_are_no_let_calls() {
              covergroup cg @(posedge clk); f: coverpoint a; hi: coverpoint b; \
              x: cross f, hi { bins s = x with (f + hi < 4); } endgroup \
              let f = a + b; assign t = f; endmodule",
-            1,
+            // The cross item and the name in the `with` expression.
+            2,
         ),
         (
             "module M; logic [3:0] a, b, t; let f = a + b; assign t = f; \

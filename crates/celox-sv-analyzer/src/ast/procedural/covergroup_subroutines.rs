@@ -26,8 +26,8 @@ use crate::ast::covergroups::{self, Covergroup, Formal, HANDLE};
 use crate::system_functions::{CoverageOp, ObjectField};
 use celox_heap::coverage as heap;
 use celox_sv_syntax::{
-    Bins, BinsKind, BinsValue, CoverageRange, CoverageRangeKind, CovergroupDeclaration, ExprId,
-    ExprKind,
+    Bins, BinsKind, BinsValue, CoverageRange, CoverageRangeKind, CovergroupDeclaration, CrossItem,
+    ExprId, ExprKind,
 };
 use num_bigint::BigUint;
 
@@ -268,6 +268,38 @@ struct Sampled {
     /// The predicate bits of the bin declarations of each coverpoint, in
     /// declaration order.
     bins: Vec<Vec<BinBits>>,
+    /// The predicate bits of each cross.
+    crosses: Vec<CrossBits>,
+}
+
+/// The predicate bits of a cross, which a sample hands over for it: its
+/// guard and those of its bin declarations (19.6), in that order.
+#[derive(Clone, Default)]
+struct CrossBits {
+    iff: Option<u32>,
+    /// The bit of each bin declaration, in declaration order.
+    bins: Vec<Option<u32>>,
+    count: u32,
+}
+
+impl CrossBits {
+    fn of(cross: &celox_sv_syntax::Cross) -> Self {
+        let mut count = 0;
+        let mut bit = || {
+            count += 1;
+            count - 1
+        };
+        let iff = cross.iff.map(|_| bit());
+        let bins = cross
+            .body_items
+            .iter()
+            .filter_map(|item| match item {
+                CrossItem::Bins(bins) => Some(bins.iff.map(|_| bit())),
+                _ => None,
+            })
+            .collect();
+        Self { iff, bins, count }
+    }
 }
 
 /// How many values the `with` filter of a bin is asked about (19.5.1.1),

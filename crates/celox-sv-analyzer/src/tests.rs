@@ -3967,15 +3967,21 @@ fn unsupported_constructs_map_to_their_tracking_issues() {
     assert_eq!(issue("undriven net declaration `n`"), 460);
     // Every construct of a covergroup is tracked by the issue of clause 19.
     for construct in [
-        "covergroup cross (IEEE 1800-2023 19.6)",
+        "covergroup cross with or matches selection (IEEE 1800-2023 19.6.1.2)",
         "covergroup bin array (IEEE 1800-2023 19.5.1)",
         "covergroup expression (semantic type of native expression `x`)",
         "covergroup declared in an interface (`I`; IEEE 1800-2023 19.3)",
         "covergroup extends (IEEE 1800-2023 19.4.1)",
         "covergroup sample call in a sequence match item (IEEE 1800-2023 19.8.1)",
+        // What the parser rejects is named after its location.
+        "dir/x.sv:3:7: covergroup cross selection that negates a parenthesized selection (IEEE \
+         1800-2023 19.6.1)",
+        "C:\\x: y.sv:12:1: covergroup cross set expression with a conditional operator (IEEE \
+         1800-2023 19.6.1.4)",
     ] {
         assert_eq!(issue(construct), 4294, "{construct}");
     }
+    assert_eq!(issue("x.sv:3: covergroup"), SV_FRONTEND_TRACKING_ISSUE);
     assert_eq!(
         issue("coverage of a covergroup"),
         SV_FRONTEND_TRACKING_ISSUE
@@ -7561,14 +7567,15 @@ fn undeclared_class_members_are_errors() {
 fn covergroups_of_classes_are_declared_members() {
     // A covergroup a class declares is a member of it (IEEE 1800-2023
     // 19.4): a property that holds the handle of its instance, so a select
-    // of it reads that property. The class constructs none, and a
-    // cross is not supported yet, which a `sample()` reports and a
-    // read of the property does not. (The read is a comparison: a `void`
-    // cast takes a function call alone, A.6.9.)
+    // of it reads that property. The class constructs none, and a cross
+    // that lists a coverpoint twice is not supported, which a `sample()`
+    // reports and a read of the property does not. (The read is a
+    // comparison: a `void` cast takes a function call alone, A.6.9.)
     let class = "class C; int x; covergroup cg; coverpoint x; cross x, x; endgroup \
         function new(); endfunction endclass";
-    let unsupported_coverpoint =
-        AnalyzerError::Unsupported("covergroup cross (IEEE 1800-2023 19.6)".to_string());
+    let unsupported_coverpoint = AnalyzerError::Unsupported(
+        "covergroup cross that lists an item twice (IEEE 1800-2023 19.6)".to_string(),
+    );
     let read = "if (c.cg == null) c.x = 1;";
     let source = format!("module Top; {class} C c; initial begin c = new; {read} end endmodule");
     analyze_source(&source, Path::new("covergroups.sv"))
@@ -7581,7 +7588,7 @@ fn covergroups_of_classes_are_declared_members() {
             .map_err(AnalyzerError::into_error),
         Err(unsupported_coverpoint.clone())
     );
-    // Without the cross the covergroup is sampled and compared.
+    // Without that cross the covergroup is sampled and compared.
     let empty = "class C; int x; covergroup cg; coverpoint x; endgroup endclass";
     for access in ["c.cg.sample();", "if (c.cg == null) c.x = 1;"] {
         let source =

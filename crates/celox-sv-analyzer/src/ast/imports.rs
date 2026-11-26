@@ -689,7 +689,7 @@ impl CovergroupFormals {
                         .filter(|id| within(&ports, native.data_type(*id).tokens)),
                 );
             }
-            let items = super::covergroups::Bound::of(covergroup);
+            let items = super::covergroups::Bound::of(native, covergroup);
             let bound = items.ranges(native);
             if bound.is_empty() {
                 continue;

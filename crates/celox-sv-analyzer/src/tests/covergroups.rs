@@ -344,8 +344,8 @@ fn unsupported_covergroup_constructs_are_rejected_where_used() {
     // type, analyze.
     let constructs = [
         (
-            "bit x, y; covergroup cg; cross x, y; endgroup",
-            "covergroup cross (IEEE 1800-2023 19.6)",
+            "bit x, y; covergroup cg; xy: cross x, y { bins b = xy with (x > y); } endgroup",
+            "covergroup cross with or matches selection (IEEE 1800-2023 19.6.1.2)",
         ),
         (
             "bit clk; covergroup cg @(posedge clk); endgroup",
@@ -1592,10 +1592,6 @@ fn unsupported_coverpoint_constructs_are_rejected_where_used() {
             "covergroup transition bins (IEEE 1800-2023 19.5.2)",
         ),
         (
-            "bit x, y; covergroup cg; coverpoint x; coverpoint y; cross x, y; endgroup",
-            "covergroup cross (IEEE 1800-2023 19.6)",
-        ),
-        (
             "covergroup cg; type_option.weight = 2; endgroup",
             "covergroup type_option (IEEE 1800-2023 19.7.1)",
         ),
@@ -1610,10 +1606,6 @@ fn unsupported_coverpoint_constructs_are_rejected_where_used() {
         (
             "covergroup cg; option.get_inst_coverage = 1; endgroup",
             "covergroup option `get_inst_coverage` (IEEE 1800-2023 19.7)",
-        ),
-        (
-            "covergroup cg; option.cross_num_print_missing = 1; endgroup",
-            "covergroup option `cross_num_print_missing` (IEEE 1800-2023 19.7)",
         ),
         (
             "bit x; covergroup cg; coverpoint x { option.detect_overlap = 1; } endgroup",
@@ -2260,4 +2252,500 @@ fn filters_share_bins_by_what_they_read() {
         ),
         (vec![false, false, false, false], vec![])
     );
+}
+
+/// Select expression `select` as text: `binsof(<position>[.<bin>][ ∩
+/// <values>])`, `!` before a negated one, and `and(…)`, `or(…)`.
+fn select_text(select: &celox_heap::coverage::Select) -> String {
+    use celox_heap::coverage::{Bound, Operand, RangeDescriptor, Select};
+    let operand = |operand: &Operand| match operand {
+        Operand::Constant(constant) => constant.value.to_string(),
+        Operand::Input(index) => format!("input{index}"),
+    };
+    let bound = |bound: &Bound| match bound {
+        Bound::Open => "$".to_string(),
+        Bound::Operand(value) => operand(value),
+    };
+    match select {
+        Select::BinsOf {
+            position,
+            bin,
+            intersect,
+            negate,
+        } => format!(
+            "{}binsof({position}{}{})",
+            if *negate { "!" } else { "" },
+            bin.map_or_else(String::new, |bin| format!(".{bin}")),
+            intersect
+                .as_ref()
+                .map_or_else(String::new, |ranges| format!(
+                    " ∩ {}",
+                    ranges
+                        .iter()
+                        .map(|range| match range {
+                            RangeDescriptor::Value(value) => operand(value),
+                            RangeDescriptor::Range { low, high } =>
+                                format!("[{}:{}]", bound(low), bound(high)),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ))
+        ),
+        Select::And(parts) | Select::Or(parts) => format!(
+            "{}({})",
+            if matches!(select, Select::And(_)) {
+                "and"
+            } else {
+                "or"
+            },
+            parts.iter().map(select_text).collect::<Vec<_>>().join(", ")
+        ),
+    }
+}
+
+#[test]
+fn crosses_compile_to_the_descriptor_of_the_type() {
+    use celox_heap::coverage::{BinKind, Operand, OptionId, OptionValue};
+    // 19.6: the crosses with what they cross, a variable through a
+    // coverpoint of its own after those the covergroup declares, their
+    // guards, bins and select expressions, and the options of the
+    // definition for the covergroup and for a cross (Table 19-2).
+    let ir = analyze(
+        "module Top; bit [3:0] v, w; bit [1:0] k; bit en, on; \
+         covergroup g1(int lo); \
+         option.cross_retain_auto_bins = 0; \
+         option.cross_num_print_missing = 3; \
+         a: coverpoint v { bins low[] = {[0:3]}; bins high = {[4:15]}; } \
+         coverpoint w; \
+         vw: cross a, w, k iff (en) { \
+           option.weight = 2; \
+           option.cross_retain_auto_bins = 1; \
+           bins b1 = binsof(a.high) && (binsof(w) intersect {[lo:7], 20} && binsof(k)) iff (on); \
+           ignore_bins i = !binsof(a) intersect {1} || (binsof(k) intersect {0} || binsof(w) intersect {2}); \
+           illegal_bins x = vw; \
+         } \
+         cross k, w; \
+         endgroup \
+         g1 c; initial begin c = new(2); c.sample(); end endmodule",
+    )
+    .unwrap();
+    let top = module(&ir, "Top");
+    let descriptor = descriptor(top, "Top.g1");
+    let points: Vec<_> = descriptor
+        .points
+        .iter()
+        .map(|point| (point.name.as_str(), point.ty.width, point.bins.len()))
+        .collect();
+    assert_eq!(points, [("a", 4, 2), ("w", 4, 0), ("k", 2, 0)]);
+    let [vw, kw] = descriptor.crosses.as_slice() else {
+        panic!("{:?}", descriptor.crosses);
+    };
+    assert_eq!(
+        (
+            vw.name.as_str(),
+            vw.points.as_slice(),
+            vw.iff,
+            vw.predicates
+        ),
+        ("vw", [0, 1, 2].as_slice(), Some(0), 2)
+    );
+    assert_eq!(
+        (
+            kw.name.as_str(),
+            kw.points.as_slice(),
+            kw.iff,
+            kw.predicates,
+            kw.bins.len()
+        ),
+        ("$cross2", [2, 1].as_slice(), None, 0, 0)
+    );
+    let bins: Vec<_> = vw
+        .bins
+        .iter()
+        .map(|bin| {
+            (
+                bin.name.as_str(),
+                bin.kind,
+                bin.iff,
+                select_text(&bin.select),
+            )
+        })
+        .collect();
+    // Parentheses group alone: a chain of `&&` or `||` is one node. The
+    // value 20 is none of `w` and is dropped with a warning; the
+    // identifier of the cross is every bin tuple (19.6.1.2).
+    assert_eq!(
+        bins,
+        [
+            (
+                "b1",
+                BinKind::Bins,
+                Some(1),
+                "and(binsof(0.1), binsof(1 ∩ [input0:7]), binsof(2))".to_string()
+            ),
+            (
+                "i",
+                BinKind::Ignore,
+                None,
+                "or(!binsof(0 ∩ 1), binsof(2 ∩ 0), binsof(1 ∩ 2))".to_string()
+            ),
+            ("x", BinKind::Illegal, None, "binsof(0)".to_string()),
+        ]
+    );
+    let options: Vec<_> = descriptor
+        .options
+        .iter()
+        .map(|init| {
+            let OptionValue::Operand(Operand::Constant(value)) = &init.value else {
+                panic!("{init:?}");
+            };
+            (init.item, init.option, value.value.to_string())
+        })
+        .collect();
+    assert_eq!(
+        options,
+        [
+            (0, OptionId::CrossRetainAutoBins, "0".to_string()),
+            (0, OptionId::CrossNumPrintMissing, "3".to_string()),
+            (4, OptionId::Weight, "2".to_string()),
+            (4, OptionId::CrossRetainAutoBins, "1".to_string()),
+        ]
+    );
+    let warnings = bin_warnings(&ir);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(
+        (warnings[0].0.as_str(), warnings[0].1.as_str()),
+        ("vw", "b1")
+    );
+    assert!(
+        warnings[0].2.starts_with("`intersect` of coverpoint `w`: "),
+        "{warnings:?}"
+    );
+    // A sample hands over the values of the three coverpoints in one call
+    // and the guards of `vw` in one more, after them; the second cross has
+    // no guard and no call. An illegal cross product is reported.
+    let ops = coverage_ops(top, "::$sample");
+    let names: Vec<_> = ops
+        .iter()
+        .map(|op| match op {
+            crate::ir::CoverageOp::Points { first, count, .. } => format!("points {first}+{count}"),
+            crate::ir::CoverageOp::Predicates { item, count } => {
+                format!("predicates {item}:{count}")
+            }
+            op => format!("{op:?}"),
+        })
+        .collect();
+    let predicates = names
+        .iter()
+        .position(|name| name == "predicates 4:2")
+        .unwrap_or_else(|| panic!("{names:?}"));
+    let points = names
+        .iter()
+        .position(|name| name == "points 1+3")
+        .unwrap_or_else(|| panic!("{names:?}"));
+    assert!(points < predicates, "{names:?}");
+    assert_eq!(
+        names
+            .iter()
+            .filter(|name| name.starts_with("predicates"))
+            .count(),
+        1,
+        "{names:?}"
+    );
+    assert!(
+        ops.iter()
+            .any(|op| matches!(op, crate::ir::CoverageOp::Message)),
+        "{names:?}"
+    );
+}
+
+#[test]
+fn cross_declarations_the_standard_excludes_are_errors() {
+    // What the declaration alone shows is an error where the covergroup is
+    // declared, whether or not something uses it.
+    for (declaration, rule) in [
+        // 19.6.1: `binsof` names a coverpoint or a bin of one.
+        (
+            "bit [1:0] x, y; covergroup cg; c: cross x, y { bins b = binsof(z); } endgroup",
+            "bin `b` of cross `c` of covergroup `Top.cg` selects the bins of `z`, which is no \
+             coverpoint of the covergroup and no variable that it crosses (IEEE 1800-2023 19.6.1)",
+        ),
+        (
+            "bit [1:0] x, y; covergroup cg; a: coverpoint x { bins lo = {0}; } \
+             c: cross a, y { bins b = binsof(a.hi); } endgroup",
+            "selects `a.hi`, which is no bin that coverpoint `a` declares (IEEE 1800-2023 19.6.1)",
+        ),
+        (
+            "bit [1:0] x, y; covergroup cg; c: cross x, y { bins b = binsof(x.auto); } endgroup",
+            "selects `x.auto`, which is no bin that coverpoint `x` declares",
+        ),
+        // 19.6: a cross name is visible only after a covergroup variable
+        // or `::`, so a cross item of that name is a variable, whose
+        // implicit coverpoint has the name of the cross (19.5).
+        (
+            "bit [1:0] x, y, c; covergroup cg; c: cross x, y; d: cross c, x; endgroup",
+            "covergroup `Top.cg` has two items named `c`: the coverpoint of the variable that \
+             cross `d` of covergroup `Top.cg` crosses and a cross (IEEE 1800-2023 19.5, 19.6)",
+        ),
+        (
+            "bit [1:0] x, y; covergroup cg; x: cross x, y; endgroup",
+            "covergroup `Top.cg` has two items named `x`: the coverpoint of the variable that \
+             cross `x` of covergroup `Top.cg` crosses and a cross",
+        ),
+        // 19.6.1.2: only the identifier of the enclosing cross.
+        (
+            "bit [1:0] x, y; covergroup cg; c: cross x, y; d: cross x, y { bins b = c; } endgroup",
+            "bin `b` of cross `d` of covergroup `Top.cg` selects the bin tuples of cross `c`",
+        ),
+        // 19.6: the label of a cross is a scope of its bins.
+        (
+            "bit [1:0] x, y; covergroup cg; c: cross x, y { bins b = binsof(x); \
+             ignore_bins b = binsof(y); } endgroup",
+            "cross `c` of covergroup `Top.cg` has two bins named `b` (IEEE 1800-2023 19.6)",
+        ),
+        // 19.7, 19.10: the options of a cross.
+        (
+            "bit [1:0] x, y; covergroup cg; c: cross x, y { option.weight = 1; option.weight = 2; } \
+             endgroup",
+            "`option.weight` is assigned twice in cross `c`",
+        ),
+        (
+            "bit [1:0] x, y; covergroup cg; c: cross x, y { option.auto_bin_max = 2; } endgroup",
+            "`option.auto_bin_max` is assigned in a cross",
+        ),
+        (
+            "bit [1:0] x, y; covergroup cg; c: cross x, y { option.per_instance = 1; } endgroup",
+            "`option.per_instance` is assigned in a cross",
+        ),
+        (
+            "bit [1:0] x, y; covergroup cg; coverpoint x { option.cross_retain_auto_bins = 0; } \
+             endgroup",
+            "`option.cross_retain_auto_bins` is assigned in a coverpoint",
+        ),
+        (
+            "bit [1:0] x, y; covergroup cg; c: cross x, y { type_option.strobe = 1; } endgroup",
+            "`type_option.strobe` is assigned in a cross",
+        ),
+        // 19.8.1: an argument of `sample` is no value of a cross bin.
+        (
+            "bit [1:0] y; covergroup cg with function sample(bit [1:0] x, int v); \
+             c: cross x, y { bins b = binsof(x) intersect {v}; } endgroup",
+            "argument `v` of the sample method of covergroup `Top.cg` is used in a cross bin",
+        ),
+        (
+            "bit [1:0] x, y; covergroup cg with function sample(int v); \
+             c: cross x, y { option.weight = v; } endgroup",
+            "argument `v` of the sample method of covergroup `Top.cg` is used in an option value",
+        ),
+        // 19.5: one name for each item, a variable a cross crosses too.
+        (
+            "bit [1:0] x, y; covergroup cg; c: coverpoint x; c: cross x, y; endgroup",
+            "two items named `c`",
+        ),
+    ] {
+        for used in ["", "cg c0; initial c0 = new;"] {
+            let error = rejected("", &format!("{declaration} {used}"));
+            let AnalyzerError::InvalidCovergroup(text) = &error else {
+                panic!("{declaration}: {error}");
+            };
+            let rule = rule.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(text.contains(&rule), "{declaration}: {text}");
+            assert!(text.contains("IEEE 1800-2023 19."), "{declaration}: {text}");
+            assert!(!error.is_unsupported());
+        }
+    }
+    // What needs the names of the scope is an error where the type is
+    // used: a cross item that is a constant, a real or a string, and a
+    // name in an `intersect` list that is neither a constant nor an
+    // argument (19.5).
+    for (declaration, rule) in [
+        (
+            "localparam int P = 1; bit [1:0] y; covergroup cg; cross P, y; endgroup",
+            "a cross of covergroup `Top.cg` crosses `P`, which is neither a coverpoint nor a \
+             variable (IEEE 1800-2023 19.6)",
+        ),
+        (
+            "function automatic bit [1:0] f(); return 1; endfunction bit [1:0] y; \
+             covergroup cg; cross f, y; endgroup",
+            "a cross of covergroup `Top.cg` crosses `f`, which is neither a coverpoint nor a \
+             variable (IEEE 1800-2023 19.6)",
+        ),
+        // A name that nothing declares, and the label of a coverpoint of
+        // another covergroup (19.6: "Attempts to cross items from
+        // different coverage groups shall result in a compiler error").
+        (
+            "bit [1:0] y; covergroup cg; cross nothere, y; endgroup",
+            "a cross of covergroup `Top.cg` crosses `nothere`, which is neither a coverpoint nor a \
+             variable (IEEE 1800-2023 19.6)",
+        ),
+        (
+            "bit [1:0] y; covergroup other; lab: coverpoint y; endgroup \
+             covergroup cg; cross lab, y; endgroup",
+            "a cross of covergroup `Top.cg` crosses `lab`, which is neither a coverpoint nor a \
+             variable (IEEE 1800-2023 19.6)",
+        ),
+        (
+            "real r; bit [1:0] y; covergroup cg; cross r, y; endgroup",
+            "crosses the real variable `r`: a cross shall not directly include a real variable \
+             (IEEE 1800-2023 19.6)",
+        ),
+        (
+            "string s; bit [1:0] y; covergroup cg; cross s, y; endgroup",
+            "crosses `s`, which is not of an integral type",
+        ),
+        (
+            "int limit; bit [1:0] x, y; covergroup cg; c: cross x, y { bins b = binsof(x) \
+             intersect {limit}; } endgroup",
+            "`limit` in bin `b` of cross `c` of covergroup `Top.cg` is neither a constant nor an \
+             argument of the covergroup (IEEE 1800-2023 19.5)",
+        ),
+    ] {
+        analyze(&format!("module Top; {declaration} cg c0; endmodule"))
+            .unwrap_or_else(|error| panic!("{declaration}: {error}"));
+        let error = rejected("", &format!("{declaration} cg c0; initial c0 = new;"));
+        let AnalyzerError::InvalidCovergroup(text) = &error else {
+            panic!("{declaration}: {error}");
+        };
+        let rule = rule.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(text.contains(&rule), "{declaration}: {text}");
+    }
+    // What the standard allows: a cross of a variable that a coverpoint
+    // without a label is of, an argument of the covergroup and one of
+    // `sample` crossed (19.8.1), and the identifier of the enclosing cross.
+    analyze(
+        "module Top; bit [1:0] x, y; \
+         covergroup cg(bit [1:0] f) with function sample(bit s); \
+         coverpoint x; c: cross x, y, f, s { bins all = c; bins b = binsof(f) && binsof(s); } \
+         endgroup cg c0; initial begin c0 = new(1); c0.sample(0); end endmodule",
+    )
+    .unwrap();
+}
+
+#[test]
+fn unsupported_cross_constructs_are_rejected_where_used() {
+    // What the analysis does not support of a cross is rejected where the
+    // type is used, with a text that maps to the tracking issue of
+    // covergroups; the declaration alone analyzes.
+    let constructs = [
+        (
+            "bit [1:0] x, y; covergroup cg; c: cross x, y { bins b = c with (x > y); } endgroup",
+            "covergroup cross with or matches selection (IEEE 1800-2023 19.6.1.2)",
+        ),
+        (
+            "bit [1:0] x, y; covergroup cg; c: cross x, y { bins b = binsof(x) with (x > 1) \
+             matches 2; } endgroup",
+            "covergroup cross with or matches selection (IEEE 1800-2023 19.6.1.2)",
+        ),
+        (
+            "bit [1:0] x, y; covergroup cg; c: cross x, y { bins b = c matches $; } endgroup",
+            "covergroup cross with or matches selection (IEEE 1800-2023 19.6.1.2)",
+        ),
+        (
+            "bit [1:0] x, y; covergroup cg; c: cross x, y { bins b = (binsof(x) && binsof(y)) \
+             with (x == y); } endgroup",
+            "covergroup cross with or matches selection (IEEE 1800-2023 19.6.1.2)",
+        ),
+        (
+            "bit [1:0] x, y; typedef struct { bit [1:0] a, b; } t_t; t_t q[$]; \
+             covergroup cg; c: cross x, y { bins b = q; } endgroup",
+            "covergroup cross set expression (IEEE 1800-2023 19.6.1.3, 19.6.1.4)",
+        ),
+        (
+            "bit [1:0] x, y; covergroup cg; c: cross x, y { \
+             function CrossQueueType f(); f.push_back('{1, 1}); endfunction \
+             bins b = f(); } endgroup",
+            "covergroup function declared in a cross body (IEEE 1800-2023 19.6, 19.6.1.4)",
+        ),
+        (
+            "bit [1:0] x; covergroup cg; c: cross x, x; endgroup",
+            "covergroup cross that lists an item twice (IEEE 1800-2023 19.6)",
+        ),
+        (
+            "bit [1:0] x, y, z; covergroup cg; coverpoint z; c: cross x, y { bins b = binsof(z); } \
+             endgroup",
+            "covergroup cross selection of the bins of a coverpoint that the cross does not cross \
+             (IEEE 1800-2023 19.6.1)",
+        ),
+        (
+            "bit [1:0] x, y; covergroup cg; c: cross x, y { type_option.weight = 2; } endgroup",
+            "covergroup type_option (IEEE 1800-2023 19.7.1)",
+        ),
+    ];
+    for (declaration, construct) in constructs {
+        let construct = construct.split_whitespace().collect::<Vec<_>>().join(" ");
+        for unused in ["", "cg c0;"] {
+            let source = format!("module Top; {declaration} {unused} endmodule");
+            analyze(&source).unwrap_or_else(|error| panic!("{source}: {error}"));
+        }
+        for used in [
+            "cg c0 = new;",
+            "cg c0; initial c0.sample();",
+            "real r0; initial r0 = cg::get_coverage();",
+        ] {
+            let error = rejected("", &format!("{declaration} {used}"));
+            assert_eq!(
+                error,
+                AnalyzerError::Unsupported(construct.clone()),
+                "{declaration} {used}"
+            );
+            assert_eq!(error.tracking_issue(), COVERGROUPS_ISSUE);
+        }
+    }
+    // `&&` and `||` that alternate through more than 32 levels of
+    // parentheses.
+    let mut select = "binsof(x)".to_string();
+    for level in 0..33 {
+        let op = if level % 2 == 0 { "&&" } else { "||" };
+        select = format!("(binsof(y) {op} {select})");
+    }
+    let declaration =
+        format!("bit [1:0] x, y; covergroup cg; c: cross x, y {{ bins b = {select}; }} endgroup");
+    let error = rejected("", &format!("{declaration} cg c0 = new;"));
+    assert_eq!(
+        error,
+        AnalyzerError::Unsupported(
+            "covergroup cross selection nested deeper than 32 (IEEE 1800-2023 19.6.1)".into()
+        )
+    );
+    assert_eq!(error.tracking_issue(), COVERGROUPS_ISSUE);
+    // 32 levels, and a chain of 10,000 terms, which is one node.
+    let mut select = "binsof(x)".to_string();
+    for level in 0..31 {
+        let op = if level % 2 == 0 { "&&" } else { "||" };
+        select = format!("(binsof(y) {op} {select})");
+    }
+    let chain = vec!["binsof(x) intersect {1}"; 10_000].join(" || ");
+    analyze(&format!(
+        "module Top; bit [1:0] x, y; covergroup cg; c: cross x, y {{ bins b = {select}; \
+         bins d = {chain}; }} endgroup cg c0 = new; endmodule"
+    ))
+    .unwrap();
+    // What the parser rejects is rejected where the covergroup is
+    // declared, not where it is used: no `new` and no method of `cg` is
+    // written. It names the issue of covergroups too.
+    for (select, construct) in [
+        (
+            "!(binsof(x))",
+            "covergroup cross selection that negates a parenthesized selection (IEEE 1800-2023 \
+             19.6.1)",
+        ),
+        (
+            "en ? binsof(x) : binsof(y)",
+            "covergroup cross set expression with a conditional operator (IEEE 1800-2023 \
+             19.6.1.4)",
+        ),
+    ] {
+        let source = format!(
+            "module Top; bit [1:0] x, y; bit en; covergroup cg; c: cross x, y {{ bins b = {select}; }} \
+             endgroup endmodule"
+        );
+        let error = analyze(&source).unwrap_err().into_error();
+        let AnalyzerError::Unsupported(text) = &error else {
+            panic!("{select}: {error}");
+        };
+        let construct = construct.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(text.ends_with(&construct), "{select}: {text}");
+        assert!(text.starts_with("covergroups.sv:"), "{select}: {text}");
+        assert_eq!(error.tracking_issue(), COVERGROUPS_ISSUE, "{select}");
+    }
 }
