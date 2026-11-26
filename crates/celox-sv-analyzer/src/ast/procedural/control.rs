@@ -915,6 +915,7 @@ impl BodyBuilder<'_, '_, '_> {
                                 if !module_item {
                                     return Err(unsupported("procedural concurrent assertion"));
                                 }
+                                self.concurrent_assertion = true;
                                 // Its clock is explicit or that of the named
                                 // sequence or property it instantiates (the
                                 // parser waits for it); default clocking

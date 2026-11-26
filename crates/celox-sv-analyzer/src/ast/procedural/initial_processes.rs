@@ -89,6 +89,7 @@ pub(in crate::ast) fn initial_processes_from_scope(
             validation_body: Vec::new(),
             synthetic: false,
             repeats: false,
+            assertion_actions: false,
         });
     }
     let active = generate::items(tree, session, const_env, &type_aliases)?;
@@ -243,6 +244,7 @@ pub(in crate::ast) fn initial_processes_from_scope(
                     validation_body: Vec::new(),
                     synthetic: false,
                     repeats: false,
+                    assertion_actions: false,
                 });
             }
             for site in &sites[first_site..] {
@@ -359,6 +361,7 @@ pub(in crate::ast) fn initial_processes_from_scope(
                 validation_body: Vec::new(),
                 synthetic: true,
                 repeats: false,
+                assertion_actions: false,
             });
             for (construct, body) in bodies {
                 processes.push(InitialProcess {
@@ -370,6 +373,7 @@ pub(in crate::ast) fn initial_processes_from_scope(
                     validation_body: Vec::new(),
                     synthetic: true,
                     repeats: true,
+                    assertion_actions: false,
                 });
             }
             continue;
@@ -421,6 +425,7 @@ pub(in crate::ast) fn initial_processes_from_scope(
                     validation_body: Vec::new(),
                     synthetic: false,
                     repeats: true,
+                    assertion_actions: false,
                 });
             }
             continue;
@@ -527,6 +532,7 @@ pub(in crate::ast) fn initial_processes_from_scope(
                 validation_body: Vec::new(),
                 synthetic: true,
                 repeats: false,
+                assertion_actions: false,
             });
         }
         // The final procedures that fail the attempts of its strong until
@@ -545,6 +551,7 @@ pub(in crate::ast) fn initial_processes_from_scope(
                 validation_body: Vec::new(),
                 synthetic: true,
                 repeats: false,
+                assertion_actions: true,
             });
         }
         processes.push(InitialProcess {
@@ -564,6 +571,7 @@ pub(in crate::ast) fn initial_processes_from_scope(
             validation_body,
             synthetic: false,
             repeats,
+            assertion_actions: builder.concurrent_assertion,
         });
     }
     // The covergroup types whose instances other `new`s construct, which

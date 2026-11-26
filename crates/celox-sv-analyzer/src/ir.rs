@@ -214,6 +214,7 @@ impl Module {
                 kind: celox_design::ProcessKind::Regular,
                 synthetic: false,
                 repeats: true,
+                assertion_actions: false,
             });
         }
         self.ff_processes = retained;
@@ -311,6 +312,7 @@ impl Module {
                 kind: celox_design::ProcessKind::Regular,
                 synthetic: false,
                 repeats: true,
+                assertion_actions: false,
             });
         }
         self.comb_processes = retained;
@@ -1979,6 +1981,8 @@ pub struct InitialProcess {
     synthetic: bool,
     /// An `always` process: its body runs forever.
     repeats: bool,
+    /// See [`InitialProcess::runs_assertion_actions`].
+    assertion_actions: bool,
 }
 
 impl InitialProcess {
@@ -2010,6 +2014,7 @@ impl InitialProcess {
             body,
             kind,
             synthetic: false,
+            assertion_actions: false,
             repeats: false,
         }
     }
@@ -2039,6 +2044,14 @@ impl InitialProcess {
     /// never finishes on its own.
     pub fn repeats(&self) -> bool {
         self.repeats
+    }
+
+    /// Whether this process runs the actions of a module's concurrent
+    /// assertion (IEEE 1800-2023 16.14): the assertion's process, or the
+    /// final procedure that fails the pending attempts of a strong until
+    /// property.
+    pub fn runs_assertion_actions(&self) -> bool {
+        self.assertion_actions
     }
 
     /// The event list and statement of `always @(list) statement`, when no
@@ -3004,6 +3017,7 @@ impl From<ast::InitialProcess> for InitialProcess {
         result.site = process.site().cloned();
         result.synthetic = process.is_synthetic();
         result.repeats = process.repeats();
+        result.assertion_actions = process.runs_assertion_actions();
         result
     }
 }

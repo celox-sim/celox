@@ -489,6 +489,7 @@ fn sampler_of<'a>(
         // otherwise make it a level-sensitive procedure, which two-state
         // simulation runs once at time zero (see `InitialProcess::repeats`).
         repeats: false,
+        assertion_actions: false,
     }))
 }
 
