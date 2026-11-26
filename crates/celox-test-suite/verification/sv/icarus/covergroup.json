@@ -101,6 +101,39 @@
     },
     {
       "category": "Sequential",
+      "detail": "Icarus build exit status: 6; see <case>/build.log\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Invalid module item.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Invalid module item.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:8: error: Invalid module item.\n",
+      "expectation": "Simulation",
+      "name": "covergroup::constructed_instances_of_a_divided_clock_sample_before_the_updates",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 6; see <case>/build.log\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Invalid module item.\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Invalid module item.\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:7: error: Invalid module item.\n",
+      "expectation": "Simulation",
+      "name": "covergroup::constructed_instances_take_stop_start_and_sample",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 62; see <case>/build.log\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Invalid class item.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Invalid class item.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:8: error: Invalid class item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: kc doesn't name a type.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:10: error: Invalid class item.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Invalid class item.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:11: error: Invalid class item.\n<case>/source_0.sv:12: syntax error\n<case>/source_0.sv:12: error: cg doesn't name a type.\n<case>/source_0.sv:14: syntax error\n<case>/source_0.sv:15: error: Invalid class item.\n<case>/source_0.sv:16: syntax error\n<case>/source_0.sv:16: error: Invalid class item.\n<case>/source_0.sv:16: syntax error\n<case>/source_0.sv:16: error: Invalid class item.\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: error: Invalid class item.\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: error: Invalid class item.\n<case>/source_0.sv:18: syntax error\n<case>/source_0.sv:18: error: Invalid class item.\n<case>/source_0.sv:18: syntax error\n<case>/source_0.sv:18: error: Invalid class item.\n<case>/source_0.sv:19: syntax error\n<case>/source_0.sv:19: error: Invalid class item.\n<case>/source_0.sv:20: syntax error\n<case>/testbench.sv:3: error: Invalid class item.\n<case>/testbench.sv:4: syntax error\n<case>/testbench.sv:4: error: Invalid class item.\n<case>/testbench.sv:5: syntax error\n<case>/testbench.sv:5: error: Invalid class item.\n<case>/testbench.sv:6: syntax error\n<case>/testbench.sv:6: error: Top doesn't name a type.\n<case>/testbench.sv:78: syntax error\n<case>/testbench.sv:81: error: Invalid class item.\n<case>/testbench.sv:82: syntax error\n<case>/testbench.sv:82: error: suite_reached_finish doesn't name a type.\n<case>/testbench.sv:83: syntax error\n<case>/testbench.sv:83: error: Invalid class item.\n<case>/testbench.sv:84: syntax error\n<case>/testbench.sv:84: error: suite_timed_out doesn't name a type.\n<case>/testbench.sv:85: syntax error\n<case>/testbench.sv:85: error: Invalid class item.\n<case>/testbench.sv:86: syntax error\n<case>/testbench.sv:86: error: Invalid class item.\n<case>/testbench.sv:87: syntax error\n<case>/testbench.sv:91: error: Invalid class item.\n<case>/testbench.sv:92: syntax error\n<case>/testbench.sv:94: error: Invalid class item.\n<case>/testbench.sv:95: syntax error\n<case>/testbench.sv:96: error: Invalid class item.\n<case>/testbench.sv:98: syntax error\n<case>/testbench.sv:98: error: Invalid class item.\n<case>/testbench.sv:100: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "covergroup::constructions_of_declaration_initializers_sample",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "Icarus build exit status: 12; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module item.\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:5: error: Invalid module item.\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Invalid module item.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Invalid module item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:10: error: Invalid module item.\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: error: Invalid module instantiation\n",
       "expectation": "Simulation",
       "name": "covergroup::constructor_arguments_set_the_bins",
@@ -233,6 +266,28 @@
     },
     {
       "category": "Sequential",
+      "detail": "Icarus build exit status: 66; see <case>/build.log\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Invalid class item.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Invalid class item.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Invalid class item.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:8: error: Invalid class item.\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: error: Invalid class item.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: cg doesn't name a type.\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:14: error: Invalid class item.\n<case>/source_0.sv:15: syntax error\n<case>/source_0.sv:15: error: Invalid class item.\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: error: Invalid class item.\n<case>/source_0.sv:18: syntax error\n<case>/source_0.sv:18: error: ifc doesn't name a type.\n<case>/source_0.sv:21: syntax error\n<case>/source_0.sv:22: error: Invalid class item.\n<case>/source_0.sv:23: syntax error\n<case>/source_0.sv:23: error: i doesn't name a type.\n<case>/source_0.sv:24: syntax error\n<case>/source_0.sv:24: error: Invalid class item.\n<case>/source_0.sv:25: syntax error\n<case>/source_0.sv:25: error: Invalid class item.\n<case>/source_0.sv:26: syntax error\n<case>/source_0.sv:26: error: Invalid class item.\n<case>/source_0.sv:27: syntax error\n<case>/source_0.sv:27: error: Invalid class item.\n<case>/source_0.sv:27: syntax error\n<case>/source_0.sv:27: error: Invalid class item.\n<case>/source_0.sv:28: syntax error\n<case>/source_0.sv:28: error: Invalid class item.\n<case>/source_0.sv:29: syntax error\n<case>/testbench.sv:3: error: Invalid class item.\n<case>/testbench.sv:4: syntax error\n<case>/testbench.sv:4: error: Invalid class item.\n<case>/testbench.sv:5: syntax error\n<case>/testbench.sv:5: error: Invalid class item.\n<case>/testbench.sv:6: syntax error\n<case>/testbench.sv:6: error: Top doesn't name a type.\n<case>/testbench.sv:78: syntax error\n<case>/testbench.sv:81: error: Invalid class item.\n<case>/testbench.sv:82: syntax error\n<case>/testbench.sv:82: error: suite_reached_finish doesn't name a type.\n<case>/testbench.sv:83: syntax error\n<case>/testbench.sv:83: error: Invalid class item.\n<case>/testbench.sv:84: syntax error\n<case>/testbench.sv:84: error: suite_timed_out doesn't name a type.\n<case>/testbench.sv:85: syntax error\n<case>/testbench.sv:85: error: Invalid class item.\n<case>/testbench.sv:86: syntax error\n<case>/testbench.sv:86: error: Invalid class item.\n<case>/testbench.sv:87: syntax error\n<case>/testbench.sv:91: error: Invalid class item.\n<case>/testbench.sv:92: syntax error\n<case>/testbench.sv:94: error: Invalid class item.\n<case>/testbench.sv:95: syntax error\n<case>/testbench.sv:96: error: Invalid class item.\n<case>/testbench.sv:98: syntax error\n<case>/testbench.sv:98: error: Invalid class item.\n<case>/testbench.sv:100: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "covergroup::embedded_covergroup_samples_through_a_virtual_interface",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 82; see <case>/build.log\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Invalid class item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Invalid class item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Invalid class item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:9: error: Invalid class item.\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: error: Invalid class item.\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:10: error: Invalid class item.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Invalid class item.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:11: error: Invalid class item.\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: error: Invalid class item.\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:12: error: Invalid class item.\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:13: error: on_change doesn't name a type.\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:13: error: on_edge doesn't name a type.\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:13: error: on_event doesn't name a type.\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:13: error: on_signal doesn't name a type.\n<case>/source_0.sv:14: syntax error\n<case>/source_0.sv:16: error: Invalid class item.\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:18: error: Invalid class item.\n<case>/source_0.sv:19: syntax error\n<case>/source_0.sv:20: error: Invalid class item.\n<case>/source_0.sv:21: syntax error\n<case>/source_0.sv:21: error: o doesn't name a type.\n<case>/source_0.sv:21: syntax error\n<case>/source_0.sv:21: error: o doesn't name a type.\n<case>/source_0.sv:21: syntax error\n<case>/source_0.sv:21: error: Invalid class item.\n<case>/source_0.sv:21: syntax error\n<case>/source_0.sv:21: error: sclk doesn't name a type.\n<case>/source_0.sv:22: syntax error\n<case>/source_0.sv:22: error: Invalid class item.\n<case>/source_0.sv:22: syntax error\n<case>/source_0.sv:22: error: sclk doesn't name a type.\n<case>/source_0.sv:23: syntax error\n<case>/source_0.sv:24: error: Invalid class item.\n<case>/source_0.sv:25: syntax error\n<case>/source_0.sv:26: error: Invalid class item.\n<case>/source_0.sv:27: syntax error\n<case>/source_0.sv:27: error: Invalid class item.\n<case>/source_0.sv:28: syntax error\n<case>/testbench.sv:3: error: Invalid class item.\n<case>/testbench.sv:4: syntax error\n<case>/testbench.sv:4: error: Invalid class item.\n<case>/testbench.sv:5: syntax error\n<case>/testbench.sv:5: error: Invalid class item.\n<case>/testbench.sv:6: syntax error\n<case>/testbench.sv:6: error: Top doesn't name a type.\n<case>/testbench.sv:78: syntax error\n<case>/testbench.sv:81: error: Invalid class item.\n<case>/testbench.sv:82: syntax error\n<case>/testbench.sv:82: error: suite_reached_finish doesn't name a type.\n<case>/testbench.sv:83: syntax error\n<case>/testbench.sv:83: error: Invalid class item.\n<case>/testbench.sv:84: syntax error\n<case>/testbench.sv:84: error: suite_timed_out doesn't name a type.\n<case>/testbench.sv:85: syntax error\n<case>/testbench.sv:85: error: Invalid class item.\n<case>/testbench.sv:86: syntax error\n<case>/testbench.sv:86: error: Invalid class item.\n<case>/testbench.sv:87: syntax error\n<case>/testbench.sv:91: error: Invalid class item.\n<case>/testbench.sv:92: syntax error\n<case>/testbench.sv:94: error: Invalid class item.\n<case>/testbench.sv:95: syntax error\n<case>/testbench.sv:96: error: Invalid class item.\n<case>/testbench.sv:98: syntax error\n<case>/testbench.sv:98: error: Invalid class item.\n<case>/testbench.sv:100: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "covergroup::embedded_covergroups_sample_at_events_of_their_class",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:2: syntax error\n<case>/source_0.sv:2: error: Invalid module item.\n<case>/source_0.sv:2: syntax error\n<case>/source_0.sv:3: error: Invalid module item.\n",
       "expectation": "Simulation",
       "name": "covergroup::handles_are_null_until_constructed",
@@ -335,6 +390,17 @@
       "detail": "Icarus build exit status: 15; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module item.\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Invalid module item.\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:5: error: Invalid module item.\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:7: error: Invalid module item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Invalid module instantiation\n<case>/source_0.sv:9: error: Invalid module item.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:11: error: Invalid module item.\n<case>/source_0.sv:12: syntax error\n<case>/source_0.sv:12: error: Invalid module instantiation\n",
       "expectation": "Simulation",
       "name": "covergroup::options_of_a_definition",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 6; see <case>/build.log\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Invalid module item.\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Invalid module item.\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:7: error: Invalid module item.\n",
+      "expectation": "Simulation",
+      "name": "covergroup::procedural_constructions_sample_at_their_clocking_events",
       "phase": "compile",
       "status": "compile_error",
       "stronger_than_sv": false,

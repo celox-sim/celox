@@ -157,6 +157,7 @@ pub(super) fn lower(
                 then_body: vec![
                     Stmt::Fork {
                         join: celox_design::ForkJoin::Any,
+                        unseeded: false,
                         branches: vec![
                             vec![
                                 Stmt::Delay {

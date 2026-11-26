@@ -15,6 +15,7 @@ impl Ff<'_, '_> {
     pub(in crate::lowering::ff) fn fork_in_unit(
         &mut self,
         join: celox_design::ForkJoin,
+        unseeded: bool,
         branches: &[Vec<sv::ir::Stmt>],
     ) -> Result<(), sv::AnalyzerError> {
         let frame = self.frame.as_ref().expect("lowering a function unit");
@@ -51,11 +52,7 @@ impl Ff<'_, '_> {
         let current = self.b.alloc_bit(64, false);
         self.b
             .emit(SIRInstruction::Concat(current, vec![high, frame_base]));
-        let mode = match join {
-            celox_design::ForkJoin::All => 0u64,
-            celox_design::ForkJoin::Any => 1,
-            celox_design::ForkJoin::None => 2,
-        };
+        let mode = celox_frontend_core::process::fork_mode(join, unseeded);
         let fixed = self.b.alloc_bit(64, false);
         self.b.emit(SIRInstruction::Imm(
             fixed,

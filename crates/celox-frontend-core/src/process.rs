@@ -45,6 +45,22 @@ const _: () = assert!(PROCESS_RESUME_WIDTH == 2 * SWITCH_BITS);
 /// Most suspension points one process kernel can have.
 pub const MAX_PROCESS_SUSPENSIONS: usize = (1 << PROCESS_RESUME_WIDTH) - 1;
 
+/// The join code of a fork, bits 32 and 33 of the word of its
+/// [`ProcessStatus::Fork`] suspension: 0, 1 and 2 for `join`, `join_any`
+/// and `join_none`, and 3 for a `join_none` whose children are processes of
+/// the analysis rather than of the source (`unseeded`): the runtime draws no
+/// seed for them from the forking process and does not make them its
+/// children, so its random values, `wait fork`, `disable fork` and `kill()`
+/// stay those of the source (IEEE 1800-2023 18.14.1, 9.6.1, 9.6.3, 9.7).
+pub fn fork_mode(join: celox_design::ForkJoin, unseeded: bool) -> u64 {
+    match join {
+        celox_design::ForkJoin::All => 0,
+        celox_design::ForkJoin::Any => 1,
+        celox_design::ForkJoin::None if unseeded => 3,
+        celox_design::ForkJoin::None => 2,
+    }
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ProcessKernelError {
     #[error("a process has more than {MAX_PROCESS_SUSPENSIONS} suspension points")]
@@ -244,17 +260,29 @@ impl<A: Copy> ProcessKernelBuilder<A> {
         count: usize,
         join: celox_design::ForkJoin,
     ) -> Result<(Vec<BlockId>, BlockId), ProcessKernelError> {
+        self.fork_coded(count, fork_mode(join, false))
+    }
+
+    /// [`Self::fork`] of a `join_none` fork whose children are processes of
+    /// the analysis (see [`fork_mode`]).
+    pub fn fork_unseeded(
+        &mut self,
+        count: usize,
+    ) -> Result<(Vec<BlockId>, BlockId), ProcessKernelError> {
+        self.fork_coded(count, fork_mode(celox_design::ForkJoin::None, true))
+    }
+
+    fn fork_coded(
+        &mut self,
+        count: usize,
+        mode: u64,
+    ) -> Result<(Vec<BlockId>, BlockId), ProcessKernelError> {
         let first = self.resume_blocks.len();
         if first + count > MAX_PROCESS_SUSPENSIONS {
             return Err(ProcessKernelError::TooManySuspensions);
         }
         let children: Vec<_> = (0..count).map(|_| self.builder.new_block()).collect();
         self.resume_blocks.extend(children.iter().copied());
-        let mode = match join {
-            celox_design::ForkJoin::All => 0u64,
-            celox_design::ForkJoin::Any => 1,
-            celox_design::ForkJoin::None => 2,
-        };
         self.store_delay_constant(first as u64 | ((count as u64) << 16) | (mode << 32));
         self.slots.const_delays = false;
         self.slots.requires_timed_simulation = true;

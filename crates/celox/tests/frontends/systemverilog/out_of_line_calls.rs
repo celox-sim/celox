@@ -6477,3 +6477,50 @@ endmodule
         }
     }
 }
+
+/// What adds a covergroup instance that a procedure constructs to the list
+/// of its type, and the sampler of one embedded in a class, the detached
+/// fork of a function (IEEE 1800-2023 19.3, 19.4): out of line they sample
+/// what they sample inlined.
+#[test]
+fn samplers_of_constructed_covergroups_out_of_line() {
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, b, c);
+    bit clk = 0;
+    bit [3:0] v = 0;
+    always #5 clk = ~clk;
+    always @(posedge clk) v <= v + 4'd1;
+    covergroup cg @(posedge clk); coverpoint v { bins b[] = {[0:15]}; } endgroup
+    class K;
+        bit [3:0] w;
+        event ev;
+        covergroup kc @ev; coverpoint w { bins b[] = {[0:15]}; } endgroup
+        covergroup kp @(w); coverpoint w { bins b[] = {[0:15]}; } endgroup
+        function new(); kc = new; kp = new; endfunction
+    endclass
+    cg g;
+    K k;
+    int covered, total;
+    initial begin
+        g = new;
+        k = new;
+        repeat (4) begin
+            #10 k.w = k.w + 4'd1;
+            -> k.ev;
+        end
+        #1;
+        void'(g.get_inst_coverage(covered, total));
+        a = covered;
+        void'(k.kc.get_inst_coverage(covered, total));
+        b = covered;
+        void'(k.kp.get_inst_coverage(covered, total));
+        c = covered;
+    end
+endmodule
+"#;
+    same_as_default(source, 7, 15, 50, &["a", "b", "c"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 50, &["a", "b", "c"]),
+        Ok(vec![value(4), value(4), value(4)])
+    );
+}

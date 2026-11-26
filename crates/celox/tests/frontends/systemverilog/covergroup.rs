@@ -928,14 +928,14 @@ endmodule
 /// A procedure the source writes takes a seed, and so changes it.
 #[test]
 fn clocking_events_do_not_change_random_stimulus() {
-    let draws = |event: &str, written: &str| {
+    let draws_with = |event: &str, declaration: &str, written: &str| {
         let source = format!(
             "`timescale 1ns/1ns
 module Top(output int unsigned a, b, output int done);
     bit clk = 0;
     bit [1:0] d;
     covergroup cg {event}; coverpoint d; endgroup
-    cg c = new;
+    {declaration}
     {written}
     always #1 clk = ~clk;
     initial begin
@@ -956,12 +956,27 @@ endmodule
             sim.get(signal)
         })
     };
+    let draws = |event: &str, written: &str| draws_with(event, "cg c = new;", written);
     let plain = draws("", "");
     assert_ne!(plain[0], plain[1], "the stimulus is random");
     assert_eq!(draws("@(posedge clk)", ""), plain);
     assert_eq!(draws("@(negedge clk iff d == 0)", ""), plain);
     assert_eq!(draws("@(clk)", ""), plain);
     assert_ne!(draws("", "always @(posedge clk) c.sample();"), plain);
+    // An instance that a procedure declared before the drawing process
+    // constructs, of a type sampled by the procedure of the type or by a
+    // process of the type, and more instances than the variables of its
+    // list hold: the procedure that constructs is one of the source, the
+    // samplers draw no seed.
+    let constructed =
+        "cg c, more[6];\n    initial begin c = new; foreach (more[i]) more[i] = new; end";
+    let plain = draws_with("", constructed, "");
+    assert_eq!(draws_with("@(posedge clk)", constructed, ""), plain);
+    assert_eq!(
+        draws_with("@(negedge clk iff d == 0)", constructed, ""),
+        plain
+    );
+    assert_eq!(draws_with("@(clk)", constructed, ""), plain);
 }
 
 /// A covergroup that a class declares and nothing constructs is a property
@@ -6636,4 +6651,821 @@ endmodule
         assert_eq!(samples(&report, "Top.cg"), [2, 6]);
         assert_eq!(hit(bins(&report, "Top.cg", 0, "r")), once(&[1, 2]));
     }
+}
+
+sv_backends! {
+    /// 19.3: an instance that any other `new` constructs is sampled at the
+    /// clocking event of its type too: in an `initial` procedure, an
+    /// element of an array in a `foreach`, a task, a function and an
+    /// `always` procedure (from the instant it constructs one: here at 12).
+    /// A value that a nonblocking assignment of the edge updates is sampled
+    /// before the update, at a clock that blocking assignments make, and a
+    /// declaration of the type keeps its own sampler beside them.
+    fn constructed_instances_sample_at_their_clocking_events(sim) {
+        @setup {
+            let source = clocked(
+                "    covergroup cg @(posedge clk); coverpoint q { bins b[] = {[0:7]}; } endgroup
+    covergroup fall @(negedge clk); coverpoint q { bins b[] = {[0:7]}; } endgroup
+    cg s = new;
+    cg c, d, e, f;
+    cg a[2];
+    fall n;
+    bit go = 0;
+    task automatic make(); d = new; endtask
+    function automatic void build(); f = new; endfunction
+    initial begin
+        c = new;
+        foreach (a[i]) a[i] = new;
+        make();
+        build();
+        n = new;
+    end
+    initial #12 go = 1;
+    always @(posedge go) e = new;",
+            );
+        }
+        @build simulation(&source).four_state(false);
+        sim.run_until(42).unwrap();
+        let report = sim.coverage();
+        // In the order of construction: `s`, `c`, `a[0]`, `a[1]`, `d`, `f`,
+        // then `e`.
+        assert_eq!(
+            all_samples(&report),
+            expected(&[("Top.cg", &[4, 4, 4, 4, 4, 4, 3]), ("Top.fall", &[4])])
+        );
+        for instance in 0..6 {
+            assert_eq!(
+                hit(bins(&report, "Top.cg", instance, "q")),
+                q_bins(&[(0, 1), (1, 1), (2, 1), (3, 1)]),
+                "{instance}"
+            );
+        }
+        assert_eq!(
+            hit(bins(&report, "Top.cg", 6, "q")),
+            q_bins(&[(1, 1), (2, 1), (3, 1)])
+        );
+        assert_eq!(
+            hit(bins(&report, "Top.fall", 0, "q")),
+            q_bins(&[(1, 1), (2, 1), (3, 1), (4, 1)])
+        );
+    }
+}
+
+/// The same in both state modes, at every optimization level and with each
+/// dead-store policy, for instances that a procedure and a class
+/// constructor construct: no sample before the first event, `@(s)` in
+/// two-state mode included.
+#[test]
+fn constructed_instances_sample_alike_in_every_mode() {
+    let source = clocked(
+        "    logic s = 0;
+    initial #7 s = 1;
+    covergroup pos @(posedge clk); coverpoint q { bins b[] = {[0:7]}; } endgroup
+    covergroup level @(s); endgroup
+    covergroup change @(clk); endgroup
+    class K;
+        covergroup kc @(posedge clk); coverpoint q { bins b[] = {[0:7]}; } endgroup
+        function new(); kc = new; endfunction
+    endclass
+    pos p;
+    level l;
+    change a;
+    K k;
+    initial begin p = new; l = new; a = new; k = new; end",
+    );
+    for four_state in [false, true] {
+        for level in [
+            celox::OptLevel::O0,
+            celox::OptLevel::O1,
+            celox::OptLevel::O2,
+        ] {
+            for policy in [
+                celox::DeadStorePolicy::Off,
+                celox::DeadStorePolicy::PreserveTopPorts,
+                celox::DeadStorePolicy::PreserveAllPorts,
+            ] {
+                let context = format!("four_state={four_state} {level:?} {policy:?}");
+                let mut sim = simulation(&source)
+                    .four_state(four_state)
+                    .opt_level(level)
+                    .dead_store_policy(policy)
+                    .build()
+                    .unwrap_or_else(|error| panic!("{context}: {error}"));
+                sim.run_until(6).unwrap();
+                assert_eq!(
+                    all_samples(&sim.coverage()),
+                    expected(&[
+                        ("K::kc", &[1]),
+                        ("Top.change", &[1]),
+                        ("Top.level", &[0]),
+                        ("Top.pos", &[1])
+                    ]),
+                    "{context}"
+                );
+                sim.run_until(42).unwrap();
+                let report = sim.coverage();
+                assert_eq!(
+                    all_samples(&report),
+                    expected(&[
+                        ("K::kc", &[4]),
+                        ("Top.change", &[8]),
+                        ("Top.level", &[1]),
+                        ("Top.pos", &[4])
+                    ]),
+                    "{context}"
+                );
+                for name in ["Top.pos", "K::kc"] {
+                    assert_eq!(
+                        hit(bins(&report, name, 0, "q")),
+                        q_bins(&[(0, 1), (1, 1), (2, 1), (3, 1)]),
+                        "{context} {name}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+sv_backends! {
+    /// 19.4: a covergroup embedded in a class is sampled at its clocking
+    /// event, bound in the class: a change of a property, an edge of a
+    /// one-bit property, a named event of the object, through `this` and
+    /// through a handle property, and an edge of a signal of the module
+    /// that declares the class.
+    fn embedded_covergroups_sample_at_events_of_their_class(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+class Obj; event m_ev; endclass
+module Top;
+    bit sclk = 0;
+    class C;
+        bit clk_bit;
+        bit [3:0] m_z;
+        event ev;
+        Obj m_obj;
+        bit [3:0] v;
+        covergroup a @m_z; coverpoint v { bins b[] = {[0:15]}; } endgroup
+        covergroup b @(posedge clk_bit); coverpoint v { bins b[] = {[0:15]}; } endgroup
+        covergroup c @ev; coverpoint v { bins b[] = {[0:15]}; } endgroup
+        covergroup d @(m_obj.m_ev); coverpoint v { bins b[] = {[0:15]}; } endgroup
+        covergroup e @(posedge sclk); coverpoint v { bins b[] = {[0:15]}; } endgroup
+        covergroup f @(this.ev); coverpoint v { bins b[] = {[0:15]}; } endgroup
+        function new();
+            m_obj = new;
+            a = new; b = new; c = new; d = new; e = new; f = new;
+        endfunction
+    endclass
+    C o;
+    initial begin
+        o = new;
+        repeat (4) begin
+            #5 o.v++; o.m_z++; o.clk_bit = 1; -> o.ev; -> o.m_obj.m_ev; sclk = 1;
+            #5 o.clk_bit = 0; sclk = 0;
+        end
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(42).unwrap();
+        let report = sim.coverage();
+        assert_eq!(
+            all_samples(&report),
+            expected(&[
+                ("C::a", &[4]),
+                ("C::b", &[4]),
+                ("C::c", &[4]),
+                ("C::d", &[4]),
+                ("C::e", &[4]),
+                ("C::f", &[4]),
+            ])
+        );
+        for name in ["C::a", "C::b", "C::c", "C::d", "C::e", "C::f"] {
+            assert_eq!(
+                hit(bins(&report, name, 0, "v")),
+                hits(&[("b[1]", 1), ("b[2]", 1), ("b[3]", 1), ("b[4]", 1)]),
+                "{name}"
+            );
+        }
+    }
+}
+
+sv_backends! {
+    /// The common verification form: a covergroup embedded in a monitor
+    /// class of a package, sampled at an edge of the clock of the interface
+    /// instance that a virtual interface property of the object denotes.
+    /// When the property is assigned another instance (at 20), the wait
+    /// that is armed already fires once more, at the next edge of the old
+    /// clock (25), and the later waits are on the new one (30, 50, 70): a
+    /// difference from 9.4.2, which waits on the new one at once, that a
+    /// task of the class waiting on the same event control shows too (to
+    /// be filed, documented).
+    fn embedded_covergroups_sample_through_a_virtual_interface(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+interface ifc(input bit clk);
+    bit [3:0] data;
+endinterface
+package mon_pkg;
+    class Monitor;
+        virtual ifc vif;
+        covergroup cg @(posedge vif.clk); d: coverpoint vif.data { bins b[] = {[0:15]}; } endgroup
+        function new(virtual ifc vif);
+            this.vif = vif;
+            cg = new;
+        endfunction
+    endclass
+endpackage
+module Top;
+    import mon_pkg::*;
+    bit clk = 0, slow = 0;
+    always #5 clk = ~clk;
+    always #10 slow = ~slow;
+    ifc i(.clk(clk));
+    ifc j(.clk(slow));
+    Monitor m;
+    initial begin
+        i.data = 3;
+        j.data = 9;
+        m = new(i);
+        #20 m.vif = j;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(19).unwrap();
+        // `clk` rises at 5 and 15.
+        assert_eq!(samples(&sim.coverage(), "mon_pkg::Monitor::cg"), [2]);
+        // The old clock at 25, then `slow` at 30, 50 and 70.
+        sim.run_until(82).unwrap();
+        let report = sim.coverage();
+        assert_eq!(samples(&report, "mon_pkg::Monitor::cg"), [6]);
+        assert_eq!(
+            hit(bins(&report, "mon_pkg::Monitor::cg", 0, "d")),
+            hits(&[("b[3]", 2), ("b[9]", 4)])
+        );
+    }
+}
+
+sv_backends! {
+    /// A named event of an object that a handle property holds,
+    /// `@(h.e)`: when the property is assigned another object (at 8), the
+    /// wait that is armed stays on the event of the first object, so the
+    /// triggers of the new object's event (at 10 and, through the handle,
+    /// at 12) are no samples, as 15.5.5.1 has it for a wait on an event
+    /// variable that is assigned. A process of the source waiting on
+    /// `@(h.e)` of a module variable `h` wakes once the same way.
+    fn embedded_covergroup_events_stay_on_the_object_of_their_first_wait(sim) {
+        @setup {
+            let source = clocked(
+                "    class H; event e; endclass
+    class E;
+        H h;
+        covergroup ec @(h.e); endgroup
+        function new(); h = new; ec = new; endfunction
+    endclass
+    E e;
+    H other;
+    initial begin
+        e = new;
+        other = new;
+        #6 -> e.h.e;
+        #2 e.h = other;
+        #2 -> other.e;
+        #2 -> e.h.e;
+    end",
+            );
+        }
+        @build simulation(&source).four_state(false);
+        sim.run_until(42).unwrap();
+        assert_eq!(samples(&sim.coverage(), "E::ec"), [1]);
+    }
+}
+
+sv_backends! {
+    /// 19.4: an embedded covergroup is assigned in the `new` method of its
+    /// class alone; constructing it again there leaves the instance it held
+    /// unsampled at the event, which the new one is. An instance of a type
+    /// of the module stays sampled, whatever holds it.
+    fn reconstruction_retires_the_old_sampler(sim) {
+        @setup {
+            let source = clocked(
+                "    class K;
+        bit [2:0] v;
+        covergroup kc @(posedge clk); endgroup
+        function new(int times); repeat (times) kc = new; endfunction
+    endclass
+    covergroup cg @(posedge clk); endgroup
+    K one, two;
+    cg c;
+    initial begin
+        one = new(1);
+        two = new(3);
+        c = new;
+        c = new;
+    end",
+            );
+        }
+        @build simulation(&source).four_state(false);
+        sim.run_until(42).unwrap();
+        assert_eq!(
+            all_samples(&sim.coverage()),
+            expected(&[("K::kc", &[4, 0, 0, 4]), ("Top.cg", &[4, 4])])
+        );
+    }
+}
+
+sv_backends! {
+    /// The sampler holds the instance, and the object of an embedded one,
+    /// for the rest of the simulation: they are sampled after the variables
+    /// that held them are `null`.
+    fn samplers_keep_their_instances_and_objects(sim) {
+        @setup {
+            let source = clocked(
+                "    covergroup cg @(posedge clk); endgroup
+    class K;
+        covergroup kc @(posedge clk); endgroup
+        function new(); kc = new; endfunction
+    endclass
+    cg c;
+    K k;
+    initial begin
+        c = new;
+        k = new;
+        #12 c = null;
+        k = null;
+    end",
+            );
+        }
+        @build simulation(&source).four_state(false);
+        sim.run_until(42).unwrap();
+        assert_eq!(
+            all_samples(&sim.coverage()),
+            expected(&[("K::kc", &[4]), ("Top.cg", &[4])])
+        );
+    }
+}
+
+sv_backends! {
+    /// Constructions that declaration initializers of a module make: the
+    /// `new` of a class that embeds a clocked covergroup, the elements of an
+    /// array of instances, a static property of a class, and instances of
+    /// types of a package and of the compilation unit, whose events are
+    /// bound where they are declared.
+    fn constructions_from_declaration_initializers_sample(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+bit uclk = 0;
+covergroup ucg @(posedge uclk); endgroup
+package p;
+    bit pclk = 0;
+    covergroup pcg @(posedge pclk); endgroup
+endpackage
+module Top;
+    bit clk = 0;
+    always #5 begin
+        clk = ~clk;
+        uclk = ~uclk;
+        p::pclk = ~p::pclk;
+    end
+    class K;
+        static K single = new;
+        covergroup kc @(posedge clk); endgroup
+        function new(); kc = new; endfunction
+    endclass
+    covergroup cg @(posedge clk); endgroup
+    K k = new;
+    cg a[2] = '{new, new};
+    p::pcg pc = new;
+    ucg uc = new;
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(42).unwrap();
+        let report = sim.coverage();
+        assert_eq!(samples(&report, "K::kc"), [4, 4]);
+        assert_eq!(samples(&report, "Top.cg"), [4, 4]);
+        assert_eq!(samples(&report, "p::pcg"), [4]);
+        assert_eq!(
+            report
+                .covergroups
+                .iter()
+                .filter(|group| group.name.ends_with("::ucg"))
+                .map(|group| group.instances.iter().map(|i| i.samples).collect::<Vec<_>>())
+                .collect::<Vec<_>>(),
+            [vec![4]]
+        );
+    }
+}
+
+/// 18.14.1: the sampler of a constructed instance takes no seed of the
+/// process that constructs it, so adding a clocked covergroup to a
+/// procedure or to a class constructor changes neither its random values
+/// nor those of the children it forks.
+#[test]
+fn constructing_clocked_instances_keeps_the_random_stimulus() {
+    let draws = |construct: bool, in_class: bool| {
+        fn when(construct: bool, text: &str) -> &str {
+            if construct { text } else { "" }
+        }
+        let new = |text| when(construct, text);
+        let source = format!(
+            "`timescale 1ns/1ns
+module Top(output int unsigned a, b, c, d, output int done);
+    bit clk;
+    always #5 clk = ~clk;
+    covergroup cg @(posedge clk); endgroup
+    class C;
+        covergroup ecg @(posedge clk); endgroup
+        rand int unsigned v;
+        function new(); {embedded} endfunction
+    endclass
+    cg g;
+    C o;
+    initial begin
+        {scope}
+        a = $urandom;
+        o = new;
+        void'(o.randomize());
+        b = o.v;
+        fork d = $urandom; join_none
+        c = $urandom;
+        #1 done = 1;
+    end
+endmodule
+",
+            embedded = new(if in_class { "ecg = new;" } else { "" }),
+            scope = new(if in_class { "" } else { "g = new;" }),
+        );
+        let mut sim = simulation(&source).four_state(false).build().unwrap();
+        sim.run_until(12).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        if construct {
+            assert_eq!(all_samples(&sim.coverage()).len(), 1);
+        }
+        ["a", "b", "c", "d"].map(|name| {
+            let signal = sim.signal(name);
+            sim.get(signal)
+        })
+    };
+    let plain = draws(false, false);
+    assert_ne!(plain[0], plain[2], "the stimulus is random");
+    assert_eq!(draws(true, false), plain);
+    assert_eq!(draws(true, true), plain);
+}
+
+sv_backends! {
+    /// The sampler is no child of the process that constructs the instance:
+    /// `wait fork` there returns when its own children end (9.6.1), and
+    /// neither `disable fork` (9.6.3) nor `kill()` of that process (9.7)
+    /// stops the sampling. A `fork`-`join_any` after a construction joins
+    /// its own first branch.
+    fn samplers_are_no_children_of_the_constructing_process(sim) {
+        @setup {
+            let source = clocked(
+                "    covergroup cg @(posedge clk); endgroup
+    cg c, d, e;
+    int waited = -1, joined = -1;
+    process p;
+    initial begin
+        c = new;
+        fork #3; join_none
+        wait fork;
+        waited = $time;
+        d = new;
+        disable fork;
+        fork #2; #6; join_any
+        joined = $time;
+    end
+    initial begin
+        p = process::self();
+        e = new;
+        #100;
+    end
+    initial #12 p.kill();",
+            );
+        }
+        @build simulation(&source).four_state(false);
+        sim.run_until(42).unwrap();
+        let waited = sim.signal("waited");
+        let joined = sim.signal("joined");
+        assert_eq!(sim.get(waited), BigUint::from(3u8));
+        assert_eq!(sim.get(joined), BigUint::from(5u8));
+        assert_eq!(samples(&sim.coverage(), "Top.cg"), [4, 4, 4]);
+    }
+}
+
+sv_backends! {
+    /// An instance of a type of the module that a procedure constructs is
+    /// sampled by the edge-sensitive procedure of the type, with the
+    /// flip-flops of the edge, as the instance of a declaration is: at the
+    /// rising edges of the divided clock `div`, at 5 and 25, both sample `r`
+    /// as 0 and 1, before the nonblocking assignments of the edge. The
+    /// sampler of an embedded covergroup is a waiting process, which runs
+    /// after those assignments and sees `r` as 1 and 2
+    /// (celox-sim/celox#4771; a difference from 19.3, documented).
+    fn constructed_instances_of_nba_updated_clocks(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top;
+    bit clk = 0, div = 0;
+    bit [3:0] r = 0;
+    always #5 clk = ~clk;
+    always_ff @(posedge clk) div <= ~div;
+    always_ff @(posedge div) r <= r + 4'd1;
+    covergroup cg @(posedge div); coverpoint r { bins b[] = {[0:15]}; } endgroup
+    class K;
+        covergroup kc @(posedge div); coverpoint r { bins b[] = {[0:15]}; } endgroup
+        function new(); kc = new; endfunction
+    endclass
+    cg s = new, c;
+    K k;
+    initial begin c = new; k = new; end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(42).unwrap();
+        let report = sim.coverage();
+        assert_eq!(samples(&report, "Top.cg"), [2, 2]);
+        assert_eq!(hit(bins(&report, "Top.cg", 0, "r")), once(&[0, 1]));
+        assert_eq!(hit(bins(&report, "Top.cg", 1, "r")), once(&[0, 1]));
+        assert_eq!(hit(bins(&report, "K::kc", 0, "r")), once(&[1, 2]));
+    }
+}
+
+sv_backends! {
+    /// `sample()`, `stop()`, `start()` and the options apply to a
+    /// constructed instance as to any (19.8).
+    fn constructed_instances_take_procedural_methods_and_options(sim) {
+        @setup {
+            let source = clocked(
+                "    covergroup cg @(posedge clk);
+        option.at_least = 2;
+        coverpoint q { bins lo = {[0:1]}; bins hi = {[2:7]}; }
+    endgroup
+    class K;
+        covergroup kc @(posedge clk);
+            option.at_least = 2;
+            coverpoint q { bins lo = {[0:1]}; bins hi = {[2:7]}; }
+        endgroup
+        function new(); kc = new; endfunction
+    endclass
+    cg c;
+    K k;
+    initial begin
+        c = new;
+        k = new;
+        #12 c.stop();
+        k.kc.stop();
+        #10 c.start();
+        k.kc.start();
+        #1 c.sample();
+        k.kc.sample();
+    end",
+            );
+        }
+        @build simulation(&source).four_state(false);
+        sim.run_until(42).unwrap();
+        let report = sim.coverage();
+        // Sampled at 5 (q = 0), 23 (q = 2, procedurally), 25 (q = 2) and 35
+        // (q = 3), not at 15 (stopped).
+        assert_eq!(samples(&report, "Top.cg"), [4]);
+        assert_eq!(bins(&report, "Top.cg", 0, "q"), hits(&[("lo", 1), ("hi", 3)]));
+        assert!(close(group(&report, "Top.cg").instances[0].coverage, 50.0));
+        assert_eq!(samples(&report, "K::kc"), [4]);
+        assert_eq!(bins(&report, "K::kc", 0, "q"), hits(&[("lo", 1), ("hi", 3)]));
+    }
+}
+
+/// The untimed `Simulator` runs no process: a design that constructs a
+/// clocked instance in a procedure or a declaration initializer needs a
+/// `Simulation`.
+#[test]
+fn constructed_instances_require_simulation() {
+    for items in [
+        "    cg c;\n    initial c = new;",
+        "    class K; covergroup kc @(posedge clk); endgroup function new(); kc = new; endfunction endclass\n    K k = new;",
+    ] {
+        let source = format!(
+            "`timescale 1ns/1ns\nmodule Top(input bit clk, input bit [3:0] d);\n    covergroup cg @(posedge clk); coverpoint d; endgroup\n{items}\nendmodule\n"
+        );
+        let sources = || vec![(source.as_str(), Path::new("covergroup_constructed.sv"))];
+        celox::Simulation::from_sv_sources(sources(), "Top")
+            .build()
+            .unwrap();
+        let error = match Simulator::from_sv_sources(sources(), "Top").build() {
+            Ok(_) => panic!("{items}: a clocking event needs a Simulation"),
+            Err(error) => format!("{error:?}"),
+        };
+        assert!(error.contains("Simulation"), "{items}: {error}");
+    }
+}
+
+/// A declaration initializer may construct a clocked instance, whose
+/// sampler is a process of the analysis, but a fork of the source that a
+/// function it calls makes stays the error 13.4.4 makes it, also beside a
+/// clocked covergroup in the same constructor.
+#[test]
+fn user_forks_of_declaration_initializers_stay_rejected() {
+    let source = |fork: &str| {
+        format!(
+            "`timescale 1ns/1ns
+module Top;
+    bit clk;
+    int n;
+    class K;
+        covergroup kc @(posedge clk); endgroup
+        function new(); kc = new; {fork} endfunction
+    endclass
+    K k = new;
+endmodule
+"
+        )
+    };
+    simulation(&source("")).build().unwrap();
+    let error = match simulation(&source("fork n++; join_none")).build() {
+        Ok(_) => panic!("a fork of a declaration initializer"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("background process scheduled by a declaration initializer; IEEE 1800-2023 13.4.4 requires an initial/always process"),
+        "{error}"
+    );
+}
+
+sv_backends! {
+    /// The instances that procedures construct are held by lists of the
+    /// module instance: two instances of a module each sample theirs at
+    /// their own clock, a type of a generate block samples at its event,
+    /// and more instances than the variables of a list hold (here 7, of an
+    /// edge and of a change event) are sampled all, from the queue of the
+    /// list. An instance constructed between occurrences samples from the
+    /// next one, also one an edge-sensitive procedure constructs at an
+    /// edge, which the sampler of the edge ran before.
+    fn constructed_instances_are_held_by_the_lists_of_their_scope(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Sub(input bit clk);
+    covergroup cg @(posedge clk); endgroup
+    cg c;
+    initial c = new;
+endmodule
+module Top;
+    bit clk = 0, slow = 0;
+    always #5 clk = ~clk;
+    always #10 slow = ~slow;
+    Sub fast_one(.clk(clk));
+    Sub slow_one(.clk(slow));
+    covergroup many @(posedge clk); endgroup
+    covergroup changes @(clk); endgroup
+    many m[7];
+    changes h[7];
+    if (1) begin : g
+        covergroup gc @(negedge clk); endgroup
+        gc x;
+        initial x = new;
+    end
+    many late, at_edge;
+    initial begin
+        foreach (m[i]) m[i] = new;
+        foreach (h[i]) h[i] = new;
+        #12 late = new;
+    end
+    always @(posedge clk) if (at_edge == null) at_edge = new;
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(42).unwrap();
+        // `clk` rises at 5, 15, 25 and 35 and changes 8 times, `slow` rises
+        // at 10 and 30.
+        let mut many = vec![4; 7];
+        many.extend([3, 3]);
+        assert_eq!(
+            all_samples(&sim.coverage()),
+            expected(&[
+                ("Sub.cg", &[4, 2]),
+                ("Top.changes", &[8; 7]),
+                ("Top.g.gc", &[4]),
+                ("Top.many", &many),
+            ])
+        );
+    }
+}
+
+/// A checkpoint keeps the lists: restored into another simulation, the
+/// instances of the list, the queue of it included, sample on.
+#[test]
+fn constructed_instance_lists_roll_back_with_a_checkpoint() {
+    let source = clocked(
+        "    covergroup cg @(posedge clk); coverpoint q { bins b[] = {[0:7]}; } endgroup
+    cg a[6];
+    initial begin
+        foreach (a[i]) begin
+            #4 a[i] = new;
+        end
+    end",
+    );
+    let build = || simulation(&source).four_state(false).build().unwrap();
+    let mut first = build();
+    // At 22 five instances exist, one of them in the queue of the list.
+    first.run_until(22).unwrap();
+    let checkpoint = first.checkpoint().unwrap();
+    first.run_until(42).unwrap();
+    let expected = first.coverage();
+    // Constructed at 4, 8, ..., 24: sampled from 5, 15 and 25 on.
+    assert_eq!(samples(&expected, "Top.cg"), [4, 3, 3, 2, 2, 2]);
+    let mut second = build();
+    second.restore(&checkpoint).unwrap();
+    second.run_until(42).unwrap();
+    assert_eq!(second.coverage(), expected);
+}
+
+/// The instances of a type of the module may be constructed in any
+/// procedure, as they join the list of the type: in `always_comb` and a
+/// continuous assignment (both at 12, when `g` rises), in `always_ff` (at
+/// the edge at 5, whose sampler ran before) and in a final procedure,
+/// directly and through a function (no sample after it).
+#[test]
+fn module_type_instances_are_constructed_in_any_procedure() {
+    let source = clocked(
+        "    covergroup ta @(posedge clk); endgroup
+    covergroup tb @(posedge clk); endgroup
+    covergroup tc @(posedge clk); endgroup
+    covergroup td @(posedge clk); endgroup
+    covergroup te @(posedge clk); endgroup
+    ta a;
+    tb b;
+    tc c;
+    td d;
+    te e;
+    bit g = 0, made = 0;
+    initial #12 g = 1;
+    function automatic void mka(); a = new; endfunction
+    function automatic bit mkb(input bit v); if (v) b = new; return v; endfunction
+    function automatic void mkd(); d = new; endfunction
+    always_comb if (g) mka();
+    wire w = mkb(g);
+    always_ff @(posedge clk) if (!made) begin c = new; made <= 1; end
+    final mkd();
+    final e = new;
+    initial #42 $finish;",
+    );
+    for four_state in [false, true] {
+        let mut sim = simulation(&source).four_state(four_state).build().unwrap();
+        sim.run_until(50).unwrap();
+        assert_eq!(
+            all_samples(&sim.coverage()),
+            expected(&[
+                ("Top.ta", &[3]),
+                ("Top.tb", &[3]),
+                ("Top.tc", &[3]),
+                ("Top.td", &[0]),
+                ("Top.te", &[0]),
+            ]),
+            "four_state={four_state}"
+        );
+    }
+}
+
+/// A hierarchical call of a function that constructs an instance of a
+/// covergroup with a clocking event of its module is not supported, as one
+/// of a function that names another variable of that module is not; the
+/// rejection names the covergroup, not the variables of its list.
+#[test]
+fn hierarchical_constructions_name_the_covergroup() {
+    let source = "`timescale 1ns/1ns
+module Sub(input bit clk);
+    covergroup cg @(posedge clk); endgroup
+    cg d;
+    function void mk(); d = new; endfunction
+endmodule
+module Top;
+    bit clk = 0;
+    always #5 clk = ~clk;
+    Sub u(clk);
+    initial #12 u.mk();
+endmodule
+";
+    let error = match simulation(source).build() {
+        Ok(_) => panic!("a hierarchical call that constructs"),
+        Err(error) => error.to_string(),
+    };
+    // The report wraps its lines.
+    let error = error
+        .split_whitespace()
+        .filter(|word| *word != "│")
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        error.contains(
+            "hierarchical call `u.mk` of a subroutine that constructs an instance of a covergroup with a clocking event of its scope"
+        ),
+        "{error}"
+    );
+    assert!(!error.contains("%covergroup"), "{error}");
 }

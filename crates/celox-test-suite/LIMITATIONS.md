@@ -1765,7 +1765,7 @@ No assertions or exclusions are weakened.
 
 ### Covergroups
 
-The 40 `covergroup::*` cases check what IEEE 1800-2023 fixes of covergroups.
+The 46 `covergroup::*` cases check what IEEE 1800-2023 fixes of covergroups.
 Five are of a covergroup without items: a variable of a covergroup type holds
 a handle or `null` (19.3), `new` and `sample` take the arguments of the
 covergroup and of its sample method, by position, by name and by default
@@ -1830,7 +1830,23 @@ with the arguments of their iteration (27.4), and `stop()`, `start()` and
 twice without suspending, writes after the triggering write in the same
 process, makes an event occur at time zero or samples a clock updated in the
 NBA region with anything but one edge, where Celox differs from 19.3, and
-none is of a program. Celox passes all of them on every backend.
+none is of a program. Five more are of instances that other `new`s
+construct: in an `initial` procedure, an array element in a `foreach`, a
+task and from 12 on (`covergroup::procedural_constructions_sample_at_their_clocking_events`);
+a covergroup embedded in a class at a change and an edge of a property, a
+named event of the object and a signal of the module
+(`covergroup::embedded_covergroups_sample_at_events_of_their_class`); one
+embedded in a monitor class of a package at the clock of the interface its
+virtual interface property denotes
+(`covergroup::embedded_covergroup_samples_through_a_virtual_interface`);
+`stop()`, `start()` and `sample()` of a constructed instance; and the `new`
+of a class and an array pattern of `new`s as declaration initializers of a
+module (`covergroup::constructions_of_declaration_initializers_sample`). They
+avoid the same differences and an event of a clock updated in the NBA region.
+One more samples six instances that a procedure constructs at a clock that a
+flip-flop divides, before the nonblocking assignments of the edge
+(`covergroup::constructed_instances_of_a_divided_clock_sample_before_the_updates`).
+Celox passes all of them on every backend.
 
 Verilator 5.054 passes 19 cases. It keeps the embedded covergroup in a
 shallow copy (`covergroup::shallow_copy_has_no_embedded_covergroup` reads the
@@ -1873,8 +1889,21 @@ samples at its event (`covergroup::clocking_event_forms_sample_their_occurrences
 `covergroup::named_events_sample_their_triggers`,
 `covergroup::clocked_instances_take_stop_start_and_sample`, which also
 displays 50.00 for 37.50); the coverage it displays of the `iff` case,
-25.00, is the expected one. xezim 0.11.4 passes 25, all six cases of
-clocking events among them. It keeps
+25.00, is the expected one. It fails all six cases of constructed
+instances: it displays `0 0` for the covered bins of the procedural
+constructions of the stop and start case and of the virtual interface case,
+stops with "Null pointer dereferenced" at the covergroup of
+`covergroup::procedural_constructions_sample_at_their_clocking_events`, does
+not compile the C++ it generates for the covergroups embedded in a class of
+the module, and does not parse `'{new, new}`; of the divided clock it
+displays `0` for the bins counted by reference and the expected 37.50.
+xezim 0.11.4 passes 29, all six cases of clocking events of declarations and
+four of the six of constructed instances among them: it takes no sample of
+the instances a procedure constructs at the divided clock, and it never samples a covergroup embedded in a class at an
+event on a property of the class (`@m_z`, `@(posedge clk_bit)`, `@ev`), which
+19.4's own example writes (`covergroup cov1 @m_z`), and displays 0.00 for
+those three of `covergroup::embedded_covergroups_sample_at_events_of_their_class`
+and the expected 18.75 for the one at a signal of the module. It keeps
 the embedded covergroup in a shallow copy too, compares a covergroup variable
 that nothing assigned with `null` as `x`
 (`covergroup::handles_are_null_until_constructed`,

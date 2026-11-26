@@ -3344,30 +3344,7 @@ fn clocked_covergroups_sample_the_instances_of_their_declarations() {
 fn clocking_events_the_analysis_does_not_support_are_rejected_where_used() {
     // What stays unsupported of clocking events is rejected where the type
     // is constructed or used, with a text that maps to the tracking issue.
-    let constructed = "covergroup sampling event of a constructed instance (IEEE 1800-2023 19.3)";
     for (before, items, construct) in [
-        // A `new` that is not the initializer of a declaration (C15).
-        (
-            "",
-            "bit clk; covergroup cg @(posedge clk); endgroup cg c; initial c = new;",
-            constructed,
-        ),
-        (
-            "",
-            "bit clk; covergroup cg @(posedge clk); endgroup cg c = new; initial c = new;",
-            constructed,
-        ),
-        (
-            "",
-            "bit clk; covergroup cg @(posedge clk); endgroup cg a[2] = '{new, new};",
-            constructed,
-        ),
-        (
-            "",
-            "bit clk; covergroup cg @(posedge clk); endgroup \
-             class K; cg h; function new(); h = new; endfunction endclass K k = new;",
-            constructed,
-        ),
         // 19.3: "A clocking event may refer to arguments of the covergroup."
         (
             "",
@@ -3379,29 +3356,6 @@ fn clocking_events_the_analysis_does_not_support_are_rejected_where_used() {
             "bit clk, clk_en; covergroup cg(bit clk_en) @(posedge clk iff clk_en); endgroup \
              cg c = new(1);",
             "covergroup sampling event that names an argument of the covergroup (IEEE 1800-2023 19.3)",
-        ),
-        // No process home in a package or the compilation unit.
-        (
-            "package p; bit clk; covergroup cg @(posedge clk); endgroup endpackage",
-            "p::cg c = new;",
-            "covergroup sampling event of a covergroup declared in a package or the compilation unit (IEEE 1800-2023 19.3)",
-        ),
-        (
-            "package p; bit clk; covergroup cg @(posedge clk); endgroup endpackage",
-            "real r; initial r = p::cg::get_coverage();",
-            "covergroup sampling event of a covergroup declared in a package or the compilation unit (IEEE 1800-2023 19.3)",
-        ),
-        (
-            "bit clk; covergroup cg @(posedge clk); endgroup",
-            "cg c = new;",
-            "covergroup sampling event of a covergroup declared in a package or the compilation unit (IEEE 1800-2023 19.3)",
-        ),
-        // An embedded covergroup is constructed by its class (C15).
-        (
-            "",
-            "class K; bit clk; covergroup cg @(posedge clk); endgroup \
-             function new(); cg = new; endfunction endclass K k = new;",
-            "covergroup sampling event of a covergroup embedded in a class (IEEE 1800-2023 19.3, 19.4)",
         ),
         // `ref` formals (C14).
         (
@@ -3424,14 +3378,39 @@ fn clocking_events_the_analysis_does_not_support_are_rejected_where_used() {
         );
         assert_eq!(error.tracking_issue(), COVERGROUPS_ISSUE, "{items}");
     }
-    // A package that declares an instance of its own clocked covergroup.
-    let source = "package p; bit clk; covergroup cg @(posedge clk); endgroup cg c = new; \
-                  endpackage module Top; import p::*; endmodule";
-    let error = analyze(source).map(|_| ()).unwrap_err().into_error();
-    assert!(
-        matches!(&error, AnalyzerError::Unsupported(text) if text.starts_with("covergroup sampling event of a covergroup declared in a package")),
-        "{error}"
-    );
+    // A declaration of a package or the compilation unit whose initializer
+    // constructs a clocked instance, itself or through the constructor of a
+    // class that embeds one, or through a function: its sampler would be a
+    // process of the package.
+    let package = "covergroup sampling event of an instance that a declaration of a package or the compilation unit constructs (IEEE 1800-2023 19.3)";
+    for before in [
+        "package p; bit clk; covergroup cg @(posedge clk); endgroup cg c = new; endpackage",
+        "package p; event e; covergroup cg @e; endgroup cg c = new; endpackage",
+        "package p; bit clk; covergroup cg @(posedge clk); endgroup \
+         function automatic cg make(); cg c; c = new; return c; endfunction \
+         cg c = make(); endpackage",
+        "package p; bit clk; class K; covergroup cg @(posedge clk); endgroup \
+         function new(); cg = new; endfunction endclass K k = new; endpackage",
+        "bit clk; covergroup cg @(posedge clk); endgroup cg c = new;",
+    ] {
+        // The module uses the scope, which is elaborated for it.
+        let import = if before.starts_with("package") {
+            "import p::*;"
+        } else {
+            "initial c.sample();"
+        };
+        let source = format!("{before} module Top; {import} endmodule");
+        let error = match analyze(&source) {
+            Ok(_) => panic!("{source}: accepted"),
+            Err(error) => error.into_error(),
+        };
+        assert_eq!(
+            error,
+            AnalyzerError::Unsupported(package.into()),
+            "{source}"
+        );
+        assert_eq!(error.tracking_issue(), COVERGROUPS_ISSUE);
+    }
     // The coverage event is one of a clocking event, a sample method and a
     // block event (Syntax 19-1): a covergroup declares at most one.
     for header in [
@@ -3464,4 +3443,317 @@ fn clocking_events_the_analysis_does_not_support_are_rejected_where_used() {
         "{source}"
     );
     assert_eq!(error.tracking_issue(), COVERGROUPS_ISSUE);
+}
+
+/// The subroutines of the modules of `ir` whose names end in `suffix`.
+fn subroutines_ending<'a>(ir: &'a Ir, suffix: &str) -> Vec<&'a crate::ir::Subroutine> {
+    ir.modules()
+        .iter()
+        .flat_map(|module| module.subroutines())
+        .filter(|subroutine| {
+            subroutine.name.starts_with("$covergroup::") && subroutine.name.ends_with(suffix)
+        })
+        .collect()
+}
+
+/// Whether `stmt` names a subroutine whose name ends in `callee`.
+fn calls(stmt: &crate::ir::Stmt, callee: &str) -> bool {
+    format!("{stmt:?}").contains(&format!("{callee}\""))
+}
+
+#[test]
+fn constructed_instances_start_a_sampler_that_their_construction_returns() {
+    use crate::ir::{Expr, Stmt};
+    use crate::procedural::{EventEdge, LoopKind};
+    // 19.3: any other `new` of a type with a clocking event hands the
+    // instance to `N::$spawn`. Of a type of the module it adds the instance
+    // to the list of the type, four handle variables, a count and a queue,
+    // which the edge-sensitive procedure of the type walks after the
+    // instance of the declaration; no process is started.
+    let ir = analyze(
+        "module Top; bit clk; bit [3:0] d; \
+         covergroup cg @(posedge clk); coverpoint d; endgroup \
+         covergroup ch @(d); coverpoint d; endgroup \
+         cg c, e = new; ch h; \
+         initial begin c = new; h = new; fork #1; join_none end \
+         endmodule",
+    )
+    .unwrap();
+    let top = module(&ir, "Top");
+    assert_eq!(site_handles(top).len(), 1);
+    let listed = |prefix: &str| {
+        top.signals()
+            .iter()
+            .filter(|signal| signal.name().starts_with(prefix))
+            .count()
+    };
+    assert_eq!(
+        (
+            listed("%covergroup_instance0_"),
+            listed("%covergroup_instance_count"),
+            listed("%covergroup_instances")
+        ),
+        (4, 2, 2)
+    );
+    let spawns = subroutines_ending(&ir, "::$spawn");
+    assert_eq!(spawns.len(), 2);
+    for spawn in &spawns {
+        assert!(!spawn.is_task && spawn.automatic);
+        let [handle] = spawn.params.as_slice() else {
+            panic!("{:?}", spawn.params);
+        };
+        assert_eq!(handle.source_name, "$cg");
+        let mut forks = 0;
+        for stmt in &spawn.body {
+            stmt.walk(&mut |stmt| forks += usize::from(matches!(stmt, Stmt::Fork { .. })));
+        }
+        assert_eq!(forks, 0, "{:?}", spawn.body);
+        // It adds the handle and returns it.
+        let [
+            Stmt::If { .. },
+            Stmt::Assign { .. },
+            Stmt::Assign { rhs, .. },
+        ] = spawn.body.as_slice()
+        else {
+            panic!("{:?}", spawn.body);
+        };
+        assert!(matches!(rhs, Expr::Ident(returned) if *returned == handle.name));
+    }
+    // The edge-sensitive procedure of `cg` samples the declaration's
+    // instance, then the list; `ch` has a process for the variables of its
+    // list and one for its queue, which first waits until the queue holds
+    // an instance. All draw no seed.
+    let [procedure] = edge_samplers(top)[..] else {
+        panic!("one edge procedure");
+    };
+    assert!(procedure.is_synthetic());
+    let body = procedure.body();
+    assert_eq!(body.len(), 1 + 4 + 1, "{body:?}");
+    assert!(samples_a_site(&body[0], &site_handles(top)));
+    let processes = samplers(top);
+    let [slots, queue] = processes.as_slice() else {
+        panic!("{processes:?}");
+    };
+    assert!(slots.is_synthetic() && queue.is_synthetic());
+    let [
+        Stmt::Loop {
+            kind: LoopKind::Forever,
+            body,
+            ..
+        },
+    ] = slots.body()
+    else {
+        panic!("{:?}", slots.body());
+    };
+    assert!(matches!(&body[0], Stmt::WaitEvent(items)
+        if matches!(items.as_slice(), [item] if item.edge == EventEdge::Any)));
+    assert_eq!(body.len(), 1 + 4, "{body:?}");
+    let [Stmt::Wait(_), Stmt::Loop { body, .. }] = queue.body() else {
+        panic!("{:?}", queue.body());
+    };
+    assert_eq!(body.len(), 2, "{body:?}");
+    // The procedure constructs through it; its own fork is a fork of the
+    // source.
+    let procedure = top
+        .initial_processes()
+        .iter()
+        .find(|process| process.body().iter().any(|stmt| calls(stmt, "::$spawn")))
+        .expect("the procedure that constructs");
+    let mut forks = Vec::new();
+    for stmt in procedure.body() {
+        stmt.walk(&mut |stmt| {
+            if let Stmt::Fork { unseeded, .. } = stmt {
+                forks.push(*unseeded);
+            }
+        });
+    }
+    assert_eq!(forks, [false]);
+    // A type that only declarations construct has no sampler subroutine.
+    let ir = analyze(
+        "module Top; bit clk; covergroup cg @(posedge clk); endgroup cg e = new; endmodule",
+    )
+    .unwrap();
+    assert!(subroutines_ending(&ir, "::$spawn").is_empty());
+    // An embedded covergroup: the event is bound in its class, a property
+    // read through `this`, and the sampler stops at the first event after
+    // the property no longer holds the instance (19.4: a later `cg = new`).
+    let ir = analyze(
+        "module Top; class K; bit b; \
+         covergroup cg @(posedge b); endgroup \
+         function new(); cg = new; endfunction endclass \
+         K k; initial k = new; endmodule",
+    )
+    .unwrap();
+    let [spawn] = subroutines_ending(&ir, "::$spawn")[..] else {
+        panic!("one sampler subroutine");
+    };
+    let [this, handle] = spawn.params.as_slice() else {
+        panic!("{:?}", spawn.params);
+    };
+    assert_eq!(
+        (this.source_name.as_str(), handle.source_name.as_str()),
+        ("this", "$cg")
+    );
+    let Some(Stmt::Fork {
+        unseeded: true,
+        branches,
+        ..
+    }) = spawn.body.first()
+    else {
+        panic!("{:?}", spawn.body);
+    };
+    let [Stmt::Loop { body, .. }] = branches[0].as_slice() else {
+        panic!("{branches:?}");
+    };
+    let [
+        Stmt::WaitEvent(items),
+        Stmt::If {
+            condition,
+            then_body,
+            ..
+        },
+        Stmt::Call { args, .. },
+    ] = body.as_slice()
+    else {
+        panic!("{body:?}");
+    };
+    assert!(
+        matches!(items.as_slice(), [item] if item.edge == EventEdge::Pos
+            && !matches!(item.expr, Expr::Ident(_))),
+        "a property of `this`: {items:?}"
+    );
+    assert!(
+        matches!(condition, Expr::Binary { op: crate::ir::BinaryOp::Ne, right, .. }
+            if matches!(right.as_ref(), Expr::Ident(cg) if *cg == handle.name)),
+        "{condition:?}"
+    );
+    assert_eq!(then_body, &[Stmt::Break]);
+    assert!(matches!(args.as_slice(), [Some(Expr::Ident(object))] if *object == this.name));
+    // The constructions that a declaration of a module makes through other
+    // initializers, and those of a package type, are accepted.
+    for (before, items) in [
+        (
+            "",
+            "bit clk; covergroup cg @(posedge clk); endgroup cg a[2] = '{new, new};",
+        ),
+        (
+            "",
+            "bit clk; covergroup cg @(posedge clk); endgroup \
+             class K; cg h; function new(); h = new; endfunction endclass K k = new;",
+        ),
+        (
+            "",
+            "class K; bit clk; covergroup cg @(posedge clk); endgroup \
+             function new(); cg = new; endfunction endclass K k = new;",
+        ),
+        (
+            "package p; bit clk; covergroup cg @(posedge clk); endgroup endpackage",
+            "p::cg c = new;",
+        ),
+        (
+            "package p; bit clk; covergroup cg @(posedge clk); endgroup endpackage",
+            "real r; initial r = p::cg::get_coverage();",
+        ),
+        (
+            "bit clk; covergroup cg @(posedge clk); endgroup",
+            "cg c = new; cg d; initial d = new;",
+        ),
+    ] {
+        let source = format!("{before} module Top; {items} endmodule");
+        analyze(&source).unwrap_or_else(|error| panic!("{source}: {error}"));
+    }
+}
+
+#[test]
+fn constructions_that_would_start_a_sampler_where_no_process_may_start_are_rejected() {
+    // The sampler of an instance of a covergroup embedded in a class, or of
+    // a type of a package or the compilation unit, is a process its
+    // construction starts (19.3): where a procedure may not start one, the
+    // construction is rejected, directly and through the subroutines and
+    // constructors it calls, with a covergroup text. The instances of a
+    // type of the module join a list there (accepted below).
+    let class = "bit clk, g, made; class K; covergroup kc @(posedge clk); endgroup \
+                 function new(); kc = new; endfunction endclass K k; ";
+    let package = "package p; bit pclk; covergroup pcg @(posedge pclk); endgroup endpackage";
+    let comb = "covergroup sampling event of an instance constructed in an always_comb procedure (IEEE 1800-2023 9.2.2.2, 19.3)";
+    let latch = "covergroup sampling event of an instance constructed in an always_latch procedure (IEEE 1800-2023 9.2.2.3, 19.3)";
+    let assign = "covergroup sampling event of an instance constructed in a continuous assignment (IEEE 1800-2023 10.3, 19.3)";
+    let ff = "covergroup sampling event of an instance constructed in an always_ff procedure (IEEE 1800-2023 9.2.2.4, 19.3)";
+    let final_ = "covergroup sampling event of an instance constructed in a final procedure (IEEE 1800-2023 9.2.3, 19.3)";
+    let mk = "function automatic void mk(); k = new; endfunction ";
+    let mkb = "function automatic bit mkb(input bit v); if (v) k = new; return v; endfunction ";
+    for (before, items, text) in [
+        ("", format!("{class}always_comb if (g) k = new;"), comb),
+        ("", format!("{class}{mk}always_comb if (g) mk();"), comb),
+        ("", format!("{class}{mk}always_latch if (g) mk();"), latch),
+        ("", format!("{class}{mkb}wire w = mkb(g);"), assign),
+        ("", format!("{class}{mkb}assign made = mkb(g);"), assign),
+        (
+            "",
+            format!("{class}always_ff @(posedge clk) if (!made) begin k = new; made <= 1; end"),
+            ff,
+        ),
+        (
+            "",
+            format!("{class}{mk}always_ff @(posedge clk) if (!made) begin mk(); made <= 1; end"),
+            ff,
+        ),
+        ("", format!("{class}final begin k = new; end"), final_),
+        ("", format!("{class}{mk}final mk();"), final_),
+        (
+            "",
+            format!(
+                "{class}class W; function void mk(); k = new; endfunction endclass final begin W w; w = new; w.mk(); end"
+            ),
+            final_,
+        ),
+        (
+            package,
+            "bit g; p::pcg x; always_comb if (g) x = new;".to_owned(),
+            comb,
+        ),
+        (package, "p::pcg x; final x = new;".to_owned(), final_),
+    ] {
+        let error = rejected(before, &items);
+        assert_eq!(
+            error,
+            AnalyzerError::Unsupported(text.to_string()),
+            "{before} {items}"
+        );
+        assert_eq!(error.tracking_issue(), COVERGROUPS_ISSUE, "{items}");
+    }
+    // A type of the module: its instances join the list of the type, in
+    // every procedure, also a final one.
+    let module = "bit clk, g, made; covergroup cg @(posedge clk); endgroup cg c; \
+                  function automatic void mk(); c = new; endfunction ";
+    for items in [
+        "always_comb if (g) mk();",
+        "function automatic bit mkb(input bit v); if (v) c = new; return v; endfunction wire w = mkb(g);",
+        "always_ff @(posedge clk) if (!made) begin c = new; made <= 1; end",
+        "final c = new;",
+        "final mk();",
+    ] {
+        let source = format!("module Top; {module}{items} endmodule");
+        analyze(&source).unwrap_or_else(|error| panic!("{items}: {error}"));
+    }
+    // 19.4's example shape with a value member, `@(m_obj.m_ev)` of an `int`
+    // `m_ev`: an event on a member of an object a handle property holds,
+    // which event expressions do not support. Through `iff` as well; a
+    // named event of such an object is supported.
+    let helper = "class Helper; int m_ev; bit on; event e; endclass ";
+    let through = "covergroup sampling event on a member of an object that a handle property holds (IEEE 1800-2023 9.4.2, 19.3)";
+    for event in ["@(m_obj.m_ev)", "@(posedge clk iff m_obj.on)"] {
+        let items = format!(
+            "bit clk; {helper}class MyClass; Helper m_obj; covergroup Cov {event}; endgroup \
+             function new(); m_obj = new; Cov = new; endfunction endclass MyClass m; initial m = new;"
+        );
+        let error = rejected("", &items);
+        assert_eq!(error, AnalyzerError::Unsupported(through.into()), "{event}");
+        assert_eq!(error.tracking_issue(), COVERGROUPS_ISSUE);
+    }
+    analyze(&format!(
+        "module Top; {helper}class MyClass; Helper m_obj; covergroup Cov @(m_obj.e); endgroup \
+         function new(); m_obj = new; Cov = new; endfunction endclass MyClass m; initial m = new; endmodule"
+    ))
+    .unwrap();
 }

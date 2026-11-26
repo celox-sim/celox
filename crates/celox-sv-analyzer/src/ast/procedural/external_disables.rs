@@ -279,6 +279,7 @@ impl BodyBuilder<'_, '_, '_> {
         branch.push(assign(&process, Expr::Literal("32'b0".into())));
         let mut output = vec![Stmt::Fork {
             join: celox_design::ForkJoin::All,
+            unseeded: false,
             branches: vec![branch],
         }];
         for inner in nested {
@@ -735,7 +736,7 @@ fn scan_context(
             continue;
         }
         match stmt {
-            Stmt::Fork { join, branches } => {
+            Stmt::Fork { join, branches, .. } => {
                 for branch in branches {
                     scan_pending(branch, disables, spawns, found);
                 }
@@ -939,8 +940,13 @@ fn unwrap_stmts(
                 step: unwrap_stmts(step, unwanted, disables),
                 body: unwrap_stmts(body, unwanted, disables),
             },
-            Stmt::Fork { join, branches } => Stmt::Fork {
+            Stmt::Fork {
                 join,
+                unseeded,
+                branches,
+            } => Stmt::Fork {
+                join,
+                unseeded,
                 branches: branches
                     .into_iter()
                     .map(|branch| unwrap_stmts(branch, unwanted, disables))
@@ -987,6 +993,7 @@ fn branch_label(stmt: &Stmt, disables: &ExternalDisables) -> Option<String> {
     let Stmt::Fork {
         join: celox_design::ForkJoin::All,
         branches,
+        ..
     } = stmt
     else {
         return None;

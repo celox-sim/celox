@@ -254,6 +254,55 @@ impl ScopeElaboration<'_> {
         reached
     }
 
+    /// Rejects a declaration of a package or the compilation unit whose
+    /// initializer constructs an instance of a covergroup with a clocking
+    /// event, itself or through the subroutines it calls, such as the `new`
+    /// of a class that embeds one (IEEE 1800-2023 19.3, 19.4): the process
+    /// that samples such an instance would run in the state of the package,
+    /// whose processes are its declaration initializers alone. The same
+    /// constructions in a module, a program or a procedure are supported.
+    pub(super) fn reject_package_samplers(&self) -> Result<(), AnalyzerError> {
+        if !self.is_package
+            || !self
+                .subroutines
+                .iter()
+                .chain(self.imported.subroutines.iter().map(AsRef::as_ref))
+                .any(|subroutine| covergroups::is_spawner(&subroutine.name))
+        {
+            return Ok(());
+        }
+        let subroutines: HashMap<&str, &Subroutine> = self
+            .imported
+            .subroutines
+            .iter()
+            .map(AsRef::as_ref)
+            .chain(&self.subroutines)
+            .map(|subroutine| (subroutine.name.as_str(), subroutine))
+            .collect();
+        let mut pending = Vec::new();
+        for process in &self.initial_processes {
+            process
+                .condition
+                .iter()
+                .for_each(|condition| const_calls(condition, &mut pending));
+            stmt_calls(&process.body, &mut pending);
+        }
+        let mut reached = HashSet::default();
+        while let Some(name) = pending.pop() {
+            if covergroups::is_spawner(name) {
+                return Err(unsupported(
+                    "covergroup sampling event of an instance that a declaration of a package or the compilation unit constructs (IEEE 1800-2023 19.3)",
+                ));
+            }
+            if let Some(subroutine) = subroutines.get(name)
+                && reached.insert(name)
+            {
+                subroutine_calls(subroutine, &mut pending);
+            }
+        }
+        Ok(())
+    }
+
     /// The names of the subroutines of `imported` that the scope can call:
     /// those its own code calls, and those they call in turn. The functions
     /// the types of its header may call are apart

@@ -204,7 +204,7 @@ program の region と `$exit` に関する差異は[標準準拠コードに影
 
 ### カバーグループ {#covergroups}
 
-covergroup（19 節）は型です。モジュール、program、パッケージ、コンパイル単位、generate ブロックで宣言でき、クラスに埋め込めます（19.4）。`new` は covergroup の引数でインスタンスを構築します。`sample()` は、`with function sample` 宣言の引数でインスタンスをサンプルします。モジュールや program の covergroup がクロッキングイベントを持つ場合（`covergroup cg @(posedge clk);`）、宣言が構築したインスタンス（`cg c = new;`）はイベントが起きるたびにもサンプルされます。`get_inst_coverage()`、`get_coverage()`、`T::get_coverage()`、`$get_coverage()` はカバレッジを返します。カバーポイントやクロスのカバレッジ（`c.cp.get_inst_coverage()`、`T::cp::get_coverage()`）も、カバー済みビン数とビン数を 2 つの `int` 変数に受け取る形（`c.get_coverage(covered, total)`）も使えます。`start()`、`stop()`、`set_inst_name()` はインスタンスを制御します（19.8）。結果は `Simulation::coverage()` で読みます（[カバレッジ](#coverage)を参照）。
+covergroup（19 節）は型です。モジュール、program、パッケージ、コンパイル単位、generate ブロックで宣言でき、クラスに埋め込めます（19.4）。`new` は covergroup の引数でインスタンスを構築します。`sample()` は、`with function sample` 宣言の引数でインスタンスをサンプルします。covergroup がクロッキングイベントを持つ場合（`covergroup cg @(posedge clk);`）、そのインスタンスはどれもイベントが起きるたびにもサンプルされます（19.3）。`get_inst_coverage()`、`get_coverage()`、`T::get_coverage()`、`$get_coverage()` はカバレッジを返します。カバーポイントやクロスのカバレッジ（`c.cp.get_inst_coverage()`、`T::cp::get_coverage()`）も、カバー済みビン数とビン数を 2 つの `int` 変数に受け取る形（`c.get_coverage(covered, total)`）も使えます。`start()`、`stop()`、`set_inst_name()` はインスタンスを制御します（19.8）。結果は `Simulation::coverage()` で読みます（[カバレッジ](#coverage)を参照）。
 
 カバーポイント（19.5）は任意のビット幅の整数型です。ラベル、独自の型、`iff` ガードを付けられ、ガードの式を先に評価します。式とガードは、covergroup の引数と `sample` の引数、埋め込み covergroup ならクラスのメンバ、スコープの名前の順に名前を解決します。ビンは、19.5.3 の自動ビン（列挙型のものを含む）か、値に対して宣言するビン（19.5.1〜19.5.6）です。値と範囲のリスト（許容差付きの範囲 `[a +/- b]`、`[a +%- b]` を含む）、`with` 式が残す値、配列の要素のいずれかを、1 つのビン、値ごとのビン（`bins b[]`）、指定した個数のビン（`bins b[N]`）にまとめます。`default` ビン、`ignore_bins`、`illegal_bins`、`wildcard` ビンも使え、どのビンにもガード（`iff`）を付けられます。ビンの値には、定数、covergroup の引数、それらを引数とする関数呼び出しを書けます。関数呼び出しは構築時に評価するため、同じ型のインスタンスでもビンが異なることがあります。不正な値（illegal）のサンプルはエラーとして報告します。
 
@@ -221,7 +221,7 @@ covergroup（19 節）は型です。モジュール、program、パッケージ
 | **ビン（19.5）** | 19.5.3 の自動ビン（列挙型のものを含む）。値と範囲のビン（`bins b = {0, [1:3], [8:$]};`）。値は、定数、covergroup の引数、それらを引数とする関数呼び出し。ビン配列（`bins b[]`、`bins b[N]`）。オペランドが整数の許容差付きの範囲（`[a +/- b]`、`[a +%- b]`）。`default` と `default[]` のビン。`ignore_bins` と `illegal_bins`。`wildcard` ビン。ビンのガード（`bins b = {1} iff (en);`）。`with` フィルタ（`bins b[] = {[0:255]} with (item % 3 == 0);`、`bins b = cp with (f(item));`）。集合式のビン（`bins b[] = S;`。要素が整数の配列パラメータ、または要素が 64 ビット以下の整数である動的配列・キュー・埋め込み covergroup のクラスの定数配列） | 遷移ビンと `default sequence` のビン（19.5.2）。`bins b[N] = default`（値の分配を規格が定めていません）。ビン配列、`ignore_bins`、`illegal_bins` の `with` フィルタで、値が定数かつ 1,048,576 個を超えるもの（`int` のカバーポイントでの `ignore_bins b = cp with (...)` など。配列でない `bins` のビンでは使えます。[カバレッジ](#coverage)を参照）。ビン配列やそのようなフィルタの下にある、値の範囲が 65,536 個を超えるワイルドカード値。上記以外の形の集合式（代入パターン、連接、パラメータでない固定長配列、文字列・ハンドル・64 ビットを超える要素の配列）。`real` のオペランドを持つ許容差付きの範囲。整数型でないビンの値 |
 | **クロス（19.6）** | カバーポイントと整数型の変数やネット（変数には専用のカバーポイントを作ります）のクロス。ラベルと `iff` ガードの有無は問いません。`binsof(cp)` と `binsof(cp.bin)` の選択式による `bins`、`ignore_bins`、`illegal_bins`。`intersect {...}` の値は、定数、covergroup の引数、それらを引数とする関数呼び出し。`!`、`&&`、`\|\|`、括弧、クロスの識別子（`bins all = X;`）。クロスのビンのガード | 選択式の `with` と `matches`（19.6.1.2）。クロスの集合式と、クロス本体で宣言した関数（19.6.1.3、19.6.1.4）。括弧で囲んだ選択の前の `!`（`!(binsof(a) && binsof(b))`）と条件演算子を使うクロスの集合式（どちらも covergroup の宣言位置でエラーになります）。同じ項目を 2 度挙げるクロス。クロスがクロスしないカバーポイントの `binsof`。括弧を通して 32 段を超えて交互に入れ子になる `&&` と `\|\|`。サンプル時にしかビンに振り分けられない値と交わる `intersect` のリスト（[カバレッジ](#coverage)を参照） |
 | **オプション（19.7、19.7.1）** | 定義内での `option` の全メンバ（19.10 が定めるレベル）。定義内で定数を代入する `type_option` のメンバ: `weight`、`goal`、`comment`（文字列リテラル）、`merge_instances`、`distribute_first`、およびクロッキングイベントのない covergroup では効果のない `strobe`（19.3）。手続きからの、インスタンスとその項目の `option` のメンバ、型とその項目の `type_option` のメンバ（`::` 経由またはインスタンス経由）の読み出しと `=` による代入 | `type_option.real_interval`（real のカバーポイントは未対応）。手続きからの `type_option.strobe` の読み出し。文字列パラメータなど、文字列リテラルでない `type_option.comment`。他の演算子（`+=`、`++`）や `<=` によるメンバへの代入。インクリメントや複合代入が書き込む場所の選択でのメンバの読み出し（`arr[c.cp.option.weight]++`）。構造体全体としての `option` と `type_option`。クロッキングイベントを持つ covergroup の `type_option.strobe = 1`（`covergroup strobe sampling`。Postponed リージョンでのサンプルは行いません） |
-| **サンプリング（19.3、19.8.1）** | `sample()`。モジュールや program（generate ブロックを含む）の covergroup のクロッキングイベント（`covergroup cg @(posedge clk);`）。そのモジュールや program の宣言が初期化子 `new` で構築したインスタンス（`cg c = new;`、ループ generate ブロック内も可）ごとに、信号のイベント制御（エッジ、変化、`or` とカンマのリスト、`iff`。9.4.2）、名前付きイベント、階層名、スコープの virtual interface 変数が指すインタフェースインスタンスのメンバでサンプルします。イベントは covergroup を宣言した場所で解決します。1 ビット変数の `posedge` または `negedge` 1 つ（`iff` の有無を問わない）は、そのエッジのフリップフロップと一緒に、そのノンブロッキング代入の前にサンプルします。それ以外のイベントはプロセスが待ちます。19.3 との違いは[covergroup のクロッキングイベント](#deviations-standard-code)を参照してください | それ以外の `new` が構築したインスタンスのクロッキングイベント（`initial c = new;`、宣言後の `c = new;`、クラスのプロパティ、配列要素: `covergroup sampling event of a constructed instance`）。クラスに埋め込んだ covergroup、パッケージ・コンパイル単位・interface で宣言した covergroup がクロッキングイベントを持つ場合は、`sample()`、`get_coverage()`、オプションを含むすべての使用。covergroup の引数を名指すクロッキングイベント（19.3:「A clocking event may refer to arguments of the covergroup」）。`Simulator` でのクロッキングイベント（[Celox の実行モデル](#celox-execution-model)を参照）。ブロックイベント（`@@(begin f)`）。sequence のマッチ項目内の `sample()` |
+| **サンプリング（19.3、19.8.1）** | `sample()`。covergroup のクロッキングイベント（`covergroup cg @(posedge clk);`）で、そのインスタンスごとにサンプルします。対象は、モジュールや program の宣言が初期化子 `new` で構築したインスタンス（`cg c = new;`、generate ブロック内も可、ループのものを含む）と、それ以外の `new` が構築したインスタンスです。後者は手続き、task、関数、埋め込み covergroup のクラスの `new` メソッド（19.4）、モジュールや program のその他の宣言初期化子（`C obj = new;`、`cg a[2] = '{new, new};`、クラスの static プロパティ）での構築です。イベントは信号のイベント制御（エッジ、変化、`or` とカンマのリスト、`iff`。9.4.2）、名前付きイベント（オブジェクトのものも可: `@ev`、`@(this.ev)`、ハンドルプロパティ `obj` が保持するオブジェクトの名前付きイベント `ev` の `@(obj.ev)`）、埋め込み covergroup のクラスのプロパティ（`@m_z`、`@(posedge clk_bit)`）、階層名、virtual interface の変数やプロパティが指すインタフェースインスタンスのメンバ（`@(posedge vif.clk)`）です。イベントは covergroup を宣言した場所で解決します。つまりそのスコープ（パッケージやコンパイル単位も可）か、埋め込み covergroup ではそのクラスです。モジュールや program の covergroup のインスタンスは、何が構築したかによらず型のサンプラーがサンプルします。1 ビット変数の `posedge` または `negedge` 1 つ（`iff` の有無を問わない）では、そのエッジのフリップフロップと一緒に、そのノンブロッキング代入の前にサンプルします。それ以外のイベントと program では、それを待つプロセスがサンプルします。埋め込み covergroup や、パッケージ・コンパイル単位の covergroup のインスタンスは、構築が開始するプロセスがサンプルします。それぞれの 19.3 との違いは[covergroup のクロッキングイベント](#deviations-standard-code)を参照してください | パッケージやコンパイル単位の宣言が、直接または呼び出すサブルーチンやクラスのコンストラクタを通じて構築するクロッキングイベント付きインスタンス（`covergroup sampling event of an instance that a declaration of a package or the compilation unit constructs`）。クラスに埋め込んだ covergroup や、パッケージ・コンパイル単位の covergroup のインスタンスを、`always_comb`・`always_latch`・`always_ff` 手続き、継続代入、final 手続きで、直接またはサブルーチンやコンストラクタを通じて構築すること（`covergroup sampling event of an instance constructed in an always_comb procedure`、`… in an always_latch procedure`、`… in a continuous assignment`、`… in an always_ff procedure`、`… in a final procedure`）。そこでプロセスを開始することになるためです（モジュールや program の covergroup のインスタンスはどれでも構築できます）。埋め込み covergroup のイベントが、ハンドルプロパティが保持するオブジェクトの値メンバを読むこと（19.4 の `int m_ev` での `@(m_obj.m_ev)` など。`iff` も同じ。`covergroup sampling event on a member of an object that a handle property holds`）。プロセスのイベント制御がこれに対応しないためです。interface で宣言した covergroup がクロッキングイベントを持つ場合は、`sample()`、`get_coverage()`、オプションを含むすべての使用。covergroup の引数を名指すクロッキングイベント（19.3:「A clocking event may refer to arguments of the covergroup」）。`Simulator` でのクロッキングイベント（[Celox の実行モデル](#celox-execution-model)を参照）。ブロックイベント（`@@(begin f)`）。sequence のマッチ項目内の `sample()` |
 | **引数（19.3、19.8.1）** | covergroup の引数と、`with function sample` 宣言の引数 | covergroup やその sample メソッドの `ref` 引数。unpacked 型の引数。カバーポイントが読む covergroup の引数のうち、整数型、文字列、クラスハンドルのいずれでもないもの（`real` など） |
 | **`let` 宣言（11.12）** | — | covergroup の名前より後では `let` を展開しません。引数の型や既定値、カバーポイントの式、クロスする変数、ガード、ビンの値、`intersect` の値、`with` 式、オプションの値が `let` を参照する covergroup はエラーになります（covergroup または `sample` の引数が同じ名前を持つ場合は、その引数を指します。`with` 式の中の `item` は、同名の宣言があってもビンの値を指します） |
 | **メソッド（19.8）** | `sample()`、`get_inst_coverage()`、`get_coverage()`、`T::get_coverage()`、`$get_coverage()`。2 つの `ref int` 引数付きの `get_coverage` と `get_inst_coverage`。`start()`、`stop()`、`set_inst_name()`。表 19-5 がカバーポイントとクロスに与えるメソッド（`c.cp.get_inst_coverage()`、`c.x.stop()`、`T::cp::get_coverage()`）。埋め込み covergroup のメソッドを、その変数（クラス内の `cg`、`obj.cg`）に対して呼ぶこと | 条件式など、ハンドルを返す他の式に対する埋め込み covergroup のメソッド呼び出し |
@@ -319,8 +319,17 @@ covergroup（19 節）は型です。モジュール、program、パッケージ
   クロックでも同じです。それ以外のイベント（`@(s)`、`@(edge s)`、
   `@(posedge a or negedge b)` のようなリスト、名前付きイベント、virtual interface
   経由のメンバ）と program のすべてのイベントは、それを待つ専用のプロセス
-  `initial forever begin @(event); c.sample(); end` になります。19.3 との違いは
-  次のとおりです。
+  `initial forever begin @(event); c.sample(); end` になります。そのような
+  covergroup のインスタンスをそれ以外の `new` が構築した場合（`initial c = new;`、
+  task、クラスのメソッド、`cg a[2] = '{new, new};`）は、型のリストに加わります。
+  リストは、同じエッジ駆動手続きが宣言のインスタンスの後に、それ以外のイベントでは
+  型の 1 つのプロセス（リストの 5 つ目以降のインスタンスにはもう 1 つ）が
+  たどります。インスタンスのためにプロセスは開始しません。クラスに埋め込んだ
+  covergroup や、パッケージ・コンパイル単位で宣言した covergroup のインスタンスは、
+  構築が開始するプロセスが `fork forever begin @(event); c.sample(); end join_none`
+  と同じようにサンプルします。このプロセスは構築したプロセスからシードを引かず
+  （18.14.1）、その子でもないため、そのプロセスの `wait fork`、`disable fork`、
+  `kill()` はこれを見ません。19.3 との違いは次のとおりです。
   - サンプラーが再び動く前の複数の発生は 1 回のサンプルになります。中断せずに
     イベントを何度も起こすプロセス（`clk = 1; clk = 0; clk = 1;`、`-> e; -> e;`）と、
     プロセスのサンプラーでは、それが動く前に 1 つのタイムステップで複数の
@@ -330,16 +339,33 @@ covergroup（19 節）は型です。モジュール、program、パッケージ
     書き込みを見ます（`clk = 1; d = 5;` は `d` を 5 としてサンプルします）。
   - プロセスのサンプラーは、最初に待つ前の発生を失います。たとえば、それより
     先に動く `initial` 手続きが時刻 0 に起こす発生や、最初の `run_until` の前に
-    ホストが起こす発生です。エッジのサンプラーは、そのエッジのフリップフロップが
-    そのとき動くため、これらもサンプルします。
+    ホストが起こす発生、構築がプロセスを開始するインスタンスでは構築したプロセスが
+    中断するまでのすべての発生です。エッジのサンプラーは、そのエッジの
+    フリップフロップがそのとき動くため、これらもサンプルします。リストの
+    インスタンスは、構築したタイムステップの発生では、サンプラーが構築の後に
+    動くときだけサンプルされます。`always @(posedge clk)` が構築したものは次の
+    エッジから最初にサンプルされます。
   - NBA リージョンが更新する変数（分周クロック、`<=` で反転するクロック）の
     エッジでは、プロセスのサンプラーはそのエッジのノンブロッキング代入の後に動き、
     その値を見ます。デザインが `initial forever @(...)` で書いたプロセスと同じです
-    （[#4771](https://github.com/celox-sim/celox/issues/4771)）。
+    （[#4771](https://github.com/celox-sim/celox/issues/4771)）。埋め込み covergroup
+    や、パッケージ・コンパイル単位の covergroup のインスタンスをサンプルする
+    プロセスも同じです。
   - 同じ covergroup 型の `sample()` を呼ぶエッジ駆動手続きと並ぶエッジの
     サンプラーはプロセスとして動くため、NBA リージョンが更新するエッジでは
     そのノンブロッキング代入を見ます。デザインが書いた 2 つのそのような手続きと
     同じです（[#4771](https://github.com/celox-sim/celox/issues/4771)）。
+  - 埋め込み covergroup のイベントが読む virtual interface プロパティ
+    （`@(posedge vif.clk)`）に別のインタフェースインスタンスを代入すると、既に
+    待っている待機は古いクロックの次のエッジでもう 1 回発火し、その後の待機は新しい
+    ほうになります（9.4.2 はすぐに新しいほうを待ちます）。同じイベント制御を待つ
+    クラスの task も同じです（[#4791](https://github.com/celox-sim/celox/issues/4791)）。
+    モジュールの virtual interface 変数にはすぐに追従します。
+  - イベントが名前付きイベントを名指すハンドルプロパティ（`@(h.e)`）に別の
+    オブジェクトを代入しても、既に待っている待機は、待ち始めたオブジェクトの
+    イベントに留まります。`@(h.e)` を待つソースのプロセスも同じで、代入された
+    イベント変数を待つ待機について 15.5.5.1 が定めるとおりです。そのイベントが
+    トリガされるまで、新しいオブジェクトのイベントのトリガはサンプルになりません。
 
   `#0` で隔てた発生や別のデルタサイクルの発生はそれぞれ 1 回のサンプルになり、
   ブロッキングに変化するクロックのエッジでノンブロッキング代入が更新する値は
@@ -545,11 +571,18 @@ covergroup 型ごとに、インスタンス、サンプル数、`$get_coverage`
   持ちません。「only applies to the scheduling of samples triggered by a clocking
   event」（19.3）だからです。クロッキングイベントを持つ covergroup で 0 以外を
   指定すると拒否します（`covergroup strobe sampling`）。
-- **サンプルするのは宣言のインスタンスで、変数ではありません。** クロッキング
+- **サンプルするのはインスタンスで、変数ではありません。** クロッキング
   イベントを持つ covergroup の宣言 `cg c = new;` は、構築したインスタンスを
   イベントのたびにサンプルします。その後 `c` が何を保持しても変わりません。
   `c = null` や `c = d` でサンプルが止まることも、別のインスタンスを 2 回
-  サンプルすることもなく、インスタンスは解放されません。19.8 のメソッドは
+  サンプルすることもなく、インスタンスは解放されません。それ以外の `new` が
+  構築したインスタンスも、構築以降は同じです。もう一度 `c = new;` を代入すると
+  両方のインスタンスをサンプルします。埋め込み covergroup は、オブジェクトの
+  プロパティが別のインスタンスを保持するまでサンプルします。これはそのクラスの
+  `new` メソッドがそこで構築したときです（19.4 はこのメソッド内でだけ代入を
+  許します）。それまでのインスタンスは、次の発生からイベントのサンプルを
+  数えません。サンプラーはインスタンスと、埋め込みのものではそのオブジェクトを、
+  シミュレーションの終わりまで保持します。19.8 のメソッドは
   他のインスタンスと同じく使えます（「These methods can be invoked procedurally at
   any time」）。`sample()` はもう 1 回サンプルし、停止中のインスタンスはイベントの
   サンプルを数えません。最初のイベントより前にはサンプルしません。2 値
@@ -703,6 +736,7 @@ covergroup 型ごとに、インスタンス、サンプル数、`$get_coverage`
   covergroup を構築するテストベンチでは、レポートのインスタンスが毎回 1 つ増えます。
 - **covergroup の構築は乱数を引きません。** 手続きやクラスのコンストラクタに
   covergroup を足しても、その乱数スティミュラスは変わりません（18.14.1）。
+  クロッキングイベントを持つものも同じで、そのサンプラーはシードを取りません。
   モジュール内で初期化子付きで宣言した covergroup 変数は、初期化子付きの
   クラス変数と同じく独立したプロセスで、プロセスにシードを与える順序の 1 つを
   占めます。
@@ -768,8 +802,22 @@ covergroup 型ごとに、インスタンス、サンプル数、`$get_coverage`
   スケジューラのカーネルです（名前付きイベントを待つものや program のものは
   ランタイムのループで動きます）。宣言ごとに、インスタンスを保持する隠しハンドル
   変数 `%covergroup_site<n>` が加わり、遅延付き継続代入の隠し変数と同じく、
-  信号一覧と波形に現れます。どの宣言も構築しないクロッキングイベント付き
-  covergroup にはコストがありません。covergroup はヒープを持たないブラウザ
+  信号一覧と波形に現れます。そのような型のインスタンスをそれ以外の `new` が
+  構築した場合も `Simulation` が必要で、コストは宣言のインスタンスとほぼ同じです。
+  型のサンプラーが型のリストをたどります。リストは 4 つの隠しハンドル変数
+  （`%covergroup_instance<n>_<k>`）、個数（`%covergroup_instance_count<n>`）、5 つ目
+  以降のためのキュー（`%covergroup_instances<n>`）で、キューの要素はサンプルの
+  たびにホストへの呼び出しで読みます。リストはインスタンスをシミュレーションの
+  終わりまで保持します。クラスに埋め込んだ covergroup や、パッケージ・コンパイル
+  単位の covergroup のインスタンスは、独自の活性化フレームを持つプロセスが
+  サンプルします。このプロセスは、関数内に書いた `fork forever begin @(event);
+  c.sample(); end join_none` と同じくランタイムのループで動き、それが生きている間、
+  デザインのすべてのタイムスロットはコンパイル済みスケジューラではなくそのループで
+  動きます。パッケージやコンパイル単位の型では、モジュールの宣言 `p::cg c = new;`
+  を含むすべてのインスタンスがこうなります。このプロセスはインスタンスをシミュレーションの終わりまで保持するため、
+  クロッキングイベント付き covergroup を埋め込んだクラスのオブジェクトは、
+  コンストラクタが動いた後は回収されません。
+  何も構築しないクロッキングイベント付き covergroup にはコストがありません。covergroup はヒープを持たないブラウザ
   （WASI）ビルドでは使えません。
 - **ホストクロック。** `Simulation::add_clock` と `Simulation::schedule` は
   イベント信号（エッジ駆動 `always` のクロックや非同期リセット、またはプロセスが待つ
