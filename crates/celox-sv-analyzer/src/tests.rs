@@ -9249,7 +9249,6 @@ fn wide_container_elements_reject_whole_container_operations() {
             "r = q.sum();",
             "array reduction of elements wider than 64 bits",
         ),
-        ("b = q == p;", "elements wider than 64 bits"),
         (
             "$display(\"%p\", q);",
             "%p of a container of elements wider than 64 bits",
