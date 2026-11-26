@@ -1901,6 +1901,7 @@ pub fn lower_frontend_artifact(
         processes,
         functions: Vec::new(),
         function_frames: Vec::new(),
+        imported_functions: Vec::new(),
         package_bindings: HashMap::default(),
         hierarchical_bindings: HashMap::default(),
         ref_port_bindings: Vec::new(),

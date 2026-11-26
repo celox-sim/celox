@@ -448,7 +448,11 @@ fn relocation_keeps_heap_helper_calls() {
         &HashMap::default(),
         &HashMap::default(),
         &[(0, 5)].into_iter().collect(),
-        0,
+        super::relocation::FunctionIds {
+            base: 0,
+            local: 0,
+            imported: &[],
+        },
     );
     let functions: Vec<u32> = relocated.blocks[&celox_sir::BlockId(0)]
         .instructions
@@ -680,4 +684,18 @@ fn exclude_written_process_sensitivity_handles_full_partial_and_unguarded_cases(
             .instructions
             .len()
     );
+}
+
+/// An instance's units name its module's own functions by their index from
+/// its copies' base on, and the functions its module imports, numbered
+/// after its own, by the design's numbers of their home copies.
+#[test]
+fn imported_functions_resolve_to_their_home_copies() {
+    let ids = super::relocation::FunctionIds {
+        base: 10,
+        local: 2,
+        imported: &[3, 7],
+    };
+    let global: Vec<u32> = (0..4).map(|id| ids.global(id)).collect();
+    assert_eq!(global, [10, 11, 3, 7]);
 }
