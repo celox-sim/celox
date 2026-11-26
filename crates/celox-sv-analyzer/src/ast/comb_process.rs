@@ -93,6 +93,7 @@ fn comb_processes_from_item(
             {
                 process.condition = condition.clone();
                 process.drive_strength = drive_strength(gate.strength.as_ref())?;
+                process.three_state_gate = is_three_state_gate(gate);
                 processes.push(substitute_process_constants_with_parameter_literals(
                     syntax_tree,
                     session,
@@ -266,10 +267,20 @@ fn logic_gate_processes(
         "nor" => (BinaryOp::BitOr, "1'b0", true),
         "xor" => (BinaryOp::BitXor, "1'b0", false),
         "xnor" => (BinaryOp::BitXor, "1'b0", true),
+        "bufif0" | "bufif1" => (BinaryOp::BitAnd, "1'b1", false),
+        "notif0" | "notif1" => (BinaryOp::BitAnd, "1'b1", true),
         _ => return Err(unsupported("gate primitive instantiation")),
     };
     // The outputs of `buf` and `not` are all terminals but the last.
     let n_output = matches!(gate.kind.as_str(), "buf" | "not");
+    // A three-state gate drives its data input, as `buf` or `not` does,
+    // while its control input is 1 (`bufif1`, `notif1`) or 0 (`bufif0`,
+    // `notif0`), and z while it is the other value (28.6, Table 28-5).
+    let enabled_by = match gate.kind.as_str() {
+        "bufif1" | "notif1" => Some(true),
+        "bufif0" | "notif0" => Some(false),
+        _ => None,
+    };
     let mut processes = Vec::new();
     for instance in &gate.instances {
         let count = gate_instance_count(instance, tree, session, dimensions)?;
@@ -282,6 +293,16 @@ fn logic_gate_processes(
                     parts: vec![expr],
                 }
             }
+        };
+        // A terminal's value for each instance: the bits of `count`.
+        let widen = |input: Expr, width: Option<usize>| match width {
+            Some(1) => Some(replicate(input)),
+            Some(width) if width == count => Some(Expr::Resize {
+                expr: Box::new(input),
+                width,
+                signed: false,
+            }),
+            _ => None,
         };
         let mismatch = |width: Option<usize>| match width {
             // Too many or too few bits for the instances are an error.
@@ -296,19 +317,31 @@ fn logic_gate_processes(
         } else {
             1
         };
-        let (outputs, inputs) = instance.terminals.split_at(outputs);
+        let (outputs, mut inputs) = instance.terminals.split_at(outputs);
+        let mut control = None;
+        if enabled_by.is_some() {
+            let [data, enable] = inputs else {
+                return Err(AnalyzerError::Parse(format!(
+                    "{} gate without one data and one control terminal",
+                    gate.kind
+                )));
+            };
+            let enable =
+                expression_binding::value(*enable, tree.declarations(), tree, session, dimensions)?;
+            let width = expr_static_width(tree, &enable, dimensions);
+            let Some(enable) = widen(enable, width) else {
+                return mismatch(width);
+            };
+            control = Some(enable);
+            inputs = std::slice::from_ref(data);
+        }
         let mut rhs = replicate(Expr::Literal(identity.into()));
         for &input in inputs {
             let input =
                 expression_binding::value(input, tree.declarations(), tree, session, dimensions)?;
-            let input = match expr_static_width(tree, &input, dimensions) {
-                Some(1) => replicate(input),
-                Some(width) if width == count => Expr::Resize {
-                    expr: Box::new(input),
-                    width,
-                    signed: false,
-                },
-                width => return mismatch(width),
+            let width = expr_static_width(tree, &input, dimensions);
+            let Some(input) = widen(input, width) else {
+                return mismatch(width);
             };
             rhs = Expr::Binary {
                 left: Box::new(rhs),
@@ -320,6 +353,47 @@ fn logic_gate_processes(
             rhs = Expr::Unary {
                 op: UnaryOp::BitNot,
                 expr: Box::new(rhs),
+            };
+        }
+        // A control input of x or z gives L, H or x (Table 28-5): with the
+        // high impedance of a disabled gate, the conditional operator
+        // yields x for the 0, 1 or x of the data (11.4.11), the value of L
+        // and H on a net with no other driver. Such a gate is the only
+        // driver of its net (see `is_three_state_gate`). Each
+        // instance of an array has its own condition.
+        if let (Some(control), Some(enabled_by)) = (control, enabled_by) {
+            let bit = |expr: &Expr, bit: usize| {
+                if count == 1 {
+                    expr.clone()
+                } else {
+                    Expr::Select {
+                        expr: Box::new(expr.clone()),
+                        msb: ConstExpr::Literal(bit.to_string()),
+                        lsb: ConstExpr::Literal(bit.to_string()),
+                        signed: false,
+                    }
+                }
+            };
+            let mut instances = (0..count)
+                .rev()
+                .map(|index| {
+                    let high_impedance = Expr::Literal("1'bz".into());
+                    let (then_expr, else_expr) = if enabled_by {
+                        (bit(&rhs, index), high_impedance)
+                    } else {
+                        (high_impedance, bit(&rhs, index))
+                    };
+                    Expr::Mux {
+                        condition: Box::new(bit(&control, index)),
+                        then_expr: Box::new(then_expr),
+                        else_expr: Box::new(else_expr),
+                    }
+                })
+                .collect::<Vec<_>>();
+            rhs = if count == 1 {
+                instances.pop().unwrap()
+            } else {
+                Expr::Concat(instances)
             };
         }
         for &output in outputs {
@@ -368,6 +442,18 @@ fn logic_gate_processes(
         }
     }
     Ok(processes)
+}
+
+/// Whether a gate is a three-state gate, whose net keeps the
+/// single-driver rule. A three-state gate outputs L or H while its
+/// control input is x or z (IEEE 1800-2023 28.6): with another driver of
+/// the net they resolve by strength (28.12.2), which nets do not model
+/// for such a gate until L and H are modelled.
+fn is_three_state_gate(gate: &celox_sv_syntax::LogicGate) -> bool {
+    matches!(
+        gate.kind.as_str(),
+        "bufif0" | "bufif1" | "notif0" | "notif1"
+    )
 }
 
 /// The number of instances that a gate instance declares (IEEE 1800-2023

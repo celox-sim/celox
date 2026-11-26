@@ -41,6 +41,7 @@ impl CombProcess {
             delay_initial: None,
             net_delay: false,
             drive_strength: None,
+            three_state_gate: false,
             creation_order: 0,
             site: None,
             process_site: None,
@@ -62,6 +63,7 @@ impl CombProcess {
             delay_initial: None,
             net_delay: false,
             drive_strength: None,
+            three_state_gate: false,
             creation_order: 0,
             site: None,
             process_site: None,
@@ -76,6 +78,11 @@ impl CombProcess {
     /// The drive strength the driver states.
     pub(crate) fn drive_strength(&self) -> Option<crate::ir::DriveStrength> {
         self.drive_strength
+    }
+
+    /// Whether the process is a three-state gate.
+    pub(crate) fn is_three_state_gate(&self) -> bool {
+        self.three_state_gate
     }
 
     pub fn body(&self) -> &[Stmt] {

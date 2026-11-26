@@ -185,6 +185,94 @@ endmodule
   (top Top)
   (expect reject))
 
+; IEEE 1800-2023 28.6, Table 28-5: a three-state gate drives its data input,
+; inverted for `notif0` and `notif1`, while the control input enables it, and
+; z while the control disables it. A control of x or z gives L, H or x, which
+; a net with no other driver reads as x.
+(case three_state_truth_tables
+  (four_state)
+  (source "three_state.sv" #"
+module Top(input logic d,c, output wire b0,b1,n0,n1);
+  bufif0 (b0,d,c);
+  bufif1 named(b1,d,c);
+  notif0 (n0,d,c);
+  notif1 ({{n1}},d,c);
+endmodule
+"#)
+  (top Top)
+  (for (dv dm cv cm b0v b0m b1v b1m n0v n0m n1v n1m)
+    (list
+      (0 0 0 0 0 0 0 1 1 0 0 1)
+      (0 0 1 0 0 1 0 0 0 1 1 0)
+      (0 0 1 1 1 1 1 1 1 1 1 1)
+      (0 0 0 1 1 1 1 1 1 1 1 1)
+      (1 0 0 0 1 0 0 1 0 0 0 1)
+      (1 0 1 0 0 1 1 0 0 1 0 0)
+      (1 0 1 1 1 1 1 1 1 1 1 1)
+      (1 0 0 1 1 1 1 1 1 1 1 1)
+      (1 1 0 0 1 1 0 1 1 1 0 1)
+      (1 1 1 0 0 1 1 1 0 1 1 1)
+      (1 1 1 1 1 1 1 1 1 1 1 1)
+      (1 1 0 1 1 1 1 1 1 1 1 1)
+      (0 1 0 0 1 1 0 1 1 1 0 1)
+      (0 1 1 0 0 1 1 1 0 1 1 1)
+      (0 1 1 1 1 1 1 1 1 1 1 1)
+      (0 1 0 1 1 1 1 1 1 1 1 1)
+    )
+    (modify (set d (fourstate dv dm)) (set c (fourstate cv cm)))
+    (assert_eq b0 (fourstate b0v b0m)) (assert_eq b1 (fourstate b1v b1m))
+    (assert_eq n0 (fourstate n0v n0m)) (assert_eq n1 (fourstate n1v n1m))))
+
+; Each instance of an array of three-state gates has its own control
+; (28.3.6).
+(case three_state_instance_arrays
+  (four_state)
+  (source "three_state_arrays.sv" #"
+module Top(input logic [3:0] d,c, input logic e, output wire [3:0] y,n);
+  bufif1 gb[3:0](y,d,c);
+  notif0 gn[0:3](n,d,e);
+endmodule
+"#)
+  (top Top)
+  (for (dv cv cm ev yv ym nv nm) (list (5 12 5 0 5 7 10 0) (15 15 0 1 15 0 0 15))
+    (modify (set d (fourstate dv 0)) (set c (fourstate cv cm)) (set e (fourstate ev 0)))
+    (assert_eq y (fourstate yv ym)) (assert_eq n (fourstate nv nm))))
+
+; The instances take the bits of vector terminals by position, whatever
+; their declared ranges (28.3.6).
+(case three_state_instance_arrays_of_offset_ranges
+  (four_state)
+  (source "offset_ranges.sv" #"
+module Top(input logic [7:4] d,c, output wire [11:8] y);
+  bufif1 g[3:0](y,d,c);
+endmodule
+"#)
+  (top Top)
+  (for (dv cv yv ym) (list (5 15 5 0) (5 3 1 12) (10 12 8 3))
+    (modify (set d (fourstate dv 0)) (set c (fourstate cv 0)))
+    (assert_eq y (fourstate yv ym))))
+
+; A disabled gate drives z, which a variable of a two-state type stores as 0
+; (6.11.2).
+(case two_state_three_state_gates
+  (source "three_state.sv" #"
+module Top(input logic d,c, output bit b0,b1,n0,n1);
+  wire w0,w1,w2,w3;
+  bufif0 (w0,d,c);
+  bufif1 (w1,d,c);
+  notif0 (w2,d,c);
+  notif1 (w3,d,c);
+  assign b0 = w0;
+  assign b1 = w1;
+  assign n0 = w2;
+  assign n1 = w3;
+endmodule
+"#)
+  (top Top)
+  (for (vd vc vb0 vb1 vn0 vn1) (list (0 0 0 0 1 0) (1 0 1 0 0 0) (0 1 0 0 0 1) (1 1 0 1 0 0))
+    (modify (set d vd) (set c vc))
+    (assert_eq b0 vb0) (assert_eq b1 vb1) (assert_eq n0 vn0) (assert_eq n1 vn1)))
+
 (case scalar_expressions_in_generate_loops
   (source "selected.sv" #"
 module Top(input logic [1:0] a,b, output wire [1:0] y, output wire inverted);

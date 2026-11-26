@@ -144,6 +144,7 @@ pub(super) fn substitute_process_constants_with_parameter_literals(
             delay_initial: process.delay_initial,
             net_delay: process.net_delay,
             drive_strength: process.drive_strength,
+            three_state_gate: process.three_state_gate,
             creation_order: process.creation_order,
             site: process.site,
             process_site: process.process_site,
@@ -172,6 +173,7 @@ pub(super) fn substitute_process_constants_with_parameter_literals(
     result.delay_initial = process.delay_initial;
     result.net_delay = process.net_delay;
     result.drive_strength = process.drive_strength;
+    result.three_state_gate = process.three_state_gate;
     result.creation_order = process.creation_order;
     result.site = process.site;
     result.process_site = process.process_site;
