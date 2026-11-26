@@ -429,7 +429,7 @@ impl BodyBuilder<'_, '_, '_> {
                 self.session,
                 &self.dims,
             )
-            && containers::value_container(
+            && containers::held_array(
                 right,
                 self.syntax().declarations(),
                 &self.tree,

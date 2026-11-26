@@ -1136,6 +1136,20 @@ pub struct ContainerLayout {
     /// The bit patterns an index of enumerated type may hold (6.19),
     /// when the index is of one.
     pub key_enum_values: Option<EnumValues>,
+    /// Of a container whose elements are fixed-size unpacked arrays, each
+    /// held in a container of its own (IEEE 1800-2023 7.4): how many
+    /// elements one has, and its layout. An element is never null: one that
+    /// takes the default of its type has as many default elements (Table
+    /// 7-1).
+    pub fixed_elements: Option<Box<FixedElements>>,
+}
+
+/// The fixed-size unpacked arrays that are the elements of a container
+/// (see [`ContainerLayout::fixed_elements`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FixedElements {
+    pub count: u32,
+    pub layout: ContainerLayout,
 }
 
 /// The bit patterns of a set of enum members (6.19), held by the layouts

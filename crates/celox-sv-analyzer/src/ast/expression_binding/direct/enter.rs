@@ -84,7 +84,7 @@ pub(super) fn enter(
                 ExprKind::Conditional { .. }
             )
         })
-        && let Some(source) = containers::value_container(id, native, tree, session, dimensions)
+        && let Some(source) = containers::held_array(id, native, tree, session, dimensions)
     {
         let fixed = shape
             .type_id(&mut session.types, &tree.functions, &dimensions.const_env)

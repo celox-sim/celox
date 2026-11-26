@@ -1145,6 +1145,16 @@ pub(in crate::ast) fn shape(
                             // whole container, whose size depends on its
                             // elements: reject it rather than describing
                             // its handle as a packed range.
+                            // A fixed-size array element has the
+                            // dimensions of its type.
+                            if let Some(fixed) = container
+                                .element
+                                .container()
+                                .and_then(|inner| inner.fixed_type())
+                            {
+                                values.push(procedural::dimensions_from_type(&fixed));
+                                continue;
+                            }
                             if container.element.container().is_some() {
                                 return Err(unsupported("query of a container element"));
                             }
