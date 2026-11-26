@@ -258,6 +258,21 @@ fn emit(value: Typed, context: Option<(u32, bool)>) -> ConstraintExpr {
                 if logical { 1 } else { width },
             )
         }
+        // A power has the type of its base; the exponent is self-determined
+        // (IEEE 1800-2023 11.4.3, 11.6.1).
+        Kind::Binary(op, a, b) if op == "**" => {
+            let exponent_signed = b.signed;
+            (
+                ConstraintExpr::Power {
+                    base: Box::new(emit(*a, Some((width, signed)))),
+                    exponent: Box::new(emit(*b, None)),
+                    signed,
+                    exponent_signed,
+                    two_state: false,
+                },
+                width,
+            )
+        }
         Kind::Binary(op, a, b) if shift(&op) => {
             let a = emit(*a, Some((width, signed)));
             // The count is self-determined; the heap reads its value as
@@ -472,11 +487,12 @@ fn loop_element(
     if !loops.iter().any(|candidate| candidate.array == array) {
         return Ok(None);
     }
-    // The loop whose variable the subscript is, which loops over the array.
+    // The loop whose variable the subscript is, which loops over the array;
+    // another position is an element at a position (see [`element_by`]).
     let celox_sv_syntax::DimensionKind::Index(index) = dimension.kind else {
-        return Err("constraint array element other than its loop's".into());
+        return Ok(None);
     };
-    let level = match &native.expression(index).kind {
+    Ok(match &native.expression(index).kind {
         ExprKind::Name(name) => {
             let variable = instances::normalize_identifier(&name.spelling);
             loops
@@ -485,9 +501,7 @@ fn loop_element(
                 .filter(|&level| loops[level].array == array)
         }
         _ => None,
-    }
-    .ok_or("constraint array element other than its loop's")?;
-    Ok(Some(level))
+    })
 }
 
 /// The member `m` of the object loop element `a[i]` refers to that `id`,
@@ -646,6 +660,119 @@ fn element_at(
             array,
             // A negative position is past the end too.
             index: u64::try_from(index).unwrap_or(u64::MAX),
+            width,
+        }),
+        width,
+        signed,
+    }))
+}
+
+/// The element `a[e]` that `id` names, of an array property `a` of the
+/// class, at a position `e` that is no constant and not the variable of a
+/// loop over `a`, such as the variable of a loop over another array or
+/// `i + 1` (IEEE 1800-2023 18.5.8.1): a state expression, which `bind`
+/// binds, known before solving as a guard is (18.5.13), and read as
+/// [`element_at`] reads a constant one.
+#[allow(clippy::too_many_arguments)]
+fn element_by(
+    id: ExprId,
+    bind: &mut dyn FnMut(&mut Session, ExprId) -> Result<Typed, String>,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    properties: &[Property],
+    names: &Names<'_>,
+    env: &ConstEnv,
+    inputs: &HashMap<String, CallerInput>,
+    loops: &[Loop],
+) -> Result<Option<Typed>, String> {
+    let native = tree.declarations();
+    let ExprKind::Select {
+        expression,
+        dimension,
+    } = &native.expression(id).kind
+    else {
+        return Ok(None);
+    };
+    let celox_sv_syntax::DimensionKind::Index(index) = dimension.kind else {
+        return Ok(None);
+    };
+    let Some((position, property)) =
+        array_property(*expression, native, properties, names, inputs, loops)?
+    else {
+        return Ok(None);
+    };
+    if (property.rand || property.randc) && !random_array(property, tree, session, env) {
+        return Err(
+            "a constraint on an element of a rand array of elements other than 2-state integral ones of at most 64 bits"
+                .into(),
+        );
+    }
+    if property.storage.as_ref().is_some_and(|storage| {
+        storage
+            .fixed
+            .is_some_and(|(left, right)| left != 0 || left > right)
+    }) {
+        return Err(
+            "a constraint on an element of a fixed-size array whose range is not [0:N-1]".into(),
+        );
+    }
+    visible(property, tree, session, env)?;
+    let element = property.array_storage().expect("an array property").clone();
+    if !solver_element(&element, tree, session, env) {
+        return Err(
+            "a constraint array element other than 2-state integral ones of at most 64 bits".into(),
+        );
+    }
+    let index = bind(session, index)?;
+    // The position, self-determined (11.5.1), as an unsigned 64-bit value,
+    // a negative one past the end (7.4.6).
+    let (index_width, signed) = (index.width, index.signed);
+    let index = emit(index, None);
+    let index = if index_width == 64 {
+        index
+    } else {
+        ConstraintExpr::Resize {
+            value: Box::new(index),
+            width: 64,
+            signed,
+        }
+    };
+    let random = |array: usize| {
+        properties
+            .iter()
+            .filter(|property| property.constraint_array())
+            .nth(array)
+            .is_some_and(|property| property.rand || property.randc)
+    };
+    if index.any(&mut |expr| match expr {
+        ConstraintExpr::Field(_)
+        | ConstraintExpr::Static(_)
+        | ConstraintExpr::Size(_)
+        | ConstraintExpr::Input { .. } => random_variable(expr, properties, false),
+        ConstraintExpr::ElementAt { array, .. }
+        | ConstraintExpr::ElementOf { array, .. }
+        | ConstraintExpr::Sum(array) => random(*array),
+        ConstraintExpr::Element {
+            level,
+            member: None,
+            ..
+        } => {
+            properties[loops[*level as usize].array].rand
+                || properties[loops[*level as usize].array].randc
+        }
+        _ => false,
+    }) {
+        return Err("an array position that a random variable decides in a constraint".into());
+    }
+    let array = properties[..position]
+        .iter()
+        .filter(|property| property.constraint_array())
+        .count();
+    let (width, signed) = (element.layout.width, element.layout.signed);
+    Ok(Some(Typed {
+        kind: Kind::Leaf(ConstraintExpr::ElementOf {
+            array,
+            index: Box::new(index),
             width,
         }),
         width,
@@ -1866,6 +1993,19 @@ pub(in crate::ast) fn bind_inputs(
         if let Some(element) = element(id, tree, session, properties, names, env, inputs, loops)? {
             return Ok(element);
         }
+        if let Some(element) = element_by(
+            id,
+            &mut |session: &mut Session, index: ExprId| recurse(session, budget, index),
+            tree,
+            session,
+            properties,
+            names,
+            env,
+            inputs,
+            loops,
+        )? {
+            return Ok(element);
+        }
         // A guard compares class handles, such as with `null`: their values
         // when the call starts, which no randomization changes (IEEE
         // 1800-2023 18.5.13).
@@ -2526,12 +2666,13 @@ pub(in crate::ast) fn bind_inputs(
             }
             // A shift has the type of its left operand; the right operand
             // is self-determined, of its own type, and its value is read as
-            // unsigned (IEEE 1800-2023 11.4.10, 11.6.1).
+            // unsigned (IEEE 1800-2023 11.4.10, 11.6.1). A power likewise,
+            // its exponent of its own signedness (11.4.3).
             ExprKind::Binary {
                 left,
                 operator,
                 right,
-            } if matches!(operator.as_str(), "<<" | ">>" | "<<<" | ">>>") => {
+            } if matches!(operator.as_str(), "<<" | ">>" | "<<<" | ">>>" | "**") => {
                 let a = recurse(session, budget, *left)?;
                 let b = recurse(session, budget, *right)?;
                 Typed {

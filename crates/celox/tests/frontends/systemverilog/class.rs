@@ -892,10 +892,11 @@ fn constraints_on_handle_and_string_properties_are_rejected() {
             "c.randomize()",
             "a randc dynamic array or queue",
         ),
+        // The position of an element is a state expression (18.5.13).
         (
-            "class C; rand int x; int a[]; constraint k { foreach (a[i]) x != a[i + 1]; } endclass",
+            "class C; rand int x, j; int a[]; constraint k { x != a[j]; } endclass",
             "c.randomize()",
-            "constraint array element other than its loop's",
+            "an array position that a random variable decides in a constraint",
         ),
         // A member of a loop element is subject to its visibility (8.18).
         (
@@ -6656,5 +6657,87 @@ sv_backends! {
         @build celox::Simulation::from_sv_sources(vec![(source, Path::new("inherited_type_parameters.sv"))], "Top");
         sim.run_until(0).unwrap();
         assert_eq!(sim.get(sim.signal("sum")), BigUint::from(39u8));
+    }
+}
+
+sv_backends! {
+    // `0 ** -1` is X (IEEE 1800-2023 11.4.3): a constraint whose truth it
+    // decides is an error in 4-state simulation, as one an X state value
+    // decides is (18.3); a 2-state simulation holds it as 0, and an element
+    // at the 2-state position of a 4-state one reads that element, or the
+    // default value past the end (7.4.6).
+    fn constraint_powers_of_zero_to_negative_exponents_are_unknown(sim) {
+        @setup {
+            let source = r#"module Top(output int ok);
+                class C;
+                    int k = -1;
+                    rand int r;
+                    constraint c { r == 0 ** k; }
+                endclass
+                C c;
+                initial begin
+                    c = new;
+                    ok = c.randomize();
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("power.sv"))], "Top")
+            .four_state(true);
+        let error = sim.run_until(0).unwrap_err().to_string();
+        assert!(error.contains("X or Z bits"), "{error}");
+    }
+
+    fn constraint_powers_of_zero_to_negative_exponents_are_zero_in_two_state_mode(sim) {
+        @setup {
+            let source = r#"module Top(output int ok, output int r, output int v);
+                class C;
+                    int k = -1;
+                    logic [1:0] at = 2'bx1;
+                    int a[$] = '{5, 6, 7};
+                    rand int r, v;
+                    constraint c { r == 0 ** k; v == a[at] + a[at + 2'd2]; }
+                endclass
+                C c;
+                initial begin
+                    c = new;
+                    c.r = 9;
+                    ok = c.randomize();
+                    r = c.r;
+                    v = c.v;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("power.sv"))], "Top")
+            .four_state(false);
+        sim.run_until(0).unwrap();
+        for (name, value) in [("ok", 1u8), ("r", 0), ("v", 6)] {
+            assert_eq!(sim.get(sim.signal(name)), BigUint::from(value), "{name}");
+        }
+    }
+
+    // In 4-state simulation, an element at a position with X bits reads
+    // the default value (7.4.6).
+    fn constraint_elements_at_unknown_positions_read_the_default(sim) {
+        @setup {
+            let source = r#"module Top(output int ok, output int v);
+                class C;
+                    logic [1:0] at = 2'bx1;
+                    int a[$] = '{5, 6, 7};
+                    rand int v;
+                    constraint c { v == a[at] + a[1] + a[at - 2'd1]; }
+                endclass
+                C c;
+                initial begin
+                    c = new;
+                    ok = c.randomize();
+                    v = c.v;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("element.sv"))], "Top")
+            .four_state(true);
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("ok")), BigUint::from(1u8));
+        assert_eq!(sim.get(sim.signal("v")), BigUint::from(6u8));
     }
 }
