@@ -8627,11 +8627,22 @@ fn final_procedures_only_follow_defaults_for_omitted_arguments() {
 
 #[test]
 fn class_randomize_bounds_nested_membership_expansion() {
-    // Sets of values, and of arrays, whose members each copy the operand.
-    for (levels, set) in [(4, "0, 1"), (25, "0, 1"), (4, "a, a"), (25, "a, a")] {
+    // Sets of values, and of arrays, whose members each copy the operand,
+    // also under a bit-vector function, whose operand the copy holds whole.
+    for (levels, set, wrapped) in [
+        (4, "0, 1", false),
+        (25, "0, 1", false),
+        (4, "a, a", false),
+        (25, "a, a", false),
+        (4, "0, 1", true),
+        (16, "0, 1", true),
+    ] {
         let mut expr = "x".to_owned();
         for _ in 0..levels {
             expr = format!("({expr}) inside {{{set}}}");
+            if wrapped {
+                expr = format!("$countones({expr})");
+            }
         }
         let source = format!(
             "module Top; class C; rand bit x; bit a[$]; constraint c {{ {expr}; }} endclass C c; initial begin c = new; c.randomize(); end endmodule"

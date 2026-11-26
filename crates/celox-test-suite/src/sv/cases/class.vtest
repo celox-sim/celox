@@ -7282,6 +7282,40 @@ endmodule
   (top Top) (run_until 1)
   (assert_eq now 7) (assert_eq seen 1))
 
+; A guard of the caller's state may count its bits (IEEE 1800-2023 18.5.12,
+; 20.9): when it is false, the constraint it guards goes, and with it the
+; value the caller computes for it, so nothing is called through `null`.
+(case inline_constraint_guards_count_caller_bits
+  (source "class.sv" #"
+module Top(output int nulls, output int calls, output int x, output bit done);
+    class source;
+        int count;
+        function int f(); return 5; endfunction
+        function int next(); count++; return 7; endfunction
+    endclass
+    class item;
+        rand int x;
+    endclass
+    initial begin
+        item it = new;
+        source h = null;
+        source c = new;
+        bit [3:0] enabled = 0;
+        // No bit of `enabled` is 1: the guard removes the constraint and `h.f()`.
+        nulls = it.randomize() with { if ($countones(enabled) != 0) x == h.f(); };
+        // A false guard calls nothing; a true one constrains with the call.
+        void'(it.randomize() with { if ($onehot(enabled)) x == c.next(); });
+        calls = c.count;
+        enabled = 4'b0100;
+        void'(it.randomize() with { if ($onehot(enabled)) x == c.next(); });
+        x = it.x;
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq nulls 1) (assert_eq calls 0) (assert_eq x 7)
+  (assert_eq done 1))
+
 ; The bit-vector functions count bits of the values they name in constraints,
 ; of rand array elements in a loop too, and an infeasible count fails the call
 ; (IEEE 1800-2023 18.6.3, 20.9).
@@ -7480,3 +7514,30 @@ module Top(output bit done);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1))
+
+; An element of a rand array at a position of state orders the solve as one
+; at a constant position does (IEEE 1800-2023 18.5.9, 18.5.13).
+(case constraint_solve_before_state_positions
+  (source "class.sv" #"
+module Top(output int bad, output bit done);
+    class C;
+        rand int a[2];
+        rand int x;
+        int j;
+        constraint c {
+            solve a[j] before x;
+            a[j] inside {[1:9]};
+            x == a[j] + 1;
+        }
+    endclass
+    initial begin
+        C c = new;
+        for (int n = 0; n < 10; n++) begin
+            c.j = n % 2;
+            if (c.randomize() == 0 || !(c.a[c.j] inside {[1:9]}) || c.x != c.a[c.j] + 1) bad++;
+        end
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq bad 0) (assert_eq done 1))
