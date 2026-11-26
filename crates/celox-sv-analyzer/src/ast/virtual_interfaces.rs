@@ -481,16 +481,24 @@ pub(crate) fn resolved_type(r#type: &crate::ir::Type, constants: &ConstEnv) -> O
         .iter()
         .map(|range| Some((eval(range.left())?, eval(range.right())?)))
         .collect::<Option<Vec<_>>>()?;
-    if !r#type.unpacked_ranges().is_empty() {
-        return None;
-    }
+    // A fixed-size unpacked array, such as a bus functional model's memory,
+    // is a member whose elements the accesses select (7.4).
+    let unpacked = r#type
+        .unpacked_ranges()
+        .iter()
+        .map(|range| {
+            range
+                .resolved_bounds()
+                .or_else(|| Some((eval(range.left())?, eval(range.right())?)))
+        })
+        .collect::<Option<Vec<_>>>()?;
     Some(MemberType::Value(
         Type::resolved(
             kind,
             r#type.is_signed(),
             r#type.signed_element_depth(),
             &packed,
-            &[],
+            &unpacked,
         )
         .with_chandle(r#type.is_chandle()),
     ))
