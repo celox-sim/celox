@@ -1127,6 +1127,11 @@ struct Design<'a> {
     files: &'a [File<'a>],
     interfaces: HashMap<String, InterfaceDecl>,
     modules: HashMap<String, ModuleDecl>,
+    /// The ports of the interfaces with ports that are not among
+    /// `interfaces`, which a module instantiates as it does a module: the
+    /// directions of their ports tell what a connection to them writes
+    /// (IEEE 1800-2023 25.3).
+    port_interfaces: HashMap<String, ModuleDecl>,
     /// The ports of every subroutine declared or imported, by name.
     subroutines: HashMap<String, Vec<(Scope, usize, SubroutinePorts)>>,
 }
@@ -1189,6 +1194,7 @@ impl<'a> Design<'a> {
             }
         }
         let mut modules = HashMap::default();
+        let mut port_interfaces = HashMap::default();
         let mut subroutines: HashMap<String, Vec<(Scope, usize, SubroutinePorts)>> =
             HashMap::default();
         if !interfaces.is_empty() {
@@ -1206,6 +1212,15 @@ impl<'a> Design<'a> {
                             return Err(AnalyzerError::DuplicateModule { name: module.name });
                         }
                         modules.insert(module.name.clone(), module);
+                    } else if unit.kind == native::UnitKind::Interface
+                        && unit.port_style == native::PortStyle::Ansi
+                        && !unit.ports.is_empty()
+                        && !interfaces.contains_key(&native_name(&unit.name))
+                        && let Ok(interface) = ModuleDecl::collect(handle, index, file, &|name| {
+                            interfaces.contains_key(name)
+                        })
+                    {
+                        port_interfaces.insert(interface.name.clone(), interface);
                     }
                 }
                 for subroutine in &native.subroutines {
@@ -1303,6 +1318,7 @@ impl<'a> Design<'a> {
             files,
             interfaces,
             modules,
+            port_interfaces,
             subroutines,
         })
     }
@@ -1714,7 +1730,15 @@ impl<'a> Design<'a> {
             if self.interfaces.contains_key(&child_name) {
                 continue;
             }
-            let Some(child) = self.modules.get(&child_name) else {
+            // An interface instance connects to the interface's ports as a
+            // module instance does to a module's; an interface port of it
+            // binds nothing this plan expands.
+            let port_interface = self.port_interfaces.get(&child_name);
+            let Some(child) = self
+                .modules
+                .get(&child_name)
+                .or(port_interface.filter(|interface| !interface.has_interface_ports()))
+            else {
                 for instance in &instantiation.instances {
                     for connection in &instance.connections {
                         let actual = match connection.kind {
