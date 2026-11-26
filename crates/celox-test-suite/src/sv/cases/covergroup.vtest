@@ -540,3 +540,187 @@ endmodule"#)
 endmodule"#)
  (top Top) (run_until 0)
  (expect_output "0.00\n66.67\n100.00\n"))
+
+; 19.6: a cross of two variables gives each a coverpoint of its own, "as if
+; it had been created by the statement coverpoint V;", with 16 automatic
+; bins, and has a bin for each of the 256 pairs of their bins: 2 of 16, 2
+; of 16 and 2 of 256 are covered.
+(case cross_of_variables_has_a_bin_for_each_pair_of_bins
+ (source "cross_variables.sv" #"module Top;
+ bit [3:0] a, b;
+ covergroup cov;
+  aXb : cross a, b;
+ endgroup
+ cov c = new;
+ initial begin
+  a = 1; b = 2; c.sample();
+  a = 15; b = 0; c.sample();
+  $display("%0.2f", c.get_inst_coverage());
+ end
+endmodule"#)
+ (top Top) (run_until 0)
+ (expect_output "8.59\n"))
+
+; 19.6.1.1: the bins of the cross `c` of the clause take 4, 7 and 1 cross
+; products, and 6 automatic bins are left (19.11.2: 9 bins). Five samples
+; cover `c1`, `c2`, `c3` and two automatic bins: 5 of 9, beside 4 of 4 and
+; 3 of 4 of the coverpoints.
+(case cross_bins_take_the_cross_products_they_select
+ (source "cross_bins.sv" #"module Top;
+ bit [7:0] v_a, v_b;
+ covergroup cg;
+  a: coverpoint v_a
+  {
+   bins a1 = { [0:63] };
+   bins a2 = { [64:127] };
+   bins a3 = { [128:191] };
+   bins a4 = { [192:255] };
+  }
+  b: coverpoint v_b
+  {
+   bins b1 = {0};
+   bins b2 = { [1:84] };
+   bins b3 = { [85:169] };
+   bins b4 = { [170:255] };
+  }
+  c : cross a, b
+  {
+   bins c1 = ! binsof(a) intersect {[100:200]};
+   bins c2 = binsof(a.a2) || binsof(b.b2);
+   bins c3 = binsof(a.a1) && binsof(b.b4);
+  }
+ endgroup
+ cg g = new;
+ initial begin
+  v_a = 0; v_b = 0; g.sample();
+  v_a = 100; v_b = 100; g.sample();
+  v_a = 150; v_b = 0; g.sample();
+  v_a = 0; v_b = 200; g.sample();
+  v_a = 200; v_b = 200; g.sample();
+  $display("%0.2f", g.get_inst_coverage());
+ end
+endmodule"#)
+ (top Top) (run_until 0)
+ (expect_output "76.85\n"))
+
+; 19.6.2, 19.6.3: the cross products of `ignore_bins` and `illegal_bins`
+; are no bins of the cross: of `yy` of the clauses 192 of 256 are left, of
+; `zz` 12 of 16, with the illegal value an argument. No sample is of an
+; illegal cross product.
+(case ignored_and_illegal_cross_products_are_no_bins
+ (source "cross_excluded.sv" #"module Top;
+ bit [3:0] a, b;
+ bit [1:0] x, y;
+ covergroup yy;
+  cross a, b
+  {
+   ignore_bins ignore = binsof(a) intersect { 5, [1:3] };
+  }
+ endgroup
+ covergroup zz(int bad);
+  cross x, y
+  {
+   illegal_bins illegal = binsof(y) intersect {bad};
+  }
+ endgroup
+ yy cy = new;
+ zz cz = new(2);
+ initial begin
+  a = 4; b = 7; cy.sample();
+  a = 2; b = 7; cy.sample();
+  $display("%0.2f", cy.get_inst_coverage());
+  x = 1; y = 3; cz.sample();
+  x = 0; y = 0; cz.sample();
+  $display("%0.2f", cz.get_inst_coverage());
+ end
+endmodule"#)
+ (top Top) (run_until 0)
+ (expect_output "6.42\n38.89\n"))
+
+; 19.6: a cross whose guard is false is not sampled, nor a bin of a cross
+; whose guard is false, and a cross of a coverpoint that its guard leaves
+; without the sample. `g` covers 2 of 4 bins, `u` and `x` 3 of 4.
+(case cross_guards_hold_for_the_count
+ (source "cross_guards.sv" #"module Top;
+ bit [1:0] p, q;
+ bit en, on;
+ covergroup cg;
+  cp: coverpoint p { bins lo = {[0:1]}; bins hi = {[2:3]}; }
+  cq: coverpoint q { bins lo = {[0:1]}; bins hi = {[2:3]}; }
+  gp: coverpoint p iff (on) { bins lo = {[0:1]}; bins hi = {[2:3]}; }
+  g: cross cp, cq iff (en) {
+   bins both_lo = binsof(cp.lo) && binsof(cq.lo) iff (on);
+  }
+  u: cross cp, cq;
+  x: cross gp, cq;
+ endgroup
+ cg c = new;
+ initial begin
+  en = 1; on = 1; p = 0; q = 0; c.sample();
+  en = 1; on = 0; p = 0; q = 1; c.sample();
+  en = 0; on = 1; p = 3; q = 3; c.sample();
+  en = 1; on = 1; p = 2; q = 0; c.sample();
+  $display("%0.2f", c.get_inst_coverage());
+ end
+endmodule"#)
+ (top Top) (run_until 0)
+ (expect_output "83.33\n"))
+
+; Table 19-1: with `cross_retain_auto_bins` 0 the bins a cross declares
+; remove every automatic bin, and a cross with only `ignore_bins` has no
+; bin and takes no part in the coverage (19.11.2). Set for the covergroup
+; it is the default of its crosses (Table 19-2).
+(case cross_retain_auto_bins_removes_the_automatic_bins
+ (source "cross_retain.sv" #"module Top;
+ bit [1:0] p, q;
+ covergroup cg;
+  option.cross_retain_auto_bins = 0;
+  cp: coverpoint p { bins lo = {[0:1]}; bins hi = {[2:3]}; }
+  cq: coverpoint q { bins lo = {[0:1]}; bins hi = {[2:3]}; }
+  kept: cross cp, cq { bins b = binsof(cp.lo); }
+  nothing: cross cp, cq { ignore_bins i = binsof(cp.hi); }
+  retained: cross cp, cq { option.cross_retain_auto_bins = 1; bins b = binsof(cp.lo); }
+ endgroup
+ cg c = new;
+ initial begin
+  p = 0; q = 0; c.sample();
+  p = 3; q = 3; c.sample();
+  $display("%0.2f", c.get_inst_coverage());
+ end
+endmodule"#)
+ (top Top) (run_until 0)
+ (expect_output "91.67\n"))
+
+; 19.6.1: `!binsof`, `&&`, `||` and parentheses of `binsof` conditions on a
+; coverpoint and on one bin declaration of it, an `intersect` list of
+; arguments and of a function call, and the identifier of the cross, which
+; selects every bin tuple (19.6.1.2). `S` has 16 cross products in its
+; bins and 8 automatic bins, of which four samples cover 4.
+(case cross_select_expressions_combine_binsof_conditions
+ (source "cross_select.sv" #"module Top;
+ bit [3:0] a;
+ bit [1:0] b;
+ function automatic int twice(int v);
+  return 2 * v;
+ endfunction
+ covergroup cg(int lo, int hi);
+  ca: coverpoint a { bins low[] = {[0:3]}; bins mid = {[4:7]}; bins top = {[8:15]}; }
+  cb: coverpoint b;
+  S: cross ca, cb {
+   bins neg = !binsof(ca.low) && binsof(cb) intersect {[lo:hi]};
+   bins par = (binsof(ca.mid) || binsof(ca.top)) && !binsof(cb) intersect {twice(1)};
+   bins arr = binsof(ca.low) intersect {[1:2]};
+  }
+  T: cross ca, cb { bins all = T; }
+ endgroup
+ cg one = new(1, 2);
+ initial begin
+  a = 5; b = 1; one.sample();
+  a = 9; b = 2; one.sample();
+  a = 0; b = 0; one.sample();
+  a = 2; b = 3; one.sample();
+  $display("%0.2f", one.get_inst_coverage());
+ end
+endmodule"#)
+ (top Top) (run_until 0)
+ (expect_output "75.76\n"))

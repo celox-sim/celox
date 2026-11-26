@@ -277,7 +277,7 @@ impl Spans {
                         .flat_map(crate::ast::covergroup_formal_ports)
                         .map(|port| port.tokens)
                         .chain(native.covergroups.iter().flat_map(|covergroup| {
-                            crate::ast::CovergroupBound::of(covergroup).ranges(native)
+                            crate::ast::CovergroupBound::of(native, covergroup).ranges(native)
                         })),
                 );
                 if formals.is_empty() {

@@ -9,8 +9,10 @@
 //! builds its bins.
 
 use super::*;
-use crate::ast::covergroups::{ITEM, Level, OptionType};
-use celox_sv_syntax::{BinsArray, CoverageItem, CoverageOption, CoverpointItem};
+use crate::ast::covergroups::{ITEM, Layout, Level, OptionType, SelectTree};
+use celox_sv_syntax::{
+    BinsArray, CoverageItem, CoverageOption, CoverpointItem, CrossBins, SelectKind,
+};
 use system_functions::{ContainerKind, ContainerOp};
 
 /// What `N::$new` evaluates and hands to the heap before it builds the
@@ -678,12 +680,12 @@ impl Construction<'_> {
         );
     }
 
-    /// Warn of what `details` say of the values of bin `name` of `point`,
-    /// written at `tokens`, that take no part in it (19.5.7).
+    /// Warn of what `details` say of the values of bin `name` of item
+    /// `item`, written at `tokens`, that take no part in it (19.5.7).
     fn warn(
         &self,
         builder: &mut BodyBuilder<'_, '_, '_>,
-        point: &heap::PointDescriptor,
+        item: &str,
         name: &str,
         details: Vec<String>,
         tokens: celox_sv_syntax::TokenRange,
@@ -695,7 +697,7 @@ impl Construction<'_> {
             &mut builder.session.diagnostics,
             [warnings::AnalyzerWarning::CovergroupBinValue {
                 covergroup: self.site.model.display.clone(),
-                item: point.name.clone(),
+                item: item.to_owned(),
                 bin: name.to_owned(),
                 detail: details.join("; "),
                 site: source_span(tokens, self.site.tree),
@@ -1135,7 +1137,13 @@ impl Construction<'_> {
                 details.push("so do other elements of the array".into());
             }
         }
-        self.warn(builder, point, name, details, native.expression(set).tokens);
+        self.warn(
+            builder,
+            &point.name,
+            name,
+            details,
+            native.expression(set).tokens,
+        );
         Ok(heap::BinValues::ranges(values))
     }
 
@@ -1180,7 +1188,7 @@ impl Construction<'_> {
                     // alone.
                     let mut details = Vec::new();
                     self.resolved(point, bins.wildcard, value, &mut values, &mut details);
-                    self.warn(builder, point, &name, details, range.tokens);
+                    self.warn(builder, &point.name, &name, details, range.tokens);
                 }
                 let filter = with
                     .map(|with| self.filter(builder, bins, with, &declared))
@@ -1232,6 +1240,136 @@ impl Construction<'_> {
         Ok(bin)
     }
 
+    /// Bin declaration `bins` of cross `cross` (19.6.1 to 19.6.3), whose
+    /// guard is predicate bit `iff` of the cross and which `layout` places
+    /// among the coverpoints `points` of the type.
+    fn cross_bins(
+        &mut self,
+        builder: &mut BodyBuilder<'_, '_, '_>,
+        bins: &CrossBins,
+        cross: &Crossing<'_>,
+        iff: Option<u32>,
+    ) -> Converted<heap::CrossBinDescriptor> {
+        let native = self.site.tree.declarations();
+        let name = instances::normalize_identifier(&bins.name.spelling);
+        let place = format!(
+            "bin `{name}` of cross `{}` of covergroup `{}`",
+            cross.name, self.site.model.display
+        );
+        let tree = covergroups::select_tree(native, bins.select)?;
+        let select = self.select(builder, &tree, cross, &name, &place)?;
+        let mut bin = heap::CrossBinDescriptor::new(name, select);
+        bin.kind = match bins.kind {
+            BinsKind::Bins => heap::BinKind::Bins,
+            BinsKind::IgnoreBins => heap::BinKind::Ignore,
+            BinsKind::IllegalBins => heap::BinKind::Illegal,
+        };
+        bin.iff = iff;
+        Ok(bin)
+    }
+
+    /// Select expression `tree` of bin `name` of `cross`, which `place`
+    /// names (19.6.1): its `binsof` conditions by the position of their
+    /// coverpoint in the cross, and the values of their `intersect` lists
+    /// resolved as those of a bin of that coverpoint are (19.5.7).
+    fn select(
+        &mut self,
+        builder: &mut BodyBuilder<'_, '_, '_>,
+        tree: &SelectTree<'_>,
+        cross: &Crossing<'_>,
+        name: &str,
+        place: &str,
+    ) -> Converted<heap::Select> {
+        let parts =
+            |this: &mut Self, builder: &mut BodyBuilder<'_, '_, '_>, parts: &[SelectTree<'_>]| {
+                parts
+                    .iter()
+                    .map(|part| this.select(builder, part, cross, name, place))
+                    .collect::<Converted<Vec<_>>>()
+            };
+        let kind = match tree {
+            SelectTree::And(and) => return Ok(heap::Select::And(parts(self, builder, and)?)),
+            SelectTree::Or(or) => return Ok(heap::Select::Or(parts(self, builder, or)?)),
+            SelectTree::Leaf(kind) => kind,
+        };
+        let SelectKind::Binsof {
+            negated,
+            target,
+            bin,
+            intersect,
+        } = kind
+        else {
+            // The identifier of the cross: every bin tuple, which are those
+            // of every bin of its first coverpoint (19.6.1.2). The
+            // declaration rejected every other expression.
+            return Ok(heap::Select::BinsOf {
+                position: 0,
+                bin: None,
+                intersect: None,
+                negate: false,
+            });
+        };
+        let target = instances::normalize_identifier(&target.spelling);
+        let unknown = || unsupported(format!("covergroup cross selection of `{target}`"));
+        let point = cross.layout.point(&target).ok_or_else(unknown)?;
+        let position = cross
+            .points
+            .iter()
+            .position(|crossed| *crossed as usize == point)
+            .ok_or_else(unknown)?;
+        let declaration = match bin {
+            Some(bin) => {
+                let bin = instances::normalize_identifier(&bin.spelling);
+                Some(
+                    cross
+                        .layout
+                        .declared
+                        .get(point)
+                        .and_then(|coverpoint| {
+                            coverpoint
+                                .items
+                                .iter()
+                                .filter_map(|item| match item {
+                                    CoverpointItem::Bins(bins) => Some(bins),
+                                    CoverpointItem::Option(_) => None,
+                                })
+                                .position(|declared| {
+                                    instances::normalize_identifier(&declared.name.spelling) == bin
+                                })
+                        })
+                        .ok_or_else(unknown)? as u32,
+                )
+            }
+            None => None,
+        };
+        let intersect = match intersect {
+            Some(ranges) => {
+                let point = &cross.points_of[point];
+                let mut values = Vec::new();
+                for range in ranges {
+                    let value = self.range(builder, range, place)?;
+                    let mut details = Vec::new();
+                    self.resolved(point, false, value, &mut values, &mut details);
+                    let details = details
+                        .into_iter()
+                        .map(|detail| {
+                            format!("`intersect` of coverpoint `{}`: {detail}", point.name)
+                        })
+                        .collect();
+                    self.warn(builder, &cross.name, name, details, range.tokens);
+                }
+                Some(values)
+            }
+            None => None,
+        };
+        Ok(heap::Select::BinsOf {
+            position: position as u32,
+            bin: declaration,
+            intersect,
+            negate: *negated,
+        })
+    }
+
     /// What the wildcard values of `values` of bin declaration `bins` of
     /// `point` that are matched as patterns mean for it (19.5.4, see
     /// `heap::MAX_WILDCARD_EXPANSION`): only one bin without a filter that
@@ -1266,10 +1404,20 @@ impl Construction<'_> {
     }
 }
 
+/// A cross as `N::$new` compiles its bins: its name, what it crosses, by
+/// index among the coverpoints of the type, which `layout` numbers, and
+/// those coverpoints.
+struct Crossing<'x> {
+    name: String,
+    points: &'x [u32],
+    layout: &'x Layout<'x>,
+    points_of: &'x [heap::PointDescriptor],
+}
+
 /// Whether `name` is declared as a constant in the scope of `dims`: a
 /// parameter, also one of an unpacked array type, or a constant of a type
 /// that does not fold to a number.
-fn declared_constant(dims: &PackedDimensions, name: &str) -> bool {
+pub(super) fn declared_constant(dims: &PackedDimensions, name: &str) -> bool {
     dims.const_env.contains_key(name)
         || dims.parameter_values.contains_key(name)
         || dims.constant_types.contains_key(name)
@@ -1437,6 +1585,7 @@ pub(super) fn body(
         mut points,
         items,
         bins: bits,
+        crosses: cross_bits,
     } = sampled;
     let instance = builder.declare(HANDLE, handle.clone());
     let mut construction = Construction {
@@ -1452,6 +1601,9 @@ pub(super) fn body(
         keyed: Vec::new(),
         warns: false,
     };
+    let native = site.tree.declarations();
+    let layout = Layout::of(native, site.declaration());
+    let mut crosses = Vec::new();
     let mut point = 0;
     for item in &site.declaration().items {
         match item {
@@ -1485,8 +1637,45 @@ pub(super) fn body(
                 }
                 point += 1;
             }
-            CoverageItem::Cross(_) => {
-                return Err(unsupported("covergroup cross (IEEE 1800-2023 19.6)"));
+            CoverageItem::Cross(cross) => {
+                let index = crosses.len();
+                let item = (points.len() + 1 + index) as u32;
+                let bits = &cross_bits[index];
+                let crossing = Crossing {
+                    name: covergroups::cross_name(cross, index + 1),
+                    points: &layout.crosses[index].1,
+                    layout: &layout,
+                    points_of: &points,
+                };
+                let mut descriptor =
+                    heap::CrossDescriptor::new(crossing.name.clone(), crossing.points.to_vec());
+                descriptor.iff = bits.iff;
+                descriptor.predicates = bits.count;
+                let mut declaration = 0;
+                for item_of in &cross.body_items {
+                    match item_of {
+                        celox_sv_syntax::CrossItem::Option(option) => {
+                            construction.option(builder, item, option, Level::Cross)?;
+                        }
+                        celox_sv_syntax::CrossItem::Bins(bins) => {
+                            let bin = construction.cross_bins(
+                                builder,
+                                bins,
+                                &crossing,
+                                bits.bins[declaration],
+                            )?;
+                            descriptor.bins.push(bin);
+                            declaration += 1;
+                        }
+                        // The declaration rejected it.
+                        celox_sv_syntax::CrossItem::Function(_) => {
+                            return Err(unsupported(
+                                "covergroup function declared in a cross body (IEEE 1800-2023 19.6, 19.6.1.4)",
+                            ));
+                        }
+                    }
+                }
+                crosses.push(descriptor);
             }
         }
     }
@@ -1547,5 +1736,6 @@ pub(super) fn body(
     descriptor.options = options;
     descriptor.sets = sets;
     descriptor.filters = filters;
+    descriptor.crosses = crosses;
     Ok((instance, body, descriptor))
 }

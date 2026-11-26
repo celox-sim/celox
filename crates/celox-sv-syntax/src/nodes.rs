@@ -1762,8 +1762,11 @@ pub struct TransitionRepeat {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Cross {
     pub label: Option<Name>,
-    /// The `cross_item`s, two or more.
-    pub items: Vec<Name>,
+    /// The `cross_item`s, two or more: each a name expression
+    /// ([`ExprKind::Name`]), the identifier of a coverpoint or of a
+    /// variable, which a cross of a variable binds as the expression of its
+    /// implicit coverpoint (19.6).
+    pub items: Vec<ExprId>,
     /// The guard `iff ( expression )`.
     pub iff: Option<ExprId>,
     pub body_items: Vec<CrossItem>,

@@ -531,11 +531,36 @@ impl AnalyzerError {
         let Self::Unsupported(construct) = self else {
             return SV_FRONTEND_TRACKING_ISSUE;
         };
+        // A construct the parser rejects is named after its location,
+        // `path:line:column: construct`.
+        let construct = located(construct).unwrap_or(construct);
         UNSUPPORTED_CONSTRUCT_ISSUES
             .iter()
             .find(|(prefix, _)| construct.starts_with(prefix))
             .map_or(SV_FRONTEND_TRACKING_ISSUE, |&(_, issue)| issue)
     }
+}
+
+/// What follows the first `": "` of `text` that comes right after
+/// `<something>:<digits>:<digits>`, counting from the `": "` before it or
+/// from the start of `text`, if one does: the text before it is taken as
+/// the location `path:line:column` of a parser diagnostic. Each `": "` is
+/// tried in turn, as a path may hold one itself (`C:\x: y.sv:12:1: …`).
+fn located(text: &str) -> Option<&str> {
+    let mut rest = text;
+    while let Some(at) = rest.find(": ") {
+        let (before, after) = (&rest[..at], &rest[at + 2..]);
+        let mut fields = before.rsplitn(3, ':');
+        let column = fields.next()?;
+        let line = fields.next();
+        let numeric =
+            |field: &str| !field.is_empty() && field.bytes().all(|byte| byte.is_ascii_digit());
+        if numeric(column) && line.is_some_and(numeric) && fields.next().is_some() {
+            return Some(after);
+        }
+        rest = after;
+    }
+    None
 }
 
 /// Time declarations for synthetic foreign declaration files, preserving the

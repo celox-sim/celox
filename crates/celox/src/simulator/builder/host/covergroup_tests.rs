@@ -794,6 +794,121 @@ fn bin_kinds_add_the_calls_of_their_predicates_and_filters() {
     assert_eq!(declared, none);
 }
 
+/// What crosses add to a sample (19.6): a cross is counted by the heap from
+/// the values the sample hands over for its coverpoints, so it adds no call
+/// of its own, also with bins and `intersect` lists, which the heap makes of
+/// the descriptor. A variable it crosses is one more coverpoint, whose value
+/// joins those of the others in their call while they fit 64 bits. The
+/// guards of a cross and of its bins are one call for the cross. None is a
+/// call of the heap helper, so the plan is that of the design without the
+/// cross; a cross with an illegal bin has the report of a hit, as a
+/// coverpoint with one has.
+#[test]
+fn crosses_add_a_call_for_their_guards_only() {
+    use coverage::op;
+    let design = |crosses: &str| {
+        rtl(
+            "",
+            &format!(
+                "    bit [3:0] v;
+    bit en;
+    covergroup cg;
+        cv: coverpoint v {{ bins low[] = {{[0:3]}}; bins high = {{[4:15]}}; }}
+        cq: coverpoint q;
+{crosses}
+    endgroup
+    cg c;
+    always @(posedge clk) begin
+        if (c == null) c = new;
+        c.sample();
+    end"
+            ),
+        )
+    };
+    let plan = |source: &str| {
+        let (program, facts) = laid_out(timed(source));
+        let calls = coverage_subs(&program.sir);
+        let plan = crate::scheduler::plan_for_test(&program).unwrap();
+        (
+            (
+                plan.settle_reads.is_some(),
+                plan.fallback,
+                plan.lazy,
+                plan.incremental,
+                plan.active,
+            ),
+            facts,
+            calls,
+        )
+    };
+    let of_a_sample = |calls: &[(u64, u64, u64)]| {
+        let bodies = count(calls, op::SAMPLING);
+        assert!(bodies > 0);
+        [
+            op::SAMPLING,
+            op::PRESENT,
+            op::POINTS,
+            op::POINT,
+            op::PREDICATES,
+            op::SAMPLE_END,
+            op::MESSAGE,
+        ]
+        .map(|sub| {
+            let calls = count(calls, sub);
+            assert_eq!(calls % bodies, 0);
+            calls / bodies
+        })
+    };
+    let constructing =
+        |calls: &[(u64, u64, u64)]| [op::NEW, op::INPUT, op::BUILD].map(|sub| count(calls, sub));
+    let (base, base_facts, base_calls) = plan(&design(""));
+    assert!(base.0 && base.2.is_some());
+    assert_eq!(base_facts.heap_calls, 0);
+    assert_eq!(of_a_sample(&base_calls), [1, 0, 1, 0, 0, 1, 0]);
+    // Crosses of the coverpoints, with bins and constant `intersect`
+    // lists, and of a variable: the calls of the design without them.
+    let (crossed, facts, calls) = plan(&design(
+        "        x: cross cv, cq { bins b = binsof(cv.low) && binsof(cq) intersect {[0:3]}; \
+         ignore_bins i = !binsof(cq) intersect {7}; }
+        y: cross cv, en;",
+    ));
+    assert_eq!(facts.heap_calls, 0);
+    assert_eq!(of_a_sample(&calls), [1, 0, 1, 0, 0, 1, 0]);
+    // `v`, `q` and `en` in one call of three items.
+    assert!(calls.contains(&(op::POINTS, 1, 3)), "{calls:?}");
+    assert_eq!(constructing(&calls), constructing(&base_calls));
+    assert_eq!(crossed, base);
+    // The guards of a cross and of its bins: one call for the cross, the
+    // fourth item, after the coverpoints.
+    let (guarded, facts, calls) = plan(&design(
+        "        x: cross cv, cq iff (en) { bins b = binsof(cv.low) iff (!en); }
+        y: cross cv, cq;",
+    ));
+    assert_eq!(facts.heap_calls, 0);
+    assert_eq!(of_a_sample(&calls), [1, 0, 1, 0, 1, 1, 0]);
+    assert!(calls.contains(&(op::PREDICATES, 3, 0)), "{calls:?}");
+    assert_eq!(guarded, base);
+    // An illegal cross product: the sample reads the text of a hit.
+    let (illegal, facts, calls) = plan(&design(
+        "        x: cross cv, cq { illegal_bins bad = binsof(cv.high) && binsof(cq) intersect {0}; }",
+    ));
+    assert_eq!(facts.heap_calls, 0);
+    assert_eq!(of_a_sample(&calls), [1, 0, 1, 0, 0, 1, 1]);
+    assert_eq!(illegal, base);
+    assert_eq!(facts.handles, base_facts.handles + 1);
+    // Declared and never constructed, a covergroup with crosses is free.
+    let (_, declared) = laid_out(timed(&rtl(
+        "",
+        "    bit [1:0] a, b;
+    covergroup cg(int n);
+        ca: coverpoint a;
+        x: cross ca, b iff (q[0]) { bins s = binsof(b) intersect {n}; illegal_bins i = binsof(ca) intersect {3}; }
+    endgroup",
+    )));
+    let (_, none) = laid_out(timed(&rtl("", "    bit [1:0] a, b;")));
+    assert_eq!(declared, none);
+}
+
 /// A coverpoint, a bin operand and an argument of more than 64 bits are
 /// handed to the heap in words, with coverage operations alone: nothing of
 /// a sample or of a construction is put in a collection of the heap, which

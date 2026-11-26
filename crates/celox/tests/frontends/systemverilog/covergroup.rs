@@ -767,7 +767,8 @@ fn module_scope_construction_requires_simulation() {
 /// declares a variable of the type builds.
 #[test]
 fn unsupported_package_covergroup_reports_where_used() {
-    let package = "package p;\n    bit a, b;\n    covergroup pcg(int x); coverpoint x; cross a, b; endgroup\nendpackage\n";
+    let package = "package p;\n    bit a, b;\n    covergroup pcg(int x); coverpoint x; \
+         ab: cross a, b { bins w = ab with (a > b); } endgroup\nendpackage\n";
     let build = |body: &str| {
         let source = format!("`timescale 1ns/1ns\n{package}module Top;\n{body}\nendmodule\n");
         celox::Simulation::from_sv_sources(
@@ -787,7 +788,10 @@ fn unsupported_package_covergroup_reports_where_used() {
         "    real r;\n    initial r = p::pcg::get_coverage();",
     ] {
         let error = build(body).expect_err(body);
-        assert!(error.contains("covergroup cross"), "{body}: {error}");
+        assert!(
+            error.contains("covergroup cross with or matches selection"),
+            "{body}: {error}"
+        );
     }
 }
 
@@ -3806,6 +3810,933 @@ endmodule
                 ]),
                 "{context}"
             );
+        }
+    }
+}
+
+/// The rows of item `item` of instance `instance` of covergroup type
+/// `name`: each bin with its kind and hits, and the number of automatic
+/// cross bins that are not listed.
+fn rows(
+    report: &celox::CoverageReport,
+    name: &str,
+    instance: usize,
+    item_name: &str,
+) -> (Vec<(String, celox::BinReportKind, u64)>, u64) {
+    let item = item(report, name, instance, item_name);
+    (
+        item.bins
+            .iter()
+            .map(|bin| (bin.name.clone(), bin.kind, bin.hits))
+            .collect(),
+        item.omitted_bins,
+    )
+}
+
+/// `rows` of bins of kind `bins` alone.
+fn counting(bins: &[(&str, u64)]) -> Vec<(String, celox::BinReportKind, u64)> {
+    bins.iter()
+        .map(|(name, hits)| (name.to_string(), celox::BinReportKind::Bins, *hits))
+        .collect()
+}
+
+sv_backends! {
+    /// 19.6: a cross of coverpoints, or of variables, which get a coverpoint
+    /// "as if it had been created by the statement `coverpoint V;`", has a
+    /// bin for each combination of their bins. These are the examples of
+    /// the clause, `cov`, `cov2` and `cov3`, and that of 19.8.1, which
+    /// crosses an argument of `sample`.
+    fn automatic_crosses_and_implicit_coverpoints(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done);
+    bit [3:0] a, b, c;
+    bit [31:0] a_var;
+    bit [3:0] b_var;
+    covergroup cov;
+        aXb : cross a, b;
+    endgroup
+    covergroup cov2;
+        BC: coverpoint b+c;
+        aXb : cross a, BC;
+    endgroup
+    covergroup cov3;
+        A: coverpoint a_var { bins yy[] = {[0:9]}; }
+        CC: cross b_var, A;
+    endgroup
+    covergroup p_cg with function sample(bit s, int x);
+        coverpoint x { bins low[] = {[0:3]}; }
+        cross x, s;
+    endgroup
+    cov c1 = new;
+    cov2 c2 = new;
+    cov3 c3 = new;
+    p_cg c4 = new;
+    initial begin
+        a = 1; b = 2; c = 3; a_var = 4; b_var = 5;
+        c1.sample(); c2.sample(); c3.sample();
+        a = 15; b = 0; c = 0; a_var = 20; b_var = 1;
+        c1.sample(); c2.sample(); c3.sample();
+        c4.sample(1, 2); c4.sample(0, 2); c4.sample(1, 9);
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        let report = sim.coverage();
+        // The coverpoints of `a` and `b`, 16 automatic bins each, and 256
+        // cross products.
+        let names = |name: &str| {
+            group(&report, name).instances[0]
+                .items
+                .iter()
+                .map(|item| (item.name.clone(), item.kind, item.coverpoints.clone()))
+                .collect::<Vec<_>>()
+        };
+        let (point, cross) = (celox::CoverItemKind::Coverpoint, celox::CoverItemKind::Cross);
+        let crossed = |names: &[&str]| names.iter().map(|name| name.to_string()).collect();
+        assert_eq!(
+            names("Top.cov"),
+            [
+                ("a".to_string(), point, vec![]),
+                ("b".to_string(), point, vec![]),
+                ("aXb".to_string(), cross, crossed(&["a", "b"])),
+            ]
+        );
+        assert_eq!(counted(&report, "Top.cov", 0, "a"), (2, 16));
+        assert_eq!(counted(&report, "Top.cov", 0, "aXb"), (2, 256));
+        assert_eq!(
+            rows(&report, "Top.cov", 0, "aXb"),
+            (counting(&[("<auto[1],auto[2]>", 1), ("<auto[15],auto[0]>", 1)]), 254)
+        );
+        // `BC` is the coverpoint of `b+c`, of four bits: the same number of
+        // cross products. The implicit coverpoint follows those declared.
+        assert_eq!(
+            names("Top.cov2"),
+            [
+                ("BC".to_string(), point, vec![]),
+                ("a".to_string(), point, vec![]),
+                ("aXb".to_string(), cross, crossed(&["a", "BC"])),
+            ]
+        );
+        assert_eq!(
+            rows(&report, "Top.cov2", 0, "aXb"),
+            (counting(&[("<auto[1],auto[5]>", 1), ("<auto[15],auto[0]>", 1)]), 254)
+        );
+        // 16 × 10 = 160 cross products; a value of `a_var` in no bin of `A`
+        // is no sample of the cross.
+        assert_eq!(counted(&report, "Top.cov3", 0, "CC"), (1, 160));
+        assert_eq!(counted(&report, "Top.cov3", 0, "b_var"), (2, 16));
+        assert_eq!(
+            rows(&report, "Top.cov3", 0, "CC"),
+            (counting(&[("<auto[5],yy[4]>", 1)]), 159)
+        );
+        // The argument `s` of `sample` gets a coverpoint of its own; the
+        // cross without a label is named for reports only.
+        assert_eq!(
+            names("Top.p_cg"),
+            [
+                ("x".to_string(), point, vec![]),
+                ("s".to_string(), point, vec![]),
+                ("$cross1".to_string(), cross, crossed(&["x", "s"])),
+            ]
+        );
+        assert_eq!(counted(&report, "Top.p_cg", 0, "s"), (2, 2));
+        assert_eq!(
+            rows(&report, "Top.p_cg", 0, "$cross1"),
+            (counting(&[("<low[2],auto[0]>", 1), ("<low[2],auto[1]>", 1)]), 6)
+        );
+    }
+
+    /// 19.6.1: the bins of a cross take the cross products their select
+    /// expressions select, and the others stay automatic bins. These are
+    /// `x1` and `x2` of the clause and the cross `c` of 19.6.1.1: a sample
+    /// of each of its 16 cross products counts 4 in `c1`, 7 in `c2` and 1
+    /// in `c3`, and leaves 6 automatic bins (19.11.2: `Bc` = 16 - 10).
+    fn cross_bins_select_cross_products(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done, output longint unsigned inst);
+    int i, j;
+    bit [7:0] v_a, v_b;
+    covergroup ct;
+        coverpoint i { bins i[] = { [0:1] }; }
+        coverpoint j { bins j[] = { [0:1] }; }
+        x1: cross i,j;
+        x2: cross i,j {
+            bins i_zero = binsof(i) intersect { 0 };
+        }
+    endgroup
+    covergroup cg;
+        a: coverpoint v_a
+        {
+            bins a1 = { [0:63] };
+            bins a2 = { [64:127] };
+            bins a3 = { [128:191] };
+            bins a4 = { [192:255] };
+        }
+        b: coverpoint v_b
+        {
+            bins b1 = {0};
+            bins b2 = { [1:84] };
+            bins b3 = { [85:169] };
+            bins b4 = { [170:255] };
+        }
+        c : cross a, b
+        {
+            bins c1 = ! binsof(a) intersect {[100:200]};
+            bins c2 = binsof(a.a2) || binsof(b.b2);
+            bins c3 = binsof(a.a1) && binsof(b.b4);
+        }
+    endgroup
+    ct t = new;
+    cg g = new;
+    initial begin
+        i = 0; j = 1; t.sample();
+        i = 1; j = 0; t.sample();
+        for (int x = 0; x < 4; x++)
+            for (int y = 0; y < 4; y++) begin
+                v_a = x * 64;
+                v_b = y == 0 ? 0 : y == 1 ? 50 : y == 2 ? 100 : 200;
+                g.sample();
+            end
+        inst = $realtobits(g.get_inst_coverage());
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        let report = sim.coverage();
+        assert_eq!(
+            rows(&report, "Top.ct", 0, "x1"),
+            (counting(&[("<i[0],j[1]>", 1), ("<i[1],j[0]>", 1)]), 2)
+        );
+        assert_eq!(counted(&report, "Top.ct", 0, "x1"), (2, 4));
+        // `i_zero`, and the two automatic bins of i == 1.
+        assert_eq!(
+            rows(&report, "Top.ct", 0, "x2"),
+            (counting(&[("i_zero", 1), ("<i[1],j[0]>", 1)]), 1)
+        );
+        assert_eq!(counted(&report, "Top.ct", 0, "x2"), (2, 3));
+        assert_eq!(
+            rows(&report, "Top.cg", 0, "c"),
+            (
+                counting(&[
+                    ("c1", 4),
+                    ("c2", 7),
+                    ("c3", 1),
+                    ("<a3,b1>", 1),
+                    ("<a3,b3>", 1),
+                    ("<a3,b4>", 1),
+                    ("<a4,b1>", 1),
+                    ("<a4,b3>", 1),
+                    ("<a4,b4>", 1),
+                ]),
+                0
+            )
+        );
+        assert_eq!(counted(&report, "Top.cg", 0, "c"), (9, 9));
+        assert_eq!(real(&mut sim, "inst"), 100.0);
+    }
+
+    /// 19.6.2: the cross products of `ignore_bins` are excluded from
+    /// coverage, also where another bin of the cross selects them; the
+    /// example `yy` of the clause keeps 192 of 256. 19.6.3: those of
+    /// `illegal_bins` too, and a sample of one is a run-time error, which
+    /// names the bin, the cross and the cross product; the example `zz`
+    /// takes the illegal value from an argument.
+    fn ignore_and_illegal_cross_products(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done);
+    bit [3:0] a, b;
+    bit [1:0] x, y;
+    covergroup yy;
+        cross a, b
+        {
+            ignore_bins ignore = binsof(a) intersect { 5, [1:3] };
+        }
+        ov: cross a, b {
+            bins some = binsof(a) intersect {[0:7]};
+            ignore_bins ignore = binsof(a) intersect { 5, [1:3] };
+        }
+    endgroup
+    covergroup zz(int bad);
+        cross x, y
+        {
+            illegal_bins illegal = binsof(y) intersect {bad};
+        }
+    endgroup
+    yy cy = new;
+    zz cz = new(2);
+    initial begin
+        a = 2; b = 7; cy.sample();
+        a = 4; b = 7; cy.sample();
+        x = 1; y = 2; cz.sample();
+        #1 x = 1; y = 3; cz.sample();
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(0).unwrap();
+        assert_eq!(
+            reports(sim.drain_runtime_events()),
+            [(
+                celox::Severity::Error,
+                "illegal_bins `illegal` of cross `$cross1` of covergroup `Top.zz` (instance \
+                 `Top.zz#0`): <auto[1],auto[2]>"
+                    .to_string()
+            )]
+        );
+        sim.run_until(2).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        assert_eq!(reports(sim.drain_runtime_events()), []);
+        let report = sim.coverage();
+        let (ignore, illegal) = (celox::BinReportKind::Ignore, celox::BinReportKind::Illegal);
+        assert_eq!(counted(&report, "Top.yy", 0, "$cross1"), (1, 192));
+        assert_eq!(
+            rows(&report, "Top.yy", 0, "$cross1"),
+            (
+                vec![
+                    ("ignore".to_string(), ignore, 1),
+                    ("<auto[4],auto[7]>".to_string(), celox::BinReportKind::Bins, 1),
+                ],
+                191
+            )
+        );
+        // `some` keeps the values 0, 4, 6 and 7 of `a`, and the ignored
+        // sample counts in it no more.
+        assert_eq!(counted(&report, "Top.yy", 0, "ov"), (1, 129));
+        assert_eq!(
+            rows(&report, "Top.yy", 0, "ov"),
+            (
+                vec![
+                    ("some".to_string(), celox::BinReportKind::Bins, 1),
+                    ("ignore".to_string(), ignore, 1),
+                ],
+                128
+            )
+        );
+        // 16 cross products, 4 of them illegal.
+        assert_eq!(counted(&report, "Top.zz", 0, "$cross1"), (1, 12));
+        assert_eq!(
+            rows(&report, "Top.zz", 0, "$cross1"),
+            (
+                vec![
+                    ("illegal".to_string(), illegal, 1),
+                    ("<auto[1],auto[3]>".to_string(), celox::BinReportKind::Bins, 1),
+                ],
+                11
+            )
+        );
+    }
+
+    /// 19.6: a cross whose guard is false at a sample is not sampled, and a
+    /// bin of a cross whose guard is false counts nothing; its cross
+    /// products stay those of no other bin. A cross of a coverpoint that is
+    /// not sampled, as its guard is false, is not sampled either.
+    fn cross_iff_and_bin_iff(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done);
+    bit [1:0] p, q;
+    bit en, on;
+    covergroup cg;
+        cp: coverpoint p { bins lo = {[0:1]}; bins hi = {[2:3]}; }
+        cq: coverpoint q { bins lo = {[0:1]}; bins hi = {[2:3]}; }
+        gp: coverpoint p iff (on) { bins lo = {[0:1]}; bins hi = {[2:3]}; }
+        g: cross cp, cq iff (en) {
+            bins both_lo = binsof(cp.lo) && binsof(cq.lo) iff (on);
+        }
+        u: cross cp, cq;
+        x: cross gp, cq;
+    endgroup
+    cg c = new;
+    initial begin
+        en = 1; on = 1; p = 0; q = 0; c.sample();
+        en = 1; on = 0; p = 0; q = 1; c.sample();
+        en = 0; on = 1; p = 3; q = 3; c.sample();
+        en = 1; on = 1; p = 2; q = 0; c.sample();
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        let report = sim.coverage();
+        assert_eq!(
+            rows(&report, "Top.cg", 0, "g"),
+            (counting(&[("both_lo", 1), ("<hi,lo>", 1)]), 2)
+        );
+        assert_eq!(counted(&report, "Top.cg", 0, "g"), (2, 4));
+        assert_eq!(
+            rows(&report, "Top.cg", 0, "u"),
+            (counting(&[("<lo,lo>", 2), ("<hi,lo>", 1), ("<hi,hi>", 1)]), 1)
+        );
+        // The second sample is none of `gp`, so none of `x`.
+        assert_eq!(
+            rows(&report, "Top.cg", 0, "x"),
+            (counting(&[("<lo,lo>", 1), ("<hi,lo>", 1), ("<hi,hi>", 1)]), 1)
+        );
+    }
+
+    /// Table 19-1: with `cross_retain_auto_bins` clear, the bins a cross
+    /// declares remove every automatic bin; with only an `ignore_bins`, the
+    /// cross has no bin and takes no part in the coverage of the covergroup
+    /// (19.11.2). Set for the covergroup it is the default of its crosses
+    /// (Table 19-2), which a cross may set again.
+    fn cross_retain_auto_bins_off(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done, output longint unsigned inst, output longint unsigned none);
+    bit [1:0] p, q;
+    covergroup cg;
+        option.cross_retain_auto_bins = 0;
+        cp: coverpoint p { bins lo = {[0:1]}; bins hi = {[2:3]}; }
+        cq: coverpoint q { bins lo = {[0:1]}; bins hi = {[2:3]}; }
+        kept: cross cp, cq { bins b = binsof(cp.lo); }
+        nothing: cross cp, cq { ignore_bins i = binsof(cp.hi); }
+        retained: cross cp, cq { option.cross_retain_auto_bins = 1; bins b = binsof(cp.lo); }
+    endgroup
+    cg c = new;
+    initial begin
+        p = 0; q = 0; c.sample();
+        p = 3; q = 3; c.sample();
+        inst = $realtobits(c.get_inst_coverage());
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        let report = sim.coverage();
+        assert_eq!(rows(&report, "Top.cg", 0, "kept"), (counting(&[("b", 1)]), 0));
+        assert_eq!(counted(&report, "Top.cg", 0, "kept"), (1, 1));
+        assert_eq!(
+            rows(&report, "Top.cg", 0, "nothing"),
+            (vec![("i".to_string(), celox::BinReportKind::Ignore, 1)], 0)
+        );
+        assert_eq!(counted(&report, "Top.cg", 0, "nothing"), (0, 0));
+        assert_eq!(item(&report, "Top.cg", 0, "nothing").coverage, 0.0);
+        assert_eq!(
+            rows(&report, "Top.cg", 0, "retained"),
+            (counting(&[("b", 1), ("<hi,hi>", 1)]), 1)
+        );
+        assert_eq!(counted(&report, "Top.cg", 0, "retained"), (2, 3));
+        // `cp`, `cq` and `kept` are covered, `retained` is to 2 of 3.
+        assert!(close(
+            real(&mut sim, "inst"),
+            (100.0 + 100.0 + 100.0 + 200.0 / 3.0) / 4.0
+        ));
+    }
+
+    /// 19.7, Table 19-2: a cross has `weight`, `goal`, `comment`,
+    /// `at_least` and `cross_num_print_missing`; `at_least` and
+    /// `cross_num_print_missing` of the covergroup are the defaults of its
+    /// crosses. The values are expressions of the scope of `new`.
+    fn cross_options(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done, output longint unsigned inst);
+    bit [1:0] p, q;
+    covergroup cg(int w);
+        option.at_least = 2;
+        option.cross_num_print_missing = 2;
+        cp: coverpoint p { bins lo = {[0:1]}; bins hi = {[2:3]}; }
+        cq: coverpoint q { bins lo = {[0:1]}; bins hi = {[2:3]}; }
+        x: cross cp, cq {
+            option.weight = w;
+            option.goal = 90;
+            option.comment = "pairs";
+            option.at_least = 1;
+            option.cross_num_print_missing = 1;
+        }
+        y: cross cp, cq;
+    endgroup
+    cg c = new(3);
+    initial begin
+        p = 0; q = 0; c.sample();
+        c.sample();
+        p = 2; c.sample();
+        inst = $realtobits(c.get_inst_coverage());
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        let report = sim.coverage();
+        let x = item(&report, "Top.cg", 0, "x");
+        assert_eq!(
+            (x.weight, x.goal, x.comment.as_str(), x.at_least),
+            (3, 90, "pairs", 1)
+        );
+        let y = item(&report, "Top.cg", 0, "y");
+        assert_eq!((y.weight, y.goal, y.comment.as_str(), y.at_least), (1, 100, "", 2));
+        // One missing bin of `x` is listed, two of `y`.
+        assert_eq!(
+            rows(&report, "Top.cg", 0, "x"),
+            (counting(&[("<lo,lo>", 2), ("<hi,lo>", 1), ("<lo,hi>", 0)]), 1)
+        );
+        assert_eq!(counted(&report, "Top.cg", 0, "x"), (2, 4));
+        assert_eq!(
+            rows(&report, "Top.cg", 0, "y"),
+            (
+                counting(&[("<lo,lo>", 2), ("<hi,lo>", 1), ("<lo,hi>", 0), ("<hi,hi>", 0)]),
+                0
+            )
+        );
+        assert_eq!(counted(&report, "Top.cg", 0, "y"), (1, 4));
+        assert!(close(
+            real(&mut sim, "inst"),
+            (50.0 + 50.0 + 3.0 * 50.0 + 25.0) / 6.0
+        ));
+    }
+
+    /// The covergroup of a monitor class with an overridden `sample`, of
+    /// the shape a protocol coverage collector has: a `default` bin, an
+    /// illegal value, a bin array, and a cross of three coverpoints that
+    /// ignores combinations by the values of two of them. Bins that are
+    /// `default`, ignored or illegal have no cross products (19.6): 3 × 4 ×
+    /// 5 = 60 cross products, of which 4 + 10 are ignored.
+    fn cross_of_a_monitor_class(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done);
+    class txn;
+        bit [1:0] burst;
+        bit [2:0] size;
+        bit [3:0] len;
+        function new(bit [1:0] b, bit [2:0] s, bit [3:0] l);
+            burst = b; size = s; len = l;
+        endfunction
+    endclass
+    class monitor;
+        covergroup cg with function sample(txn t);
+            BURST: coverpoint t.burst {
+                bins fixed = {0};
+                bins incr = {1};
+                bins wrap = {2};
+                illegal_bins reserved = {3};
+            }
+            SIZE: coverpoint t.size {
+                bins sizes[] = {[0:3]};
+                bins other = default;
+            }
+            LEN: coverpoint t.len {
+                bins one = {0};
+                bins many[] = {1, 3, 7, 15};
+                bins rest = default;
+            }
+            BXSXL: cross BURST, SIZE, LEN {
+                ignore_bins wrap_one = binsof(BURST) intersect {2} && binsof(LEN) intersect {0};
+                ignore_bins fixed_big = binsof(BURST) intersect {0} && binsof(SIZE) intersect {[2:3]};
+            }
+        endgroup
+        function new();
+            cg = new;
+        endfunction
+        function void write(txn t);
+            cg.sample(t);
+        endfunction
+    endclass
+    monitor m;
+    task automatic put(bit [1:0] b, bit [2:0] s, bit [3:0] l);
+        txn t;
+        t = new(b, s, l);
+        m.write(t);
+    endtask
+    initial begin
+        m = new;
+        put(1, 0, 0);
+        put(2, 1, 0);
+        put(0, 3, 7);
+        put(1, 5, 1);
+        #1 put(3, 0, 0);
+        #1 put(0, 1, 15);
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(0).unwrap();
+        assert_eq!(reports(sim.drain_runtime_events()), []);
+        sim.run_until(3).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        let errors = reports(sim.drain_runtime_events());
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].0, celox::Severity::Error);
+        assert!(
+            errors[0].1.starts_with("illegal_bins `reserved` of coverpoint `BURST` of covergroup `monitor::cg`")
+                && errors[0].1.ends_with("value 3"),
+            "{errors:?}"
+        );
+        let report = sim.coverage();
+        assert_eq!(samples(&report, "monitor::cg"), [6]);
+        assert_eq!(counted(&report, "monitor::cg", 0, "BXSXL"), (2, 46));
+        let ignore = celox::BinReportKind::Ignore;
+        assert_eq!(
+            rows(&report, "monitor::cg", 0, "BXSXL"),
+            (
+                vec![
+                    ("wrap_one".to_string(), ignore, 1),
+                    ("fixed_big".to_string(), ignore, 1),
+                    ("<fixed,sizes[1],many[15]>".to_string(), celox::BinReportKind::Bins, 1),
+                    ("<incr,sizes[0],one>".to_string(), celox::BinReportKind::Bins, 1),
+                ],
+                44
+            )
+        );
+    }
+
+    /// 19.6.1: `!binsof`, `&&`, `||` and parentheses combine the bins that
+    /// `binsof` conditions select, of a coverpoint or of one bin
+    /// declaration of it; the values of `intersect` may be arguments of the
+    /// covergroup and calls of functions (19.5). The identifier of the
+    /// cross selects every bin tuple (19.6.1.2).
+    fn select_expressions(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done);
+    bit [3:0] a;
+    bit [1:0] b;
+    function automatic int twice(int v);
+        return 2 * v;
+    endfunction
+    covergroup cg(int lo, int hi);
+        ca: coverpoint a { bins low[] = {[0:3]}; bins mid = {[4:7]}; bins top = {[8:15]}; }
+        cb: coverpoint b;
+        S: cross ca, cb {
+            bins neg = !binsof(ca.low) && binsof(cb) intersect {[lo:hi]};
+            bins par = (binsof(ca.mid) || binsof(ca.top)) && !binsof(cb) intersect {twice(1)};
+            bins arr = binsof(ca.low) intersect {[1:2]};
+        }
+        T: cross ca, cb { bins all = T; }
+    endgroup
+    cg one = new(1, 2);
+    cg two = new(3, 3);
+    initial begin
+        a = 5; b = 1; one.sample();
+        a = 9; b = 2; one.sample();
+        a = 0; b = 0; one.sample();
+        a = 2; b = 3; one.sample();
+        a = 5; b = 3; two.sample();
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        let report = sim.coverage();
+        // `neg` is <mid|top, 1|2>, `par` <mid|top, 0|1|3>, `arr` <low[1]|low[2],
+        // any>: 16 cross products, so 8 are automatic.
+        assert_eq!(
+            rows(&report, "Top.cg", 0, "S"),
+            (
+                counting(&[("neg", 2), ("par", 1), ("arr", 1), ("<low[0],auto[0]>", 1)]),
+                7
+            )
+        );
+        assert_eq!(counted(&report, "Top.cg", 0, "S"), (4, 11));
+        assert_eq!(rows(&report, "Top.cg", 0, "T"), (counting(&[("all", 4)]), 0));
+        assert_eq!(counted(&report, "Top.cg", 0, "T"), (1, 1));
+        // With `lo` = `hi` = 3, `neg` is <mid|top, 3>: 14 cross products in
+        // bins, 10 automatic.
+        assert_eq!(
+            rows(&report, "Top.cg", 1, "S"),
+            (counting(&[("neg", 1), ("par", 1), ("arr", 0)]), 10)
+        );
+        assert_eq!(counted(&report, "Top.cg", 1, "S"), (2, 13));
+    }
+
+    /// The report of a cross lists the automatic bins that were sampled and
+    /// as many others as `option.cross_num_print_missing` asks for, whatever
+    /// the number of cross products: a cross of seven of nine one-bit
+    /// coverpoints has 128, one of all nine 512.
+    fn large_cross_report_is_bounded(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done);
+    bit [8:0] d;
+    covergroup cg;
+        p0: coverpoint d[0]; p1: coverpoint d[1]; p2: coverpoint d[2];
+        p3: coverpoint d[3]; p4: coverpoint d[4]; p5: coverpoint d[5];
+        p6: coverpoint d[6]; p7: coverpoint d[7]; p8: coverpoint d[8];
+        seven: cross p0, p1, p2, p3, p4, p5, p6;
+        nine: cross p0, p1, p2, p3, p4, p5, p6, p7, p8 { option.cross_num_print_missing = 5; }
+    endgroup
+    cg c = new;
+    initial begin
+        d = 0; c.sample();
+        d = 9'h1ff; c.sample();
+        d = 9'h0aa; c.sample();
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        let report = sim.coverage();
+        let (listed, omitted) = rows(&report, "Top.cg", 0, "seven");
+        assert_eq!(listed.len(), 3);
+        assert_eq!(omitted, 125);
+        assert_eq!(counted(&report, "Top.cg", 0, "seven"), (3, 128));
+        let (listed, omitted) = rows(&report, "Top.cg", 0, "nine");
+        assert_eq!(listed.len(), 8);
+        assert_eq!(omitted, 504);
+        assert_eq!(counted(&report, "Top.cg", 0, "nine"), (3, 512));
+        assert_eq!(
+            listed[0].0,
+            "<auto[0],auto[0],auto[0],auto[0],auto[0],auto[0],auto[0],auto[0],auto[0]>"
+        );
+    }
+}
+
+sv_backends! {
+    /// 19.4, 19.6: a cross in a class crosses the properties of the object
+    /// as variables, each with a coverpoint of its own.
+    fn embedded_cross_of_class_properties(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done);
+    class C;
+        bit [1:0] a, b;
+        covergroup cg;
+            ab: cross a, b {
+                ignore_bins same = binsof(a) intersect {0} && binsof(b) intersect {0};
+            }
+        endgroup
+        function new();
+            cg = new;
+        endfunction
+        function void take(bit [1:0] x, bit [1:0] y);
+            a = x;
+            b = y;
+            cg.sample();
+        endfunction
+    endclass
+    C o;
+    initial begin
+        o = new;
+        o.take(0, 0);
+        o.take(1, 2);
+        o.take(3, 3);
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(1).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        let report = sim.coverage();
+        assert_eq!(counted(&report, "C::cg", 0, "a"), (3, 4));
+        assert_eq!(counted(&report, "C::cg", 0, "ab"), (2, 15));
+        assert_eq!(
+            rows(&report, "C::cg", 0, "ab"),
+            (
+                vec![
+                    ("same".to_string(), celox::BinReportKind::Ignore, 1),
+                    ("<auto[1],auto[2]>".to_string(), celox::BinReportKind::Bins, 1),
+                    ("<auto[3],auto[3]>".to_string(), celox::BinReportKind::Bins, 1),
+                ],
+                13
+            )
+        );
+    }
+
+    /// 19.6.1, 19.5.7: the values of an `intersect` list are resolved as
+    /// those of a bin of the coverpoint of its `binsof`. One that an
+    /// argument gives and that the coverpoint has not is warned of by the
+    /// `new` that constructs the instance, and selects nothing.
+    fn intersect_values_of_arguments_warn_at_new(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done);
+    bit [1:0] x, y;
+    covergroup cg(int v);
+        c: cross x, y { bins b = binsof(x) intersect {v}; }
+    endgroup
+    cg fits, outside;
+    initial begin
+        fits = new(1);
+        #1 outside = new(9);
+        x = 1; y = 0; fits.sample(); outside.sample();
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(0).unwrap();
+        assert_eq!(reports(sim.drain_runtime_events()), []);
+        sim.run_until(2).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        let warned = reports(sim.drain_runtime_events());
+        assert_eq!(warned.len(), 1, "{warned:?}");
+        assert_eq!(warned[0].0, celox::Severity::Warning);
+        assert!(
+            warned[0].1.contains("bins `b` of cross `c`") && warned[0].1.contains('9'),
+            "{warned:?}"
+        );
+        let report = sim.coverage();
+        assert_eq!(rows(&report, "Top.cg", 0, "c"), (counting(&[("b", 1)]), 12));
+        assert_eq!(counted(&report, "Top.cg", 0, "c"), (1, 13));
+        assert_eq!(
+            rows(&report, "Top.cg", 1, "c"),
+            (counting(&[("<auto[1],auto[0]>", 1)]), 15)
+        );
+        assert_eq!(counted(&report, "Top.cg", 1, "c"), (1, 16));
+    }
+}
+
+/// An `intersect` list that meets values of a bin whose `with` filter a
+/// sample evaluates, which no construction sorts, is not supported: the
+/// construction ends the simulation with an error that says so.
+#[test]
+fn intersect_with_values_only_a_sample_sorts_ends_the_simulation() {
+    let source = r#"`timescale 1ns/1ns
+module Top(output int done);
+    int x;
+    bit y;
+    covergroup cg;
+        cx: coverpoint x { bins even = cx with (item % 2 == 0); }
+        c: cross cx, y { bins b = binsof(cx) intersect {4}; }
+    endgroup
+    cg h;
+    initial begin
+        h = new;
+        done = 1;
+    end
+endmodule
+"#;
+    let mut sim = simulation(source).four_state(false).build().unwrap();
+    let error = format!(
+        "{:?}",
+        sim.run_until(1).expect_err("the construction faults")
+    );
+    assert!(
+        error.contains("covergroup cross `intersect` of bins `b` of cross `c`")
+            && error.contains("only a sample sorts into bins"),
+        "{error}"
+    );
+}
+
+/// Crosses under the untimed `Simulator`, in the clocked procedure that
+/// constructs and samples the covergroup: the guard of the cross reads the
+/// state of the design, a variable crossed is an input, and a sample of an
+/// illegal cross product is reported. At every optimization level and in
+/// both state modes.
+#[test]
+fn crosses_in_clocked_logic_under_simulator() {
+    let source = r#"module Top(input bit clk, input logic [3:0] d, input logic e, output bit [7:0] q);
+    covergroup cg;
+        cd: coverpoint d { bins low[] = {[0:3]}; bins high = {[4:14]}; illegal_bins bad = {15}; }
+        x: cross cd, e iff (q[0] || q == 8'd4) {
+            bins hi_on = binsof(cd.high) && binsof(e) intersect {1};
+            illegal_bins no = binsof(cd.low) intersect {3} && binsof(e) intersect {1};
+        }
+    endgroup
+    cg c;
+    always_ff @(posedge clk) q <= q + 8'd1;
+    always @(posedge clk) begin
+        if (c == null) c = new;
+        c.sample();
+    end
+endmodule
+"#;
+    for level in [
+        celox::OptLevel::O0,
+        celox::OptLevel::O1,
+        celox::OptLevel::O2,
+    ] {
+        for four_state in [false, true] {
+            let mut sim =
+                Simulator::from_sv_sources(vec![(source, Path::new("covergroup_ff.sv"))], "Top")
+                    .four_state(four_state)
+                    .opt_level(level)
+                    .build()
+                    .unwrap();
+            let clk = sim.event("clk");
+            let d = sim.signal("d");
+            let e = sim.signal("e");
+            // `q` is the number of edges before the one that samples.
+            for (value, on) in [(4u8, 1u8), (4, 1), (3, 1), (3, 1), (15, 0), (0, 0)] {
+                sim.modify(|io| {
+                    io.set(d, value);
+                    io.set(e, on);
+                })
+                .unwrap();
+                sim.tick(clk).unwrap();
+            }
+            let context = format!("{level:?} four_state={four_state}");
+            assert_eq!(
+                reports(sim.drain_runtime_events()),
+                [
+                    (
+                        celox::Severity::Error,
+                        "illegal_bins `no` of cross `x` of covergroup `Top.cg` (instance \
+                         `Top.cg#0`): <low[3],auto[1]>"
+                            .to_string()
+                    ),
+                    (
+                        celox::Severity::Error,
+                        "illegal_bins `bad` of coverpoint `cd` of covergroup `Top.cg` (instance \
+                         `Top.cg#0`): value 15"
+                            .to_string()
+                    ),
+                ],
+                "{context}"
+            );
+            let report = sim.coverage();
+            assert_eq!(samples(&report, "Top.cg"), [6], "{context}");
+            assert_eq!(
+                rows(&report, "Top.cg", 0, "x"),
+                (
+                    vec![
+                        ("hi_on".to_string(), celox::BinReportKind::Bins, 1),
+                        ("no".to_string(), celox::BinReportKind::Illegal, 1),
+                        (
+                            "<low[0],auto[0]>".to_string(),
+                            celox::BinReportKind::Bins,
+                            1
+                        ),
+                    ],
+                    7
+                ),
+                "{context}"
+            );
+            assert_eq!(counted(&report, "Top.cg", 0, "x"), (2, 9), "{context}");
         }
     }
 }

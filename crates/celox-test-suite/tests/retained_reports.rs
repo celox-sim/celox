@@ -1463,7 +1463,13 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             | "covergroup::illegal_values_are_values_of_no_other_bin"
                             | "covergroup::tolerance_ranges_of_a_bin"
                             | "covergroup::wildcard_bins_stand_for_both_values_of_a_bit"
-                            | "covergroup::with_expression_keeps_the_values_of_a_bin",
+                            | "covergroup::with_expression_keeps_the_values_of_a_bin"
+                            | "covergroup::cross_bins_take_the_cross_products_they_select"
+                            | "covergroup::cross_guards_hold_for_the_count"
+                            | "covergroup::cross_of_variables_has_a_bin_for_each_pair_of_bins"
+                            | "covergroup::cross_retain_auto_bins_removes_the_automatic_bins"
+                            | "covergroup::cross_select_expressions_combine_binsof_conditions"
+                            | "covergroup::ignored_and_illegal_cross_products_are_no_bins",
                         ) => ("compile_error", "compile", "Invalid module item"),
                         ("icarus", "covergroup::set_expression_is_the_values_of_a_bin") => (
                             "compile_error",
@@ -1487,6 +1493,42 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                         ("verilator", "covergroup::tolerance_ranges_of_a_bin") => {
                             ("compile_error", "compile", "Unsupported: +/- range")
                         }
+                        (
+                            "verilator",
+                            "covergroup::cross_of_variables_has_a_bin_for_each_pair_of_bins",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            // "8.59" expected, "0.00" displayed.
+                            "expect_output: expected [56, 46, 53, 57, 10], got [48, 46, 48, 48, 10]",
+                        ),
+                        (
+                            "verilator",
+                            "covergroup::ignored_and_illegal_cross_products_are_no_bins",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            // "6.42" and "38.89" expected, "0.00" twice displayed.
+                            "expect_output: expected [54, 46, 52, 50, 10, 51, 56, 46, 56, 57, 10], got [48,",
+                        ),
+                        (
+                            "verilator",
+                            "covergroup::cross_retain_auto_bins_removes_the_automatic_bins",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            // "91.67" expected, "76.67" displayed.
+                            "expect_output: expected [57, 49, 46, 54, 55, 10], got [55, 54, 46, 54, 55, 10]",
+                        ),
+                        (
+                            "verilator",
+                            "covergroup::cross_select_expressions_combine_binsof_conditions",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            // "75.76" expected, "72.55" displayed.
+                            "expect_output: expected [55, 53, 46, 55, 54, 10], got [55, 50, 46, 53, 53, 10]",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }
