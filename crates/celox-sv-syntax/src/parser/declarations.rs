@@ -1077,10 +1077,13 @@ impl Parser<'_> {
             let item_word = self.peek();
             let closing_class = item_word == "endclass" && frame.scopes.last() == Some(&"endclass");
             if frame.delimiters.is_empty() {
+                // The `:` of a bind directive's instance list is no label
+                // (IEEE 1800-2023 23.11).
                 frame.item_start = matches!(
                     item_word,
                     "begin" | "end" | "generate" | "endgenerate" | "else" | ":" | ";"
-                );
+                ) && !(item_word == ":"
+                    && frame.typed_category.as_deref() == Some("bind"));
                 frame.label_pending = matches!(item_word, "begin" | "end");
                 if matches!(item_word, "if" | "for" | "case" | "casex" | "casez") {
                     frame.header_pending = true;

@@ -654,6 +654,25 @@ impl<'a> File<'a> {
         self.range_span(range)
             .ok_or_else(|| unsupported("interface elaboration of an empty node"))
     }
+    /// The span of `unit` from its first token to its end keyword. The
+    /// instantiation of a bind directive into `unit` is among its tokens with
+    /// the offsets of the directive (`source_tree::binds`), which a span
+    /// over all of them would reach.
+    fn unit_span(&self, unit: &native::Unit) -> Converted<Span> {
+        let native = self.syntax_tree.declarations();
+        let mut tokens = native
+            .tokens
+            .get(unit.tokens.start..unit.tokens.end)
+            .into_iter()
+            .flatten()
+            .filter(|token| !token.is_trivia())
+            .map(|token| native.sources.invocation(token.origin));
+        let first = tokens
+            .next()
+            .ok_or_else(|| unsupported("interface elaboration of an empty node"))?;
+        let last = tokens.next_back().unwrap_or(first);
+        Ok((first.start, last.end))
+    }
     fn name_span(&self, name: &native::Name) -> Span {
         let span = self
             .syntax_tree
@@ -2525,7 +2544,7 @@ impl Scope {
                 native::UnitKind::Package => Self::Package(name),
                 _ => Self::Other,
             };
-            scopes.push((file.span(unit.tokens)?, scope));
+            scopes.push((file.unit_span(unit)?, scope));
         }
         for item in &native.body_items {
             if let native::BodyItemKind::Unconverted { category, .. } = &item.kind
@@ -2856,7 +2875,7 @@ impl InterfaceDecl {
                 "enum type in interface `{interface_name}`"
             )));
         }
-        let span = file.span(unit.tokens)?;
+        let span = file.unit_span(unit)?;
         let mut interface = Self {
             scope: handle,
             name: interface_name.clone(),
@@ -3542,7 +3561,7 @@ impl ModuleDecl {
             scope: handle,
             name: native_name(&unit.name),
             file: file_index,
-            span: file.span(unit.tokens)?,
+            span: file.unit_span(unit)?,
             ports,
         })
     }
@@ -3646,7 +3665,7 @@ fn generic_actual_interfaces(
         if unit.kind != native::UnitKind::Module {
             continue;
         }
-        let module = file.span(unit.tokens)?;
+        let module = file.unit_span(unit)?;
         let blocks = block_spans(unit, file)?;
         let mut handles = Handles::default();
         let mut actuals = Vec::new();

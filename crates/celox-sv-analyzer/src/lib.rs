@@ -138,6 +138,10 @@ pub enum AnalyzerError {
     /// rule and its clause.
     #[error("invalid clocking block: {0}")]
     InvalidClocking(String),
+    /// A bind directive the standard makes illegal (IEEE 1800-2023 23.11);
+    /// the text names the rule.
+    #[error("invalid bind directive: {0}")]
+    InvalidBind(String),
     /// An embedded covergroup variable is assigned only in the `new` method
     /// of the class that declares the covergroup (IEEE 1800-2023 19.4).
     #[error(
