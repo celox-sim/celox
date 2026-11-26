@@ -6524,3 +6524,57 @@ endmodule
         Ok(vec![value(4), value(4), value(4)])
     );
 }
+
+/// The sampling subroutine of a covergroup with `ref` arguments takes the
+/// variables the declaration of each instance names, an unpacked array
+/// among them, by reference (IEEE 1800-2023 19.3): out of line it samples
+/// what it samples inlined, at the clocking event of the covergroup and
+/// through `sample()` in a function.
+#[test]
+fn covergroup_reference_arguments_out_of_line() {
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, b, c);
+    bit clk = 0;
+    logic [3:0] v = 0;
+    always #5 clk = ~clk;
+    always @(posedge clk) v <= v + 4'd1;
+    logic [3:0] w;
+    assign w = v + 4'd8;
+    logic [3:0] arr[0:3];
+    for (genvar i = 0; i < 4; i++) begin : drive
+        assign arr[i] = v + 4'(i);
+    end
+    covergroup cg(ref logic [3:0] x, ref logic [3:0] e[0:3]) @(posedge clk);
+        coverpoint x { bins b[] = {[0:15]}; }
+        coverpoint e[3] { bins b[] = {[0:15]}; }
+    endgroup
+    cg g = new(v, arr), h = new(w, arr);
+    covergroup plain(ref logic [3:0] x); coverpoint x { bins b[] = {[0:15]}; } endgroup
+    plain p = new(w);
+    function automatic void take(); p.sample(); endfunction
+    int covered, total;
+    initial begin
+        repeat (3) #10 take();
+        #1;
+        void'(g.get_inst_coverage(covered, total));
+        a = covered;
+        void'(h.get_inst_coverage(covered, total));
+        b = covered;
+        void'(p.get_inst_coverage(covered, total));
+        c = covered;
+    end
+endmodule
+"#;
+    for four_state in [false, true] {
+        for backend in backends() {
+            for forced in [false, true] {
+                assert_eq!(
+                    simulate(source, four_state, forced, backend, 50, &["a", "b", "c"]),
+                    // Rising edges at 5, 15 and 25 before the reads at 31.
+                    Ok(vec![value(6), value(6), value(3)]),
+                    "{backend}, four-state {four_state}, forced {forced}"
+                );
+            }
+        }
+    }
+}

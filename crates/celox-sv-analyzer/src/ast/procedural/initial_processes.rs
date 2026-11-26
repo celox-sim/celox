@@ -182,6 +182,7 @@ pub(in crate::ast) fn initial_processes_from_scope(
                         creation_order,
                         &name,
                         native,
+                        body.len(),
                         &mut sites,
                         &mut parts.signals,
                     )?
@@ -223,6 +224,11 @@ pub(in crate::ast) fn initial_processes_from_scope(
                 qualify_stmt(item, stmt);
                 substitute_stmt_constants(tree, session, stmt, const_env, parameter_literals);
             }
+            // The `ref` actuals of the sites, as their initializers read them
+            // (19.3).
+            for site in &mut sites[first_site..] {
+                parts.references.extend(site.bind(&body));
+            }
             if !body.is_empty() {
                 initializers.push(InitialProcess {
                     creation_order,
@@ -240,6 +246,9 @@ pub(in crate::ast) fn initial_processes_from_scope(
                 });
             }
             for site in &sites[first_site..] {
+                if !site.clocked() {
+                    continue;
+                }
                 match covergroup_sites::sampler(
                     root,
                     session,

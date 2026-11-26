@@ -30,13 +30,21 @@ use super::*;
 use crate::ast::covergroups::{self, Covergroup};
 use celox_sv_syntax::ExprKind;
 
-/// A declaration that samples the instance it constructs.
+/// A declaration that samples the instance it constructs, or whose
+/// instance reads the variables its `ref` actuals name.
 pub(super) struct Site {
     model: Arc<Covergroup>,
-    /// The hidden variable of the scope that holds the instance.
-    handle: String,
+    /// The hidden variable of the scope that holds the instance, of a type
+    /// with a clocking event.
+    handle: Option<String>,
     creation_order: usize,
     tokens: celox_sv_syntax::TokenRange,
+    /// Where the statements of the initializer start among those of the
+    /// initializers of its item.
+    at: usize,
+    /// The actuals of the `ref` formals of the type, bound and qualified as
+    /// the statements of the initializer are (see [`Site::bind`]).
+    references: Vec<Expr>,
 }
 
 /// The hidden variables of the sites of a scope, which the scope declares
@@ -51,6 +59,82 @@ pub(in crate::ast) struct SiteParts {
     pub edge_procedures: Vec<FfProcess>,
     /// The covergroup type each of `edge_procedures` samples.
     covergroups: Vec<String>,
+    /// The sites of the types with `ref` formals, whose `sample()` through
+    /// the declared variable passes the actuals of the declaration (see
+    /// [`pass_references`]).
+    pub references: Vec<ReferenceSite>,
+}
+
+/// A declaration that constructs an instance of a covergroup with `ref`
+/// formals (IEEE 1800-2023 19.3): `cg c = new(a);`. The instance reads the
+/// variables of its actuals at each sample, which `N::$sample` takes as
+/// `const ref` formals: the sampler of the declaration passes them, and so
+/// does `c.sample()`, which the declared variable alone may call, as
+/// nothing but the initializer may write it (see [`check_site_variables`]).
+#[derive(Debug, Clone)]
+pub(in crate::ast) struct ReferenceSite {
+    /// The declared variable, as the bodies of the scope name it.
+    variable: String,
+    /// The sampling subroutine of the type.
+    sample: String,
+    /// The subroutine that constructs an instance of the type, which only
+    /// the initializer of a declaration calls.
+    construct: String,
+    /// The hidden variable of the instance, if the type has a clocking
+    /// event.
+    handle: Option<String>,
+    /// The actuals of the `ref` formals.
+    actuals: Vec<Expr>,
+    /// The names of the `ref` formals and the name of the type, which
+    /// messages show.
+    formals: Vec<String>,
+    display: String,
+}
+
+impl Site {
+    /// The actuals of the `ref` formals and the declared variable, from
+    /// `body`, the statements of the initializers of the item of the site
+    /// as they are bound and qualified: the initializer of the site starts
+    /// at [`Self::at`]. `None` for a type without `ref` formals.
+    pub(super) fn bind(&mut self, body: &[Stmt]) -> Option<ReferenceSite> {
+        if !self.model.has_references() {
+            return None;
+        }
+        let Some(Stmt::Assign {
+            rhs: Expr::Call { args, .. },
+            ..
+        }) = body.get(self.at)
+        else {
+            unreachable!("a site constructs its instance first");
+        };
+        self.references = self
+            .model
+            .references()
+            .map(|(index, _)| args[index].clone().expect("a site passes every ref actual"))
+            .collect();
+        let Some(Stmt::Assign { lhs, .. }) = body.get(self.at + usize::from(self.handle.is_some()))
+        else {
+            unreachable!("a site assigns its variable");
+        };
+        Some(ReferenceSite {
+            variable: lhs.name().to_owned(),
+            sample: self.model.sample_subroutine(),
+            construct: self.model.new_subroutine(),
+            handle: self.handle.clone(),
+            actuals: self.references.clone(),
+            formals: self
+                .model
+                .references()
+                .map(|(_, formal)| formal.name.clone())
+                .collect(),
+            display: self.model.display.clone(),
+        })
+    }
+
+    /// Whether the type samples the instance at a clocking event.
+    pub(super) fn clocked(&self) -> bool {
+        self.model.event.is_some()
+    }
 }
 
 impl SiteParts {
@@ -78,9 +162,11 @@ impl SiteParts {
 /// The statements of the initializer `native` of variable `name`, which
 /// `item` declares at `creation_order`, when the declaration is a site: the
 /// construction of the instance into a hidden variable, and the assignment
-/// of that variable to `name`. `sites` gets the site and `signals` its
-/// variable. `None` for any other initializer, which the ordinary binding
-/// of the initializer checks and reports.
+/// of that variable to `name`; for a type without a clocking event, whose
+/// `new` has `ref` formals, the construction into `name`. `sites` gets the
+/// site, whose statements start at `at` among those of the item, and
+/// `signals` its variable. `None` for any other initializer, which the
+/// ordinary binding of the initializer checks and reports.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn initializer(
     tree: &AnalysisContext<'_>,
@@ -90,6 +176,7 @@ pub(super) fn initializer(
     creation_order: usize,
     name: &str,
     native: celox_sv_syntax::ExprId,
+    at: usize,
     sites: &mut Vec<Site>,
     signals: &mut SiteSignals,
 ) -> Converted<Option<Vec<Stmt>>> {
@@ -131,7 +218,7 @@ pub(super) fn initializer(
     let Ok(model) = covergroups::model(tree, session, item_dimensions, &class, None) else {
         return Ok(None);
     };
-    if model.rejection.is_some() || model.event.is_none() {
+    if model.rejection.is_some() || (model.event.is_none() && !model.has_references()) {
         return Ok(None);
     }
     let construction = covergroups::construct_at_site(
@@ -142,6 +229,22 @@ pub(super) fn initializer(
         item_dimensions,
         &class,
     )?;
+    let tokens = declarations.body_item(item.id).tokens;
+    if model.event.is_none() {
+        sites.push(Site {
+            model,
+            handle: None,
+            creation_order,
+            tokens,
+            at,
+            references: Vec::new(),
+        });
+        return Ok(Some(vec![Stmt::Assign {
+            lhs: LValue::Ident(name.to_owned()),
+            rhs: construction,
+            nonblocking: false,
+        }]));
+    }
     let handle = format!("%covergroup_site{}", signals.len());
     signals.push((
         handle.clone(),
@@ -149,9 +252,11 @@ pub(super) fn initializer(
     ));
     sites.push(Site {
         model,
-        handle: handle.clone(),
+        handle: Some(handle.clone()),
         creation_order,
-        tokens: declarations.body_item(item.id).tokens,
+        tokens,
+        at,
+        references: Vec::new(),
     });
     Ok(Some(vec![
         Stmt::Assign {
@@ -261,10 +366,20 @@ pub(super) fn sampler<'a>(
     parameter_literals: &HashMap<String, Expr>,
     site: &Site,
 ) -> Converted<Sampler> {
+    let handle = site
+        .handle
+        .clone()
+        .expect("a site of a type with a clocking event has a hidden variable");
+    // The variables of the `ref` actuals of the declaration (19.3), which
+    // its initializer bound and qualified (see `Site::bind`).
+    let args = std::iter::once(Expr::Ident(handle))
+        .chain(site.references.iter().cloned())
+        .map(Some)
+        .collect::<Vec<_>>();
     let call = Stmt::Call {
         name: site.model.sample_subroutine(),
-        args: vec![Some(Expr::Ident(site.handle.clone()))],
-        arg_order: vec![0],
+        arg_order: (0..args.len()).collect(),
+        args,
     };
     sampler_of(
         tree,
@@ -508,6 +623,175 @@ impl InstanceList {
             }],
             else_body: Vec::new(),
         }
+    }
+}
+
+/// `sample()` of the covergroups with `ref` formals in the bodies of a
+/// scope, through the variable of declaration `sites` (IEEE 1800-2023 19.3,
+/// 19.8): the calls of `N::$sample` that `covergroups::sample_statement`
+/// made without the `ref` actuals, which it leaves out, get those of the
+/// declaration whose variable is their handle. A call through any other
+/// variable, such as a local of a subroutine with the name of the declared
+/// one, is rejected. `references` gives the number of `ref` formals of the
+/// type each sampling subroutine samples, if it has any.
+pub(in crate::ast) fn pass_references<'a>(
+    sites: &[ReferenceSite],
+    references: &dyn Fn(&str) -> Option<usize>,
+    bodies: impl Iterator<Item = &'a mut Vec<Stmt>>,
+) -> Converted<()> {
+    let mut result = Ok(());
+    for body in bodies {
+        for stmt in body.iter_mut() {
+            stmt.walk_mut(&mut |stmt| {
+                let Stmt::Call { name, args, .. } = stmt else {
+                    return;
+                };
+                if result.is_err() || !covergroups::is_sampler(name) {
+                    return;
+                }
+                let Some(count) = references(name).filter(|count| *count != 0) else {
+                    return;
+                };
+                // A sampler of a declaration passes its actuals already.
+                if !args.get(1).is_some_and(Option::is_none) {
+                    return;
+                }
+                let site = match args.first() {
+                    Some(Some(Expr::Ident(variable))) => sites
+                        .iter()
+                        .find(|site| site.variable == *variable && site.sample == *name),
+                    _ => None,
+                };
+                let Some(site) = site else {
+                    result = Err(covergroups::sampled_elsewhere());
+                    return;
+                };
+                debug_assert_eq!(site.actuals.len(), count);
+                for (arg, actual) in args[1..=count].iter_mut().zip(&site.actuals) {
+                    *arg = Some(actual.clone());
+                }
+            });
+        }
+    }
+    result
+}
+
+/// The error of a `ref` actual of a declaration of `sites` that names a net
+/// of `nets` or selects from one: "Nets and selects into nets shall not be
+/// passed by reference" (IEEE 1800-2023 13.5.2).
+pub(in crate::ast) fn check_site_actuals(
+    sites: &[ReferenceSite],
+    nets: &HashSet<&str>,
+) -> Converted<()> {
+    fn root(actual: &Expr) -> Option<&str> {
+        match actual {
+            Expr::Ident(name) => Some(name),
+            Expr::Select { expr, .. } | Expr::Resize { expr, .. } => root(expr),
+            _ => None,
+        }
+    }
+    // An actual the declaration names once: a variable, or an element at
+    // constant indices. A sample reads the actual as the declaration bound
+    // it, which for a class property or an index that a variable gives
+    // would read through the handle or the index at the time of the
+    // sample instead.
+    fn fixed(actual: &Expr) -> bool {
+        // An index the substitution of the parameters and genvars of the
+        // declaration left reading no variable and calling nothing, as its
+        // range checks do not.
+        fn constant(index: &ConstExpr) -> bool {
+            match index {
+                ConstExpr::Literal(_) => true,
+                ConstExpr::Ident(_) | ConstExpr::Function { .. } => false,
+                ConstExpr::Select { expr, bit } => constant(expr) && constant(bit),
+                ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+                    constant(expr) && constant(msb) && constant(lsb)
+                }
+                ConstExpr::Unary { expr, .. } | ConstExpr::Resize { expr, .. } => constant(expr),
+                ConstExpr::Binary { left, right, .. } => constant(left) && constant(right),
+                ConstExpr::Mux {
+                    condition,
+                    then_expr,
+                    else_expr,
+                } => constant(condition) && constant(then_expr) && constant(else_expr),
+            }
+        }
+        match actual {
+            Expr::Ident(_) => true,
+            Expr::Select { expr, msb, lsb, .. } => fixed(expr) && constant(msb) && constant(lsb),
+            _ => false,
+        }
+    }
+    for site in sites {
+        for (actual, formal) in site.actuals.iter().zip(&site.formals) {
+            if !fixed(actual) {
+                return Err(unsupported(
+                    "covergroup ref argument bound to a class property or to an element at an index that is not constant (IEEE 1800-2023 13.5.2, 19.3)",
+                ));
+            }
+            if root(actual).is_some_and(|name| nets.contains(name)) {
+                return Err(AnalyzerError::InvalidCovergroup(format!(
+                    "the actual of ref argument `{formal}` of covergroup `{}` is a net, which cannot be passed by reference (IEEE 1800-2023 13.5.2, 19.3)",
+                    site.display
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Rejects a write to the variable of a declaration of `sites` but for its
+/// initializer (IEEE 1800-2023 19.3): the samples of the instance through
+/// the variable pass the actuals of the declaration (see
+/// [`pass_references`]), which another instance it held would read.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::ast) fn check_site_variables<'a>(
+    sites: &[ReferenceSite],
+    subroutines: impl Iterator<Item = &'a Subroutine>,
+    comb: &[CombProcess],
+    ff: &[FfProcess],
+    processes: &[InitialProcess],
+    directions: &lifetimes::Directions,
+) -> Converted<()> {
+    if sites.is_empty() {
+        return Ok(());
+    }
+    let variables = sites
+        .iter()
+        .map(|site| site.variable.as_str())
+        .collect::<HashSet<_>>();
+    // The initializer of a declaration assigns the instance from the hidden
+    // variable of the site, or from the construction itself, which no
+    // other `new` of such a type is.
+    let initializer = |stmt: &Stmt| {
+        let Stmt::Assign { lhs, rhs, .. } = stmt else {
+            return false;
+        };
+        sites.iter().any(|site| {
+            site.variable == lhs.name()
+                && match rhs {
+                    Expr::Ident(handle) => site.handle.as_deref() == Some(handle.as_str()),
+                    Expr::Call {
+                        callee: Callee::Subroutine(name),
+                        ..
+                    } => *name == site.construct,
+                    _ => false,
+                }
+        })
+    };
+    match super::references::written_variable(
+        &variables,
+        &initializer,
+        subroutines,
+        comb,
+        ff,
+        processes,
+        directions,
+    ) {
+        Some(variable) => Err(unsupported(format!(
+            "covergroup ref argument of an instance whose variable `{variable}` is written outside its declaration (IEEE 1800-2023 19.3)"
+        ))),
+        None => Ok(()),
     }
 }
 

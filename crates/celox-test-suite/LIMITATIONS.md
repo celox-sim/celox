@@ -1765,7 +1765,7 @@ No assertions or exclusions are weakened.
 
 ### Covergroups
 
-The 46 `covergroup::*` cases check what IEEE 1800-2023 fixes of covergroups.
+The 48 `covergroup::*` cases check what IEEE 1800-2023 fixes of covergroups.
 Five are of a covergroup without items: a variable of a covergroup type holds
 a handle or `null` (19.3), `new` and `sample` take the arguments of the
 covergroup and of its sample method, by position, by name and by default
@@ -1846,6 +1846,13 @@ avoid the same differences and an event of a clock updated in the NBA region.
 One more samples six instances that a procedure constructs at a clock that a
 flip-flop divides, before the nonblocking assignments of the edge
 (`covergroup::constructed_instances_of_a_divided_clock_sample_before_the_updates`).
+Two are of `ref` arguments (19.3): two declarations of one covergroup read
+at each rising edge the variables their actuals name, which continuous
+assignments drive, beside an input argument
+(`covergroup::reference_arguments_track_their_actuals`), and a covergroup
+without a clocking event reads at each `sample()` through its declarations,
+also from a task, an `int` and an element of an unpacked array it takes as a
+whole (`covergroup::reference_arguments_are_read_at_each_sample`).
 Celox passes all of them on every backend.
 
 Verilator 5.054 passes 19 cases. It keeps the embedded covergroup in a
@@ -1896,14 +1903,21 @@ stops with "Null pointer dereferenced" at the covergroup of
 `covergroup::procedural_constructions_sample_at_their_clocking_events`, does
 not compile the C++ it generates for the covergroups embedded in a class of
 the module, and does not parse `'{new, new}`; of the divided clock it
-displays `0` for the bins counted by reference and the expected 37.50.
-xezim 0.11.4 passes 29, all six cases of clocking events of declarations and
+displays `0` for the bins counted by reference and the expected 37.50. Of
+the two cases of `ref` arguments it displays `0 0` for the bins counted by
+reference and the expected coverage of each coverpoint.
+xezim 0.11.4 passes 30, all six cases of clocking events of declarations and
 four of the six of constructed instances among them: it takes no sample of
 the instances a procedure constructs at the divided clock, and it never samples a covergroup embedded in a class at an
 event on a property of the class (`@m_z`, `@(posedge clk_bit)`, `@ev`), which
 19.4's own example writes (`covergroup cov1 @m_z`), and displays 0.00 for
 those three of `covergroup::embedded_covergroups_sample_at_events_of_their_class`
-and the expected 18.75 for the one at a signal of the module. It keeps
+and the expected 18.75 for the one at a signal of the module. It passes the
+`ref` arguments at a clocking event, and counts no sample of a coverpoint of
+an element of an unpacked array that a covergroup takes as a `ref` argument
+(`covergroup::reference_arguments_are_read_at_each_sample` displays `3 24`,
+`2 24` and 0.00 for `6 24`, `4 24` and 12.50, and stops before `$finish`).
+It keeps
 the embedded covergroup in a shallow copy too, compares a covergroup variable
 that nothing assigned with `null` as `x`
 (`covergroup::handles_are_null_until_constructed`,

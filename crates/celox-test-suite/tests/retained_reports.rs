@@ -1485,7 +1485,9 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             | "covergroup::clocking_events_of_nba_updated_clocks_sample_before_the_updates"
                             | "covergroup::procedural_constructions_sample_at_their_clocking_events"
                             | "covergroup::constructed_instances_take_stop_start_and_sample"
-                            | "covergroup::constructed_instances_of_a_divided_clock_sample_before_the_updates",
+                            | "covergroup::constructed_instances_of_a_divided_clock_sample_before_the_updates"
+                            | "covergroup::reference_arguments_track_their_actuals"
+                            | "covergroup::reference_arguments_are_read_at_each_sample",
                         ) => ("compile_error", "compile", "Invalid module item"),
                         (
                             "icarus",
@@ -1647,6 +1649,23 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             // "3" six times and "37.50" expected, "0" six times
                             // and the expected 37.50 displayed.
                             "expect_output: expected [51, 32, 51, 32, 51, 32, 51, 32, 51, 32, 51, 32, 51, 55, 46, 53, 48, 10], got [48, 32, 48, 32, 48, 32, 48, 32, 48, 32, 48, 32, 51, 55, 46, 53, 48, 10]",
+                        ),
+                        ("verilator", "covergroup::reference_arguments_track_their_actuals") => (
+                            "mismatch",
+                            "execute",
+                            // "7 32", "6 32" and "18.75 12.50" expected, "0 0"
+                            // twice and the expected 18.75 12.50 displayed.
+                            "expect_output: expected [55, 32, 51, 50, 10, 54, 32, 51, 50, 10, 49, 56, 46, 55, 53, 32, 49, 50, 46, 53, 48, 10], got [48, 32, 48, 10, 48, 32, 48, 10, 49, 56, 46, 55, 53, 32, 49, 50, 46, 53, 48, 10]",
+                        ),
+                        (
+                            "verilator",
+                            "covergroup::reference_arguments_are_read_at_each_sample",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            // "6 24", "4 24" and "37.50 12.50" expected, "0 0"
+                            // twice and the expected 37.50 12.50 displayed.
+                            "expect_output: expected [54, 32, 50, 52, 10, 52, 32, 50, 52, 10, 51, 55, 46, 53, 48, 32, 49, 50, 46, 53, 48, 10], got [48, 32, 48, 10, 48, 32, 48, 10, 51, 55, 46, 53, 48, 32, 49, 50, 46, 53, 48, 10]",
                         ),
                         (
                             "verilator",

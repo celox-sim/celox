@@ -846,6 +846,7 @@ pub(super) fn lower(
     if model.rejection.is_some() {
         return Ok(Vec::new());
     }
+    covergroups::name_subroutines(session, model);
     let site = Site {
         model,
         tree,
@@ -869,7 +870,14 @@ pub(super) fn lower(
                 Some(object) => (classes::THIS, object.clone()),
                 None => (HANDLE, handle.clone()),
             }),
-            formals: model.sample_formals.clone(),
+            // The `ref` formals of `new` are read where they are at each
+            // sample (19.3): the caller passes the variables a declaration
+            // of an instance names (see `procedural::covergroup_sites`).
+            formals: model
+                .references()
+                .map(|(_, formal)| formal.clone())
+                .chain(model.sample_formals.iter().cloned())
+                .collect(),
             result: None,
         },
         |builder, first| {
@@ -925,7 +933,10 @@ pub(super) fn lower(
             subroutines.push(self::counts(&site, session, state, &handle, instance)?);
         }
     }
-    if spawn && let Some(event) = model.event {
+    if spawn
+        && model.spawns()
+        && let Some(event) = model.event
+    {
         // The instances of a type of a module or a program go to the list
         // its sampler walks; those of an embedded type, and of a type of a
         // package or the compilation unit, each get a process.

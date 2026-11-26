@@ -7469,3 +7469,347 @@ endmodule
     );
     assert!(!error.contains("%covergroup"), "{error}");
 }
+
+/// A counter `q` of the rising edges of `clk` (every 10 ns from 5 ns), the
+/// `logic` variables `bus_a` and `bus_b` that continuous assignments drive
+/// from it, and the unpacked array `bus_event`, as the coverage interfaces
+/// of Caliptra have them; `items` are among the module's items.
+fn buses(items: &str) -> String {
+    format!(
+        r#"`timescale 1ns/1ns
+module Top(output int done, output longint unsigned ca, cb);
+    bit clk = 0;
+    always #5 clk = ~clk;
+    bit [2:0] q = 0;
+    always_ff @(posedge clk) q <= q + 3'd1;
+    logic [3:0] bus_a, bus_b;
+    assign bus_a = {{1'b0, q}};
+    assign bus_b = {{1'b1, q}};
+    logic [3:0] bus_event[0:7];
+    for (genvar i = 0; i < 8; i++) begin : drive
+        assign bus_event[i] = {{1'b0, q}} + 4'(i);
+    end
+{items}
+endmodule
+"#
+    )
+}
+
+/// The value bins `b[v]` of `values` hit once each.
+fn once_each(values: &[u64]) -> Vec<(String, u64)> {
+    values
+        .iter()
+        .map(|value| (format!("b[{value}]"), 1))
+        .collect()
+}
+
+sv_backends! {
+    /// 19.3: "A ref argument tracks the value of the actual argument as it
+    /// changes": an instance that a declaration constructs reads, at each
+    /// sample at its clocking event, the variables that the actuals of the
+    /// declaration name, each declaration its own, in its coverpoints,
+    /// guards, crosses and in `with` filters a sample evaluates, an input
+    /// formal beside them keeping the value `new` passed. An unpacked
+    /// array is passed as a whole. The samples are those of a covergroup
+    /// whose coverpoints name the variables themselves.
+    fn reference_arguments_track_the_actuals_of_their_declarations(sim) {
+        @setup {
+            let source = buses(
+                "    covergroup at_edge(ref logic [3:0] v, input bit [3:0] lo) @(posedge clk);
+        coverpoint v { bins b[] = {[0:15]}; }
+        above: coverpoint v iff (v >= lo) { bins b[] = {[0:15]}; }
+    endgroup
+    at_edge a = new(bus_a, 4'd1), b = new(bus_b, 4'd10);
+    covergroup at_change(const ref logic [3:0] v) @(clk);
+        coverpoint v { bins b[] = {[0:15]}; }
+    endgroup
+    at_change c = new(bus_a);
+    covergroup direct @(clk); coverpoint bus_a { bins b[] = {[0:15]}; } endgroup
+    direct d = new;
+    covergroup events(ref logic [3:0] e[0:7]) @(posedge clk);
+        e2: coverpoint e[2] { bins b[] = {[0:15]}; }
+    endgroup
+    events e = new(bus_event);
+    covergroup pair(ref logic [3:0] v, ref logic [3:0] w) @(negedge clk);
+        cv: coverpoint v { bins b[] = {[0:15]}; }
+        vw: cross v, w;
+    endgroup
+    pair p = new(bus_a, bus_b);",
+            );
+        }
+        @build simulation(&source).four_state(false);
+        sim.run_until(42).unwrap();
+        let report = sim.coverage();
+        assert_eq!(
+            all_samples(&report),
+            expected(&[
+                ("Top.at_change", &[8]),
+                ("Top.at_edge", &[4, 4]),
+                ("Top.direct", &[8]),
+                ("Top.events", &[4]),
+                ("Top.pair", &[4]),
+            ])
+        );
+        // Before the nonblocking assignments of each edge, as at any
+        // clocking event (19.3).
+        assert_eq!(hit(bins(&report, "Top.at_edge", 0, "v")), once_each(&[0, 1, 2, 3]));
+        assert_eq!(hit(bins(&report, "Top.at_edge", 0, "above")), once_each(&[1, 2, 3]));
+        assert_eq!(hit(bins(&report, "Top.at_edge", 1, "v")), once_each(&[8, 9, 10, 11]));
+        assert_eq!(hit(bins(&report, "Top.at_edge", 1, "above")), once_each(&[10, 11]));
+        let changes = hits(&[("b[0]", 1), ("b[1]", 2), ("b[2]", 2), ("b[3]", 2), ("b[4]", 1)]);
+        assert_eq!(hit(bins(&report, "Top.at_change", 0, "v")), changes);
+        assert_eq!(hit(bins(&report, "Top.direct", 0, "bus_a")), changes);
+        assert_eq!(hit(bins(&report, "Top.events", 0, "e2")), once_each(&[2, 3, 4, 5]));
+        // At the falling edges, after the counter moved: v is 1..4 and w
+        // 9..12.
+        assert_eq!(hit(bins(&report, "Top.pair", 0, "cv")), once_each(&[1, 2, 3, 4]));
+        assert_eq!(hit(bins(&report, "Top.pair", 0, "vw")).len(), 4);
+    }
+}
+
+sv_backends! {
+    /// 19.8's example shape, a covergroup with `ref` formals and no
+    /// clocking event: `sample()` through the variable of the declaration
+    /// reads the actuals of that declaration, from a procedure, a task, a
+    /// function or a method of a class of the module, and at an edge. An
+    /// option that reads a `ref` formal reads it when `new` runs, as the
+    /// expressions of options do (19.7). The actual may be a member of an
+    /// unpacked structure (13.5.2). A `ref` formal of an overridden sample
+    /// method is passed by each call, through any handle.
+    fn reference_arguments_without_an_event_are_sampled_through_their_declarations(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done, output longint unsigned ra, rb);
+    int x = 0, y = 0;
+    int least = 2;
+    covergroup cg(ref int v, input int base, ref int n);
+        option.at_least = n;
+        cp: coverpoint v - base { bins b[] = {[0:7]}; }
+    endgroup
+    cg a = new(x, 0, least), b = new(y, 4, least);
+    task automatic both(); a.sample(); b.sample(); endtask
+    function automatic void only_a(); a.sample(); endfunction
+    class K; function void go(); b.sample(); endfunction endclass
+    covergroup sf with function sample(ref int s); coverpoint s { bins b[] = {[0:7]}; } endgroup
+    sf e = new;
+    sf h;
+    typedef struct { int m; int n; } pair_t;
+    pair_t pr;
+    covergroup member(ref int v); coverpoint v { bins b[] = {[0:7]}; } endgroup
+    member m = new(pr.n);
+    bit clk = 0;
+    int edges = 0;
+    always @(posedge clk) if (edges < 2) begin a.sample(); edges <= edges + 1; end
+    initial begin
+        K k;
+        k = new;
+        h = e;
+        x = 1; y = 5;
+        a.sample(); b.sample();
+        x = 2; y = 6; both();
+        x = 3; only_a();
+        y = 7; k.go();
+        least = 9;
+        a.sample();
+        e.sample(x); h.sample(y);
+        pr.m = 1; pr.n = 6; m.sample();
+        x = 4;
+        #1 clk = 1;
+        #1 clk = 0; x = 5;
+        #1 clk = 1;
+        #1 ra = $realtobits(a.get_inst_coverage());
+        rb = $realtobits(b.get_inst_coverage());
+        done = 1;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(10).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        let report = sim.coverage();
+        assert_eq!(
+            all_samples(&report),
+            expected(&[("Top.cg", &[6, 3]), ("Top.member", &[1]), ("Top.sf", &[2])])
+        );
+        assert_eq!(hit(bins(&report, "Top.member", 0, "v")), once_each(&[6]));
+        assert_eq!(
+            hit(bins(&report, "Top.cg", 0, "cp")),
+            hits(&[("b[1]", 1), ("b[2]", 1), ("b[3]", 2), ("b[4]", 1), ("b[5]", 1)])
+        );
+        assert_eq!(hit(bins(&report, "Top.cg", 1, "cp")), once_each(&[1, 2, 3]));
+        assert_eq!(hit(bins(&report, "Top.sf", 0, "s")), once_each(&[3, 7]));
+        // `at_least` is 2, the value of `least` at the construction: one
+        // bin of eight of `a` is covered, none of `b`.
+        assert_eq!(real(&mut sim, "ra"), 12.5);
+        assert_eq!(real(&mut sim, "rb"), 0.0);
+    }
+}
+
+/// The same in both state modes, at every optimization level and with each
+/// dead-store policy, with sites in a generate loop: an actual that nothing
+/// but the covergroup reads keeps its value.
+#[test]
+fn reference_arguments_sample_alike_in_every_mode() {
+    let source = buses(
+        "    logic [3:0] only;
+    assign only = {1'b0, q};
+    covergroup cg(ref logic [3:0] v) @(posedge clk); coverpoint v { bins b[] = {[0:15]}; } endgroup
+    cg c = new(only);
+    covergroup ch(ref logic [3:0] v) @(clk); coverpoint v { bins b[] = {[0:15]}; } endgroup
+    ch h = new(only);
+    for (genvar i = 0; i < 2; i++) begin : g
+        logic [3:0] own;
+        assign own = {1'b0, q} + 4'(i);
+        cg s = new(own);
+        cg t = new(bus_event[i + 4]);
+    end",
+    );
+    for four_state in [false, true] {
+        for level in [
+            celox::OptLevel::O0,
+            celox::OptLevel::O1,
+            celox::OptLevel::O2,
+        ] {
+            for policy in [
+                celox::DeadStorePolicy::Off,
+                celox::DeadStorePolicy::PreserveTopPorts,
+                celox::DeadStorePolicy::PreserveAllPorts,
+            ] {
+                let context = format!("four_state={four_state} {level:?} {policy:?}");
+                let mut sim = simulation(&source)
+                    .four_state(four_state)
+                    .opt_level(level)
+                    .dead_store_policy(policy)
+                    .build()
+                    .unwrap_or_else(|error| panic!("{context}: {error}"));
+                sim.run_until(42).unwrap();
+                let report = sim.coverage();
+                assert_eq!(
+                    all_samples(&report),
+                    expected(&[("Top.cg", &[4, 4, 4, 4, 4]), ("Top.ch", &[8])]),
+                    "{context}"
+                );
+                let pins = [
+                    (0, [0, 1, 2, 3]),
+                    (1, [0, 1, 2, 3]),
+                    (2, [4, 5, 6, 7]),
+                    (3, [1, 2, 3, 4]),
+                    (4, [5, 6, 7, 8]),
+                ];
+                for (instance, values) in pins {
+                    assert_eq!(
+                        hit(bins(&report, "Top.cg", instance, "v")),
+                        once_each(&values),
+                        "{context} {instance}"
+                    );
+                }
+                assert_eq!(
+                    hit(bins(&report, "Top.ch", 0, "v")),
+                    hits(&[
+                        ("b[0]", 1),
+                        ("b[1]", 2),
+                        ("b[2]", 2),
+                        ("b[3]", 2),
+                        ("b[4]", 1)
+                    ]),
+                    "{context}"
+                );
+            }
+        }
+    }
+}
+
+sv_backends! {
+    /// `sample()` in an `always_comb` procedure runs it at each change of
+    /// what the procedure reads (9.2.2.2), the sampled variables included:
+    /// through a `ref` argument the same changes as through the variable
+    /// itself.
+    fn reference_arguments_sampled_in_always_comb_follow_their_actuals(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int done);
+    int y = 0;
+    covergroup direct; coverpoint y { bins b[] = {[0:7]}; } endgroup
+    direct d = new;
+    covergroup cg(ref int v); coverpoint v { bins b[] = {[0:7]}; } endgroup
+    cg c = new(y);
+    always_comb d.sample();
+    always_comb c.sample();
+    initial begin #1 y = 1; #1 y = 2; #1 y = 2; #1 y = 5; #1 done = 1; end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(10).unwrap();
+        let report = sim.coverage();
+        let direct = samples(&report, "Top.direct");
+        assert!(direct[0] >= 4, "{direct:?}");
+        assert_eq!(samples(&report, "Top.cg"), direct);
+        assert_eq!(bins(&report, "Top.cg", 0, "v"), bins(&report, "Top.direct", 0, "y"));
+        assert_eq!(
+            hit(bins(&report, "Top.cg", 0, "v")).iter().map(|(bin, _)| bin.as_str()).collect::<Vec<_>>(),
+            ["b[0]", "b[1]", "b[2]", "b[5]"]
+        );
+    }
+}
+
+sv_backends! {
+    /// 19.5.1.1: "The with clause behaves as if the expression were
+    /// evaluated for every value in the covergroup_range_list at the time the
+    /// covergroup instance is constructed": a filter that reads an input
+    /// argument keeps the value `new` passed, also over a range of more values
+    /// than a construction is asked about, whose filter a sample evaluates.
+    /// (A `ref` argument may not be read there, 19.5.)
+    fn with_filters_read_input_arguments_as_new_passed_them(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top;
+    bit clk = 0;
+    always #5 clk = ~clk;
+    int x = 5;
+    int w = 0;
+    initial #1 w = 100;
+    covergroup cg(input int r) @(posedge clk);
+        big: coverpoint x { bins near = {[0:$]} with (item >= r); }
+        sm: coverpoint x { bins near = {[0:15]} with (item >= r); }
+    endgroup
+    cg c = new(w);
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(32).unwrap();
+        let report = sim.coverage();
+        assert_eq!(samples(&report, "Top.cg"), [3]);
+        assert_eq!(hit(bins(&report, "Top.cg", 0, "big")), hits(&[("near", 3)]));
+        assert_eq!(hit(bins(&report, "Top.cg", 0, "sm")), hits(&[("near", 3)]));
+    }
+}
+
+sv_backends! {
+    /// A static property of a class is a variable (8.9, 13.5.2): as a
+    /// `ref` actual it is sampled as a coverpoint of the property is.
+    fn static_class_properties_are_reference_actuals(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top;
+    bit clk = 0;
+    always #5 clk = ~clk;
+    class S; static logic [3:0] m = 0; endclass
+    always_ff @(posedge clk) S::m <= S::m + 4'd3;
+    covergroup cg(ref logic [3:0] v) @(posedge clk); cp: coverpoint v { bins b[] = {[0:15]}; } endgroup
+    cg c = new(S::m);
+    covergroup dg @(posedge clk); cp: coverpoint S::m { bins b[] = {[0:15]}; } endgroup
+    dg d = new;
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(42).unwrap();
+        let report = sim.coverage();
+        assert_eq!(hit(bins(&report, "Top.cg", 0, "cp")), once_each(&[0, 3, 6, 9]));
+        assert_eq!(bins(&report, "Top.cg", 0, "cp"), bins(&report, "Top.dg", 0, "cp"));
+    }
+}

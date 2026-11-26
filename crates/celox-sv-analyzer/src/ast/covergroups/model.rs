@@ -128,6 +128,29 @@ impl Covergroup {
             .map(|index| (index as u32 + 1, self.items[index].cross))
     }
 
+    /// The `ref` and `const ref` formals of `new`, by their index among
+    /// [`Self::new_formals`] (19.3): `N::$sample` takes them after the
+    /// handle, before the formals of `sample`.
+    pub fn references(&self) -> impl Iterator<Item = (usize, &Formal)> {
+        self.new_formals
+            .iter()
+            .enumerate()
+            .filter(|(_, formal)| formal.direction.is_reference())
+    }
+
+    /// Whether `new` of the type has a `ref` or `const ref` formal: only a
+    /// declaration of a module or a program with an initializer constructs
+    /// an instance then (see `procedural::covergroup_sites`).
+    pub fn has_references(&self) -> bool {
+        self.references().next().is_some()
+    }
+
+    /// Whether the type has [`Self::spawn_subroutine`]: a clocking event,
+    /// and no `ref` formal, whose instances only a declaration constructs.
+    pub fn spawns(&self) -> bool {
+        self.event.is_some() && !self.has_references()
+    }
+
     /// The type, when it can be constructed and sampled.
     pub fn usable(&self) -> Converted<&Self> {
         match &self.rejection {
@@ -189,6 +212,110 @@ pub(crate) fn is_constructor(name: &str) -> bool {
 
 fn invalid(text: impl Into<String>) -> AnalyzerError {
     AnalyzerError::InvalidCovergroup(text.into())
+}
+
+/// What messages name subroutine `N::$new` or `N::$sample` of a covergroup
+/// type by: its method and the type, whose `ref` formals of `new` are
+/// those of `references`.
+#[derive(Debug, Clone)]
+pub(in crate::ast) struct Named {
+    display: String,
+    method: &'static str,
+    references: Vec<String>,
+}
+
+impl Named {
+    /// The name of the method in messages that name a subroutine.
+    fn method(&self) -> String {
+        // The message quotes the subroutine: "`new` of covergroup `Top.cg`".
+        format!("{}` of covergroup `{}", self.method, self.display)
+    }
+}
+
+/// Record what messages name the subroutines `new` and `sample` of `model`
+/// by (see [`in_covergroup_terms`]).
+pub(in crate::ast) fn name_subroutines(session: &mut Session, model: &Covergroup) {
+    if session
+        .covergroup_names
+        .contains_key(&model.sample_subroutine())
+    {
+        return;
+    }
+    let references = model
+        .references()
+        .map(|(_, formal)| formal.name.clone())
+        .collect::<Vec<_>>();
+    for (subroutine, method) in [
+        (model.new_subroutine(), "new"),
+        (model.sample_subroutine(), "sample"),
+    ] {
+        session.covergroup_names.insert(
+            subroutine,
+            Named {
+                display: model.display.clone(),
+                method,
+                references: references.clone(),
+            },
+        );
+    }
+}
+
+/// `error` of a call or of the body of subroutine `N::$new` or
+/// `N::$sample` of a covergroup type that `names` names, in the terms of the
+/// covergroup: its method and its name instead of the subroutine, which no
+/// source spells. A `ref` argument of `new` that an expression of the
+/// covergroup writes is an error of the covergroup: "a covergroup cannot
+/// modify any argument to the new operator, a ref argument will be treated
+/// the same as a read-only const ref argument" (19.3); a `ref` argument of
+/// `sample`, which the analysis treats as a `const ref` one as well, is not
+/// supported written.
+pub(in crate::ast) fn in_covergroup_terms(
+    error: AnalyzerError,
+    names: &HashMap<String, Named>,
+) -> AnalyzerError {
+    match error {
+        AnalyzerError::InvalidCallArguments { subroutine, detail }
+            if let Some(named) = names.get(&subroutine) =>
+        {
+            AnalyzerError::InvalidCallArguments {
+                subroutine: named.method(),
+                detail,
+            }
+        }
+        AnalyzerError::InvalidRefArgument {
+            subroutine,
+            argument,
+            detail,
+        } if let Some(named) = names.get(&subroutine) => {
+            if !detail.starts_with("a const ref argument cannot be written") {
+                return AnalyzerError::InvalidRefArgument {
+                    subroutine: named.method(),
+                    argument,
+                    detail,
+                };
+            }
+            if named.references.contains(&argument) {
+                invalid(format!(
+                    "ref argument `{argument}` of covergroup `{}` is written by an expression of the covergroup, which cannot modify an argument of `new`: a ref argument is read-only, as a const ref argument is (IEEE 1800-2023 19.3)",
+                    named.display
+                ))
+            } else {
+                unsupported(format!(
+                    "covergroup ref argument `{argument}` of the sample method of `{}` written by an expression of the covergroup (IEEE 1800-2023 19.8.1)",
+                    named.display
+                ))
+            }
+        }
+        error => error,
+    }
+}
+
+/// The rejection of a `new` of a covergroup with a `ref` formal that is not
+/// the initializer of a declaration of a module or a program (19.3).
+pub(in crate::ast) fn outside_a_site() -> AnalyzerError {
+    unsupported(
+        "covergroup ref argument outside a declaration with an initializer (IEEE 1800-2023 19.3)",
+    )
 }
 
 /// A rejection of something the analysis does not support in a covergroup:
@@ -302,7 +429,8 @@ pub(in crate::ast) fn build(
         Ok(formals) => model.new_formals = formals,
         Err(error) => reject(&mut model, error),
     }
-    for formal in &model.new_formals {
+    let mut rejection = None;
+    for formal in &mut model.new_formals {
         match formal.direction {
             ParamDirection::Input => {}
             ParamDirection::Output | ParamDirection::Inout => {
@@ -311,10 +439,32 @@ pub(in crate::ast) fn build(
                     formal.name, model.display
                 )));
             }
+            // "A ref argument will be treated the same as a read-only const
+            // ref argument" (19.3). The instance reads the variable its
+            // declaration names (see `procedural::covergroup_sites`); an
+            // embedded covergroup is constructed by `new` of its class
+            // alone, which is no such declaration.
             ParamDirection::Ref | ParamDirection::ConstRef => {
-                model
-                    .rejection
-                    .get_or_insert(unsupported("covergroup ref argument (IEEE 1800-2023 19.3)"));
+                formal.direction = ParamDirection::ConstRef;
+                if model.owner.is_some() {
+                    rejection.get_or_insert_with(outside_a_site);
+                }
+                // An integral variable or a fixed-size array of them, which
+                // `N::$sample` reads as any subroutine reads a `const ref`
+                // formal of its type.
+                let ty = &formal.r#type;
+                if !matches!(
+                    ty.kind(),
+                    TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit
+                ) || ty.container().is_some()
+                    || ty.is_unpacked_struct_in(&session.types)
+                {
+                    rejection.get_or_insert_with(|| {
+                        unsupported(
+                            "covergroup ref argument of a type that is neither integral nor a fixed-size array of an integral type (IEEE 1800-2023 19.3)",
+                        )
+                    });
+                }
             }
         }
         if formal.direction == ParamDirection::Input
@@ -322,10 +472,13 @@ pub(in crate::ast) fn build(
                 || formal.r#type.container().is_some()
                 || formal.r#type.is_unpacked_struct_in(&session.types))
         {
-            model.rejection.get_or_insert(unsupported(
-                "covergroup argument of unpacked type (IEEE 1800-2023 19.3)",
-            ));
+            rejection.get_or_insert_with(|| {
+                unsupported("covergroup argument of unpacked type (IEEE 1800-2023 19.3)")
+            });
         }
+    }
+    if let Some(rejection) = rejection {
+        model.rejection.get_or_insert(rejection);
     }
     match event {
         None => {}
@@ -352,7 +505,7 @@ pub(in crate::ast) fn build(
                 Ok(formals) => model.sample_formals = formals,
                 Err(error) => reject(&mut model, error),
             }
-            for formal in &model.sample_formals {
+            for formal in &mut model.sample_formals {
                 if formal.direction == ParamDirection::Output {
                     return Err(invalid(format!(
                         "argument `{}` of the sample method of covergroup `{}` is an output argument (IEEE 1800-2023 19.8.1)",
@@ -369,13 +522,11 @@ pub(in crate::ast) fn build(
                         formal.name, model.display
                     )));
                 }
-                if matches!(
-                    formal.direction,
-                    ParamDirection::Ref | ParamDirection::ConstRef
-                ) {
-                    model.rejection.get_or_insert(unsupported(
-                        "covergroup ref argument of the sample method (IEEE 1800-2023 19.8.1)",
-                    ));
+                // The covergroup reads a formal of `sample` in the sample
+                // alone, and writes none: a `ref` one is a `const ref` one,
+                // which the call passes as any subroutine call does.
+                if formal.direction == ParamDirection::Ref {
+                    formal.direction = ParamDirection::ConstRef;
                 }
             }
         }

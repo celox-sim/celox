@@ -131,7 +131,8 @@ endpackage",
     // subroutines it calls.
     let declared = packages([
         "covergroup ucg(int a); option.weight = a; coverpoint a { bins b = {[0:a]}; } endgroup",
-        "covergroup pcg with function sample(bit [3:0] s); coverpoint s; endgroup",
+        "covergroup pcg with function sample(bit [3:0] s); coverpoint s; endgroup
+    covergroup pref(ref int r); coverpoint r; endgroup",
         "covergroup kcg(string s = \"k\"); option.name = s; coverpoint v iff (v > 0); \
          coverpoint s.len(); endgroup
         covergroup kclocked @(v); coverpoint v; endgroup",
@@ -139,7 +140,9 @@ endpackage",
     let items = format!(
         "{import}
     covergroup cg(int lo, string name = \"n\") @(posedge clk); coverpoint d; endgroup
-    covergroup plain(int hi); coverpoint d {{ bins low = {{[0:hi]}}; }} coverpoint q; endgroup"
+    covergroup plain(int hi); coverpoint d {{ bins low = {{[0:hi]}}; }} coverpoint q; endgroup
+    covergroup refs(ref logic [7:0] v, input int lo) @(posedge clk); coverpoint v {{ bins b = {{[lo:$]}}; }} endgroup
+    covergroup sampled(ref logic [7:0] v); coverpoint v; endgroup"
     );
     let (program, facts) = laid_out(timed(&rtl(&declared, &items)));
     assert_eq!(facts, base);
@@ -1448,4 +1451,67 @@ fn constructed_samplers_are_planned_as_the_written_samplers() {
     );
     assert_eq!(declared.functions, written.functions);
     assert_eq!(declared.processes, written.processes);
+}
+
+/// A declaration that constructs an instance of a covergroup with `ref`
+/// formals (IEEE 1800-2023 19.3) is laid out and planned as the same
+/// declaration of a covergroup whose coverpoints name the actual itself: at
+/// an edge, at a change and through `sample()` in clocked logic. The
+/// sampler stays a procedure the compiled scheduler runs.
+#[test]
+fn reference_sites_are_planned_as_direct_sites() {
+    let plan = |items: &str| {
+        let (program, facts) = laid_out(timed(&rtl("", items)));
+        (crate::scheduler::plan_for_test(&program).unwrap(), facts)
+    };
+    for (direct, referenced, formals) in [
+        (
+            "    covergroup cg @(posedge clk); coverpoint d; coverpoint q iff (d[0]); endgroup
+    cg c = new, e = new;",
+            "    covergroup cg(ref logic [7:0] v, ref logic [7:0] w) @(posedge clk);
+        coverpoint v; coverpoint w iff (v[0]);
+    endgroup
+    cg c = new(d, q), e = new(d, q);",
+            2,
+        ),
+        (
+            "    covergroup cg @(clk); coverpoint d; endgroup
+    cg c = new;",
+            "    covergroup cg(ref logic [7:0] v) @(clk); coverpoint v; endgroup
+    cg c = new(d);",
+            1,
+        ),
+        (
+            "    covergroup cg; coverpoint d; endgroup
+    cg c = new;
+    always @(posedge clk) c.sample();",
+            "    covergroup cg(ref logic [7:0] v); coverpoint v; endgroup
+    cg c = new(d);
+    always @(posedge clk) c.sample();",
+            1,
+        ),
+    ] {
+        let (direct_plan, direct_facts) = plan(direct);
+        let (plan, facts) = plan(referenced);
+        // A `ref` formal of `N::$new` and of `N::$sample` is a variable of
+        // the subroutine, as one of any subroutine is, which holds nothing:
+        // the calls bind it to the actual.
+        assert_eq!(
+            facts,
+            Facts {
+                state_objects: direct_facts.state_objects + 2 * formals,
+                ..direct_facts
+            },
+            "{referenced}"
+        );
+        assert_eq!(plan.fallback, direct_plan.fallback, "{referenced}");
+        let (_, kernels) = plan.fallback.split_first().unwrap();
+        assert!(kernels.iter().all(Option::is_none), "{:?}", plan.fallback);
+        assert_eq!(plan.settle_reads, direct_plan.settle_reads, "{referenced}");
+        assert_eq!(plan.lazy, direct_plan.lazy, "{referenced}");
+        assert_eq!(plan.incremental, direct_plan.incremental, "{referenced}");
+        assert_eq!(plan.active, direct_plan.active, "{referenced}");
+        assert_eq!(plan.clocks, direct_plan.clocks, "{referenced}");
+        assert_eq!(plan.derived, direct_plan.derived, "{referenced}");
+    }
 }

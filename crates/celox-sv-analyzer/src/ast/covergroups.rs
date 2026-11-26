@@ -33,12 +33,12 @@ pub(super) use compile::{
 };
 pub(super) use methods::{
     check_place, construct, construct_at_site, option_assignment, overall, result_shape,
-    result_type, sample_statement, value,
+    result_type, sample_statement, sampled_elsewhere, value,
 };
 pub(crate) use model::is_constructor;
 pub(super) use model::{
-    Covergroup, Formal, ITEM_FORMAL, build, count_formals, declare, is_sampler, is_spawner,
-    rejected,
+    Covergroup, Formal, ITEM_FORMAL, Named, build, count_formals, declare, in_covergroup_terms,
+    is_sampler, is_spawner, name_subroutines, outside_a_site, rejected,
 };
 
 /// The start of the reserved class name of every covergroup type.
@@ -369,7 +369,9 @@ fn through_expression() -> AnalyzerError {
 /// type of the class of an embedded covergroup, whose object they take, or
 /// else that of the covergroup, whose handle `N::$sample` takes. `handle` is
 /// that of the covergroup, whose handle `N::$counts` and `N::$spawn` take.
-/// `N::$spawn` is a subroutine of a type with a clocking event alone.
+/// `N::$sample` takes the `ref` formals of `new` after the handle (see
+/// [`Covergroup::references`]). `N::$spawn` is a subroutine of a type with
+/// a clocking event alone (see [`Covergroup::spawns`]).
 pub(super) fn signatures(
     model: &Covergroup,
     first: &Type,
@@ -392,7 +394,12 @@ pub(super) fn signatures(
     };
     let embedded = model.owner.is_some();
     let counts = count_formals();
-    let spawn = model.event.map(|_| {
+    let sample_formals = model
+        .references()
+        .map(|(_, formal)| formal.clone())
+        .chain(model.sample_formals.iter().cloned())
+        .collect::<Vec<_>>();
+    let spawn = model.spawns().then(|| {
         let mut formals = formals(embedded.then_some((classes::THIS, first)), &[]);
         formals.push((HANDLE.to_owned(), ParamDirection::Input, handle.clone()));
         (model.spawn_subroutine(), formals)
@@ -410,7 +417,7 @@ pub(super) fn signatures(
             model.sample_subroutine(),
             formals(
                 Some((if embedded { classes::THIS } else { HANDLE }, first)),
-                &model.sample_formals,
+                &sample_formals,
             ),
         ),
         (
