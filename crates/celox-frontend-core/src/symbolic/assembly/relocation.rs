@@ -197,13 +197,33 @@ pub(super) fn remap_for_fold_runtime_event_sites<A: std::hash::Hash + Eq + Clone
         })
 }
 
+/// The design's numbers of the functions an instance's units call: its own
+/// copies of its module's functions from `base` on, then the functions its
+/// module imports (see [`SimModule::imported_functions`]).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct FunctionIds<'a> {
+    pub(super) base: u32,
+    pub(super) local: u32,
+    pub(super) imported: &'a [u32],
+}
+
+impl FunctionIds<'_> {
+    /// The design's number of the module's function `id`.
+    pub(super) fn global(self, id: u32) -> u32 {
+        match id.checked_sub(self.local) {
+            Some(imported) => self.imported[imported as usize],
+            None => self.base + id,
+        }
+    }
+}
+
 pub(super) fn relocate_executation_unit_with_errors<A, B>(
     eu: &ExecutionUnit<A>,
     f: &impl Fn(&A) -> B,
     runtime_error_codes: &HashMap<i64, i64>,
     runtime_event_sites: &HashMap<u32, u32>,
     extern_functions: &HashMap<u32, u32>,
-    function_base: u32,
+    function_base: FunctionIds<'_>,
 ) -> ExecutionUnit<B> {
     ExecutionUnit {
         entry_block_id: eu.entry_block_id,
@@ -257,11 +277,12 @@ pub(super) fn relocate_executation_unit_with_errors<A, B>(
                                 }
                                 // A module's units name its functions by their index
                                 // in the module; each instance has its own copies,
-                                // from `function_base` on.
+                                // from `function_base` on, and calls the imported
+                                // ones in their home instance.
                                 SIRInstruction::Call { .. } => {
                                     let mut call = inst.map_addr(f);
                                     if let SIRInstruction::Call { function, .. } = &mut call {
-                                        function.0 += function_base;
+                                        function.0 = function_base.global(function.0);
                                     }
                                     call
                                 }
@@ -359,6 +380,7 @@ pub(super) fn relocate_units(
     startup_statuses.sort();
     startup_statuses.dedup();
     let mut gated_startup = false;
+    let imported = imported_function_ids(expanded, instance_modules, modules)?;
 
     for (path, id) in expanded {
         let module_id = &instance_modules[id];
@@ -379,6 +401,7 @@ pub(super) fn relocate_units(
             &mut extern_functions,
             &mut runtime_event_sites,
             &functions,
+            imported.get(id).map_or(&[], Vec::as_slice),
             homes,
         )?;
         let function_base = instance.function_base;
@@ -388,7 +411,7 @@ pub(super) fn relocate_units(
             calls
                 .iter()
                 .map(|call| celox_design::CallResume {
-                    function: call.function + function_base,
+                    function: function_base.global(call.function),
                     ..*call
                 })
                 .collect::<Vec<_>>()
@@ -472,7 +495,7 @@ struct InstanceRelocation<'a> {
     runtime_error_codes: HashMap<i64, i64>,
     runtime_event_site_map: HashMap<u32, u32>,
     extern_function_map: HashMap<u32, u32>,
-    function_base: u32,
+    function_base: FunctionIds<'a>,
     scope: String,
 }
 
@@ -495,6 +518,7 @@ fn number_instance<'a>(
     extern_functions: &mut Vec<ExternFunction>,
     runtime_event_sites: &mut Vec<RuntimeEventSite>,
     functions: &[celox_sir::FunctionUnit<RegionedAbsoluteAddr>],
+    imported: &'a [u32],
     homes: &HomeNames<'_>,
 ) -> Result<InstanceRelocation<'a>, ParserError> {
     let runtime_event_site_base = u32::try_from(runtime_event_sites.len()).map_err(|_| {
@@ -576,9 +600,13 @@ fn number_instance<'a>(
         }
         runtime_event_sites.push(site);
     }
-    let function_base = u32::try_from(functions.len()).map_err(|_| {
-        ParserError::illegal_context("function relocation", "function count exceeds u32", None)
-    })?;
+    let function_base = FunctionIds {
+        base: u32::try_from(functions.len()).map_err(|_| {
+            ParserError::illegal_context("function relocation", "function count exceeds u32", None)
+        })?,
+        local: sim_module.functions.len() as u32,
+        imported,
+    };
     Ok(InstanceRelocation {
         id,
         sim_module,
@@ -590,6 +618,61 @@ fn number_instance<'a>(
         function_base,
         scope,
     })
+}
+
+/// The design's numbers of the functions that the modules of the instances
+/// import (see [`SimModule::imported_functions`]), by instance: those of
+/// the home module's one instance. The instances place their copies in the
+/// order of `expanded`, as [`relocate_units`] relocates them.
+fn imported_function_ids(
+    expanded: &HashMap<InstancePath, InstanceId>,
+    instance_modules: &HashMap<InstanceId, ModuleId>,
+    modules: &HashMap<ModuleId, SimModule>,
+) -> Result<HashMap<InstanceId, Vec<u32>>, ParserError> {
+    let mut imported = HashMap::default();
+    if modules
+        .values()
+        .all(|module| module.imported_functions.is_empty())
+    {
+        return Ok(imported);
+    }
+    let mut bases = HashMap::default();
+    let mut homes: HashMap<ModuleId, Option<InstanceId>> = HashMap::default();
+    let mut next = 0u32;
+    for id in expanded.values() {
+        let module_id = instance_modules[id];
+        bases.insert(*id, next);
+        next += modules[&module_id].functions.len() as u32;
+        homes
+            .entry(module_id)
+            .and_modify(|home| *home = None)
+            .or_insert(Some(*id));
+    }
+    for id in expanded.values() {
+        let module = &modules[&instance_modules[id]];
+        if module.imported_functions.is_empty() {
+            continue;
+        }
+        let ids = module
+            .imported_functions
+            .iter()
+            .map(|&(home, function)| {
+                let instance = homes.get(&home).copied().flatten().ok_or_else(|| {
+                    ParserError::illegal_context(
+                        "function relocation",
+                        format!(
+                            "module `{}` imports a function of a module without exactly one instance",
+                            module.name
+                        ),
+                        None,
+                    )
+                })?;
+                Ok(bases[&instance] + function)
+            })
+            .collect::<Result<Vec<_>, ParserError>>()?;
+        imported.insert(*id, ids);
+    }
+    Ok(imported)
 }
 
 /// Relocate the functions of the instance; each copy is its own function.
