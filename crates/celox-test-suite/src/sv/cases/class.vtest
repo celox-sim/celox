@@ -7330,3 +7330,79 @@ module Top(output bit done);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1))
+
+; An unpacked array in the set of `inside` stands for its elements (IEEE
+; 1800-2023 11.4.13): a state queue under a guard, a rand array, mixed with
+; values and ranges, in a loop and negated; an empty one matches nothing, so
+; a constraint that needs a match fails the call (18.6.3). A membership is
+; itself the operand of a membership in another array.
+(case constraint_inside_array_sets
+  (source "constraint_inside_arrays.sv" #"
+module Top(output bit done);
+    class C;
+        rand bit read_from_written;
+        rand bit [31:0] araddr;
+        int readback_base[$];
+        rand int a[4];
+        rand int x, y, z;
+        rand bit [3:0] n;
+        byte sb[2];
+        rand bit [7:0] q[$];
+        bit [7:0] allowed[$];
+        constraint c0 {
+            araddr < 4096;
+            if (read_from_written && readback_base.size() > 0) araddr inside {readback_base};
+        }
+        constraint c1 { foreach (a[i]) a[i] inside {[10:20]}; x inside {a}; }
+        constraint c2 { y inside {1, readback_base, [100:200]}; n inside {sb}; }
+        constraint c3 {
+            q.size() == 3;
+            foreach (q[i]) q[i] inside {allowed};
+            !(z inside {readback_base});
+            z inside {[0:2048]};
+        }
+    endclass
+    class Nested;
+        rand int x;
+        int a[$], b[$];
+        constraint c { x == 5; (x inside {a}) inside {b}; }
+    endclass
+    C c;
+    Nested d;
+    bit hit;
+    initial begin
+        c = new;
+        c.srandom(3);
+        c.readback_base = '{512, 1024};
+        c.sb = '{-1, 3};
+        c.allowed = '{7, 9};
+        repeat (32) begin
+            if (!c.randomize()) $fatal(1, "randomize");
+            if (c.read_from_written && c.araddr != 512 && c.araddr != 1024) $fatal(1, "readback");
+            hit = 0;
+            foreach (c.a[i]) if (c.x == c.a[i]) hit = 1;
+            if (!hit || c.x < 10 || c.x > 20) $fatal(1, "rand array set");
+            if (!(c.y == 1 || c.y == 512 || c.y == 1024 || (c.y >= 100 && c.y <= 200))) $fatal(1, "mixed set");
+            // -1 is 8'hff in the 8-bit unsigned context of a 4-bit `n`.
+            if (c.n != 3) $fatal(1, "context");
+            foreach (c.q[i]) if (c.q[i] != 7 && c.q[i] != 9) $fatal(1, "loop set");
+            if (c.z == 512 || c.z == 1024) $fatal(1, "negated set");
+        end
+        c.read_from_written = 1;
+        c.read_from_written.rand_mode(0);
+        if (!c.randomize() || (c.araddr != 512 && c.araddr != 1024)) $fatal(1, "guarded set");
+        c.readback_base = {};
+        if (!c.randomize()) $fatal(1, "empty guarded set");
+        c.allowed = {};
+        if (c.randomize()) $fatal(1, "empty set matched");
+        d = new;
+        d.a = '{5};
+        d.b = '{1};
+        if (!d.randomize() || d.x != 5) $fatal(1, "nested membership");
+        d.b = '{0};
+        if (d.randomize()) $fatal(1, "nested membership matched");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
