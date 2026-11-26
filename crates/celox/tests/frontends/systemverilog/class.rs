@@ -935,6 +935,13 @@ fn constraints_on_handle_and_string_properties_are_rejected() {
             "c.randomize()",
             "a constraint array element other than 2-state integral",
         ),
+        // The elements of a rand array wider than 64 bits are no solver
+        // variables, only its size.
+        (
+            "class C; rand bit [3:0] x; rand bit [99:0] w[$]; constraint k { foreach (w[i]) w[i] != 0; } endclass",
+            "c.randomize()",
+            "a constraint array element other than 2-state integral ones of at most 64 bits",
+        ),
         // The array of a loop is subject to its visibility too (8.18).
         (
             "class C; rand int x; local int a[]; endclass",
@@ -1460,6 +1467,55 @@ endmodule
         .unwrap();
     sim.run_until(0).unwrap();
     assert_eq!(sim.get(sim.signal("ok")), BigUint::from(1u8));
+}
+
+#[test]
+fn rand_arrays_of_wide_elements_get_random_elements() {
+    // A rand dynamic array or queue of 2-state elements wider than 64 bits
+    // is resized to the size its constraints give and gets random elements
+    // (IEEE 1800-2023 18.4), as the AXI4 AVIP's write data does.
+    let source = r#"module Top(output int bad, output bit top, output bit odd_top, output int distinct);
+    class C;
+        rand bit [7:0] len;
+        rand bit [511:0] data[$:256];
+        rand bit [63:0] strobe[$:256];
+        rand bit [129:0] odd[];
+        constraint c { len < 4; data.size() == len + 1; strobe.size() == len + 1;
+                       foreach (strobe[i]) strobe[i] != 0; }
+    endclass
+    C c;
+    bit [511:0] last;
+    initial begin
+        c = new;
+        c.odd = new[3];
+        repeat (40) begin
+            if (!c.randomize()) bad++;
+            if (c.data.size() != c.len + 1 || c.strobe.size() != c.len + 1 || c.odd.size() != 3)
+                bad++;
+            foreach (c.strobe[i]) if (c.strobe[i] == 0) bad++;
+            foreach (c.data[i]) top |= c.data[i][511];
+            foreach (c.odd[i]) odd_top |= c.odd[i][129];
+            if (c.data[0] != last) distinct++;
+            last = c.data[0];
+        end
+        // An array a call selects (18.11) is random too.
+        last = c.odd[0];
+        if (!c.randomize(odd) || c.odd.size() != 3 || c.odd[0] == last) bad++;
+    end
+endmodule
+"#;
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("wide_arrays.sv"))], "Top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("bad")), BigUint::from(0u8));
+        assert_eq!(sim.get(sim.signal("top")), BigUint::from(1u8));
+        assert_eq!(sim.get(sim.signal("odd_top")), BigUint::from(1u8));
+        assert_eq!(sim.get(sim.signal("distinct")), BigUint::from(40u8));
+    }
 }
 
 #[test]
