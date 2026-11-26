@@ -146,6 +146,25 @@ impl Ff<'_, '_> {
             slots.push(self.slot_of(seed.0));
             dist_seed = Some(seed);
         }
+        // The scope that calls a unit of the root that names its scope.
+        let mut scope = None;
+        let mut scope_slot = None;
+        if process.scope
+            && self
+                .m
+                .out_of_line()
+                .is_some_and(|functions| !functions.scope_callers.is_empty())
+        {
+            scope_slot = Some(slots.len());
+            let (token, _) = self.m.temp(
+                "call_scope",
+                crate::lowering::out_of_line::SCOPE_TOKEN_WIDTH,
+                false,
+                false,
+            );
+            slots.push(self.slot_of(token));
+            scope = Some(token);
+        }
         // The dynamic parts of the places of the `ref` formals (see
         // [`Place`]), which the caller passes.
         let mut place_slots = Vec::new();
@@ -283,6 +302,7 @@ impl Ff<'_, '_> {
             size_patches: Vec::new(),
             random: process_slots.0,
             dist_seed: process_slots.1,
+            scope: scope_slot,
             resume: resume_slot,
             calls: Vec::new(),
             omitted: omitted_slot,
@@ -296,6 +316,7 @@ impl Ff<'_, '_> {
             depth,
             random,
             dist_seed,
+            scope,
             resume,
             size_patches: Vec::new(),
             renames,

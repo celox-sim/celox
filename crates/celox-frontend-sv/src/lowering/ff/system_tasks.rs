@@ -512,7 +512,7 @@ impl Ff<'_, '_> {
                 Some(queue) => Some(DeferredSite::Action { queue, region }),
                 None => None,
             });
-        let site_id = self.m.event_site(RuntimeEventSite {
+        let site = RuntimeEventSite {
             kind: event_kind,
             template: template.clone(),
             sizing: DisplaySizing::Ieee,
@@ -528,11 +528,8 @@ impl Ff<'_, '_> {
             arg_float_precision,
             arg_is_handle,
             home: None,
-        });
-        self.b.emit(SIRInstruction::RuntimeEvent {
-            site_id,
-            args: regs,
-        });
+        };
+        self.emit_scoped_event(site, regs);
         // A deferred `$fatal` ends the simulation when it matures.
         if kind.is_fatal() && deferred.is_none() {
             let code = self
@@ -549,5 +546,86 @@ impl Ff<'_, '_> {
             self.b.switch_to_block(resume);
         }
         Ok(true)
+    }
+}
+
+impl Ff<'_, '_> {
+    /// Raise the runtime event of `site` with `args`. In a unit of the root
+    /// that receives the caller's scope token (see
+    /// `out_of_line::Function::scope`), a site whose output names its scope
+    /// reports in the scope of the caller: a copy of the site for each
+    /// package whose state module may call the unit names the package's
+    /// instance, and the token selects the copy, as each module's own unit
+    /// would report. The report of a class dispatch's default names the
+    /// dispatching module either way (see
+    /// `out_of_line::unknown_class_report`).
+    pub(super) fn emit_scoped_event(&mut self, site: RuntimeEventSite, args: Vec<RegisterId>) {
+        let token = self
+            .frame
+            .as_ref()
+            .and_then(|frame| frame.scope)
+            .filter(|_| {
+                self.m.site_home.is_none()
+                    && crate::lowering::out_of_line::site_names_scope(&site)
+                    && !crate::lowering::out_of_line::unknown_class_report(&site)
+            });
+        let callers = match (token, self.m.out_of_line()) {
+            (Some(_), Some(functions)) => functions.scope_callers.clone(),
+            _ => Vec::new(),
+        };
+        let Some(token) = token.filter(|_| !callers.is_empty()) else {
+            let site_id = self.m.event_site(site);
+            self.b.emit(SIRInstruction::RuntimeEvent { site_id, args });
+            return;
+        };
+        let width = crate::lowering::out_of_line::SCOPE_TOKEN_WIDTH;
+        let caller = self.b.alloc_bit(width, false);
+        self.b.emit(SIRInstruction::Load(
+            caller,
+            stable(token),
+            SIROffset::Static(0),
+            width,
+        ));
+        let done = self.b.new_block();
+        let mut scoped = Vec::new();
+        for (position, package) in callers.iter().enumerate() {
+            let site_id = self.m.event_site(RuntimeEventSite {
+                home: Some(celox_design::SiteHome::Path {
+                    up: None,
+                    down: vec![(format!("{package}::"), 0)],
+                    within: None,
+                }),
+                ..site.clone()
+            });
+            scoped.push(site_id);
+            let key = self.b.alloc_bit(width, false);
+            self.b
+                .emit(SIRInstruction::Imm(key, SIRValue::new(position as u64 + 1)));
+            let hit = self.b.alloc_bit(1, false);
+            self.b
+                .emit(SIRInstruction::Binary(hit, caller, BinaryOp::Eq, key));
+            let arm = self.b.new_block();
+            let next = self.b.new_block();
+            self.b.seal_block(SIRTerminator::Branch {
+                cond: hit,
+                true_block: (arm, Vec::new()),
+                false_block: (next, Vec::new()),
+            });
+            self.b.switch_to_block(arm);
+            self.b.emit(SIRInstruction::RuntimeEvent {
+                site_id,
+                args: args.clone(),
+            });
+            self.jump(done);
+            self.b.switch_to_block(next);
+        }
+        let site_id = self.m.event_site(site);
+        scoped.push(site_id);
+        self.b.emit(SIRInstruction::RuntimeEvent { site_id, args });
+        self.jump(done);
+        self.b.switch_to_block(done);
+        if let Some(functions) = self.m.out_of_line() {
+            functions.scoped_sites.extend(scoped);
+        }
     }
 }

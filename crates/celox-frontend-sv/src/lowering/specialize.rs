@@ -263,6 +263,19 @@ pub(super) fn specialize_module(
     ));
     if let Some(functions) = calls.as_mut().and_then(|graph| graph.out_of_line.as_mut()) {
         functions.foreign = hierarchical.shared.foreign_references.clone();
+        // The packages whose state modules may call the root's units: those
+        // that keep time as the root does (see `out_of_line::Home`).
+        if hierarchical.home {
+            let time_scale = scope_time_scale(&module.packages, &module.name).ok();
+            let mut callers: Vec<String> = module
+                .packages
+                .names()
+                .filter(|package| scope_time_scale(&module.packages, package).ok() == time_scale)
+                .map(str::to_string)
+                .collect();
+            callers.sort_unstable();
+            functions.scope_callers = callers;
+        }
     }
     let lowered = lower_module(
         specialized,

@@ -27,6 +27,9 @@ pub(super) struct FrameContext {
     /// state and the name of the process seed, and the seed of `$random`.
     pub(super) random: Option<((SourceVarId, String), String)>,
     pub(super) dist_seed: Option<(SourceVarId, String)>,
+    /// The variable of the slot of the caller's scope token (see
+    /// [`Function::scope`]).
+    pub(super) scope: Option<SourceVarId>,
     /// For a resumable unit (see [`Function::resume`]), its resume slots.
     resume: Option<ResumeFrame>,
     /// Registers holding a frame size not known yet (see
