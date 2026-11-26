@@ -111,10 +111,18 @@ pub(super) struct SequenceMonitor {
     pub start: Vec<Stmt>,
     /// The record of its disable condition, with `disable iff`.
     pub disabled: Option<DisableHistory>,
-    /// For a multiclocked sequence (16.13), its decisions instead of the
-    /// stages of one clock.
+    /// For a multiclocked sequence (16.13) or an until property
+    /// (16.12.12), its decisions instead of the stages of one clock.
     pub multiclock: Option<super::multiclock::Multiclock>,
+    /// For a strong until property, its attempts still pending, which fail
+    /// when the simulation ends (see `until`).
+    pub unresolved: Option<super::until::Unresolved>,
 }
+
+/// The prefix of the name of the index of a loop that runs an assertion's
+/// action once for each attempt that passed or failed (see `multiclock` and
+/// `until`), by which `timed_tasks::concurrent_actions` finds the action.
+pub(super) const ACTION_LOOP: &str = "repeat@assertion";
 
 /// Whether the disable condition of a concurrent assertion over cycles was
 /// true since each attempt started (IEEE 1800-2023 16.12): an attempt is
@@ -1015,6 +1023,7 @@ impl BodyBuilder<'_, '_, '_> {
             start: Vec::new(),
             disabled: None,
             multiclock: None,
+            unresolved: None,
         })
     }
 }

@@ -369,6 +369,7 @@ pub(in crate::ast) fn initial_processes_from_scope(
         );
         let body = builder.native_body(&[procedure.body], &procedure.authored_statements)?;
         let mut watchers = std::mem::take(&mut builder.disable_watchers);
+        let mut finals = std::mem::take(&mut builder.assertion_finals);
         let mut validation_body = if is_final {
             std::mem::take(&mut builder.sensitivity_body)
         } else {
@@ -389,6 +390,7 @@ pub(in crate::ast) fn initial_processes_from_scope(
             .iter_mut()
             .chain(&mut validation_body)
             .chain(watchers.iter_mut().flatten())
+            .chain(finals.iter_mut().flatten())
         {
             substitute_stmt_constants(tree, builder.session, stmt, &item.env, literals);
             qualify_stmt(item, stmt);
@@ -407,6 +409,24 @@ pub(in crate::ast) fn initial_processes_from_scope(
                 condition: None,
                 body: watcher,
                 kind: celox_design::ProcessKind::Regular,
+                validation_body: Vec::new(),
+                synthetic: true,
+                repeats: false,
+            });
+        }
+        // The final procedures that fail the attempts of its strong until
+        // properties still pending when the simulation ends.
+        for body in finals {
+            processes.push(InitialProcess {
+                creation_order,
+                site: process_site(
+                    "until property",
+                    tree.declarations().body_item(item.id).tokens,
+                    tree,
+                ),
+                condition: None,
+                body,
+                kind: celox_design::ProcessKind::Final,
                 validation_body: Vec::new(),
                 synthetic: true,
                 repeats: false,

@@ -48,7 +48,14 @@ pub(super) fn validate(subroutines: &[&Subroutine], processes: &[InitialProcess]
             break;
         }
     }
-    for process in processes.iter().filter(|process| process.is_final()) {
+    // A final procedure that the lowering of a concurrent assertion makes
+    // runs an assertion action, which `timed_tasks::concurrent_actions`
+    // keeps from suspending: the restrictions on the function statements of
+    // an authored final procedure (9.2.3) are not its.
+    for process in processes
+        .iter()
+        .filter(|process| process.is_final() && !process.synthetic)
+    {
         let (invalid, _, callees, _) = effects(
             process.body.iter().chain(&process.validation_body),
             &definitions,
