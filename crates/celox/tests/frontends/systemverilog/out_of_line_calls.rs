@@ -6259,27 +6259,34 @@ endmodule
 }
 
 #[test]
-fn package_initializers_keep_units_that_report_their_scope() {
-    // A report of a unit has the scope of the instance whose copy runs:
-    // the initializer's call of `checked` keeps the package's own unit, so
-    // its warning names the package's scope, as inlined.
+fn package_initializers_report_in_their_scope_through_the_units_of_the_root() {
+    // The initializer of `early` calls `Top`'s unit of `checked`, which
+    // `Top` calls too: each warning names the scope of its caller, the
+    // package's state for the initializer's and `Top` for `Top`'s, as
+    // inlined. `noted` reaches the report through a second unit.
     let source = r#"`timescale 1ns/1ns
 package p;
+    int seed = 3;
     function automatic int checked(int v);
         if (v > 2) $warning("big %0d", v);
+        if (v > 3) $error("bigger %0d", v);
         return v + 1;
     endfunction
-    int seed = 3;
+    function automatic int noted(int v);
+        return checked(v + 1) * 2;
+    endfunction
     int early = checked(seed);
+    int later = noted(seed);
 endpackage
-module Top(output int a, output int b);
+module Top(output int a, output int b, output int c);
     import p::*;
     int k = 4;
     initial begin
         #1 a = checked(k);
         b = early;
+        c = later + noted(k);
     end
 endmodule
 "#;
-    same_as_inlined(source, 2, 2, &["a", "b"]);
+    same_as_inlined(source, 2, 2, &["a", "b", "c"]);
 }
