@@ -223,7 +223,7 @@ For `expect (property_spec) action_block` (16.17), the executing process makes o
 
 ### Coverage groups {#covergroups}
 
-A covergroup (clause 19) is a type: declared in a module, a program, a package, the compilation unit or a generate block, or embedded in a class (19.4). `new` constructs an instance, with the arguments of the covergroup; `sample()` samples it, with the arguments of a `with function sample` declaration, and so does each occurrence of the clocking event of the covergroup (`covergroup cg @(posedge clk);`) for each of its instances (19.3); `get_inst_coverage()`, `get_coverage()`, `T::get_coverage()` and `$get_coverage()` give coverage, also of a coverpoint or cross (`c.cp.get_inst_coverage()`, `T::cp::get_coverage()`) and with the covered bins and the bins in two `int` variables (`c.get_coverage(covered, total)`); `start()`, `stop()` and `set_inst_name()` control an instance (19.8). The results are read through `Simulation::coverage()` (see [Coverage](#coverage)).
+A covergroup (clause 19) is a type: declared in a module, a program, a package, the compilation unit or a generate block, or embedded in a class (19.4). `new` constructs an instance, with the arguments of the covergroup; `sample()` samples it, with the arguments of a `with function sample` declaration, and so does each occurrence of the clocking event of the covergroup (`covergroup cg @(posedge clk);`) for each of its instances (19.3); `get_inst_coverage()`, `get_coverage()`, `T::get_coverage()` and `$get_coverage()` give coverage, also of a coverpoint or cross (`c.cp.get_inst_coverage()`, `T::cp::get_coverage()`) and with the covered bins and the bins in two `int` variables (`c.get_coverage(covered, total)`); `start()`, `stop()` and `set_inst_name()` control an instance (19.8). The results are read through `Simulation::coverage()`, or `coverage()` of a `Simulation` in TypeScript (see [Coverage](#coverage)).
 
 A coverpoint (19.5) is of an integral type of any width: with or without a label, with a type of its own, and with an `iff` guard, whose expression is evaluated first. Its expression and its guard read the arguments of the covergroup and of `sample`, then the members of the class of an embedded covergroup, then the names of the scope. Its bins are the automatic bins of 19.5.3, also those of an enumeration, or the bins it declares for values (19.5.1 to 19.5.6): one bin, a bin for each value (`bins b[]`) or a number of bins (`bins b[N]`) of a list of values and ranges, also ranges with a tolerance (`[a +/- b]`, `[a +%- b]`), of the values a `with` expression keeps, or of the elements of an array; `default` bins; `ignore_bins` and `illegal_bins`; `wildcard` bins; and a guard on any of them (`iff`). A bin value is a constant, an argument of the covergroup or a call of a function with these, which the construction evaluates, so the instances of one type may differ in their bins. A sample of an illegal value is reported as an error.
 
@@ -246,7 +246,7 @@ A construct of the **Not supported** column is rejected where a `new` or a metho
 | **Methods (19.8)** | `sample()`, `get_inst_coverage()`, `get_coverage()`, `T::get_coverage()`, and `$get_coverage()`; `get_coverage` and `get_inst_coverage` with two `ref int` arguments; `start()`, `stop()` and `set_inst_name()`; the methods Table 19-5 gives coverpoints and crosses (`c.cp.get_inst_coverage()`, `c.x.stop()`, `T::cp::get_coverage()`); a method of an embedded covergroup called on its variable (`cg` in the class, `obj.cg`) | A method of an embedded covergroup called on another expression that gives the handle, such as a conditional expression |
 | **Construction (19.3, 19.4)** | `new` with the arguments of the covergroup; in the `new` method of its class, an embedded covergroup assigned as `cg = new;` or `this.cg = new;` | `new` with a covergroup handle as a shallow copy (8.12); an embedded covergroup assigned through another handle of the class (`other.cg = new;`) in the `new` method (outside that method the assignment is the error 19.4 makes it) |
 | **Type names (20.6.1)** | — | `$typename` of a covergroup type, of a variable of one, or of an array or structure that holds one (20.6.1 has no rule for the name) |
-| **Results (19.9)** | `Simulation::coverage()` and `Simulator::coverage()` (see [Coverage](#coverage)) | The coverage database; see [No coverage database](#deviations-standard-code) |
+| **Results (19.9)** | `Simulation::coverage()` and `Simulator::coverage()` in Rust; `coverage()` of a `Simulation` in TypeScript (see [Coverage](#coverage)) | The coverage database; see [No coverage database](#deviations-standard-code) |
 
 ### I/O, formatting, and system tasks {#formatted-output-to-strings}
 
@@ -328,7 +328,8 @@ These accepted IEEE 1800-2023 constructs deliberately behave differently from th
   (`no_coverage_database` in
   [`[diagnostics]`](./celox-toml.md#diagnostics)); nothing is saved or
   loaded (19.9; [#4294](https://github.com/celox-sim/celox/issues/4294)).
-  Read the coverage of covergroups with `Simulation::coverage()`. Immediate
+  Read the coverage of covergroups with `Simulation::coverage()`, or with
+  `coverage()` of a `Simulation` in TypeScript. Immediate
   `cover` executes its pass statement; assertion coverage and the code
   coverage of clause 40 are not collected.
 - **Clocking events of covergroups.** IEEE 1800-2023 19.3 samples a
@@ -604,7 +605,12 @@ Clause 4.7 permits either order in the cases below; Celox is deterministic:
 `Simulation::coverage()` and `Simulator::coverage()` report every covergroup
 type that has an instance, with its instances, their numbers of samples and
 the coverage `$get_coverage` gives. Reading the report changes nothing and
-advances no time.
+advances no time. In TypeScript, `coverage()` of a `Simulation` returns the
+same report as a `CoverageReport` object with camelCase field names
+(see [Writing Tests](./writing-tests.md#coverage)). The event-based
+`Simulator` of TypeScript has no `coverage()`: the only covergroup
+construction a `Simulator` builds is one in a clocked procedure, and its
+handle does not drain the runtime events that report illegal bin hits.
 
 - **A covergroup type belongs to its elaborated scope.** Instances of a
   module or a program share the covergroup types it declares when each

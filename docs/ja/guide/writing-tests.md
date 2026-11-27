@@ -185,6 +185,49 @@ for (const event of sim.drainRuntimeEvents()) {
 }
 ```
 
+### カバレッジ {#coverage}
+
+`coverage()` は、最後に完了したステップの時点でのシミュレーションの covergroup の
+カバレッジ（IEEE 1800-2023 19 節）を返します。インスタンスを持つ covergroup 型ごとに、
+カバーポイントとクロス、そのビンとヒット数を、型全体とインスタンスごとに含みます。
+レポートは `CoverageReport` のオブジェクトで、Rust の `Simulation::coverage()` の JSON を
+パースしたものです。呼び出すたびに作り直し、読んでも何も変わらず、時刻も進みません。
+covergroup のない設計（Veryl の設計はすべて該当）は `{ coverage: 100, covergroups: [] }` を返します。
+ヒット数とサンプル数は JavaScript の数値で、`Number.MAX_SAFE_INTEGER` まで正確です。
+
+covergroup は SystemVerilog の機能です。モジュール定義に `.sv` のソースを指定します。
+`illegal_bins` のビンへのヒットは `drainRuntimeEvents()` が返す `"error"` の報告になり、
+そのヒットはレポートにも含まれます。
+
+```typescript
+const Top: ModuleDefinition<Record<string, never>> = {
+  __celox_module: true,
+  name: "Top",
+  sources: [{ path: "Top.sv", content: source }], // covergroup を宣言してサンプルする
+  ports: {},
+  events: [],
+};
+const sim = Simulation.create(Top);
+sim.runUntil(1000);
+const report = sim.coverage();
+console.log(`$get_coverage() = ${report.coverage}%`);
+for (const group of report.covergroups) {
+  for (const item of group.items) {
+    for (const bin of item.bins) {
+      console.log(`${group.name}.${item.name} ${bin.name}: ${bin.hits}`);
+    }
+  }
+}
+```
+
+カバレッジを返すのは `Simulation` だけで、イベントベースの `Simulator` には `coverage()` が
+ありません。`Simulator` はプロセスを実行しないため、宣言の初期化子（`cg c = new;`）や
+`initial` ブロックで covergroup を構築する設計は `Simulator` として構築できません。
+`Simulator` が実行できる唯一の構築であるクロック同期の手続き内での構築
+（`always @(posedge clk) if (c == null) c = new;`）では、illegal ビンへのヒットを実行時イベントで
+報告しますが、`Simulator` のハンドルはそれを取り出しません。ブラウザ（WASI）ビルドでは
+covergroup を使えません。
+
 ## シミュレータオプション
 
 `Simulator` と `Simulation` の両方で以下のオプションが使えます：

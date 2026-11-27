@@ -1,8 +1,9 @@
 # SystemVerilog Support
 
 Celox can simulate SystemVerilog through its **Rust API**.
-Supply your source files and choose a top module. The TypeScript package and
-Vite plugin currently load Veryl only.
+Supply your source files and choose a top module. The Vite plugin currently
+loads Veryl only; the TypeScript package compiles the sources of a module
+definition whose paths end in `.sv` or `.svh` as SystemVerilog.
 
 Celox follows IEEE Std 1800™-2023.
 Instead of restating the standard, the

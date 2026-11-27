@@ -14,6 +14,7 @@ import type { NativeCreateSimulationFn } from "./simulation.js";
 import type { NativeCreateFn } from "./simulator.js";
 import type {
 	AssertionSite,
+	CoverageReport,
 	CreateResult,
 	FrontendSimulatorHandle,
 	LoopBreak,
@@ -69,6 +70,8 @@ export interface RawNapiSimulationHandle {
 	switchVcd?(path: string): void;
 	drainRuntimeEvents?(): RawRuntimeEvent[];
 	setFailOn?(severity: string | null): void;
+	/** The coverage report as JSON (`celox::CoverageReport`). */
+	coverageJson?(): string;
 	dispose(): void;
 }
 
@@ -1008,6 +1011,12 @@ export function wrapDirectSimulationHandle(
 			: {}),
 		...(raw.setFailOn
 			? { setFailOn: (severity: Severity | null) => raw.setFailOn!(severity) }
+			: {}),
+		...(raw.coverageJson
+			? {
+					coverage: (): CoverageReport =>
+						JSON.parse(raw.coverageJson!()) as CoverageReport,
+				}
 			: {}),
 	};
 }
