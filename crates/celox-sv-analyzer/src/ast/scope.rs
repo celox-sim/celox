@@ -85,6 +85,10 @@ pub(super) struct ScopeSymbols {
     pub interface_arrays: HashMap<String, interface_binding::ArrayBinding>,
     pub interface_scopes: HashMap<String, interface_binding::ScopeBinding>,
     pub interface_declarations: HashSet<celox_sv_syntax::BodyItemId>,
+    /// The variables and subroutines of the interface instances the scope
+    /// binds, by their bound names: state of the scope, as the instances'
+    /// signals and processes are (see `ScopeElaboration::exported_locals`).
+    pub instance_items: HashSet<String>,
     pub interface_instances:
         HashMap<interface_binding::InstanceKey, interface_binding::InstanceBinding>,
     /// The names the imports of a generate block bind there to another
@@ -308,6 +312,8 @@ impl ScopeSymbols {
         extend_missing(&mut self.interface_scopes, &other.interface_scopes);
         self.interface_declarations
             .extend(other.interface_declarations.iter().copied());
+        self.instance_items
+            .extend(other.instance_items.iter().cloned());
         extend_missing(&mut self.type_aliases, &other.type_aliases);
         self.type_declarations
             .extend(other.type_declarations.iter().cloned());
@@ -547,6 +553,11 @@ impl ScopeSymbols {
             interface_arrays: self.interface_arrays.clone(),
             interface_scopes: self.interface_scopes.clone(),
             interface_declarations: self.interface_declarations.clone(),
+            instance_items: self
+                .instance_items
+                .iter()
+                .map(|name| rename.name(name))
+                .collect(),
             interface_members: self
                 .interface_members
                 .iter()

@@ -628,3 +628,48 @@ module Top(output int passes, failures);
 endmodule"#)
  (top Top) (run_until 5)
  (assert_eq passes 1) (assert_eq failures 1))
+
+(case assertions_of_nested_interface_instances
+  ; The concurrent assertions of an interface instance inside another
+  ; interface's instances keep their sequence and property state per
+  ; instance, as those of an instance in a module do (IEEE 1800-2023 16.14,
+  ; 25.3): `m1` alone sees `b[2]` rise without `b[3]` a clock later, and the
+  ; cover of `v[2] ##1 v[3]` matches at 25 to 75 in the instances of `a`,
+  ; two levels down in `o` too (23.6).
+  (source "nested.sv" #"
+interface checks(input bit clk, input bit [3:0] v);
+    int fails, hits;
+    A1: assert property (@(posedge clk) $rose(v[0]) |-> v[0] s_until_with v[1]) else fails++;
+    A2: assert property (@(posedge clk) $rose(v[2]) |-> ##1 v[3]) else fails++;
+    A3: assert property (@(posedge clk) v[3] |-> $past(v[2])) else fails++;
+    C1: cover property (@(posedge clk) v[2] ##1 v[3]) hits++;
+endinterface
+interface mon(input bit clk, input bit [3:0] v);
+    checks C(.clk(clk), .v(v));
+endinterface
+interface outer(input bit clk, input bit [3:0] v);
+    mon M(.clk(clk), .v(v));
+endinterface
+module Top(output int f0, output int f1, output int f2,
+           output int c0, output int c1, output int c2);
+    bit clk;
+    bit [3:0] a, b;
+    always #5 clk = ~clk;
+    mon m0(.clk(clk), .v(a));
+    mon m1(.clk(clk), .v(b));
+    outer o(.clk(clk), .v(a));
+    initial begin
+        #12 a[0] = 1; a[2] = 1;
+        #10 a[3] = 1;
+        #10 a[1] = 1;
+        #2 b[2] = 1;
+    end
+    initial begin
+        #80 f0 = m0.C.fails; f1 = m1.C.fails; f2 = o.M.C.fails;
+        c0 = m0.C.hits; c1 = m1.C.hits; c2 = o.M.C.hits;
+    end
+endmodule
+"#)
+  (top Top) (run_until 90)
+  (assert_eq f0 0) (assert_eq f1 1) (assert_eq f2 0)
+  (assert_eq c0 6) (assert_eq c1 0) (assert_eq c2 6))
