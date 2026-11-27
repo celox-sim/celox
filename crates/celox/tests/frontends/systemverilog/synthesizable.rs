@@ -83,8 +83,9 @@ fn unsupported_constructs_name_their_tracking_issue() {
             4294,
         ),
         (
-            "interface I; covergroup cg; endgroup endinterface \
-             module Top(input logic a, output logic y); I i(); assign y = a; endmodule",
+            "interface I; covergroup cg; endgroup cg c; endinterface \
+             module Top(input logic a, output logic y); I i(); assign y = a; \
+             initial i.c.sample(); endmodule",
             4294,
         ),
     ] {

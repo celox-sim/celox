@@ -444,9 +444,32 @@ fn predefined<'n>(
         }
     }
     let Some((class, owner)) = found else {
+        // A covergroup of an interface through a virtual interface, whose
+        // member the handle is (`vif.c.sample()`), as through an instance.
+        if virtual_interfaces::covergroup_member(tree, session, receiver, native, dimensions) {
+            return Err(outside_the_interface());
+        }
         return Ok(None);
     };
     let model = model(tree, session, dimensions, &class, owner.as_deref())?;
+    // A handle of a covergroup of an interface that a property of an object
+    // holds may be of another instance of the interface: the classes an
+    // interface declares do not tell their instances apart.
+    if model.interface
+        && separator != "::"
+        && let ExprKind::Member {
+            expression,
+            separator,
+            ..
+        } = &native
+            .expression(expression_binding::ungroup(receiver, native))
+            .kind
+        && separator == "."
+        && expression_binding::object_native_class(tree, session, *expression, native, dimensions)
+            .is_some()
+    {
+        return Err(in_a_class());
+    }
     Ok(Some(Use {
         model,
         receiver: if separator == "::" {

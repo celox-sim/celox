@@ -7814,6 +7814,618 @@ endmodule
     }
 }
 
+/// The body of the monitor interfaces of the UVM examples (sv-tests
+/// `uart_example`, `apb_monitor.sv`): a covergroup type of the interface,
+/// an array of its handles that an `initial foreach` constructs, and
+/// `sample()` in the action of a `cover property` of the interface.
+const MONITOR: &str = r#"
+    covergroup cg_t();
+        option.per_instance = 1;
+        RW: coverpoint w { bins read = {0}; bins write = {1}; }
+        ERR: coverpoint e { bins err = {1}; bins ok = {0}; }
+        X: cross RW, ERR;
+    endgroup
+    cg_t arr[N];
+    initial foreach (arr[i]) arr[i] = new();
+    sequence done_s; @(posedge clk) $rose(en); endsequence
+    cover property (done_s) begin
+        foreach (arr[i]) if (sel[i] == 1) arr[i].sample();
+    end
+    function automatic int covered(int i);
+        int hit, total;
+        void'(arr[i].get_inst_coverage(hit, total));
+        return hit;
+    endfunction
+"#;
+
+/// A design with two instances of each of two monitor interfaces of
+/// [`MONITOR`]: `mon`, which only its instances name, and `pmon`, which a
+/// port of `Peer`, a port of a modport of `Viewer` and a virtual interface
+/// name as well. `n` and `pn` see `w` and `e` swapped and every select.
+/// `{extra}` goes to the end of `Top`.
+fn monitors(extra: &str) -> String {
+    format!(
+        r#"`timescale 1ns/1ns
+interface mon #(int N = 2) (input logic clk, input logic w, input logic e, input logic [N-1:0] sel, input logic en);
+{MONITOR}
+endinterface
+interface pmon #(int N = 2) (input logic clk, input logic w, input logic e, input logic [N-1:0] sel, input logic en);
+{MONITOR}
+    modport view(input en, import covered);
+endinterface
+module Peer(pmon p); endmodule
+module Viewer(pmon.view q, output int seen);
+    always @(negedge q.en) seen = q.covered(0);
+endmodule
+module Top(output int done, output int seen, output int hit);
+    logic clk = 0, w = 0, e = 0, en = 0;
+    logic [1:0] sel = 0;
+    always #1 clk = ~clk;
+    mon #(2) m(.clk(clk), .w(w), .e(e), .sel(sel), .en(en));
+    mon #(2) n(.clk(clk), .w(e), .e(w), .sel(2'b11), .en(en));
+    pmon #(2) pm(.clk(clk), .w(w), .e(e), .sel(sel), .en(en));
+    pmon #(2) pn(.clk(clk), .w(e), .e(w), .sel(2'b11), .en(en));
+    Peer peer(.p(pm));
+    Viewer viewer(.q(pn), .seen(seen));
+    virtual pmon #(2) v;
+    task automatic xfer(bit ww, bit ee, logic [1:0] s);
+        @(negedge clk) begin w = ww; e = ee; sel = s; en = 1; end
+        @(negedge clk) en = 0;
+    endtask
+    initial begin
+        v = pm;
+        xfer(1, 0, 2'b01);
+        xfer(0, 1, 2'b11);
+        xfer(1, 1, 2'b10);
+        xfer(0, 0, 2'b00);
+        #4 hit = m.covered(1);
+        done = 1;
+    end
+{extra}
+endmodule
+"#
+    )
+}
+
+/// The samples and the hit bins of each instance of the covergroup types
+/// named `name` of `report`, in the order of the types, then of their
+/// instances.
+fn instance_bins(report: &celox::CoverageReport, name: &str) -> Vec<(u64, Vec<String>)> {
+    report
+        .covergroups
+        .iter()
+        .filter(|group| group.name == name)
+        .flat_map(|group| &group.instances)
+        .map(|instance| {
+            (
+                instance.samples,
+                instance
+                    .items
+                    .iter()
+                    .flat_map(|item| {
+                        item.bins
+                            .iter()
+                            .filter(|bin| bin.hits != 0)
+                            .map(move |bin| format!("{}.{}={}", item.name, bin.name, bin.hits))
+                    })
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+fn with_bins(samples: u64, bins: &[&str]) -> (u64, Vec<String>) {
+    (samples, bins.iter().map(|bin| bin.to_string()).collect())
+}
+
+/// What the two monitors of one interface of [`monitors`] sample, in the
+/// order the instances are constructed: the first two transfers select
+/// `arr[0]` of the first monitor, the second and third its `arr[1]`, and
+/// every transfer both elements of the second, with `w` and `e` swapped.
+fn monitor_bins() -> Vec<(u64, Vec<String>)> {
+    let every = [
+        "RW.read=2",
+        "RW.write=2",
+        "ERR.err=2",
+        "ERR.ok=2",
+        "X.<read,err>=1",
+        "X.<read,ok>=1",
+        "X.<write,err>=1",
+        "X.<write,ok>=1",
+    ];
+    vec![
+        with_bins(
+            2,
+            &[
+                "RW.read=1",
+                "RW.write=1",
+                "ERR.err=1",
+                "ERR.ok=1",
+                "X.<read,err>=1",
+                "X.<write,ok>=1",
+            ],
+        ),
+        with_bins(
+            2,
+            &[
+                "RW.read=1",
+                "RW.write=1",
+                "ERR.err=2",
+                "X.<read,err>=1",
+                "X.<write,err>=1",
+            ],
+        ),
+        with_bins(4, &every),
+        with_bins(4, &every),
+    ]
+}
+
+sv_backends! {
+    /// 19.3: a covergroup declared in an interface is a type of the
+    /// interface. Each instance of the interface constructs its own
+    /// instances in its `initial`, and samples them in the action of its
+    /// `cover property`, which reads the members of that instance: the two
+    /// instances of each interface share the type, not the instances. A
+    /// module that receives an instance through a port or a modport samples
+    /// nothing of it, calling a function of the interface through the
+    /// modport reads the instance's coverage, and a virtual interface of
+    /// the instance changes nothing.
+    fn interface_covergroups(sim) {
+        @setup { let source = monitors(""); }
+        @build simulation(&source).four_state(false);
+        sim.run_until(20).unwrap();
+        let (done, seen, hit) = (sim.signal("done"), sim.signal("seen"), sim.signal("hit"));
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        let report = sim.coverage();
+        assert_eq!(instance_bins(&report, "mon.cg_t"), monitor_bins());
+        assert_eq!(instance_bins(&report, "pmon.cg_t"), monitor_bins());
+        assert_eq!(report.covergroups.len(), 2);
+        // `arr[0]` of `pn` covers every bin: 8 of 8. `arr[1]` of `m`
+        // covers 5: two of `RW`, `err` and two crosses.
+        assert_eq!(sim.get(seen), BigUint::from(8u8));
+        assert_eq!(sim.get(hit), BigUint::from(5u8));
+    }
+
+    /// 19.3: an interface with other parameter values declares a type of
+    /// its own, which the report lists under the same name.
+    fn interface_covergroups_of_each_parameterization(sim) {
+        @setup {
+            let source = monitors(
+                "    mon #(3) wide(.clk(clk), .w(w), .e(e), .sel({1'b1, sel}), .en(en));",
+            );
+        }
+        @build simulation(&source).four_state(false);
+        sim.run_until(20).unwrap();
+        let report = sim.coverage();
+        let groups = report
+            .covergroups
+            .iter()
+            .filter(|group| group.name == "mon.cg_t")
+            .map(|group| group.instances.iter().map(|instance| instance.samples).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        assert_eq!(groups.len(), 2, "{groups:?}");
+        assert!(groups.contains(&vec![2, 2, 4, 4]), "{groups:?}");
+        assert!(groups.contains(&vec![2, 2, 4]), "{groups:?}");
+        assert_eq!(instance_bins(&report, "pmon.cg_t"), monitor_bins());
+    }
+}
+
+/// An interface with covergroups that have clocking events (19.3): one that
+/// a procedure of the interface constructs, a declaration with an
+/// initializer at the other edge, one with a `ref` argument and one at a
+/// change. `use_c` samples through a modport.
+fn clocked_interface(top: &str) -> String {
+    format!(
+        r#"`timescale 1ns/1ns
+interface ci(input logic clk);
+    logic [3:0] v = 0;
+    logic [3:0] sig;
+    assign sig = v + 4'd1;
+    covergroup g @(posedge clk); coverpoint v {{ bins b[] = {{[0:15]}}; }} endgroup
+    covergroup s @(negedge clk); coverpoint v {{ bins b[] = {{[0:15]}}; }} endgroup
+    covergroup r(ref logic [3:0] x) @(posedge clk); coverpoint x {{ bins b[] = {{[0:15]}}; }} endgroup
+    covergroup ch @(v); coverpoint v {{ bins b[] = {{[0:15]}}; }} endgroup
+    g c;
+    s d = new;
+    r e = new(sig);
+    ch h;
+    initial begin c = new; h = new; end
+    always @(posedge clk) v <= v + 4'd1;
+    function void use_c(); c.sample(); endfunction
+    modport m(input clk, import use_c);
+endinterface
+module Peer(ci p); endmodule
+module User(ci.m q); initial #4 q.use_c(); endmodule
+module Top(output int done);
+    logic clk = 0;
+    always #1 clk = ~clk;
+{top}
+    initial #20 done = 1;
+endmodule
+"#
+    )
+}
+
+/// The bins `b[lo]` to `b[hi]` of coverpoint `point`, each hit once.
+fn once_from(point: &str, lo: u32, hi: u32) -> Vec<String> {
+    (lo..=hi)
+        .map(|value| format!("{point}.b[{value}]=1"))
+        .collect()
+}
+
+sv_backends! {
+    /// 19.3: the clocking event of a covergroup of an interface samples the
+    /// instances of each instance of the interface, those a procedure
+    /// constructs and those of its declarations with initializers, `ref`
+    /// arguments included, at an edge and at a change. A module that
+    /// receives an instance through a port samples nothing; `sample()` in a
+    /// function a modport imports samples the instance once more.
+    fn interface_covergroups_sample_at_their_clocking_events(sim) {
+        @setup {
+            let source = clocked_interface(
+                "    ci a(.clk(clk));\n    ci b(.clk(clk));\n    Peer pe(.p(a));\n    User us(.q(b));",
+            );
+        }
+        @build simulation(&source).four_state(false);
+        // Rising edges at 1, ..., 29 see v = 0..14; falling ones at 2, ..., 30
+        // and the changes see 1..15.
+        sim.run_until(30).unwrap();
+        let report = sim.coverage();
+        let edges = (15, once_from("v", 0, 14));
+        let mut used = once_from("v", 0, 14);
+        used[2] = "v.b[2]=2".into();
+        assert_eq!(instance_bins(&report, "ci.g"), [edges.clone(), (16, used)]);
+        let after = (15, once_from("v", 1, 15));
+        assert_eq!(instance_bins(&report, "ci.s"), [after.clone(), after.clone()]);
+        assert_eq!(instance_bins(&report, "ci.ch"), [after.clone(), after]);
+        let referenced = (15, once_from("x", 1, 15));
+        assert_eq!(instance_bins(&report, "ci.r"), [referenced.clone(), referenced]);
+    }
+}
+
+#[test]
+fn interface_covergroups_sample_alike_in_every_mode() {
+    let monitors = monitors("");
+    let clocked =
+        clocked_interface("    ci a(.clk(clk));\n    ci b(.clk(clk));\n    Peer pe(.p(a));");
+    for four_state in [false, true] {
+        for level in [
+            celox::OptLevel::O0,
+            celox::OptLevel::O1,
+            celox::OptLevel::O2,
+        ] {
+            for policy in [
+                celox::DeadStorePolicy::Off,
+                celox::DeadStorePolicy::PreserveTopPorts,
+                celox::DeadStorePolicy::PreserveAllPorts,
+            ] {
+                let context = format!("four_state={four_state} {level:?} {policy:?}");
+                let build = |source| {
+                    simulation(source)
+                        .four_state(four_state)
+                        .opt_level(level)
+                        .dead_store_policy(policy)
+                        .build()
+                        .unwrap_or_else(|error| panic!("{context}: {error}"))
+                };
+                let mut sim = build(&monitors);
+                sim.run_until(20).unwrap();
+                let report = sim.coverage();
+                assert_eq!(
+                    instance_bins(&report, "mon.cg_t"),
+                    monitor_bins(),
+                    "{context}"
+                );
+                assert_eq!(
+                    instance_bins(&report, "pmon.cg_t"),
+                    monitor_bins(),
+                    "{context}"
+                );
+                let mut sim = build(&clocked);
+                sim.run_until(30).unwrap();
+                // In four-state simulation the port `clk` of each instance,
+                // a net, falls from x to 0 at time zero (9.4.2), one more
+                // sample of the declaration at `negedge clk`.
+                let falling: &[u64] = if four_state { &[16, 16] } else { &[15, 15] };
+                assert_eq!(
+                    all_samples(&sim.coverage()),
+                    expected(&[
+                        ("ci.ch", &[15, 15]),
+                        ("ci.g", &[15, 15]),
+                        ("ci.r", &[15, 15]),
+                        ("ci.s", falling),
+                    ]),
+                    "{context}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn interface_covergroups_used_outside_the_interface_are_rejected() {
+    // The handles of a covergroup of an interface are members of each
+    // instance, whose subroutines only the body of the instance calls: a
+    // method through a virtual interface, and a task or function of the
+    // interface called through a virtual interface that uses the
+    // covergroup, are rejected, as a use through an instance or a port is.
+    let outside = "covergroup declared in an interface used from outside the interface (IEEE 1800-2023 19.3, 25.3)";
+    let called = "covergroup declared in an interface used by a task or function called through a virtual interface (IEEE 1800-2023 19.3, 25.9)";
+    for (extra, rejection) in [
+        ("    initial #3 v.arr[0].sample();", outside),
+        (
+            "    initial #3 $display(v.arr[1].get_inst_coverage());",
+            outside,
+        ),
+        ("    initial #3 $display(v.covered(0));", called),
+        ("    initial #3 m.arr[0].sample();", outside),
+    ] {
+        let source = monitors(extra);
+        let error = match simulation(&source).build() {
+            Ok(_) => panic!("{extra}: accepted"),
+            Err(error) => error.to_string(),
+        };
+        let error = error
+            .replace('│', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(error.contains(rejection), "{extra}: {error}");
+        assert!(error.contains("#4294"), "{extra}: {error}");
+    }
+}
+
+#[test]
+fn handles_of_interface_covergroups_stay_in_their_instance() {
+    // The subroutines of a covergroup type of an interface are those of each
+    // instance of the interface, which read its members (19.3): every way a
+    // handle could leave the body of the instance that holds it is rejected,
+    // through an instance name, a port, a virtual interface or a hierarchical
+    // name, as a variable, an actual or a result, and so is a method of the
+    // covergroup through a virtual interface.
+    let outside = "covergroup declared in an interface used from outside the interface (IEEE 1800-2023 19.3, 25.3)";
+    let called = "covergroup declared in an interface used by a task or function called through a virtual interface (IEEE 1800-2023 19.3, 25.9)";
+    let interface = r#"`timescale 1ns/1ns
+interface ifc(input logic clk, input logic [3:0] init);
+    covergroup cg; CP: coverpoint init { bins b[] = {[0:15]}; } endgroup
+    cg c;
+    initial c = new;
+    always @(posedge clk) c.sample();
+    function automatic cg get(); return c; endfunction
+    function automatic void take(cg h); h.sample(); endfunction
+endinterface
+"#;
+    for (modules, rejection) in [
+        ("module Top; I2 initial #2 a.c = b.c; endmodule", outside),
+        ("module Top; I2 initial #2 a.take(b.c); endmodule", outside),
+        (
+            "module Top; I2 initial #2 a.take(b.get()); endmodule",
+            outside,
+        ),
+        (
+            "module Top; I2 virtual ifc va = a, vb = b; initial #2 va.c = vb.c; endmodule",
+            outside,
+        ),
+        (
+            "module Top; I2 virtual ifc v = a; initial #2 $display(v.c.CP.get_inst_coverage()); endmodule",
+            outside,
+        ),
+        (
+            "module Top; I2 virtual ifc v = a; initial #2 v.c.CP.option.weight = 3; endmodule",
+            outside,
+        ),
+        (
+            "module Top; I2 virtual ifc v = b; initial #2 $display(v.get() == null); endmodule",
+            called,
+        ),
+        (
+            "module S; initial #3 Top.a.c = Top.b.c; endmodule module Top; I2 S s(); endmodule",
+            outside,
+        ),
+        (
+            "module S; initial #3 Top.a.c.sample(); endmodule module Top; I2 S s(); endmodule",
+            outside,
+        ),
+        (
+            "module M(ifc p, ifc q); initial #2 p.c = q.c; endmodule module Top; I2 M m(.p(a), .q(b)); endmodule",
+            outside,
+        ),
+    ] {
+        let source = format!(
+            "{interface}{}",
+            modules.replace(
+                "I2",
+                "logic clk = 0; always #1 clk = ~clk; ifc a(.clk(clk), .init(4'd1)); ifc b(.clk(clk), .init(4'd15));"
+            )
+        );
+        let error = match simulation(&source).build() {
+            Ok(_) => panic!("{modules}: accepted"),
+            Err(error) => error.to_string(),
+        };
+        let error = error
+            .replace('│', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(error.contains(rejection), "{modules}: {error}");
+        assert!(error.contains("#4294"), "{modules}: {error}");
+    }
+}
+
+/// The samples and the hit bins of the instances of every covergroup type
+/// named `name` of `report`, sorted.
+fn sorted_instance_bins(report: &celox::CoverageReport, name: &str) -> Vec<(u64, Vec<String>)> {
+    let mut bins = instance_bins(report, name);
+    bins.sort();
+    bins
+}
+
+sv_backends! {
+    /// 19.3: a covergroup of the compilation unit or of a package used in an
+    /// interface is one type of the unit or of the design, whose instances
+    /// each instance of the interface constructs and samples with its own
+    /// members: two instances, one in another interface and a function a
+    /// modport imports, which a module calls through a port.
+    fn covergroups_of_the_unit_and_of_packages_in_interfaces(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+covergroup ucg with function sample(logic [3:0] x); coverpoint x { bins b[] = {[0:15]}; } endgroup
+package p;
+    covergroup pcg with function sample(logic [3:0] x); coverpoint x { bins b[] = {[0:15]}; } endgroup
+endpackage
+interface ifc(input logic clk, input logic [3:0] base);
+    import p::*;
+    ucg u;
+    pcg v;
+    initial begin u = new; v = new; end
+    always @(posedge clk) begin u.sample(base); v.sample(base); end
+    function automatic void s(logic [3:0] x); u.sample(x); v.sample(x); endfunction
+    modport mp(import s);
+endinterface
+interface O(input logic clk); ifc x(.clk(clk), .base(4'd5)); endinterface
+module S(ifc.mp p); initial #2 p.s(4'd6); endmodule
+module Top;
+    logic clk = 0;
+    always #1 clk = ~clk;
+    ifc a(.clk(clk), .base(4'd2));
+    ifc b(.clk(clk), .base(4'd7));
+    O o(.clk(clk));
+    S s(.p(b));
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        // Rising edges at 1, ..., 19; `s` samples 6 into the instances of b.
+        sim.run_until(20).unwrap();
+        let report = sim.coverage();
+        let expected = vec![
+            with_bins(10, &["x.b[2]=10"]),
+            with_bins(10, &["x.b[5]=10"]),
+            with_bins(11, &["x.b[6]=1", "x.b[7]=10"]),
+        ];
+        assert_eq!(sorted_instance_bins(&report, "$unit::ucg"), expected);
+        assert_eq!(sorted_instance_bins(&report, "p::pcg"), expected);
+    }
+
+    /// 19.11.3, 6.22: instances of an interface whose parameter takes its
+    /// default and instances that write the same value, by position or by
+    /// name, share the covergroup type: with `merge_instances` the coverage
+    /// of the type is that of the three samples together.
+    fn interface_instances_with_the_same_parameter_values_share_types(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+interface ifc #(int N = 2) (input logic [3:0] d);
+    covergroup cg; type_option.merge_instances = 1; coverpoint d { bins b[] = {[0:15]}; } endgroup
+    cg c;
+    initial c = new;
+    task automatic s(); c.sample(); endtask
+    function automatic real tc(); return c.get_coverage(); endfunction
+endinterface
+module Top(output bit [63:0] ta, tb, tc);
+    logic [3:0] x = 1, y = 2, z = 3;
+    ifc a(.d(x));
+    ifc #(2) b(.d(y));
+    ifc #(.N(2)) c(.d(z));
+    ifc #(3) e(.d(z));
+    initial begin #1 a.s(); b.s(); c.s(); e.s(); #1 ta = $realtobits(a.tc()); tb = $realtobits(b.tc()); tc = $realtobits(c.tc()); end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(3).unwrap();
+        for name in ["ta", "tb", "tc"] {
+            assert_eq!(real(&mut sim, name), 18.75, "{name}");
+        }
+        let report = sim.coverage();
+        let groups = report
+            .covergroups
+            .iter()
+            .filter(|group| group.name == "ifc.cg")
+            .map(|group| group.instances.len())
+            .collect::<Vec<_>>();
+        assert_eq!(groups.len(), 2, "{groups:?}");
+        assert!(groups.contains(&3) && groups.contains(&1), "{groups:?}");
+    }
+
+    /// 6.22, 6.20.2: instances of an interface whose parameter without a
+    /// type takes values of other widths have covergroup types of their
+    /// own, with the automatic bins of a coverpoint of that width (19.5.3);
+    /// instances that give the same value of the same type, however
+    /// written, share one. (An instance of an interface cannot bind an
+    /// unpacked array parameter yet.)
+    fn interface_instances_with_parameter_values_of_other_types_have_other_types(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+interface wide #(parameter P = 1) (input logic [7:0] d);
+    logic [$bits(P)-1:0] v;
+    assign v = d[$bits(P)-1:0];
+    covergroup cg; coverpoint v; endgroup
+    cg c = new;
+    task automatic s(); c.sample(); endtask
+    function automatic real ic(); return c.get_inst_coverage(); endfunction
+endinterface
+module Top(output bit [63:0] wa, wb, wc, we);
+    logic [7:0] x = 1;
+    wide a(.d(x));
+    wide #(1'b1) b(.d(x));
+    wide #(4'b1) c(.d(x));
+    wide #(4'h1) e(.d(x));
+    initial begin
+        #1 a.s(); b.s(); c.s(); e.s();
+        #1 wa = $realtobits(a.ic()); wb = $realtobits(b.ic());
+        wc = $realtobits(c.ic()); we = $realtobits(e.ic());
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(3).unwrap();
+        // 64 automatic bins of a 32-bit value, 2 of a bit, 16 of 4 bits.
+        assert_eq!(real(&mut sim, "wa"), 100.0 / 64.0);
+        assert_eq!(real(&mut sim, "wb"), 50.0);
+        assert_eq!(real(&mut sim, "wc"), 6.25);
+        assert_eq!(real(&mut sim, "we"), 6.25);
+        let report = sim.coverage();
+        assert_eq!(instances_of_types(&report, "wide.cg"), [1, 1, 2]);
+    }
+
+    /// 23.8: a coverpoint and the clocking event of a covergroup of an
+    /// interface may name a signal of the module that instantiates it
+    /// through a hierarchical name, which the scope of the instance
+    /// resolves.
+    fn interface_covergroups_read_hierarchical_names(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+interface ifc(input logic clk);
+    covergroup cg @(posedge Top.clk); X: coverpoint Top.x { bins b[] = {[0:15]}; } endgroup
+    cg c = new;
+endinterface
+module Top;
+    logic clk = 0;
+    always #1 clk = ~clk;
+    logic [3:0] x = 0;
+    always @(negedge clk) x <= x + 4'd3;
+    ifc a(.clk(clk));
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        // Rising edges at 1, ..., 19 see x = 0, 3, ..., 15, 2, 5, 8, 11.
+        sim.run_until(20).unwrap();
+        let report = sim.coverage();
+        assert_eq!(
+            instance_bins(&report, "ifc.cg"),
+            [with_bins(
+                10,
+                &[
+                    "X.b[0]=1", "X.b[2]=1", "X.b[3]=1", "X.b[5]=1", "X.b[6]=1", "X.b[8]=1",
+                    "X.b[9]=1", "X.b[11]=1", "X.b[12]=1", "X.b[15]=1",
+                ]
+            )]
+        );
+    }
+}
+
 sv_backends! {
     /// 19.11.3, 6.22: instances of a module whose parameter takes its default
     /// and instances that write the same value, by position or by name, share
@@ -7933,3 +8545,763 @@ endmodule
 
 #[path = "covergroup_transitions.rs"]
 mod transitions;
+
+sv_backends! {
+    /// 19.3, 14.10, 14.13: the clocking event of a covergroup may be a
+    /// clocking block event, `@(cb)`, which follows the Observed region of
+    /// the block's clocking event; a coverpoint may read a clockvar,
+    /// `cb.x`, the value the block sampled at that event. At the events at
+    /// 5, 15, 25 and 35 `x` has become 1 to 4 and `cb.x` holds 0 to 3; a
+    /// covergroup sampled in a process that waits for `@(cb)` reads the
+    /// same.
+    fn coverpoints_of_clockvars_at_clocking_block_events(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top;
+    bit clk;
+    logic [3:0] x = 0;
+    always #5 clk = ~clk;
+    always @(posedge clk) x <= x + 1;
+    clocking cb @(posedge clk); input x; endclocking
+    covergroup at_block @(cb); X: coverpoint x { bins b[] = {[0:15]}; } S: coverpoint cb.x { bins b[] = {[0:15]}; } endgroup
+    covergroup by_call; S: coverpoint cb.x { bins b[] = {[0:15]}; } endgroup
+    at_block a = new;
+    by_call b = new;
+    always @(cb) b.sample();
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(40).unwrap();
+        let report = sim.coverage();
+        let sampled = ["b[0]=1", "b[1]=1", "b[2]=1", "b[3]=1"];
+        let mut expected = ["b[1]=1", "b[2]=1", "b[3]=1", "b[4]=1"]
+            .map(|bin| format!("X.{bin}"))
+            .to_vec();
+        expected.extend(sampled.map(|bin| format!("S.{bin}")));
+        assert_eq!(instance_bins(&report, "Top.at_block"), [(4, expected)]);
+        assert_eq!(
+            instance_bins(&report, "Top.by_call"),
+            [(4, sampled.map(|bin| format!("S.{bin}")).to_vec())]
+        );
+    }
+
+    /// 19.3, 14.10, 25.9: a covergroup of an interface whose clocking event
+    /// is a clocking block of the interface, with a coverpoint of a clockvar
+    /// of it: each instance samples its own instances at the events of its
+    /// own block, with its own sampled values.
+    fn interface_covergroups_at_their_clocking_block_events(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+interface ifc(input bit clk, input logic [3:0] d);
+    clocking cb @(posedge clk); input d; endclocking
+    covergroup cg @(cb); D: coverpoint d { bins b[] = {[0:15]}; } S: coverpoint cb.d { bins b[] = {[0:15]}; } endgroup
+    cg c = new;
+endinterface
+module Top;
+    bit clk;
+    logic [3:0] p = 0, q = 8;
+    always #5 clk = ~clk;
+    always @(negedge clk) begin p <= p + 1; q <= q + 2; end
+    ifc a(clk, p);
+    ifc b(clk, q);
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(40).unwrap();
+        let report = sim.coverage();
+        // `d` changes at the negative edges, so the sampled value is the
+        // value at the event.
+        let bins = |values: [u32; 4]| {
+            let bins = ["D", "S"]
+                .iter()
+                .flat_map(|item| values.map(|value| format!("{item}.b[{value}]=1")))
+                .collect::<Vec<_>>();
+            (4, bins)
+        };
+        let mut expected = vec![bins([0, 1, 2, 3]), bins([8, 10, 12, 14])];
+        expected.sort();
+        assert_eq!(sorted_instance_bins(&report, "ifc.cg"), expected);
+    }
+
+    /// 23.11, 19.3: an interface attached to a module with `bind` is an
+    /// instance in each instance of the module. Its covergroups sample, for
+    /// each, the ports it binds there and, through a name of the module, a
+    /// signal of that instance (23.8): one with a clocking event and a
+    /// declaration with an initializer, one with a `ref` argument of a
+    /// variable port.
+    fn interfaces_bound_into_each_instance_of_a_module_cover_it(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+interface cov_if(input logic clk, input var logic [3:0] x);
+    covergroup cg @(posedge clk); X: coverpoint x { bins b[] = {[0:15]}; } Y: coverpoint dut.y { bins b[] = {[0:15]}; } endgroup
+    covergroup by_ref(ref logic [3:0] v) @(posedge clk); V: coverpoint v { bins b[] = {[0:15]}; } endgroup
+    cg c = new;
+    by_ref r = new(x);
+endinterface
+module dut(input logic clk, input logic [3:0] x);
+    logic [3:0] y;
+    assign y = x + 4'd4;
+endmodule
+bind dut cov_if inst(.clk(clk), .x(x));
+module Top;
+    logic clk = 0;
+    logic [3:0] p = 1, q = 9;
+    always #5 clk = ~clk;
+    dut u1(.clk(clk), .x(p));
+    dut u2(.clk(clk), .x(q));
+    always @(negedge clk) q <= q + 1;
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(40).unwrap();
+        let report = sim.coverage();
+        let bins = |item: &str, values: &[u32]| {
+            values
+                .iter()
+                .map(|value| format!("{item}.b[{value}]={}", if values.len() == 1 { 4 } else { 1 }))
+                .collect::<Vec<_>>()
+        };
+        let with = |x: &[u32], y: &[u32]| {
+            let mut all = bins("X", x);
+            all.extend(bins("Y", y));
+            (4, all)
+        };
+        // u1 holds 1, u2 counts 9 to 12.
+        assert_eq!(
+            sorted_instance_bins(&report, "cov_if.cg"),
+            [with(&[1], &[5]), with(&[9, 10, 11, 12], &[0, 13, 14, 15])]
+        );
+        assert_eq!(
+            sorted_instance_bins(&report, "cov_if.by_ref"),
+            [(4, bins("V", &[1])), (4, bins("V", &[9, 10, 11, 12]))]
+        );
+    }
+}
+
+#[test]
+fn bound_interface_covergroups_rejected_uses() {
+    // 23.11: what a bound interface with covergroups may not do is rejected
+    // as it is for any instance: a use of a handle through a hierarchical
+    // name from outside the instance, a binding into an interface, and a
+    // binding into one instance, which `bind` does not support.
+    let interface = "interface cov_if(input logic clk, input logic [3:0] x);
+    covergroup cg @(posedge clk); coverpoint x; endgroup
+    cg c = new;
+endinterface
+";
+    for (rest, rejection, issue) in [
+        (
+            "module dut(input logic clk, input logic [3:0] x); endmodule
+bind dut cov_if inst(.clk(clk), .x(x));
+module Top; logic clk; logic [3:0] p; dut u1(.clk(clk), .x(p)); initial #1 u1.inst.c.sample(); endmodule",
+            "covergroup declared in an interface used from outside the interface (IEEE 1800-2023 19.3, 25.3)",
+            "#4294",
+        ),
+        (
+            "interface bus(input logic clk); logic [3:0] d; endinterface
+bind bus cov_if inst(.clk(clk), .x(d));
+module Top; logic clk; bus a(clk); endmodule",
+            "covergroup declared in an interface instantiated in another interface (IEEE 1800-2023 19.3, 25.3)",
+            "#4294",
+        ),
+        (
+            "module dut(input logic clk, input logic [3:0] x); endmodule
+bind Top.u1 cov_if inst(.clk(clk), .x(x));
+module Top; logic clk; logic [3:0] p; dut u1(.clk(clk), .x(p)); endmodule",
+            "bind directive to the instance `Top.u1`",
+            "#88",
+        ),
+    ] {
+        let source = format!("{interface}{rest}");
+        let error = match simulation(&source).build() {
+            Ok(_) => panic!("{rest}: accepted"),
+            Err(error) => error.to_string(),
+        };
+        let error = error
+            .replace('│', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(error.contains(rejection), "{rest}: {error}");
+        assert!(error.contains(issue), "{rest}: {error}");
+    }
+}
+
+#[test]
+fn covergroup_uses_of_clocking_blocks_of_other_scopes_are_rejected() {
+    // A clockvar of a clocking block of an interface read through an
+    // instance or a virtual interface, and a clocking block of an interface
+    // whose covergroup a function a module calls through a port constructs,
+    // are rejected in a covergroup as they are elsewhere (14.13, 25.9).
+    let interface = "interface ifc(input bit clk, input logic [3:0] d);
+    clocking cb @(posedge clk); input d; endclocking
+";
+    let foreign = "of a clocking block of another scope, through an interface instance or a virtual interface";
+    for (rest, rejection) in [
+        (
+            "endinterface
+module Top; bit clk; logic [3:0] q; ifc a(clk, q);
+    covergroup cg @(a.cb); coverpoint a.cb.d; endgroup cg c = new; endmodule",
+            foreign,
+        ),
+        (
+            "endinterface
+module Top; bit clk; logic [3:0] q; ifc a(clk, q); virtual ifc v = a;
+    covergroup cg @(v.cb); coverpoint v.cb.d; endgroup cg c = new; endmodule",
+            foreign,
+        ),
+        (
+            "    covergroup cg @(cb); coverpoint cb.d; endgroup
+    cg c;
+    function automatic void make(); c = new; endfunction
+endinterface
+module user(ifc p); initial p.make(); endmodule
+module Top; bit clk; logic [3:0] q; ifc a(clk, q); user u(a); endmodule",
+            "clocking block `cb` of interface `ifc` used by a task or function called through an interface port",
+        ),
+    ] {
+        let source = format!("{interface}{rest}");
+        let error = match simulation(&source).build() {
+            Ok(_) => panic!("{rest}: accepted"),
+            Err(error) => error.to_string(),
+        };
+        let error = error
+            .replace('│', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(error.contains(rejection), "{rest}: {error}");
+    }
+}
+
+#[test]
+fn aggregate_handles_of_interface_covergroups_stay_in_their_instance() {
+    // A handle of a covergroup of an interface in a structure, a nested
+    // structure, an array or a queue would carry it out of its instance as
+    // a bare handle would: a task or function of the interface with a formal
+    // or a result of such a type, and a variable of one, are rejected through
+    // an instance name, a port, a virtual interface and a hierarchical name.
+    let outside = "covergroup declared in an interface used from outside the interface (IEEE 1800-2023 19.3, 25.3)";
+    let called = "covergroup declared in an interface used by a task or function called through a virtual interface (IEEE 1800-2023 19.3, 25.9)";
+    let interface = r#"`timescale 1ns/1ns
+interface ifc(input logic [3:0] init);
+    covergroup cg; CP: coverpoint init { bins b[] = {[0:15]}; } endgroup
+    typedef struct { cg h; } s_t;
+    typedef struct { s_t inner; int n; } n_t;
+    typedef cg cg_t;
+    cg c;
+    cg_t tc;
+    cg q[$];
+    initial begin c = new; tc = new; q.push_back(c); end
+    function automatic void take_t(cg_t h); h.sample(); endfunction
+MEMBER
+    function automatic s_t get_s(); s_t r; r.h = c; return r; endfunction
+    function automatic void take_s(s_t v); v.h.sample(); endfunction
+    function automatic n_t get_n(); n_t r; r.inner.h = c; return r; endfunction
+    function automatic void take_n(n_t v); v.inner.h.sample(); endfunction
+    function automatic void take_a(cg v[2]); v[0].sample(); endfunction
+    function automatic void take_q(cg v[$]); foreach (v[i]) v[i].sample(); endfunction
+    function automatic void put_s(output s_t v); v.h = c; endfunction
+    function automatic int count_s(ref s_t v); return v.h == null; endfunction
+endinterface
+"#;
+    // A port view of an interface with a member of unpacked structure type
+    // is not supported (it is rejected as a generate block of the member's
+    // name): the member is in a variant of the interface of its own.
+    let member = "    s_t s;\n    initial s.h = c;";
+    for (modules, rejection) in [
+        (
+            "module Top; I2 initial #2 a.take_s(b.get_s()); endmodule",
+            outside,
+        ),
+        (
+            "module Top; I2 initial #2 a.take_n(b.get_n()); endmodule",
+            outside,
+        ),
+        (
+            "module Top; I2 initial #2 void'(b.get_s()); endmodule",
+            outside,
+        ),
+        (
+            "module Top; I2 initial #2 a.take_a('{null, null}); endmodule",
+            outside,
+        ),
+        ("module Top; I2 initial #2 a.take_q({}); endmodule", outside),
+        (
+            "MEMBER module Top; I2 initial #2 a.s = b.s; endmodule",
+            outside,
+        ),
+        (
+            "module M(ifc p, ifc q); initial #2 p.take_s(q.get_s()); endmodule module Top; I2 M m(.p(a), .q(b)); endmodule",
+            outside,
+        ),
+        // A call through a virtual interface with a structure of the
+        // interface as its result is rejected before the covergroup is.
+        (
+            "module Top; I2 virtual ifc va = a, vb = b; initial #2 va.take_s(vb.get_s()); endmodule",
+            "unpacked structure whose type is not formed in this scope",
+        ),
+        (
+            "module Top; I2 virtual ifc va = a; initial #2 va.take_q({}); endmodule",
+            called,
+        ),
+        // A member of unpacked structure type through a virtual interface
+        // is rejected before the covergroup is.
+        (
+            "MEMBER module Top; I2 virtual ifc va = a, vb = b; initial #2 va.s = vb.s; endmodule",
+            "has the name of another declaration",
+        ),
+        // A hierarchical call of a subroutine of an interface is not
+        // resolved, whatever its formals.
+        (
+            "module S; initial #3 Top.a.take_s(Top.b.get_s()); endmodule module Top; I2 S s(); endmodule",
+            "unresolved hierarchical reference `Top.a.take_s`",
+        ),
+        (
+            "MEMBER module S; initial #3 Top.a.s = Top.b.s; endmodule module Top; I2 S s(); endmodule",
+            outside,
+        ),
+        ("module Top; I2 initial #2 a.tc = b.tc; endmodule", outside),
+        (
+            "module Top; I2 initial #2 a.take_t(b.c); endmodule",
+            outside,
+        ),
+        (
+            "module Top; I2 virtual ifc va = a, vb = b; initial #2 va.tc = vb.tc; endmodule",
+            outside,
+        ),
+        (
+            "module S; initial #3 Top.a.q.push_back(Top.b.q[0]); endmodule module Top; I2 S s(); endmodule",
+            outside,
+        ),
+        (
+            "module S; initial #3 Top.a.q[0] = Top.b.q[0]; endmodule module Top; I2 S s(); endmodule",
+            outside,
+        ),
+        (
+            "module S; initial #3 Top.b.q[0].sample(); endmodule module Top; I2 S s(); endmodule",
+            outside,
+        ),
+        (
+            "module S; initial #3 $display(Top.b.q[0] == null); endmodule module Top; I2 S s(); endmodule",
+            outside,
+        ),
+    ] {
+        let (interface, modules) = match modules.strip_prefix("MEMBER ") {
+            Some(modules) => (interface.replace("MEMBER", member), modules),
+            None => (interface.replace("MEMBER\n", ""), modules),
+        };
+        let source = format!(
+            "{interface}{}",
+            modules.replace("I2", "ifc a(.init(4'd1)); ifc b(.init(4'd15));")
+        );
+        let error = match simulation(&source).build() {
+            Ok(_) => panic!("{modules}: accepted"),
+            Err(error) => error.to_string(),
+        };
+        let error = error
+            .replace('│', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(error.contains(rejection), "{modules}: {error}");
+        if rejection == outside || rejection == called {
+            assert!(error.contains("#4294"), "{modules}: {error}");
+        }
+    }
+}
+
+sv_backends! {
+    /// 19.3, 25.5: a function of an interface that a module calls through a
+    /// port, also of a modport, may construct and sample a covergroup
+    /// instance of its own, in a local handle, a local structure or a local
+    /// array, also through another function: the covergroup reads the
+    /// members of the instance the port denotes, which the port captures.
+    fn local_handles_of_interface_covergroups_through_ports(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+interface ifc(input logic [3:0] x);
+    logic [3:0] d;
+    assign d = x;
+    covergroup cg; CP: coverpoint d { bins b[] = {[0:15]}; } endgroup
+    typedef struct { cg h; } s_t;
+    function automatic void f(); cg c; c = new; c.sample(); endfunction
+    function automatic void g(); s_t s; s.h = new; s.h.sample(); endfunction
+    function automatic void h(); f(); endfunction
+    function automatic void k(); cg arr[2]; arr[1] = new; arr[1].sample(); endfunction
+    modport mp(import f, import g, import h);
+endinterface
+module user(ifc.mp p);
+    initial begin #1 p.f(); p.g(); p.h(); end
+endmodule
+module whole(ifc p);
+    initial #1 p.k();
+endmodule
+module Top;
+    logic [3:0] x = 3, y = 9;
+    ifc a(x);
+    ifc b(y);
+    user ua(a);
+    user ub(b);
+    whole wa(a);
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(3).unwrap();
+        let report = sim.coverage();
+        let one = |value: u32| (1, vec![format!("CP.b[{value}]=1")]);
+        assert_eq!(
+            sorted_instance_bins(&report, "ifc.cg"),
+            [one(3), one(3), one(3), one(3), one(9), one(9), one(9)]
+        );
+    }
+
+    /// 19.3, 25.9: a covergroup of a package or of the compilation unit is a
+    /// type of the design, whose subroutines no instance owns: a variable of
+    /// one that an interface declares is a member like any other, which a
+    /// module compares with `null` through a virtual interface, an instance
+    /// name and a port, while each instance samples its own. (A hierarchical
+    /// name of a class handle variable is not supported, of any class.)
+    fn package_covergroup_handles_of_interfaces_are_members(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+covergroup ucg with function sample(logic [3:0] x); coverpoint x { bins b[] = {[0:15]}; } endgroup
+package p;
+    covergroup pcg with function sample(logic [3:0] x); coverpoint x { bins b[] = {[0:15]}; } endgroup
+endpackage
+interface ifc(input bit clk, input logic [3:0] d);
+    p::pcg c, never;
+    ucg u, none;
+    initial begin c = new; u = new; end
+    always @(posedge clk) begin c.sample(d); u.sample(d); end
+endinterface
+module M(ifc q, output bit [1:0] seen);
+    initial #2 seen = {q.c == null, q.never == null};
+endmodule
+module Top(output bit [1:0] by_vif, by_name, by_port);
+    bit clk = 0;
+    always #1 clk = ~clk;
+    ifc a(clk, 4'd3);
+    ifc b(clk, 4'd9);
+    virtual ifc v = a;
+    M m(b, by_port);
+    initial #2 begin
+        by_vif = {v.c == null, v.never == null};
+        by_name = {b.u == null, b.none == null};
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(4).unwrap();
+        for name in ["by_vif", "by_name", "by_port"] {
+            let signal = sim.signal(name);
+            let value = sim.get(signal).to_u64_digits().first().copied().unwrap_or(0);
+            assert_eq!(value, 0b01, "{name}");
+        }
+        let report = sim.coverage();
+        // Rising edges at 1 and 3.
+        let expected = vec![
+            (2, vec!["x.b[3]=2".to_string()]),
+            (2, vec!["x.b[9]=2".to_string()]),
+        ];
+        assert_eq!(sorted_instance_bins(&report, "p::pcg"), expected);
+        assert_eq!(sorted_instance_bins(&report, "$unit::ucg"), expected);
+    }
+
+    /// 19.5.2, 19.3: the transitions of a coverpoint of a covergroup of an
+    /// interface follow the values each instance of the interface samples:
+    /// two instances whose members run through other sequences complete
+    /// their own transitions.
+    fn transitions_of_interface_covergroups_follow_their_instance(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+interface ifc #(parameter bit [3:0] STEP = 1) (input bit clk);
+    bit [3:0] q = 0;
+    always_ff @(posedge clk) q <= q + STEP;
+    covergroup cg @(posedge clk);
+        coverpoint q { bins up = (0 => 1 => 2); bins even = (0 => 2 => 4); }
+    endgroup
+    cg c = new;
+endinterface
+module Top;
+    bit clk = 0;
+    always #5 clk = ~clk;
+    ifc #(1) a(clk);
+    ifc #(2) b(clk);
+    ifc #(1) e(clk);
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(40).unwrap();
+        let report = sim.coverage();
+        let mut types = report
+            .covergroups
+            .iter()
+            .filter(|group| group.name == "ifc.cg")
+            .map(|group| {
+                group
+                    .instances
+                    .iter()
+                    .map(|instance| {
+                        instance.items[0]
+                            .bins
+                            .iter()
+                            .map(|bin| (bin.name.clone(), bin.hits))
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        types.sort();
+        let bins = |up, even| vec![("up".to_string(), up), ("even".to_string(), even)];
+        // Steps of one: 0, 1, 2, 3; of two: 0, 2, 4, 6.
+        assert_eq!(types, [vec![bins(0, 1)], vec![bins(1, 0), bins(1, 0)]]);
+    }
+}
+
+sv_backends! {
+    /// 19.3, 25.5: the handles a function of an interface samples may be of
+    /// any type that holds handles of a covergroup of the interface: a member
+    /// declared through a type declaration, also of another one, an array or
+    /// a queue of handles, a handle the function passes on to another one,
+    /// and locals of such types or of structures of them, also nested. A
+    /// module calls each function through a modport that imports only it,
+    /// and one calls them all through a plain port: the port captures the members the
+    /// covergroup reads, and each covergroup instance reads those of the
+    /// instance the port denotes.
+    fn typed_handles_of_interface_covergroups_through_ports(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+interface ifc(input logic [3:0] x);
+    logic [3:0] d;
+    assign d = x;
+    covergroup cg; CP: coverpoint d { bins b[] = {[0:15]}; } endgroup
+    typedef cg cg_t;
+    typedef cg_t cg_u;
+    typedef struct { cg_t h; } s_t;
+    typedef struct { s_t inner; } n_t;
+    cg_t m1;
+    cg_u m2;
+    cg_u arr[2];
+    cg q[$];
+    cg_u m3 = new;
+    initial begin
+        cg_t made;
+        m1 = new;
+        m2 = new;
+        foreach (arr[i]) arr[i] = new;
+        made = new;
+        q.push_back(made);
+    end
+    function automatic void pass(cg_u h); h.sample(); endfunction
+    function automatic void f1(); m1.sample(); endfunction
+    function automatic void f2(); m2.sample(); endfunction
+    function automatic void f3(); arr[1].sample(); endfunction
+    function automatic void f4(); q[0].sample(); endfunction
+    function automatic void f5(); pass(m1); endfunction
+    function automatic void f6(); cg_u c; c = new; c.sample(); endfunction
+    function automatic void f7(); s_t s; s.h = new; s.h.sample(); endfunction
+    function automatic void f8(); n_t n; n.inner.h = new; n.inner.h.sample(); endfunction
+    function automatic void f9(); m3.sample(); endfunction
+    modport mp1(import f1);
+    modport mp2(import f2);
+    modport mp3(import f3);
+    modport mp4(import f4);
+    modport mp5(import f5);
+    modport mp6(import f6);
+    modport mp7(import f7);
+    modport mp8(import f8);
+    modport mp9(import f9);
+endinterface
+module u1(ifc.mp1 p); initial #1 p.f1(); endmodule
+module u2(ifc.mp2 p); initial #1 p.f2(); endmodule
+module u3(ifc.mp3 p); initial #1 p.f3(); endmodule
+module u4(ifc.mp4 p); initial #1 p.f4(); endmodule
+module u5(ifc.mp5 p); initial #1 p.f5(); endmodule
+module u6(ifc.mp6 p); initial #1 p.f6(); endmodule
+module u7(ifc.mp7 p); initial #1 p.f7(); endmodule
+module u8(ifc.mp8 p); initial #1 p.f8(); endmodule
+module u9(ifc.mp9 p); initial #1 p.f9(); endmodule
+module by_port(ifc p);
+    initial begin #1 p.f1(); p.f2(); p.f3(); p.f4(); p.f5(); p.f6(); p.f7(); p.f8(); p.f9(); end
+endmodule
+module Top;
+    logic [3:0] x = 3, y = 9;
+    ifc a(x);
+    ifc b(y);
+    u1 m1(a);
+    u2 m2(a);
+    u3 m3(a);
+    u4 m4(a);
+    u5 m5(a);
+    u6 m6(a);
+    u7 m7(a);
+    u8 m8(a);
+    u9 m9(a);
+    by_port ub(b);
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(3).unwrap();
+        let report = sim.coverage();
+        // Per instance of the interface: m1 sampled by f1 and f5; m2, m3 (a
+        // declaration with an initializer of a type declaration), arr[1],
+        // q[0] and the three locals once each; arr[0] never.
+        let mut expected = Vec::new();
+        for value in [3, 9] {
+            expected.push((0, vec![]));
+            expected.extend(std::iter::repeat_n((1, vec![format!("CP.b[{value}]=1")]), 7));
+            expected.push((2, vec![format!("CP.b[{value}]=2")]));
+        }
+        expected.sort();
+        assert_eq!(sorted_instance_bins(&report, "ifc.cg"), expected);
+    }
+}
+
+#[test]
+fn every_channel_out_of_an_interface_instance_is_closed_to_its_handles() {
+    // 19.3, 25.3: a handle of a covergroup of an interface never leaves the
+    // instance that holds it. Every type that can hold one (a handle, one
+    // through a type declaration, a fixed-size array, a queue, a dynamic
+    // and an associative array, a structure and a nested one) is named,
+    // read and written, through every way into another instance: an
+    // instance name, a port, a modport, a virtual interface, a hierarchical
+    // name and an instance that `bind` attaches. Each is rejected, as the
+    // covergroup's, or by an earlier rule that rejects the access whatever
+    // the member holds.
+    let outside = "covergroup declared in an interface used from outside the interface (IEEE 1800-2023 19.3, 25.3)";
+    let interface = r#"`timescale 1ns/1ns
+interface ifc;
+    bit [3:0] v = 1;
+    covergroup cg; CP: coverpoint v; endgroup
+    typedef cg cg_t;
+    typedef struct { cg h; } s_t;
+    typedef struct { s_t inner; } n_t;
+    cg c;
+    cg_t tc;
+    cg fx[2];
+    cg q[$];
+    cg dy[];
+    cg m[int];
+    STRUCTS
+    modport mp(input c, input tc, input fx, input q, input dy, input m PORTS);
+endinterface
+"#;
+    // The member, a read of it and whether it is a structure.
+    let members = [
+        ("c", "X == null", false),
+        ("tc", "X == null", false),
+        ("fx", "X[0] == null", false),
+        ("q", "X.size() == 0", false),
+        ("dy", "X.size() == 0", false),
+        ("m", "X.num() == 0", false),
+        ("s", "X.h == null", true),
+        ("n", "X.inner.h == null", true),
+    ];
+    // Each way to reach two instances `A` and `B` of the interface.
+    let channels = [
+        (
+            "instance",
+            "module Top; ifc a(); ifc b(); initial #2 BODY; endmodule",
+            "a.",
+            "b.",
+        ),
+        (
+            "port",
+            "module M(ifc p, ifc r); initial #2 BODY; endmodule module Top; ifc a(); ifc b(); M m(a, b); endmodule",
+            "p.",
+            "r.",
+        ),
+        (
+            "modport",
+            "module M(ifc.mp p, ifc.mp r); initial #2 BODY; endmodule module Top; ifc a(); ifc b(); M m(a, b); endmodule",
+            "p.",
+            "r.",
+        ),
+        (
+            "virtual interface",
+            "module Top; ifc a(); ifc b(); virtual ifc va = a, vb = b; initial #2 BODY; endmodule",
+            "va.",
+            "vb.",
+        ),
+        (
+            "hierarchical name",
+            "module S; initial #3 BODY; endmodule module Top; ifc a(); ifc b(); S s(); endmodule",
+            "Top.a.",
+            "Top.b.",
+        ),
+        (
+            "bind",
+            "module dut; initial #2 BODY; endmodule bind dut ifc i1(); bind dut ifc i2(); module Top; dut d(); endmodule",
+            "i1.",
+            "i2.",
+        ),
+    ];
+    // What rejects an access whatever the member holds: a structure member
+    // through a port view or a virtual interface of the interface, and a
+    // hierarchical name of a structure; an assignment of a whole fixed-size
+    // array of handles of another instance, which binding types as one
+    // handle; a method of a container through a virtual interface.
+    let structures = [
+        "has the name of another declaration",
+        "hierarchical reference `Top.a.",
+        "hierarchical reference `Top.b.",
+    ];
+    let whole_array = "is no handle of class";
+    let container_method = "method or randomize call";
+    let mut accepted = Vec::new();
+    for (member, read, structure) in members {
+        for (channel, template, left, right) in channels {
+            for body in [
+                read.replace('X', &format!("{right}{member}")),
+                format!("{left}{member} = {right}{member}"),
+            ] {
+                if channel == "modport" && body.contains(" = ") {
+                    // The members of the modport are inputs.
+                    continue;
+                }
+                let structs = if structure { "s_t s;\n    n_t n;" } else { "" };
+                let ports = if structure { ", input s, input n" } else { "" };
+                let interface = interface
+                    .replace("STRUCTS", structs)
+                    .replace(" PORTS", ports);
+                let body = if body.contains(" = ") {
+                    body
+                } else {
+                    format!("$display({body})")
+                };
+                let source = format!("{interface}{}", template.replace("BODY", &body));
+                match simulation(&source).build() {
+                    Ok(_) => accepted.push(format!("{channel}, {member}: `{body}` accepted")),
+                    Err(error) => {
+                        let error = error
+                            .to_string()
+                            .replace('│', " ")
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        let earlier = structure
+                            && structures.iter().any(|text| error.contains(text))
+                            || member == "fx"
+                                && body.contains(" = ")
+                                && error.contains(whole_array)
+                            || channel == "virtual interface"
+                                && ["q", "dy", "m"].contains(&member)
+                                && error.contains(container_method);
+                        if !(error.contains(outside) || earlier) {
+                            accepted.push(format!("{channel}, {member}: `{body}`: {error}"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(accepted.is_empty(), "{}", accepted.join("\n"));
+}

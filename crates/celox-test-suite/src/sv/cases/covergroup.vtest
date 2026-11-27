@@ -1513,3 +1513,157 @@ endmodule"#)
 endmodule"#)
  (top Top) (run_to_finish)
  (expect_output "2 120\n"))
+
+; 19.3: a covergroup declared in an interface is a type of the interface.
+; The monitor interfaces of the UVM examples declare an array of its
+; handles, construct them in an `initial foreach` and sample them in the
+; action of a `cover property`: each instance of the interface has its own
+; instances, which sample the members of that instance.
+(case interface_covergroups_sample_their_instance
+ (source "interface_covergroups.sv" #"interface mon(input logic clk, input logic w, input logic e, input logic [1:0] sel, input logic en);
+ covergroup cg_t();
+  option.per_instance = 1;
+  RW: coverpoint w { bins read = {0}; bins write = {1}; }
+  ERR: coverpoint e { bins err = {1}; bins ok = {0}; }
+  X: cross RW, ERR;
+ endgroup
+ cg_t arr[2];
+ initial foreach (arr[i]) arr[i] = new();
+ sequence done_s; @(posedge clk) $rose(en); endsequence
+ cover property (done_s) begin
+  foreach (arr[i]) if (sel[i] == 1) arr[i].sample();
+ end
+ task automatic report();
+  int covered, total;
+  foreach (arr[i]) begin
+   void'(arr[i].get_inst_coverage(covered, total));
+   $display("%0d %0d %0.2f", covered, total, arr[i].X.get_inst_coverage());
+  end
+ endtask
+endinterface
+module Top;
+ logic clk = 0, w = 0, e = 0, en = 0;
+ logic [1:0] sel = 0;
+ always #1 clk = ~clk;
+ mon m(.clk(clk), .w(w), .e(e), .sel(sel), .en(en));
+ mon n(.clk(clk), .w(e), .e(w), .sel(2'b11), .en(en));
+ task automatic xfer(bit ww, bit ee, logic [1:0] s);
+  @(negedge clk) begin w = ww; e = ee; sel = s; en = 1; end
+  @(negedge clk) en = 0;
+ endtask
+ initial begin
+  xfer(1, 0, 2'b01);
+  xfer(0, 1, 2'b11);
+  xfer(1, 1, 2'b10);
+  xfer(0, 0, 2'b00);
+  #4;
+  m.report();
+  n.report();
+  $finish;
+ end
+endmodule"#)
+ (top Top) (run_to_finish)
+ (expect_output "6 8 50.00\n5 8 50.00\n8 8 100.00\n8 8 100.00\n"))
+
+; 19.3: the clocking event of a covergroup of an interface samples, at
+; each event, the instances of each instance of the interface: one that a
+; procedure of the interface constructs and one of a declaration with an
+; initializer.
+(case interface_covergroups_sample_at_their_clocking_events
+ (source "interface_clocking_events.sv" #"interface ci(input bit clk, input bit [3:0] base);
+ bit [3:0] q = 0;
+ always_ff @(posedge clk) q <= q + 4'd1;
+ covergroup cg @(posedge clk); coverpoint q + base { bins b[] = {[0:15]}; } endgroup
+ cg c;
+ cg d = new;
+ initial #12 c = new;
+ task automatic report();
+  int covered, total;
+  void'(c.get_inst_coverage(covered, total)); $write("%0d ", covered);
+  void'(d.get_inst_coverage(covered, total)); $display("%0d", covered);
+ endtask
+endinterface
+module Top;
+ bit clk = 0;
+ always #5 clk = ~clk;
+ ci a(.clk(clk), .base(4'd0));
+ ci b(.clk(clk), .base(4'd8));
+ initial begin
+  #62;
+  a.report();
+  b.report();
+  $finish;
+ end
+endmodule"#)
+ (top Top) (run_to_finish)
+ (expect_output "5 6\n5 6\n"))
+
+; 23.11, 19.3: an interface attached with `bind` to a module is an instance
+; in each instance of the module: its covergroups sample, for each, the
+; ports it binds there and, through the name of the module, a signal of that
+; instance (23.8), at their clocking events, also one with a `ref`
+; argument of a variable port. u1 holds 1 (one bin of each), u2 counts 9 to
+; 12 (four bins of each).
+(case interface_covergroups_bound_into_each_instance
+ (source "bound_covergroups.sv" #"interface cov_if #(parameter int ID = 0) (input logic clk, input var logic [3:0] x);
+ covergroup cg @(posedge clk);
+  X: coverpoint x { bins b[] = {[0:15]}; }
+  Y: coverpoint dut.y { bins b[] = {[0:15]}; }
+ endgroup
+ covergroup by_ref(ref logic [3:0] v) @(posedge clk);
+  V: coverpoint v { bins b[] = {[0:15]}; }
+ endgroup
+ cg c = new;
+ by_ref r = new(x);
+ initial begin
+  #(40 + ID);
+  $display("u%0d %0.2f %0.2f %0.2f", ID, c.X.get_inst_coverage(), c.Y.get_inst_coverage(), r.get_inst_coverage());
+ end
+endinterface
+module dut #(parameter int ID = 0) (input logic clk, input logic [3:0] x);
+ logic [3:0] y;
+ assign y = x + 4'd4;
+endmodule
+bind dut cov_if #(.ID(ID)) inst(.clk(clk), .x(x));
+module Top;
+ logic clk = 0;
+ logic [3:0] p = 1, q = 9;
+ always #5 clk = ~clk;
+ dut #(1) u1(.clk(clk), .x(p));
+ dut #(2) u2(.clk(clk), .x(q));
+ always @(negedge clk) q <= q + 1;
+ initial #50 $finish;
+endmodule"#)
+ (top Top) (run_to_finish)
+ (expect_output "u1 6.25 6.25 6.25\nu2 25.00 25.00 25.00\n"))
+
+; 19.3, 14.10, 14.13: a covergroup whose clocking event is a clocking block
+; event, `@(cb)`, samples after the Observed region of the block's clocking
+; event, where `x` has become 1 to 4 at the events at 5, 15, 25 and 35; a
+; coverpoint of the clockvar `cb.x` reads the values the block sampled, 0 to
+; 3, also in a covergroup sampled by a process that waits for `@(cb)`.
+(case covergroups_at_clocking_block_events
+ (source "clocking_covergroups.sv" #"module Top;
+ bit clk;
+ logic [3:0] x = 0;
+ always #5 clk = ~clk;
+ always @(posedge clk) x <= x + 1;
+ clocking cb @(posedge clk); input x; endclocking
+ covergroup at_block @(cb);
+  X: coverpoint x { bins b[] = {[1:4]}; }
+  S: coverpoint cb.x { bins b[] = {[1:4]}; }
+ endgroup
+ covergroup by_call;
+  S: coverpoint cb.x { bins b[] = {[1:4]}; }
+ endgroup
+ at_block a = new;
+ by_call b = new;
+ always @(cb) b.sample();
+ initial begin
+  #40;
+  $display("%0.2f %0.2f %0.2f", a.X.get_inst_coverage(), a.S.get_inst_coverage(), b.S.get_inst_coverage());
+  $finish;
+ end
+endmodule"#)
+ (top Top) (run_to_finish)
+ (expect_output "100.00 75.00 75.00\n"))

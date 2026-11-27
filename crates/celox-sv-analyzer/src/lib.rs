@@ -574,6 +574,21 @@ fn located(text: &str) -> Option<&str> {
 
 /// Time declarations for synthetic foreign declaration files, preserving the
 /// authored design's explicit/default settings and simulation precision.
+/// Why a reference that names a variable of type `class`, a class handle
+/// type, from outside the interface instance that holds it is rejected: a
+/// covergroup declared in an interface is used only by the body of each
+/// instance of the interface (IEEE 1800-2023 19.3, 25.3). `None` for any other
+/// class.
+pub fn interface_covergroup_reference(class: &str) -> Option<AnalyzerError> {
+    ast::interface_covergroup_class(class).then(ast::interface_covergroup_outside)
+}
+
+/// [`interface_covergroup_reference`] for a reference to a value of type
+/// `ty`, which may hold such handles in an array or an unpacked structure.
+pub fn interface_covergroup_type_reference(ty: &ir::Type) -> Option<AnalyzerError> {
+    ast::interface_covergroup_handles(ty).then(ast::interface_covergroup_outside)
+}
+
 pub fn generated_time_declarations(
     sources: &[(&str, &Path)],
     roots: Option<&[&str]>,

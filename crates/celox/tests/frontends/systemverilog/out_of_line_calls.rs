@@ -6578,3 +6578,61 @@ endmodule
         }
     }
 }
+
+/// The subroutines of a covergroup declared in an interface are those of
+/// each instance of the interface (IEEE 1800-2023 19.3): out of line, the
+/// two instances sample what they sample inlined, the members of their own
+/// instance, at the clocking event, through `sample()` in the action of a
+/// `cover property`, through a declaration with a `ref` argument, and
+/// through a function that the module calls through each instance.
+#[test]
+fn interface_covergroups_out_of_line() {
+    let source = r#"`timescale 1ns/1ns
+interface ci(input bit clk, input logic [3:0] base);
+    logic [3:0] v = 0;
+    logic [3:0] w;
+    assign w = v + base;
+    always @(posedge clk) v <= v + 4'd1;
+    covergroup cg @(posedge clk); coverpoint w { bins b[] = {[0:15]}; } endgroup
+    covergroup plain; coverpoint w { bins b[] = {[0:15]}; } endgroup
+    covergroup refs(ref logic [3:0] x) @(negedge clk); coverpoint x { bins b[] = {[0:15]}; } endgroup
+    cg c;
+    plain p = new;
+    refs r = new(w);
+    initial c = new;
+    cover property (@(posedge clk) w[0]) p.sample();
+    function automatic int covered();
+        int hit, total, all = 0;
+        void'(c.get_inst_coverage(hit, total)); all = hit;
+        void'(p.get_inst_coverage(hit, total)); all = all * 100 + hit;
+        void'(r.get_inst_coverage(hit, total)); return all * 100 + hit;
+    endfunction
+endinterface
+module Top(output int a, b);
+    bit clk = 0;
+    always #5 clk = ~clk;
+    ci one(.clk(clk), .base(4'd0));
+    ci two(.clk(clk), .base(4'd3));
+    initial begin
+        #41;
+        a = one.covered();
+        b = two.covered();
+    end
+endmodule
+"#;
+    for four_state in [false, true] {
+        for backend in backends() {
+            for forced in [false, true] {
+                assert_eq!(
+                    simulate(source, four_state, forced, backend, 50, &["a", "b"]),
+                    // Rising edges at 5, ..., 35 see v = 0..3, falling ones
+                    // at 10, ..., 40 see v = 1..4: `one` samples w = 0..3
+                    // and odd w = 1, 3 and w = 1..4; `two` w = 3..6, odd
+                    // w = 3, 5 and w = 4..7.
+                    Ok(vec![value(40204), value(40204)]),
+                    "{backend}, four-state {four_state}, forced {forced}"
+                );
+            }
+        }
+    }
+}

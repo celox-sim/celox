@@ -21,6 +21,34 @@ pub(super) fn analyze(
     declarations_only: bool,
     outward: &[HierarchicalSignal],
 ) -> Converted<Module> {
+    // What the body binds of its covergroup types is of this instance.
+    let outer = session.enter_interface_body();
+    let module = analyze_body(
+        tree,
+        session,
+        path,
+        packages,
+        overrides,
+        types,
+        interfaces,
+        declarations_only,
+        outward,
+    );
+    session.leave_interface_body(outer);
+    module
+}
+
+fn analyze_body(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    path: &Path,
+    packages: &packages::Packages,
+    overrides: &HashMap<String, ConstExpr>,
+    types: &[(String, Type)],
+    interfaces: &ModuleInterfaces,
+    declarations_only: bool,
+    outward: &[HierarchicalSignal],
+) -> Converted<Module> {
     let mut imported = imports::imported_symbols(tree, packages, packages.unit(path))?;
     imported.declarations_only = declarations_only;
     // The hierarchical names of the body that the scope instantiating it

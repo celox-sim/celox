@@ -721,3 +721,97 @@ endmodule
     #[cfg(feature = "wasm-runtime")]
     case!(wasm, build_wasm);
 }
+
+/// The instances of covergroups declared in interfaces (IEEE 1800-2023
+/// 19.3) belong to each instance of the interface: a simulation restored
+/// from a checkpoint samples them on as the one that took it does, those a
+/// procedure of the interface constructs at its clocking event, those of
+/// a declaration with an initializer and those its processes sample.
+mod covergroup_interfaces {
+    use std::path::Path;
+    const SOURCE: &str = r#"`timescale 1ns/1ns
+interface ci(input bit clk);
+    bit [3:0] q = 0;
+    always_ff @(posedge clk) q <= q + 4'd1;
+    covergroup cg @(posedge clk); coverpoint q { bins b[] = {[0:15]}; } endgroup
+    covergroup plain; coverpoint q { bins b[] = {[0:15]}; } endgroup
+    cg c;
+    cg d = new;
+    plain p[2];
+    initial begin
+        foreach (p[i]) p[i] = new;
+        #12 c = new;
+    end
+    always @(negedge clk) p[q[0]].sample();
+endinterface
+module Top;
+    bit clk = 0;
+    always #5 clk = ~clk;
+    ci a(.clk(clk));
+    ci b(.clk(clk));
+endmodule
+"#;
+    /// The samples of each instance of each covergroup type of `report`.
+    fn samples(report: &celox::CoverageReport) -> Vec<(String, Vec<u64>)> {
+        report
+            .covergroups
+            .iter()
+            .map(|group| {
+                (
+                    group.name.clone(),
+                    group.instances.iter().map(|i| i.samples).collect(),
+                )
+            })
+            .collect()
+    }
+    macro_rules! case {
+        ($name:ident, $build:ident) => {
+            #[test]
+            fn $name() {
+                let build = || {
+                    celox::Simulation::from_sv_sources(
+                        vec![(SOURCE, Path::new("interfaces.sv"))],
+                        "Top",
+                    )
+                    .$build()
+                    .unwrap()
+                };
+                let mut source = build();
+                source.run_until(22).unwrap();
+                let checkpoint = source.checkpoint().unwrap();
+                let bytes = checkpoint.to_bytes().unwrap();
+                source.run_until(62).unwrap();
+                let expected = source.coverage();
+                // Rising edges at 5, ..., 55: six for the declarations, five for the
+                // instances constructed at 12; falling ones at 10, ..., 60 sample
+                // `p[q[0]]`, q = 1..6.
+                assert_eq!(
+                    samples(&expected),
+                    [
+                        ("ci.cg".to_owned(), vec![6, 6, 5, 5]),
+                        ("ci.plain".to_owned(), vec![3, 3, 3, 3])
+                    ]
+                );
+                let mut restored = build();
+                // SAFETY: unchanged bytes from the same build's checkpoint encoder.
+                let decoded = unsafe { restored.checkpoint_from_bytes(&bytes) }.unwrap();
+                restored.restore(&decoded).unwrap();
+                assert_eq!(restored.time(), 22);
+                restored.run_until(62).unwrap();
+                assert_eq!(restored.coverage(), expected);
+                source.restore(&checkpoint).unwrap();
+                source.run_until(62).unwrap();
+                assert_eq!(source.coverage(), expected);
+            }
+        };
+    }
+    case!(interpreter, build_interpreter);
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    case!(native, build_native);
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    case!(tiered, build_tiered);
+    #[cfg(feature = "cranelift")]
+    case!(cranelift, build_cranelift);
+    #[cfg(feature = "wasm-runtime")]
+    case!(wasm, build_wasm);
+}

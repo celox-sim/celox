@@ -44,6 +44,11 @@ pub(crate) use covergroups::Bound as CovergroupBound;
 pub(crate) use covergroups::CovergroupIndex;
 pub(crate) use covergroups::formal_ports as covergroup_formal_ports;
 pub(crate) use covergroups::is_constructor as covergroup_constructor;
+pub(crate) use covergroups::{
+    holds_interface_handles as interface_covergroup_handles,
+    is_interface_class as interface_covergroup_class,
+    outside_the_interface as interface_covergroup_outside,
+};
 pub(crate) use warnings::COVERAGE_DATABASE_TASKS;
 mod events;
 mod mailboxes;

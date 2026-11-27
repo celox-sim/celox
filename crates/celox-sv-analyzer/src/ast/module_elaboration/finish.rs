@@ -215,7 +215,7 @@ impl ScopeElaboration<'_> {
 
     /// Adds the subroutines, locals and DPI imports of the packages the scope
     /// uses. Returns the package parameters it sees.
-    pub(super) fn lower_imported(&mut self) -> Vec<Parameter> {
+    pub(super) fn lower_imported(&mut self) -> Converted<Vec<Parameter>> {
         // The subroutines of the packages the module uses that it can call,
         // and their locals and DPI imports, are lowered with it.
         {
@@ -236,7 +236,7 @@ impl ScopeElaboration<'_> {
             // a specialization it has may call (see
             // `Packages::build_design_subroutines`).
             let design = self.imported.design_subroutines.0.clone();
-            let reachable = self.reachable_imports(&imported, design.as_deref(), &known);
+            let reachable = self.reachable_imports(&imported, design.as_deref(), &known)?;
             // The locals of the imported subroutines come with the scope
             // whether it calls them or not, but those of the subroutines
             // of the covergroup types it does not reach: a package makes
@@ -349,7 +349,7 @@ impl ScopeElaboration<'_> {
                 .iter()
                 .any(|local| local.name == parameter.name)
         });
-        imported_parameters
+        Ok(imported_parameters)
     }
 
     /// Drops the bodies of the functions that declaration contracts cannot

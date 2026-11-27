@@ -461,7 +461,7 @@ fn sampler_of<'a>(
         .is_ok_and(|unit| unit.kind == celox_sv_syntax::UnitKind::Program);
     if !program && let Some(mut procedure) = edge_procedure(&body, bit, &sample) {
         procedure.creation_order = creation_order;
-        procedure.site = process_site("covergroup sampling", tokens, tree);
+        procedure.site = process_site(covergroups::SAMPLING, tokens, tree);
         return Ok(Sampler::Edge {
             covergroup: model.name.clone(),
             procedure,
@@ -470,7 +470,7 @@ fn sampler_of<'a>(
     body.append(&mut sample);
     Ok(Sampler::Process(InitialProcess {
         creation_order,
-        site: process_site("covergroup sampling", tokens, tree),
+        site: process_site(covergroups::SAMPLING, tokens, tree),
         condition: None,
         body: vec![Stmt::Loop {
             kind: LoopKind::Forever,
@@ -828,7 +828,9 @@ pub(super) fn constructed<'a>(
     let own = tree.root_unit().is_ok_and(|unit| {
         matches!(
             unit.kind,
-            celox_sv_syntax::UnitKind::Module | celox_sv_syntax::UnitKind::Program
+            celox_sv_syntax::UnitKind::Module
+                | celox_sv_syntax::UnitKind::Program
+                | celox_sv_syntax::UnitKind::Interface
         )
     });
     if !own {

@@ -68,6 +68,11 @@ impl CallTarget<'_> {
         let elaborated = &hierarchy.elaborated[&self.id];
         let subroutine = self.target()?;
         let resolve = |r#type: &sv::ir::Type| {
+            // A handle of a covergroup of an interface belongs to the body
+            // of each instance (IEEE 1800-2023 19.3, 25.3).
+            if let Some(rejection) = sv::interface_covergroup_type_reference(r#type) {
+                return Err(rejection);
+            }
             resolved_type(elaborated, r#type).ok_or_else(|| {
                 unsupported(format!(
                     "hierarchical call `{}` of a subroutine with a formal or result of this type",

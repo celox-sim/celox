@@ -658,7 +658,28 @@ fn interface_subroutines(
         // Each subroutine names its handle apart from the others', which
         // the handle of a call of another one reads.
         let handle = format!("{}$$handle", subroutine.name);
-        let (dispatching, temporaries) = dispatching(subroutine, interface, &handle, &ty, &own);
+        let (mut dispatching, temporaries) = dispatching(subroutine, interface, &handle, &ty, &own);
+        // A formal or result of a covergroup type of the interface would let
+        // a handle of one instance reach the subroutines of another: the
+        // call, if a scope makes one, is rejected as one of a subroutine
+        // that uses a covergroup of the interface (see
+        // `covergroups::THROUGH_A_VIRTUAL_INTERFACE`).
+        if subroutine
+            .params
+            .iter()
+            .map(|param| &param.r#type)
+            .chain(&subroutine.return_type)
+            .any(|ty| covergroups::holds_interface_handle(ty, Some(&session.types)))
+        {
+            dispatching.body.insert(
+                0,
+                Stmt::Call {
+                    name: covergroups::THROUGH_A_VIRTUAL_INTERFACE.to_owned(),
+                    args: Vec::new(),
+                    arg_order: Vec::new(),
+                },
+            );
+        }
         built.subroutines.push(Arc::new(dispatching));
         built.locals.extend(temporaries.into_iter().map(Arc::new));
         built.locals.push(Arc::new(LocalVariable {
