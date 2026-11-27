@@ -1255,8 +1255,15 @@ mod tests {
                 "run();",
                 "concurrent assertion action that performs a nonblocking assignment (through `run`)",
             ),
+            // A fork of the action itself or of a task it calls, unlike
+            // that of a function it calls (see below).
             (
-                "function automatic void run(); fork x = 1; join_none endfunction",
+                "",
+                "fork x = 1; join_none",
+                "concurrent assertion action that may suspend",
+            ),
+            (
+                "task automatic run(); fork x = 1; join_none endtask",
                 "run();",
                 "concurrent assertion action that may suspend (through `run`)",
             ),
@@ -1323,6 +1330,23 @@ mod tests {
             std::path::Path::new("action-triggered.sv"),
         )
         .unwrap();
+        // A function's `fork … join_none`, also through a task, does not
+        // suspend or schedule from the action, whatever its children do:
+        // when one runs, it is an error of the simulation (IEEE 1800-2023
+        // 13.4.4).
+        for child in ["#1 x = 1;", "x <= 1;", "-> e;", "@(e) x = 1;"] {
+            let source = format!(
+                "module Top(input bit clk); int x; event e; \
+                 function automatic void spawn(); if (x > 1) fork {child} join_none endfunction \
+                 task automatic run(); spawn(); endtask \
+                 assert property (@(posedge clk) x == 0) run(); else spawn(); endmodule"
+            );
+            if let Err(error) =
+                crate::analyze_source(&source, std::path::Path::new("action-function-fork.sv"))
+            {
+                panic!("{source}: {error}");
+            }
+        }
     }
 
     /// Actions are found in every body, also a subroutine's; a concurrent

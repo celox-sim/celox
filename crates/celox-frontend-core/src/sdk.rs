@@ -1668,6 +1668,7 @@ fn lower_processes(
             requires_timed_simulation: false,
             const_delays: false,
             program: None,
+            assertion: false,
             resume: lowering
                 .hidden
                 .declare(name("resume"), PROCESS_RESUME_WIDTH, false),
