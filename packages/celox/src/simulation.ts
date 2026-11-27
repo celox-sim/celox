@@ -18,6 +18,7 @@ import {
 	wrapDirectSimulationHandle,
 } from "./napi-helpers.js";
 import type {
+	CoverageReport,
 	CreateResult,
 	FourStateValue,
 	ModuleDefinition,
@@ -510,6 +511,24 @@ export class Simulation<P = Record<string, unknown>> {
 			);
 		}
 		return this._handle.drainRuntimeEvents();
+	}
+
+	/**
+	 * The covergroup coverage of the simulation (IEEE 1800-2023 clause 19)
+	 * as of the last completed step: every covergroup type that has an
+	 * instance, with its coverpoints, crosses, bins and hits, for the type
+	 * and for each instance. Each call builds the report; reading it changes
+	 * nothing and advances no time. A design without covergroups, any Veryl
+	 * design included, reports coverage 100 and no covergroup.
+	 *
+	 * Counts are JavaScript numbers, exact up to `Number.MAX_SAFE_INTEGER`.
+	 */
+	coverage(): CoverageReport {
+		this.ensureAlive();
+		if (!this._handle.coverage) {
+			throw new Error("This simulation does not support coverage reports");
+		}
+		return this._handle.coverage();
 	}
 
 	/**

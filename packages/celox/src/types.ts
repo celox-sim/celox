@@ -271,6 +271,113 @@ export type RuntimeEvent =
 	/** Events the design's event buffer overwrote before they were drained. */
 	| { kind: "missed"; count: number };
 
+/**
+ * The covergroup coverage of a simulation (IEEE 1800-2023 clause 19), as
+ * `Simulation.coverage()` returns it: an object parsed from the JSON of the
+ * Rust `celox::CoverageReport`. Every field is always present.
+ *
+ * Coverage values are percentages. Hit counts, sample counts and bin
+ * counts are 64-bit unsigned integers in the simulator and JavaScript
+ * numbers here: exact up to `Number.MAX_SAFE_INTEGER` (2^53 - 1), rounded
+ * above it.
+ */
+export interface CoverageReport {
+	/** What `$get_coverage()` gives now: 100 without an instance. */
+	coverage: number;
+	/** The covergroup types that have an instance, by name. */
+	covergroups: CovergroupReport[];
+}
+
+/** A covergroup type, with the bins of all its instances. */
+export interface CovergroupReport {
+	/** The hierarchical name of the type, such as `"Top.cg"`. */
+	name: string;
+	/** `type_option.comment`; `weight` and `goal` are `type_option` too. */
+	comment: string;
+	weight: number;
+	goal: number;
+	mergeInstances: boolean;
+	/** What `get_coverage()` gives, in percent. */
+	coverage: number;
+	/** The covered bins and the bins, as `get_coverage(covered, total)`. */
+	covered: number;
+	total: number;
+	/**
+	 * The coverpoints and crosses with the bins of all instances, where the
+	 * bins of one name are one bin whose hits add up (19.11.3).
+	 */
+	items: CoverItemReport[];
+	/** The instances in the order they were created. */
+	instances: CovergroupInstanceReport[];
+}
+
+/** An instance of a covergroup. */
+export interface CovergroupInstanceReport {
+	/** `option.name`, such as `"Top.cg#0"` when the design sets none. */
+	name: string;
+	comment: string;
+	weight: number;
+	goal: number;
+	atLeast: number;
+	perInstance: boolean;
+	/** Whether `stop()` was not the last of its `start()` and `stop()`. */
+	collecting: boolean;
+	/** Whether the object of the instance is still reachable. */
+	live: boolean;
+	/** The samples taken while the instance was collecting. */
+	samples: number;
+	/** What `get_inst_coverage()` gives, in percent. */
+	coverage: number;
+	covered: number;
+	total: number;
+	/** The coverpoints in declaration order, then the crosses. */
+	items: CoverItemReport[];
+}
+
+/** A coverpoint or a cross. */
+export interface CoverItemReport {
+	name: string;
+	kind: "coverpoint" | "cross";
+	/** The coverpoints a cross crosses; empty for a coverpoint. */
+	coverpoints: string[];
+	comment: string;
+	weight: number;
+	goal: number;
+	atLeast: number;
+	coverage: number;
+	covered: number;
+	total: number;
+	/**
+	 * The bins that have a value. A `default` bin array (`bins d[] = default;`)
+	 * has a bin of kind `"default"` for each value that was sampled, named
+	 * by the value, such as `"d[11]"`. Of a cross, its declared bins, then
+	 * the automatic bins that were sampled and as many unsampled ones as
+	 * `option.cross_num_print_missing` asks for.
+	 */
+	bins: BinReport[];
+	/**
+	 * The bins that are not listed: of a cross, its automatic bins that were
+	 * not sampled; of a `default` bin array, the hits of the values beyond
+	 * those it has a bin for.
+	 */
+	omittedBins: number;
+}
+
+/** A bin with its hits. */
+export interface BinReport {
+	/** The name as 19.11.3 gives it, such as `"lo"`, `"auto[3]"` or `"<lo,auto[1]>"`. */
+	name: string;
+	/**
+	 * `"bins"` counts towards coverage; `"default"` is a `default` or
+	 * `default sequence` bin, `"ignore"` an `ignore_bins` and `"illegal"` an
+	 * `illegal_bins` bin.
+	 */
+	kind: "bins" | "default" | "ignore" | "illegal";
+	hits: number;
+	/** Whether the bin has the `atLeast` hits its item needs. */
+	covered: boolean;
+}
+
 export interface NativeSimulationHandle {
 	addClock(eventId: number, period: number, initialDelay: number): void;
 	schedule(eventId: number, time: number, value: number): void;
@@ -312,6 +419,8 @@ export interface NativeSimulationHandle {
 	drainRuntimeEvents?(): RuntimeEvent[];
 	/** Fail runs and steps at a report of at least `severity`. */
 	setFailOn?(severity: Severity | null): void;
+	/** The covergroup coverage as of the last completed step. */
+	coverage?(): CoverageReport;
 }
 
 /**

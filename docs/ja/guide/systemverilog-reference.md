@@ -221,7 +221,7 @@ bind 指令を含むモジュールのインスタンスが設計に複数あっ
 
 ### カバーグループ {#covergroups}
 
-covergroup（19 節）は型です。モジュール、program、パッケージ、コンパイル単位、generate ブロックで宣言でき、クラスに埋め込めます（19.4）。`new` は covergroup の引数でインスタンスを構築します。`sample()` は、`with function sample` 宣言の引数でインスタンスをサンプルします。covergroup がクロッキングイベントを持つ場合（`covergroup cg @(posedge clk);`）、そのインスタンスはどれもイベントが起きるたびにもサンプルされます（19.3）。`get_inst_coverage()`、`get_coverage()`、`T::get_coverage()`、`$get_coverage()` はカバレッジを返します。カバーポイントやクロスのカバレッジ（`c.cp.get_inst_coverage()`、`T::cp::get_coverage()`）も、カバー済みビン数とビン数を 2 つの `int` 変数に受け取る形（`c.get_coverage(covered, total)`）も使えます。`start()`、`stop()`、`set_inst_name()` はインスタンスを制御します（19.8）。結果は `Simulation::coverage()` で読みます（[カバレッジ](#coverage)を参照）。
+covergroup（19 節）は型です。モジュール、program、パッケージ、コンパイル単位、generate ブロックで宣言でき、クラスに埋め込めます（19.4）。`new` は covergroup の引数でインスタンスを構築します。`sample()` は、`with function sample` 宣言の引数でインスタンスをサンプルします。covergroup がクロッキングイベントを持つ場合（`covergroup cg @(posedge clk);`）、そのインスタンスはどれもイベントが起きるたびにもサンプルされます（19.3）。`get_inst_coverage()`、`get_coverage()`、`T::get_coverage()`、`$get_coverage()` はカバレッジを返します。カバーポイントやクロスのカバレッジ（`c.cp.get_inst_coverage()`、`T::cp::get_coverage()`）も、カバー済みビン数とビン数を 2 つの `int` 変数に受け取る形（`c.get_coverage(covered, total)`）も使えます。`start()`、`stop()`、`set_inst_name()` はインスタンスを制御します（19.8）。結果は `Simulation::coverage()`、TypeScript では `Simulation` の `coverage()` で読みます（[カバレッジ](#coverage)を参照）。
 
 カバーポイント（19.5）は任意のビット幅の整数型です。ラベル、独自の型、`iff` ガードを付けられ、ガードの式を先に評価します。式とガードは、covergroup の引数と `sample` の引数、埋め込み covergroup ならクラスのメンバ、スコープの名前の順に名前を解決します。ビンは、19.5.3 の自動ビン（列挙型のものを含む）か、値に対して宣言するビン（19.5.1〜19.5.6）です。値と範囲のリスト（許容差付きの範囲 `[a +/- b]`、`[a +%- b]` を含む）、`with` 式が残す値、配列の要素のいずれかを、1 つのビン、値ごとのビン（`bins b[]`）、指定した個数のビン（`bins b[N]`）にまとめます。`default` ビン、`ignore_bins`、`illegal_bins`、`wildcard` ビンも使え、どのビンにもガード（`iff`）を付けられます。ビンの値には、定数、covergroup の引数、それらを引数とする関数呼び出しを書けます。関数呼び出しは構築時に評価するため、同じ型のインスタンスでもビンが異なることがあります。不正な値（illegal）のサンプルはエラーとして報告します。遷移ビン（19.5.2）は、カバーポイントの値の並びを数えます。`bins t = (1 => 2 => 3), (4 => 5);` のように書き、各ステップに値と範囲のリスト（`(1, [5:7] => 6, 7)`）、回数または範囲付きの連続・goto・非連続の繰り返し（`3 [* 5]`、`3 [* 3:5]`、`1 => 3 [-> 2] => 5`、`3 [= 1:2]`）を使えます。値の並びごとのビン（`bins t[] = (...)`）、`wildcard` の遷移、遷移の `ignore_bins` と `illegal_bins`、`default sequence` も使え、どれにもガードを付けられます。値と回数にはビンの値と同じオペランドを書けます。不正な遷移を終えるサンプルはエラーとして報告します。
 
@@ -244,7 +244,7 @@ covergroup（19 節）は型です。モジュール、program、パッケージ
 | **メソッド（19.8）** | `sample()`、`get_inst_coverage()`、`get_coverage()`、`T::get_coverage()`、`$get_coverage()`。2 つの `ref int` 引数付きの `get_coverage` と `get_inst_coverage`。`start()`、`stop()`、`set_inst_name()`。表 19-5 がカバーポイントとクロスに与えるメソッド（`c.cp.get_inst_coverage()`、`c.x.stop()`、`T::cp::get_coverage()`）。埋め込み covergroup のメソッドを、その変数（クラス内の `cg`、`obj.cg`）に対して呼ぶこと | 条件式など、ハンドルを返す他の式に対する埋め込み covergroup のメソッド呼び出し |
 | **構築（19.3、19.4）** | covergroup の引数を取る `new`。クラスの `new` メソッド内での、埋め込み covergroup への `cg = new;` または `this.cg = new;` による代入 | covergroup ハンドルを渡す浅いコピーの `new`（8.12）。`new` メソッド内での、クラスの他のハンドルを通した埋め込み covergroup への代入（`other.cg = new;`）。このメソッドの外での代入は、19.4 が定めるとおりエラーです |
 | **型名（20.6.1）** | — | covergroup 型、その変数、それを含む配列や構造体の `$typename`（20.6.1 にはその名前の規則がありません） |
-| **結果（19.9）** | `Simulation::coverage()` と `Simulator::coverage()`（[カバレッジ](#coverage)を参照） | カバレッジデータベース。[カバレッジデータベースはありません](#deviations-standard-code)を参照してください |
+| **結果（19.9）** | Rust の `Simulation::coverage()` と `Simulator::coverage()`、TypeScript の `Simulation` の `coverage()`（[カバレッジ](#coverage)を参照） | カバレッジデータベース。[カバレッジデータベースはありません](#deviations-standard-code)を参照してください |
 
 ### I/O・書式出力・システムタスク {#formatted-output-to-strings}
 
@@ -323,7 +323,8 @@ covergroup（19 節）は型です。モジュール、program、パッケージ
   （[`[diagnostics]`](./celox-toml.md#diagnostics) の `no_coverage_database`）を
   出します。何も保存せず、読み込みません（19.9、
   [#4294](https://github.com/celox-sim/celox/issues/4294)）。covergroup のカバレッジは
-  `Simulation::coverage()` で読みます。即時 `cover` は pass 文を実行します。
+  `Simulation::coverage()`、TypeScript では `Simulation` の `coverage()` で読みます。
+  即時 `cover` は pass 文を実行します。
   アサーションカバレッジと 40 節のコードカバレッジは収集しません。
 - **covergroup のクロッキングイベント。** IEEE 1800-2023 19.3 は covergroup を
   「the instant the clocking event takes place, as if the process triggering the event
@@ -540,7 +541,12 @@ Clause 4.7 がどちらの順序も許すケースで、Celox は決定的です
 
 `Simulation::coverage()` と `Simulator::coverage()` は、インスタンスを持つ
 covergroup 型ごとに、インスタンス、サンプル数、`$get_coverage` が返すカバレッジを
-報告します。レポートを読んでも状態は変わらず、時刻も進みません。
+報告します。レポートを読んでも状態は変わらず、時刻も進みません。TypeScript では
+`Simulation` の `coverage()` が同じレポートを `CoverageReport` のオブジェクト（フィールド名は
+camelCase）として返します（[テストの書き方](./writing-tests.md#coverage)を参照）。
+TypeScript のイベントベースの `Simulator` には `coverage()` がありません。`Simulator` が構築できるのは
+クロック同期の手続き内での構築だけで、そのハンドルは illegal ビンへのヒットを報告する
+実行時イベントを取り出さないためです。
 
 - **covergroup 型はエラボレートしたスコープに属します。** モジュールや program の
   インスタンスは、各パラメータの値と型（型のないパラメータは値の型を取ります、6.20.2）、

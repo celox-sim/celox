@@ -1071,3 +1071,255 @@ fn simulation_handle_compiles_systemverilog_sources() {
     let events: serde_json::Value = serde_json::from_str(&handle.events_json).unwrap();
     assert!(events.get("clk").is_some(), "events: {events}");
 }
+
+fn sv_simulation(source: &str) -> NativeSimulationHandle {
+    NativeSimulationHandle::new(
+        vec![NapiSourceFile {
+            content: source.to_string(),
+            path: "src/Top.sv".to_string(),
+        }],
+        "Top".into(),
+        None,
+    )
+    .unwrap()
+}
+
+/// A covergroup with two coverpoints, one with an illegal bin, and their
+/// cross.
+const COVERGROUP_SOURCE: &str = r#"`timescale 1ns/1ns
+module Top;
+    bit [1:0] v;
+    bit w;
+    covergroup cg;
+        cp: coverpoint v {
+            bins lo = {0};
+            bins hi = {1};
+            illegal_bins bad = {3};
+        }
+        cw: coverpoint w;
+        x: cross cp, cw;
+    endgroup
+    cg a = new;
+    cg b = new;
+    initial begin
+        v = 0; w = 1; a.sample();
+        #1 v = 1; w = 0; a.sample();
+        #1 v = 3; b.sample();
+    end
+endmodule
+"#;
+
+/// The JSON of the coverage report is the interface of the TypeScript
+/// package and of `celox run --coverage-report`: this pins it exactly.
+#[test]
+fn coverage_json_is_the_report_with_camel_case_fields() {
+    let mut handle = sv_simulation(
+        r#"module Top;
+    bit [1:0] v;
+    bit w;
+    covergroup cg;
+        cp: coverpoint v {
+            bins lo = {0};
+            bins hi = {1};
+            illegal_bins bad = {3};
+        }
+        cw: coverpoint w;
+        x: cross cp, cw;
+    endgroup
+    cg c = new;
+    initial begin
+        v = 0; w = 1; c.sample();
+    end
+endmodule
+"#,
+    );
+    handle.run_until(0.0).unwrap();
+    // The type has the bins of its one instance; `bad` is listed with no
+    // hit, and of the four automatic bins of the cross only the sampled
+    // one, with the others omitted (`option.cross_num_print_missing` is 0).
+    let expected = concat!(
+        r#"{"coverage":41.666666666666664,"covergroups":["#,
+        r#"{"name":"Top.cg","comment":"","#,
+        r#""weight":1,"goal":100,"mergeInstances":false,"#,
+        r#""coverage":41.666666666666664,"covered":3,"total":8,"#,
+        r#""items":["#,
+        r#"{"name":"cp","kind":"coverpoint","coverpoints":[],"comment":"","weight":1,"goal":100,"#,
+        r#""atLeast":1,"coverage":50.0,"covered":1,"total":2,"#,
+        r#""bins":["#,
+        r#"{"name":"lo","kind":"bins","hits":1,"covered":true},"#,
+        r#"{"name":"hi","kind":"bins","hits":0,"covered":false},"#,
+        r#"{"name":"bad","kind":"illegal","hits":0,"covered":false}],"omittedBins":0},"#,
+        r#"{"name":"cw","kind":"coverpoint","coverpoints":[],"comment":"","weight":1,"goal":100,"#,
+        r#""atLeast":1,"coverage":50.0,"covered":1,"total":2,"#,
+        r#""bins":["#,
+        r#"{"name":"auto[0]","kind":"bins","hits":0,"covered":false},"#,
+        r#"{"name":"auto[1]","kind":"bins","hits":1,"covered":true}],"omittedBins":0},"#,
+        r#"{"name":"x","kind":"cross","coverpoints":["cp","cw"],"comment":"","weight":1,"goal":100,"#,
+        r#""atLeast":1,"coverage":25.0,"covered":1,"total":4,"#,
+        r#""bins":["#,
+        r#"{"name":"<lo,auto[1]>","kind":"bins","hits":1,"covered":true}],"omittedBins":3}],"#,
+        r#""instances":["#,
+        r#"{"name":"Top.cg#0","comment":"","weight":1,"goal":100,"#,
+        r#""atLeast":1,"perInstance":false,"collecting":true,"live":true,"samples":1,"#,
+        r#""coverage":41.666666666666664,"covered":3,"total":8,"#,
+        r#""items":["#,
+        r#"{"name":"cp","kind":"coverpoint","coverpoints":[],"comment":"","weight":1,"goal":100,"#,
+        r#""atLeast":1,"coverage":50.0,"covered":1,"total":2,"#,
+        r#""bins":["#,
+        r#"{"name":"lo","kind":"bins","hits":1,"covered":true},"#,
+        r#"{"name":"hi","kind":"bins","hits":0,"covered":false},"#,
+        r#"{"name":"bad","kind":"illegal","hits":0,"covered":false}],"omittedBins":0},"#,
+        r#"{"name":"cw","kind":"coverpoint","coverpoints":[],"comment":"","weight":1,"goal":100,"#,
+        r#""atLeast":1,"coverage":50.0,"covered":1,"total":2,"#,
+        r#""bins":["#,
+        r#"{"name":"auto[0]","kind":"bins","hits":0,"covered":false},"#,
+        r#"{"name":"auto[1]","kind":"bins","hits":1,"covered":true}],"omittedBins":0},"#,
+        r#"{"name":"x","kind":"cross","coverpoints":["cp","cw"],"comment":"","weight":1,"goal":100,"#,
+        r#""atLeast":1,"coverage":25.0,"covered":1,"total":4,"#,
+        r#""bins":["#,
+        r#"{"name":"<lo,auto[1]>","kind":"bins","hits":1,"covered":true}],"omittedBins":3}]}]}]}"#,
+    );
+    assert_eq!(handle.coverage_json().unwrap(), expected);
+}
+
+/// Two instances of a type, a cross and an illegal bin hit, read before
+/// and after the run: the report is live, and the hit of the illegal bin
+/// is a runtime error the handle drains.
+#[test]
+fn coverage_json_reports_crosses_illegal_bins_and_instances() {
+    fn bins(item: &serde_json::Value) -> Vec<(String, String, u64, bool)> {
+        item["bins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|bin| {
+                (
+                    bin["name"].as_str().unwrap().to_owned(),
+                    bin["kind"].as_str().unwrap().to_owned(),
+                    bin["hits"].as_u64().unwrap(),
+                    bin["covered"].as_bool().unwrap(),
+                )
+            })
+            .collect()
+    }
+    let bin = |name: &str, kind: &str, hits: u64, covered: bool| {
+        (name.to_owned(), kind.to_owned(), hits, covered)
+    };
+    let mut handle = sv_simulation(COVERGROUP_SOURCE);
+    let report = |handle: &NativeSimulationHandle| -> serde_json::Value {
+        serde_json::from_str(&handle.coverage_json().unwrap()).unwrap()
+    };
+    // The declarations constructed both instances; nothing sampled yet.
+    let before = report(&handle);
+    assert_eq!(before["coverage"], 0.0);
+    let samples = |report: &serde_json::Value| -> Vec<u64> {
+        report["covergroups"][0]["instances"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|instance| instance["samples"].as_u64().unwrap())
+            .collect()
+    };
+    assert_eq!(samples(&before), [0, 0]);
+
+    handle.run_until(10.0).unwrap();
+    let after = report(&handle);
+    assert_eq!(report(&handle), after, "reading the report changes nothing");
+    assert_eq!(after["coverage"], 50.0);
+    assert_eq!(after["covergroups"].as_array().unwrap().len(), 1);
+    let group = &after["covergroups"][0];
+    assert_eq!(group["name"], "Top.cg");
+    assert_eq!(group["covered"], 7);
+    assert_eq!(group["total"], 16);
+    assert_eq!(samples(&after), [2, 1]);
+    let names: Vec<_> = group["instances"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|instance| instance["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["Top.cg#0", "Top.cg#1"]);
+    // The type: the bins of both instances by name.
+    let items = &group["items"];
+    assert_eq!(
+        bins(&items[0]),
+        [
+            bin("lo", "bins", 1, true),
+            bin("hi", "bins", 1, true),
+            bin("bad", "illegal", 1, true),
+        ]
+    );
+    assert_eq!(items[2]["kind"], "cross");
+    assert_eq!(items[2]["coverpoints"], serde_json::json!(["cp", "cw"]));
+    assert_eq!(
+        bins(&items[2]),
+        [
+            bin("<lo,auto[1]>", "bins", 1, true),
+            bin("<hi,auto[0]>", "bins", 1, true),
+        ]
+    );
+    assert_eq!(items[2]["omittedBins"], 2);
+    // The second instance sampled only the illegal value, which no cross
+    // bin counts.
+    let second = &group["instances"][1];
+    assert_eq!(second["coverage"], 50.0 / 3.0);
+    assert_eq!(
+        bins(&second["items"][0]),
+        [
+            bin("lo", "bins", 0, false),
+            bin("hi", "bins", 0, false),
+            bin("bad", "illegal", 1, true),
+        ]
+    );
+    assert_eq!(bins(&second["items"][2]), []);
+    assert_eq!(second["items"][2]["omittedBins"], 4);
+    let errors: Vec<_> = handle
+        .sim
+        .as_mut()
+        .unwrap()
+        .drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Report(report) => Some((
+                report.severity,
+                String::from_utf8(report.message).unwrap(),
+                report.time,
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        errors,
+        [(
+            celox::Severity::Error,
+            "illegal_bins `bad` of coverpoint `cp` of covergroup `Top.cg` (instance \
+             `Top.cg#1`): value 3"
+                .to_owned(),
+            Some(2),
+        )]
+    );
+}
+
+/// A design without covergroups, SystemVerilog or Veryl, has an empty
+/// report of coverage 100 (IEEE 1800-2023 19.9: `$get_coverage` without
+/// an instance).
+#[test]
+fn coverage_json_of_designs_without_covergroups_is_empty() {
+    let empty = r#"{"coverage":100.0,"covergroups":[]}"#;
+    let mut sv = sv_simulation("module Top; int n; initial n = 1; endmodule");
+    sv.run_until(1.0).unwrap();
+    assert_eq!(sv.coverage_json().unwrap(), empty);
+    let mut veryl =
+        NativeSimulationHandle::new(napi_sources(TWO_EVENTS_SOURCE), "Top".into(), None).unwrap();
+    assert_eq!(veryl.coverage_json().unwrap(), empty);
+    veryl.run_until(10.0).unwrap();
+    assert_eq!(veryl.coverage_json().unwrap(), empty);
+}
+
+#[test]
+fn coverage_json_after_dispose_fails() {
+    let mut handle = sv_simulation(COVERGROUP_SOURCE);
+    handle.dispose().unwrap();
+    let error = handle.coverage_json().unwrap_err();
+    assert_eq!(error.reason, "Simulation has been disposed");
+}
