@@ -319,16 +319,18 @@ impl ScopeElaboration<'_> {
     ) -> Result<(), AnalyzerError> {
         // Instance connections may call subroutines, of the module or of the
         // packages it uses, with untyped assignment patterns.
-        (
-            self.subroutine_params,
-            self.subroutine_shapes,
-            self.subroutine_directions,
-        ) = procedural::subroutine_argument_names(
-            syntax_tree,
-            session,
-            &self.const_env,
-            &self.type_aliases,
-        )?;
+        let shapes;
+        (self.subroutine_params, shapes, self.subroutine_directions) =
+            procedural::subroutine_argument_names(
+                syntax_tree,
+                session,
+                &self.const_env,
+                &self.type_aliases,
+            )?;
+        self.subroutine_shapes = shapes
+            .into_iter()
+            .map(|(name, shapes)| (name, Arc::new(shapes)))
+            .collect();
         for (name, params) in &self.imported.subroutine_params {
             self.subroutine_params
                 .entry(name.clone())
@@ -337,7 +339,7 @@ impl ScopeElaboration<'_> {
         for (name, shapes) in &self.imported.subroutine_shapes {
             self.subroutine_shapes
                 .entry(name.clone())
-                .or_insert_with(|| (**shapes).clone());
+                .or_insert_with(|| shapes.clone());
         }
         // The subroutines of the packages the module uses, by their qualified
         // names and by the names its imports give them.
@@ -377,14 +379,16 @@ impl ScopeElaboration<'_> {
             // Shapes check the actuals as assignments to the formals.
             self.subroutine_shapes.insert(
                 import.name().to_string(),
-                import
-                    .arguments()
-                    .iter()
-                    .filter_map(|argument| {
-                        let r#type = dpi::argument_type(session, argument.r#type())?;
-                        Some(procedural::dimensions_from_type(&r#type))
-                    })
-                    .collect(),
+                Arc::new(
+                    import
+                        .arguments()
+                        .iter()
+                        .filter_map(|argument| {
+                            let r#type = dpi::argument_type(session, argument.r#type())?;
+                            Some(procedural::dimensions_from_type(&r#type))
+                        })
+                        .collect(),
+                ),
             );
             self.subroutine_params.insert(
                 import.name().to_string(),

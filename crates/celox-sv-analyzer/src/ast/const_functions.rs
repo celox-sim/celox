@@ -548,7 +548,12 @@ fn collect_module_constant_functions(
     }
     dimensions.function_return_types = returns.into();
     dimensions.subroutine_param_names = Arc::new(subroutine_params.clone());
-    dimensions.subroutine_param_shapes = Arc::new(subroutine_shapes);
+    dimensions.subroutine_param_shapes = Arc::new(
+        subroutine_shapes
+            .into_iter()
+            .map(|(name, shapes)| (name, Arc::new(shapes)))
+            .collect(),
+    );
     dimensions.subroutine_directions = Arc::new(subroutine_directions.clone());
     dimensions.constant_function_bodies = true;
     let mut locals = Vec::new();

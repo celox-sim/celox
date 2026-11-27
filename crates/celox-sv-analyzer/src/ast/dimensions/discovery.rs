@@ -107,7 +107,7 @@ struct ClassSignatures {
     type_aliases: SharedAliases,
     function_return_types: SharedMap<FunctionReturnMetadata>,
     specializations: usize,
-    shapes: Vec<(String, Vec<VariableDimensions>)>,
+    shapes: Vec<(String, Arc<Vec<VariableDimensions>>)>,
     names: Vec<(String, Vec<String>)>,
     returns: Vec<(String, FunctionReturnMetadata)>,
 }
@@ -1166,7 +1166,7 @@ fn publish_signature(
         .get(&n)
         .is_some_and(|old| same_shapes(old, &shapes))
     {
-        Arc::make_mut(&mut context.subroutine_param_shapes).insert(n.clone(), shapes);
+        Arc::make_mut(&mut context.subroutine_param_shapes).insert(n.clone(), Arc::new(shapes));
     }
     let names = formals
         .iter()
