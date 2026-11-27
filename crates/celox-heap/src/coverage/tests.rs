@@ -10,6 +10,7 @@ use crate::{HandleKind, Root};
 
 mod bin_kinds;
 mod crosses;
+mod transitions;
 
 const CLASS: u32 = 77;
 

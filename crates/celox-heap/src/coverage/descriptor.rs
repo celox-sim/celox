@@ -119,6 +119,65 @@ impl TypeDescriptor {
         Ok(())
     }
 
+    /// What is wrong with the transitions `sequences` of bin declaration
+    /// `bin` (19.5.2), as [`TypeDescriptor::validate`] tells it after the
+    /// name of the bin.
+    fn validate_transitions(
+        &self,
+        bin: &BinDescriptor,
+        sequences: &[Vec<TransitionStep>],
+    ) -> Result<(), String> {
+        if sequences.is_empty() {
+            return Err("has no transition".into());
+        }
+        // `[N]` is no form of a transition bin (Syntax 19-3).
+        if matches!(bin.array, BinArray::Fixed(_)) {
+            return Err("is a transition bin array with a size".into());
+        }
+        for steps in sequences {
+            let Some(first) = steps.first() else {
+                return Err("has a transition of no steps".into());
+            };
+            // "Transition bin specifications of length 0 shall be illegal"
+            // (19.5.2): one value range without a repetition, or with one
+            // that is 1, also as the low count of a range, which stands for
+            // its counts ("3 [* 3:5]" is "the same as" its three
+            // sequences). Repetition counts that a construction hands over
+            // are checked when it builds the bins.
+            if steps.len() == 1 && first.repeat.low() == Some(1) {
+                return Err("has a transition of length 0".into());
+            }
+            for step in steps {
+                if step.values.is_empty() {
+                    return Err("has a transition step of no values".into());
+                }
+                self.validate_ranges(&step.values)?;
+                let (low, high) = match &step.repeat {
+                    Repeat::Once => continue,
+                    Repeat::Consecutive(low, high) => (low, high),
+                    Repeat::Goto(low, high) | Repeat::NonConsecutive(low, high) => {
+                        // Such a sequence is "of unbounded or undetermined
+                        // varying length" (19.5.2, 19.5.5, 19.5.6).
+                        if bin.array != BinArray::Scalar {
+                            return Err("is a transition bin array with a goto or nonconsecutive \
+                                 repetition"
+                                .into());
+                        }
+                        if bin.kind != BinKind::Bins {
+                            return Err("is an ignored or illegal transition with a goto or \
+                                 nonconsecutive repetition"
+                                .into());
+                        }
+                        (low, high)
+                    }
+                };
+                self.validate_operand(low)?;
+                self.validate_operand(high)?;
+            }
+        }
+        Ok(())
+    }
+
     /// What is wrong with cross `cross`, as [`TypeDescriptor::validate`]
     /// tells it.
     fn validate_cross(&self, cross: &CrossDescriptor) -> Result<(), String> {
@@ -302,6 +361,24 @@ impl TypeDescriptor {
                         }
                         if bin.wildcard {
                             return wrong("is a wildcard `default` bin");
+                        }
+                    }
+                    BinValues::Transitions(sequences) => {
+                        self.validate_transitions(bin, sequences)
+                            .or_else(|what| wrong(&what))?;
+                    }
+                    BinValues::DefaultSequence => {
+                        // "A default sequence specification shall not accept
+                        // multiple transition bins" (19.5.2), and a default
+                        // bin cannot be ignored (19.5).
+                        if bin.kind == BinKind::Ignore {
+                            return wrong("is an ignored `default sequence` bin");
+                        }
+                        if bin.array != BinArray::Scalar {
+                            return wrong("is a `default sequence` bin array");
+                        }
+                        if bin.wildcard {
+                            return wrong("is a wildcard `default sequence` bin");
                         }
                     }
                 }
@@ -503,6 +580,17 @@ pub enum BinValues {
     /// `default`: the values that are in no other bin of the coverpoint
     /// (19.5). Such a bin does not count towards coverage.
     Default,
+    /// A `trans_list` (19.5.2): each element is a `trans_set`, the steps it
+    /// lists with `=>`. A sample counts in the bin when the values the
+    /// coverpoint was sampled with last match one of them; with
+    /// [`BinArray::Open`] each sequence of values that one of them stands
+    /// for is a bin of its own.
+    Transitions(Vec<Vec<TransitionStep>>),
+    /// `default sequence` (19.5.2): the samples at which no other
+    /// transition bin of the coverpoint counts and none of the transitions
+    /// that were under way goes on. Such a bin does not count towards
+    /// coverage.
+    DefaultSequence,
 }
 
 impl BinValues {
@@ -511,6 +599,67 @@ impl BinValues {
         Self::Ranges {
             ranges,
             filter: None,
+        }
+    }
+}
+
+/// A `trans_range_list` (19.5.2): the values of one step of a transition
+/// and how often they are repeated.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TransitionStep {
+    /// The range list of the step, resolved as the values of a bin are
+    /// (19.5.7), and for a `wildcard` declaration with x and z bits that
+    /// stand for 0 and 1 (19.5.4).
+    pub values: Vec<RangeDescriptor>,
+    pub repeat: Repeat,
+}
+
+impl TransitionStep {
+    /// The step of the values `values` without a repetition.
+    pub fn new(values: Vec<RangeDescriptor>) -> Self {
+        Self {
+            values,
+            repeat: Repeat::Once,
+        }
+    }
+}
+
+/// The repetition of a step of a transition (19.5.2). The counts are the
+/// low and the high bound of `repeat_range`; `[* n]` is `Consecutive(n,
+/// n)`. A construction evaluates them: each is a value of at least 1 and
+/// without x or z bits, and the high bound is not below the low one.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Repeat {
+    /// No repetition: one sample of the values.
+    Once,
+    /// `[* low:high]`: that many samples of the values in a row.
+    Consecutive(Operand, Operand),
+    /// `[-> low:high]`: that many samples of the values, with any samples
+    /// of other values before each; the next step follows the last of them
+    /// at once.
+    Goto(Operand, Operand),
+    /// `[= low:high]`: as `Goto`, but the next step may follow after more
+    /// samples of other values.
+    NonConsecutive(Operand, Operand),
+}
+
+impl Repeat {
+    /// The low count where the descriptor tells it: 1 for `Once`, and a
+    /// constant count of at most `u32::MAX`.
+    fn low(&self) -> Option<u32> {
+        match self {
+            Self::Once => Some(1),
+            Self::Consecutive(low, _) | Self::Goto(low, _) | Self::NonConsecutive(low, _) => {
+                match low {
+                    Operand::Constant(constant) => {
+                        let ones = super::value::ones(constant.ty.width);
+                        ((&constant.mask & &ones).bits() == 0)
+                            .then(|| u32::try_from(&constant.value & &ones).ok())
+                            .flatten()
+                    }
+                    Operand::Input(_) => None,
+                }
+            }
         }
     }
 }
