@@ -48,7 +48,7 @@ struct ScopeElaboration<'a> {
     /// The argument names of each subroutine the scope may call.
     subroutine_params: HashMap<String, Vec<String>>,
     /// The declared shape of each argument of each of those subroutines.
-    subroutine_shapes: HashMap<String, Vec<VariableDimensions>>,
+    subroutine_shapes: HashMap<String, Arc<Vec<VariableDimensions>>>,
     subroutine_directions: lifetimes::Directions,
     /// The generate items the DPI imports were collected from. They are kept
     /// while the scope elaborates, as the tables of their scopes are.
