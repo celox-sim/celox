@@ -147,6 +147,11 @@ pub(crate) struct Session {
     /// covergroup types the scope uses by, by the names of the subroutines,
     /// which no source spells (see `covergroups::in_covergroup_terms`).
     pub(super) covergroup_names: HashMap<String, covergroups::Named>,
+    /// The elaborated module, interface or program being analyzed, by its
+    /// name and the values of its parameters, which names the covergroup
+    /// types it declares (see `covergroups::scope_names`): set once its
+    /// parameters are known.
+    pub(super) covergroup_scope: Option<Arc<str>>,
 }
 
 impl Session {

@@ -186,8 +186,8 @@ pub(super) struct Names {
 /// The names of scope-level covergroup `id` of the file of `tree`, declared
 /// in elaborated generate scope `generate_scope` when it is in one. A
 /// covergroup of a module, interface or program is a type of the elaborated
-/// scope: instances with equal parameters share it, as they share the types
-/// their typedefs declare (see `types::unit_scope`). One of a package is a
+/// scope: instances whose parameters have the same values share it (see
+/// `ScopeElaboration::covergroup_scope`). One of a package is a
 /// type of the design, and one of the compilation unit of its source file
 /// (IEEE 1800-2023 6.22, 3.12.1).
 pub(super) fn scope_names(
@@ -213,7 +213,14 @@ pub(super) fn scope_names(
         }
         Some(unit) => {
             let element = instances::normalize_identifier(&unit.name.spelling);
-            let scope = types::unit_scope(Some(unit), session);
+            // The elaborated scope by the values of its parameters (see
+            // `ScopeElaboration::covergroup_scope`): instances with the same
+            // values share the type, also one that takes a default and one
+            // that writes it.
+            let scope = session
+                .covergroup_scope
+                .clone()
+                .or_else(|| types::unit_scope(Some(unit), session));
             Names {
                 class: format!("{PREFIX}{}::{local}", scope.as_deref().unwrap_or(&element)),
                 display: format!("{element}.{local}"),
