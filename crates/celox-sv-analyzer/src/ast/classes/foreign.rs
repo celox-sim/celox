@@ -566,6 +566,9 @@ fn specialize(
     let mut symbols = package.symbols;
     symbols.aliases.clear();
     symbols.declarations_only = false;
+    if let Some(caller) = caller {
+        with_caller_locals(&mut symbols, caller, name);
+    }
     let declarations =
         specializations::export_declarations(&context, session, &symbols.class_member_types);
     Ok(Specialized {
@@ -636,6 +639,36 @@ fn caller_view(caller: &ScopeSymbols, name: &str) -> ScopeSymbols {
         function_return_types: qualified(&caller.function_return_types),
         ..Default::default()
     }
+}
+
+/// Add to the `symbols` of package `name`'s specializations the variables
+/// of the subroutines of other scopes among them, which `caller` handed over
+/// with them (see [`hand_over`]): a scope that takes these subroutines from
+/// the specializations (see [`Registry::extend`]) declares their formals and
+/// locals as variables of its own, as it does those of the package's.
+fn with_caller_locals(symbols: &mut ScopeSymbols, caller: &ScopeSymbols, name: &str) {
+    let own = format!("{name}::");
+    let declared = symbols
+        .subroutines
+        .iter()
+        .filter(|subroutine| !subroutine.name.starts_with(&own))
+        .flat_map(|subroutine| declared_names(subroutine))
+        .collect::<HashSet<_>>();
+    if declared.is_empty() {
+        return;
+    }
+    let mut known = symbols
+        .locals
+        .iter()
+        .map(|local| local.name.clone())
+        .collect::<HashSet<_>>();
+    let missing = LocalIndex::new(&caller.locals)
+        .named(&declared)
+        .into_iter()
+        .filter(|local| known.insert(local.name.clone()))
+        .map(|local| Arc::new(local.clone()))
+        .collect::<Vec<_>>();
+    symbols.locals.extend(missing);
 }
 
 /// Whether each of `classes` that specializes one of the classes `open` of
