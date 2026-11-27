@@ -15,7 +15,7 @@ pub(in crate::ast) fn classify<'a>(
         .iter()
         .map(|sub| (sub.name.as_str(), *sub))
         .collect();
-    let known = subroutine_effects(&subroutines, &definitions);
+    let known = subroutine_effects(&subroutines, &definitions, FunctionForks::Kernel);
     let timed: HashSet<String> = known
         .iter()
         .filter(|(_, effects)| effects.suspends)
@@ -26,7 +26,7 @@ pub(in crate::ast) fn classify<'a>(
     let triggered_readers = callers_closure(&subroutines, |subroutine, readers| {
         reads_triggered(&subroutine.body, readers)
     });
-    concurrent_actions(&subroutines, &definitions, &known, comb, ff, processes)?;
+    concurrent_actions(&subroutines, &definitions, comb, ff, processes)?;
     assertion_functions(assertion_callees, &definitions, dpi_imports)?;
     if !triggered_readers.is_empty() {
         for body in bodies(&subroutines, comb, ff, processes) {
@@ -56,7 +56,9 @@ pub(in crate::ast) fn classify<'a>(
         let is_timed = if subroutine.is_task {
             timed.contains(&subroutine.name)
         } else {
-            own_effects(&subroutine.body, &definitions).0.suspends
+            own_effects(&subroutine.body, &definitions, FunctionForks::Kernel)
+                .0
+                .suspends
         };
         if !subroutine.is_task {
             let (blocking, _, calls, _) = super::final_procedures::effects(
@@ -159,6 +161,7 @@ pub(in crate::ast) fn classify<'a>(
                     validation_body: Vec::new(),
                     synthetic: false,
                     repeats: true,
+                    assertion_actions: false,
                 });
                 continue;
             }
@@ -202,6 +205,7 @@ pub(in crate::ast) fn classify<'a>(
                     validation_body: Vec::new(),
                     synthetic: false,
                     repeats: true,
+                    assertion_actions: false,
                 });
                 continue;
             }
@@ -264,6 +268,7 @@ pub(in crate::ast) fn classify<'a>(
             validation_body: Vec::new(),
             synthetic: false,
             repeats: true,
+            assertion_actions: false,
         });
     }
     *comb = retained;
@@ -369,6 +374,7 @@ pub(in crate::ast) fn classify<'a>(
             validation_body: Vec::new(),
             synthetic: false,
             repeats: true,
+            assertion_actions: false,
         });
     }
     *ff = retained;
@@ -637,19 +643,50 @@ fn expression_effects(expr: &Expr) -> Effects {
     effects
 }
 
+/// How the `fork … join_none` of a function's body counts among the
+/// function's effects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FunctionForks {
+    /// As a fork, which needs the calling process's kernel.
+    Kernel,
+    /// As the background processes it spawns, which the calling process
+    /// does not wait for (IEEE 1800-2023 13.4.4): neither the fork nor the
+    /// statements of its children suspend or schedule from the caller. The
+    /// fork that starts the sampler of a covergroup instance (19.3) still
+    /// counts as a fork.
+    Detached,
+}
+
 /// The effects of `body` itself, with the defaults of the omitted arguments
-/// its calls evaluate, and the subroutines it calls.
+/// its calls evaluate, and the subroutines it calls. `detached` leaves out
+/// its `fork … join_none` statements with their children (see
+/// [`FunctionForks::Detached`]), whose calls are not the body's either.
 fn own_effects(
     body: &[Stmt],
     definitions: &HashMap<&str, &Subroutine>,
+    forks: FunctionForks,
 ) -> (Effects, HashSet<String>) {
     #[cfg(test)]
     OWN_EFFECT_WALKS.with(|count| count.set(count.get() + 1));
     let mut effects = Effects::default();
     for statement in body {
-        statement.walk(&mut |statement| {
-            effects = effects.union(statement_effects(statement));
-        });
+        match forks {
+            FunctionForks::Kernel => statement.walk(&mut |statement| {
+                effects = effects.union(statement_effects(statement));
+            }),
+            FunctionForks::Detached => statement.walk_without_detached_children(&mut |statement| {
+                if !matches!(
+                    statement,
+                    Stmt::Fork {
+                        join: celox_design::ForkJoin::None,
+                        unseeded: false,
+                        ..
+                    }
+                ) {
+                    effects = effects.union(statement_effects(statement));
+                }
+            }),
+        }
     }
     // A call evaluates the defaults of its omitted arguments.
     let (_, _, calls, defaults) = super::final_procedures::effects(body.iter(), definitions);
@@ -677,20 +714,29 @@ fn body_effects(
     known: &HashMap<String, Effects>,
     definitions: &HashMap<&str, &Subroutine>,
 ) -> Effects {
-    let (effects, calls) = own_effects(body, definitions);
+    let (effects, calls) = own_effects(body, definitions, FunctionForks::Kernel);
     with_callees(effects, &calls, known)
 }
 
-/// The effects of every subroutine, through the subroutines it calls. Each
-/// body is walked once; the effects then propagate through the calls until
-/// they settle, one pass per step of the longest call chain.
+/// The effects of every subroutine, through the subroutines it calls, with
+/// the forks of functions counted as `forks` says. Each body is walked
+/// once; the effects then propagate through the calls until they settle,
+/// one pass per step of the longest call chain.
 fn subroutine_effects(
     subroutines: &[&Subroutine],
     definitions: &HashMap<&str, &Subroutine>,
+    forks: FunctionForks,
 ) -> HashMap<String, Effects> {
     let own = subroutines
         .iter()
-        .map(|subroutine| own_effects(&subroutine.body, definitions))
+        .map(|subroutine| {
+            let forks = if subroutine.is_task {
+                FunctionForks::Kernel
+            } else {
+                forks
+            };
+            own_effects(&subroutine.body, definitions, forks)
+        })
         .collect::<Vec<_>>();
     // Effects only grow, so the least fixpoint is reached by revisiting the
     // callers of a subroutine whose effects grew, each at most once per
@@ -757,10 +803,19 @@ fn subroutine_effects(
 /// nonblocking assignment, process, event trigger or other process control.
 /// The action, with the subroutines it calls, is judged by the effects that
 /// select process kernels; reading process or event state is allowed.
+///
+/// A function the action calls may fork a background process on some path
+/// (13.4.4), as UVM 1.2's reporting reaches the fork of
+/// `uvm_component::m_set_cl_verb` when it first builds `uvm_root`: the
+/// fork does not suspend the action, whose process does not wait for its
+/// children. Neither the assertion's process nor the final procedure that
+/// fails the pending attempts of a strong until property is one of the
+/// initial or always procedures such a call needs, and 13.4.4 lets the
+/// error be issued at run time: a fork that runs stops the simulation then
+/// (see `celox_runtime`).
 fn concurrent_actions(
     subroutines: &[&Subroutine],
     definitions: &HashMap<&str, &Subroutine>,
-    known: &HashMap<String, Effects>,
     comb: &[CombProcess],
     ff: &[FfProcess],
     processes: &[InitialProcess],
@@ -794,8 +849,12 @@ fn concurrent_actions(
             });
         }
     }
+    if actions.is_empty() {
+        return Ok(());
+    }
+    let known = subroutine_effects(subroutines, definitions, FunctionForks::Detached);
     for action in actions {
-        let effects = body_effects(action, known, definitions);
+        let effects = body_effects(action, &known, definitions);
         let (_, _, calls, _) = super::final_procedures::effects(action.iter(), definitions);
         let callee = |has: fn(&Effects) -> bool| {
             calls

@@ -794,6 +794,7 @@ pub(crate) fn lower(
             requires_timed_simulation: false,
             const_delays: false,
             program: None,
+            assertion: false,
             resume: runtime.design.allocate_testbench_slot(16, false),
             status: runtime.design.allocate_testbench_slot(8, false),
             delay: runtime.design.allocate_testbench_slot(64, false),
