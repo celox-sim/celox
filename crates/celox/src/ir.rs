@@ -98,6 +98,11 @@ pub struct RuntimeDesign {
     /// Source-declared lexical scopes used only by reflection. Keep the
     /// real-instance display path unchanged for lookup and VCD bookkeeping.
     reflection_instance_paths: std::collections::BTreeMap<InstanceId, Vec<String>>,
+    /// The state object and source variable ids the next testbench slot
+    /// takes, once one is allocated: only those slots add ids after
+    /// projection, each past every id before it.
+    #[serde(skip)]
+    next_testbench_ids: Option<(u32, u32)>,
 }
 
 impl std::ops::Deref for RuntimeDesign {
@@ -130,21 +135,25 @@ impl RuntimeDesign {
             .keys()
             .min()
             .expect("testbench root instance");
-        let object = self
-            .semantic
-            .state_objects
-            .keys()
-            .map(|a| a.var_id.0)
-            .max()
-            .unwrap_or(0)
-            + 1;
-        let source = self
-            .variables
-            .values()
-            .map(|v| v.source_id.0)
-            .max()
-            .unwrap_or(0)
-            + 1;
+        let (object, source) = self.next_testbench_ids.unwrap_or_else(|| {
+            let object = self
+                .semantic
+                .state_objects
+                .keys()
+                .map(|a| a.var_id.0)
+                .max()
+                .unwrap_or(0)
+                + 1;
+            let source = self
+                .variables
+                .values()
+                .map(|v| v.source_id.0)
+                .max()
+                .unwrap_or(0)
+                + 1;
+            (object, source)
+        });
+        self.next_testbench_ids = Some((object + 1, source + 1));
         let address = AbsoluteAddr {
             instance_id,
             var_id: celox_design::StateObjectId(object),
@@ -294,6 +303,7 @@ impl RuntimeDesign {
             variables,
             package_instances: frontend.package_instances,
             reflection_instance_paths: Default::default(),
+            next_testbench_ids: None,
         };
         design
             .validate()
