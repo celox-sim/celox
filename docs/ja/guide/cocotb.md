@@ -83,6 +83,29 @@ cc -shared -fPIC -o model.so model.c
 celox run tb.sv --top tb --dpi-lib model.so
 ```
 
+`--coverage-report FILE` は、SystemVerilog の実行が終わったとき、その出力の後で、
+設計の covergroup のカバレッジ（IEEE 1800-2023 19 節）を JSON として `FILE` に
+書き出します。内容は `Simulation::coverage()` のレポートで、フィールド名は camelCase です
+（[カバレッジ](./systemverilog-reference#coverage)を参照）。開始した実行は、終わり方に
+かかわらず書き出します。完了や `$finish`、illegal ビンへのヒットや `$error`、`$fatal`、
+`--max-steps`、CDSP のクライアントの切断のいずれでもです。開始しなかった実行は
+書き出しません。不正な引数（ステータス 2）、コンパイルエラー、`--restore-checkpoint` で
+復元できないチェックポイント、存在しない `--save-state-on` の信号、開けない `--cdsp` の
+ポートの場合です。コマンドはファイルを削除しないため、そのような失敗の後も既存の `FILE` は
+そのまま残ります。それは以前の実行のレポートで、0 以外の終了ステータスがこの実行では
+書き出さなかったことを示します。`FILE` には、実行がほかに読み書きするファイル（コマンドライン、
+ファイルリスト、プロジェクトのいずれかによる設計のソース、`--project` で指定したか見つかった
+プロジェクトのマニフェスト、`-f`、プロジェクト、ほかのファイルリストのいずれかによるファイル
+リスト、`--dpi-lib` のライブラリ、`--restore-checkpoint`、`--save-state-dir`、`--vcd`、`--fst`、
+`--settle-profile`、`--activation-profile`、`--dump-settle-plan`）を指定できません。コマンドは
+コンパイルの前にそれを拒否します。covergroup のない設計は `{"coverage": 100.0, "covergroups": []}` を
+書き出します。ファイルを書けないとコマンドはステータス 1 で失敗します。何も表示しないので、
+標準出力は設計の出力だけです。Veryl の実行はこのオプションを受け付けません。
+
+```sh
+celox run tb.sv --top tb --coverage-report coverage.json
+```
+
 両言語とも`--backend native|tiered|interpreter|cranelift|wasm`で実行方式を選べます（既定native）。
 tieredはインタープリターで開始し、待機中のイベントを保ちながら生成コードへ移行します。
 両言語とも`--threads N`（1〜64、既定1）で並列度を指定できます。

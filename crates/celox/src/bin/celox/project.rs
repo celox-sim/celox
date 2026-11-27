@@ -207,6 +207,9 @@ pub(super) struct Design {
     /// Compatibility: shared `always @*` variables as per-block temporaries.
     pub shared_always_temporary: bool,
     pub sources: Vec<PathBuf>,
+    /// The project manifest and the file lists that resolving the design
+    /// read, given or discovered, nested ones included.
+    pub read_files: Vec<PathBuf>,
     pub include_dirs: Vec<PathBuf>,
     pub defines: BTreeMap<String, String>,
     /// The shared libraries of DPI-C imports, in search order.
@@ -329,6 +332,7 @@ impl DesignArgs {
                 if !image_input && self.source_files.is_empty() && self.sources.is_empty() {
                     let manifest =
                         veryl_metadata::Metadata::search_from(&path).map_err(|e| e.to_string())?;
+                    design.read_files.push(manifest.clone());
                     let mut metadata =
                         veryl_metadata::Metadata::load(&manifest).map_err(|e| e.to_string())?;
                     design.sources = metadata
@@ -346,6 +350,7 @@ impl DesignArgs {
                 let text = std::fs::read_to_string(&path).map_err(|error| {
                     format!("failed to read project {}: {error}", path.display())
                 })?;
+                design.read_files.push(path.clone());
                 let config: Manifest = toml::from_str(&text)
                     .map_err(|error| format!("invalid project {}: {error}", path.display()))?;
                 let base = path.parent().expect("canonical project has a parent");
@@ -785,6 +790,7 @@ impl Design {
             .map_err(|error| format!("failed to read file list {}: {error}", path.display()))?;
         let tokens = tokenize(&text).map_err(|error| format!("{}: {error}", path.display()))?;
         let base = path.parent().expect("canonical file list has a parent");
+        self.read_files.push(path.clone());
         active.push(path.clone());
         let mut tokens = tokens.iter();
         while let Some(token) = tokens.next() {

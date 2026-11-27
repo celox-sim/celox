@@ -742,14 +742,18 @@ fn serve_session<B: SimBackend>(
     }
 }
 
+/// Open the loopback port of `--cdsp`.
+pub(super) fn listen(port: u16) -> Result<TcpListener, String> {
+    TcpListener::bind((Ipv4Addr::LOCALHOST, port))
+        .map_err(|error| format!("cannot listen for CDSP on 127.0.0.1:{port}: {error}"))
+}
+
 pub(super) fn serve<B: SimBackend>(
     simulation: &mut Simulation<B>,
     max_steps: u64,
-    port: u16,
+    listener: TcpListener,
     out: &mut impl Write,
 ) -> Result<(), String> {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
-        .map_err(|error| format!("cannot listen for CDSP on 127.0.0.1:{port}: {error}"))?;
     let exponent = simulation.program().design.time_precision.exponent();
     let mut waves = Waveforms::default();
     waves.add_instance("", simulation.named_hierarchy());

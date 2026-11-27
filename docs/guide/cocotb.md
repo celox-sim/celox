@@ -96,6 +96,33 @@ cc -shared -fPIC -o model.so model.c
 celox run tb.sv --top tb --dpi-lib model.so
 ```
 
+`--coverage-report FILE` writes the coverage of the design's covergroups
+(IEEE 1800-2023 clause 19) to `FILE` as JSON once a SystemVerilog run ends,
+after its output: the report of `Simulation::coverage()`, with camelCase
+field names (see [Coverage](./systemverilog-reference#coverage)). A run that
+started writes it however it ends: on completion or `$finish`, on an
+illegal bin hit or `$error`, on `$fatal`, at `--max-steps`, or when a CDSP
+client leaves. A run that does not start writes none: invalid arguments
+(status 2), a compilation error, a checkpoint that `--restore-checkpoint`
+cannot restore, a `--save-state-on` signal that does not exist, or a
+`--cdsp` port that cannot be opened. The command never deletes a file, so
+after such a failure an existing `FILE` is left as it was: it is the
+report of an earlier run, and the nonzero exit status says that this run
+wrote none. `FILE` must not be a file that the run reads or writes
+otherwise: a source of the design (from the command line, a file list or
+the project), the project manifest (given with `--project` or found),
+a file list (given with `-f`, named by the project or by another file
+list), `--dpi-lib` libraries, `--restore-checkpoint`, `--save-state-dir`,
+`--vcd`, `--fst`, `--settle-profile`, `--activation-profile` or
+`--dump-settle-plan`; the command rejects it before compiling. A design without covergroups
+writes `{"coverage": 100.0, "covergroups": []}`. Failing to write the file
+fails the command with status 1. Nothing is printed: stdout stays the
+design's output. Veryl runs reject the option.
+
+```sh
+celox run tb.sv --top tb --coverage-report coverage.json
+```
+
 ## Select execution and collect measurements
 
 `celox run` accepts `--threads N` (1–64, default 1) and `--four-state` for both
