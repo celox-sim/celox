@@ -1638,3 +1638,96 @@ fn reference_sites_are_planned_as_direct_sites() {
         assert_eq!(plan.derived, direct_plan.derived, "{referenced}");
     }
 }
+
+/// A covergroup declared in an interface (IEEE 1800-2023 19.3) costs
+/// nothing while nothing constructs it, also in a module that receives the
+/// interface through a port, and is laid out and planned as the same
+/// covergroup of the module that instantiates the interface: `sample()` in
+/// clocked logic of the interface, an instance that a procedure constructs
+/// and one of a declaration with an initializer, at an edge and at a change.
+/// The samplers stay procedures and processes the compiled scheduler runs.
+#[test]
+fn interface_covergroups_are_planned_as_module_covergroups() {
+    let interface = |body: &str| {
+        format!(
+            "interface I(input logic clk, input logic [7:0] v);\n{body}\nendinterface\n\
+             module Peer(I p); endmodule"
+        )
+    };
+    let viewed = "    I i(.clk(clk), .v(d));\n    Peer peer(.p(i));";
+    let (_, plain) = laid_out(timed(&rtl(&interface(""), viewed)));
+    let (_, declared) = laid_out(timed(&rtl(
+        &interface(
+            "    covergroup cg @(posedge clk); coverpoint v; endgroup
+    covergroup plain(int lo); coverpoint v { bins b = {[lo:$]}; } endgroup",
+        ),
+        viewed,
+    )));
+    assert_eq!(declared, plain);
+    let instance = "    I i(.clk(clk), .v(d));";
+    for body in [
+        "    covergroup cg; coverpoint v; endgroup
+    cg c = new;
+    always @(posedge clk) c.sample();",
+        "    covergroup cg @(posedge clk); coverpoint v; endgroup
+    cg c;
+    initial c = new;",
+        "    covergroup cg @(posedge clk); coverpoint v; endgroup
+    cg c = new;",
+        "    covergroup cg @(clk); coverpoint v; endgroup
+    cg c;
+    initial c = new;",
+    ] {
+        let (module_program, module_facts) = laid_out(timed(&rtl(
+            &interface(""),
+            &format!("{instance}\n    wire [7:0] v = d;\n{body}"),
+        )));
+        let (interface_program, interface_facts) =
+            laid_out(timed(&rtl(&interface(body), instance)));
+        assert!(interface_facts.coverage_calls > 0, "{body}");
+        assert_eq!(interface_facts.handles, module_facts.handles, "{body}");
+        assert_eq!(interface_facts.functions, module_facts.functions, "{body}");
+        assert_eq!(interface_facts.processes, module_facts.processes, "{body}");
+        assert_eq!(
+            interface_facts.heap_calls, module_facts.heap_calls,
+            "{body}"
+        );
+        let module_plan = crate::scheduler::plan_for_test(&module_program).unwrap();
+        let interface_plan = crate::scheduler::plan_for_test(&interface_program).unwrap();
+        let sorted = |mut fallback: Vec<Option<String>>| {
+            fallback.sort();
+            fallback
+        };
+        assert_eq!(
+            sorted(interface_plan.fallback.clone()),
+            sorted(module_plan.fallback.clone()),
+            "{body}"
+        );
+        let lazy = |lazy: &Option<Vec<bool>>| {
+            lazy.clone().map(|mut kernels| {
+                kernels.sort();
+                kernels
+            })
+        };
+        assert_eq!(
+            lazy(&interface_plan.lazy),
+            lazy(&module_plan.lazy),
+            "{body}"
+        );
+        assert_eq!(
+            interface_plan.active.len(),
+            module_plan.active.len(),
+            "{body}"
+        );
+        assert_eq!(
+            interface_plan.clocks.len(),
+            module_plan.clocks.len(),
+            "{body}"
+        );
+        assert_eq!(
+            interface_plan.derived.len(),
+            module_plan.derived.len(),
+            "{body}"
+        );
+    }
+}

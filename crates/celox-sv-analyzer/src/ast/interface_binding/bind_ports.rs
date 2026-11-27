@@ -187,6 +187,28 @@ impl ModuleBinding<'_> {
                 bound.subroutines.retain(|function| {
                     function.name.contains("::") || functions.contains(&function.name)
                 });
+                // An instance of a covergroup type of the interface with a
+                // clocking event joins the samplers of the interface
+                // instance, which a port view does not hold: a function the
+                // module calls through the port may not construct one.
+                if bound
+                    .subroutines
+                    .iter()
+                    .any(|function| covergroups::is_instance_subroutine(&function.name))
+                {
+                    if bound.subroutines.iter().any(|function| {
+                        let mut calls = Vec::new();
+                        module_elaboration::subroutine_calls(function, &mut calls);
+                        functions.contains(&function.name)
+                            && calls.into_iter().any(covergroups::is_spawner)
+                    }) {
+                        return Err(covergroups::spawned_through_a_port());
+                    }
+                    // Nor does it hold the hidden variables of the samplers.
+                    bound
+                        .signals
+                        .retain(|signal| !covergroups::is_hidden_variable(&signal.name));
+                }
                 // The subroutines the port imports run in the instance it
                 // denotes, whose scope their `%m` names.
                 let home = celox_design::SiteHome::Path {
@@ -210,9 +232,14 @@ impl ModuleBinding<'_> {
                     .map(|name| names[name].clone())
                     .collect::<HashSet<_>>();
                 // Declaration initializers of interface variables belong to the
-                // actual instance, not to each module receiving its port view.
+                // actual instance, not to each module receiving its port view,
+                // as do the samplers of its covergroups.
                 bound.initial_processes.retain(|process| {
                     process.synthetic
+                        && !process
+                            .site
+                            .as_ref()
+                            .is_some_and(|site| site.construct == covergroups::SAMPLING)
                         && procedural::written_names(&process.body).is_disjoint(&members)
                 });
                 for (member, direction) in &port.members {
@@ -237,6 +264,7 @@ impl ModuleBinding<'_> {
                 bound
                     .signals
                     .retain(|signal| !members.contains(&signal.name));
+                covergroups::record_outside_names(session, &tree.functions, &bound);
                 self.imported.extend(&bound);
             }
         }

@@ -123,7 +123,7 @@ fn lvalue_calls<'a>(lvalue: &'a LValue, calls: &mut Vec<&'a str>) {
 
 /// The names of the subroutines `stmts` call, those that only describe the
 /// reads of an `@*` included.
-fn stmt_calls<'a>(stmts: &'a [Stmt], calls: &mut Vec<&'a str>) {
+pub(in crate::ast) fn stmt_calls<'a>(stmts: &'a [Stmt], calls: &mut Vec<&'a str>) {
     let mut exprs = Vec::new();
     let mut lvalues = Vec::new();
     for stmt in stmts {
@@ -141,7 +141,7 @@ fn stmt_calls<'a>(stmts: &'a [Stmt], calls: &mut Vec<&'a str>) {
 
 /// The names of the subroutines a subroutine calls, in its body, in the
 /// statements that describe its reads and in the defaults of its formals.
-pub(super) fn subroutine_calls<'a>(subroutine: &'a Subroutine, calls: &mut Vec<&'a str>) {
+pub(in crate::ast) fn subroutine_calls<'a>(subroutine: &'a Subroutine, calls: &mut Vec<&'a str>) {
     stmt_calls(&subroutine.body, calls);
     stmt_calls(&subroutine.sensitivity_body, calls);
     for param in &subroutine.params {
@@ -310,15 +310,23 @@ impl ScopeElaboration<'_> {
     ///
     /// A name the imports do not have is looked up in `design`, the
     /// subroutines of every package, unless the scope has it (`known`).
+    ///
+    /// A subroutine of a covergroup type of an interface that neither has
+    /// is one a task or function of the interface calls through a virtual
+    /// interface, whose copy runs for whatever instance the handle denotes
+    /// (see `virtual_interface_calls`): the subroutines of the type are
+    /// those of each instance, which the copy does not name, and the call
+    /// is rejected.
     pub(super) fn reachable_imports<'a>(
         &self,
         imported: &HashMap<&'a str, &'a Subroutine>,
         design: Option<&'a packages::DesignSubroutines>,
         known: &HashSet<&str>,
-    ) -> HashSet<&'a str> {
+    ) -> Converted<HashSet<&'a str>> {
         let mut reached = HashSet::default();
         let mut pending: Vec<&'a Subroutine> = Vec::new();
-        let visit = |name: &str, reached: &mut HashSet<&'a str>, pending: &mut Vec<_>| {
+        let mut dangling = false;
+        let mut visit = |name: &str, reached: &mut HashSet<&'a str>, pending: &mut Vec<_>| {
             let found = imported
                 .get_key_value(name)
                 .map(|(&name, &subroutine)| (name, subroutine))
@@ -328,10 +336,15 @@ impl ScopeElaboration<'_> {
                         .and_then(|design| design.subroutines.get_key_value(name))
                         .map(|(name, subroutine)| (name.as_str(), subroutine.as_ref()))
                 });
-            if let Some((name, subroutine)) = found
-                && reached.insert(name)
-            {
-                pending.push(subroutine);
+            match found {
+                Some((name, subroutine)) => {
+                    if reached.insert(name) {
+                        pending.push(subroutine);
+                    }
+                }
+                None => {
+                    dangling |= !known.contains(name) && covergroups::is_instance_subroutine(name);
+                }
             }
         };
         for name in self.own_calls() {
@@ -344,6 +357,9 @@ impl ScopeElaboration<'_> {
                 visit(name, &mut reached, &mut pending);
             }
         }
-        reached
+        if dangling {
+            return Err(covergroups::through_a_virtual_interface());
+        }
+        Ok(reached)
     }
 }

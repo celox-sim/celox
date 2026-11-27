@@ -163,6 +163,11 @@ pub struct VirtualInterfaceDeclaration {
     pub arguments: Arc<[i128]>,
     /// What specializing a parameterized interface needs.
     pub(crate) template: Option<Arc<DeclarationTemplate>>,
+    /// The members that hold handles of a covergroup type of the interface,
+    /// arrays of them included, whose `new` and methods only the body of
+    /// the interface binds (IEEE 1800-2023 19.3; see
+    /// [`covergroup_member`]).
+    pub(crate) covergroups: HashSet<String>,
     /// The hierarchical names, by their components, that the tasks and
     /// functions of the interface use and it does not declare, which each
     /// instance finds from its parent (IEEE 1800-2023 23.8). Until they are
@@ -378,6 +383,16 @@ impl VirtualInterfaces {
                 })
             });
             let members = members_of(module, &enumerations);
+            let covergroups = module
+                .ports()
+                .iter()
+                // The members that hold handles of a covergroup type of the
+                // interface, whose subroutines are those of each instance; a
+                // covergroup of a package or the compilation unit has
+                // subroutines of the design.
+                .filter(|port| covergroups::holds_interface_handle(port.r#type(), None))
+                .map(|port| declared_name(port.name()).to_owned())
+                .collect();
             let modport_imports = prototype
                 .modports
                 .iter()
@@ -419,6 +434,7 @@ impl VirtualInterfaces {
                     arguments: Arc::new([]),
                     template,
                     outward: Vec::new(),
+                    covergroups,
                 },
             );
         }
@@ -728,6 +744,49 @@ pub(super) fn declarations(state: &Session) -> Option<&VirtualInterfaces> {
     state.virtual_interfaces.as_deref()
 }
 
+/// Whether native expression `id` names a member of the interface instance
+/// that a virtual interface denotes that holds handles of a covergroup type
+/// of the interface, or an element of one: `vif.c`, `vif.arr[i]`.
+pub(super) fn covergroup_member(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: celox_sv_syntax::ExprId,
+    native: &celox_sv_syntax::Declarations,
+    dimensions: &PackedDimensions,
+) -> bool {
+    use celox_sv_syntax::ExprKind;
+    if declarations(session).is_none_or(|declarations| {
+        declarations
+            .interfaces
+            .values()
+            .all(|declaration| declaration.covergroups.is_empty())
+    }) {
+        return false;
+    }
+    let mut id = expression_binding::ungroup(id, native);
+    while let ExprKind::Select { expression, .. } = &native.expression(id).kind {
+        id = expression_binding::ungroup(*expression, native);
+    }
+    let ExprKind::Member {
+        expression,
+        separator,
+        name,
+    } = &native.expression(id).kind
+    else {
+        return false;
+    };
+    if separator != "." {
+        return false;
+    }
+    let Some(ty) = native_type(tree, session, *expression, native, dimensions) else {
+        return false;
+    };
+    let member = instances::normalize_identifier(&name.spelling);
+    declarations(session)
+        .and_then(|declarations| declarations.interfaces.get(&ty.key()))
+        .is_some_and(|declaration| declaration.covergroups.contains(&member))
+}
+
 /// The type `virtual name[#(arguments)][.modport]`, checked against the
 /// interface; `context` evaluates the parameter values, which a type of a
 /// parameterized interface holds with the defaults of those it does not
@@ -913,6 +972,11 @@ pub(super) fn member<'a>(
     let declaration = declarations(state)
         .and_then(|declarations| declarations.interfaces.get(&ty.key()))
         .ok_or_else(|| unsupported(format!("virtual interface type of `{}`", ty.spelling())))?;
+    // A handle of a covergroup of the interface belongs to the body of each
+    // instance (IEEE 1800-2023 19.3, 25.3).
+    if declaration.covergroups.contains(member) {
+        return Err(covergroups::outside_the_interface());
+    }
     let found = declaration.member(member).ok_or_else(|| {
         unsupported(format!(
             "member `{member}` of virtual interface `{}`",

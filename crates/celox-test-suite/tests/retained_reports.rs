@@ -1493,7 +1493,11 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             | "covergroup::repetitions_of_transitions"
                             | "covergroup::transition_arrays_and_ignored_transitions"
                             | "covergroup::transition_operands_of_arguments"
-                            | "covergroup::bus_transitions_through_a_reference",
+                            | "covergroup::bus_transitions_through_a_reference"
+                            | "covergroup::interface_covergroups_sample_their_instance"
+                            | "covergroup::interface_covergroups_sample_at_their_clocking_events"
+                            | "covergroup::interface_covergroups_bound_into_each_instance"
+                            | "covergroup::covergroups_at_clocking_block_events",
                         ) => ("compile_error", "compile", "Invalid module item"),
                         (
                             "verilator",
@@ -1686,6 +1690,30 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             // "3" six times and "37.50" expected, "0" six times
                             // and the expected 37.50 displayed.
                             "expect_output: expected [51, 32, 51, 32, 51, 32, 51, 32, 51, 32, 51, 32, 51, 55, 46, 53, 48, 10], got [48, 32, 48, 32, 48, 32, 48, 32, 48, 32, 48, 32, 51, 55, 46, 53, 48, 10]",
+                        ),
+                        (
+                            "verilator",
+                            "covergroup::interface_covergroups_sample_their_instance",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            // The C++ it emits for the covergroup of the
+                            // interface does not compile: "'class
+                            // Vdut_mon__03a__03acg_t' has no member named
+                            // '__PVT____Vint'".
+                            "Verilator build exit status: 2",
+                        ),
+                        (
+                            "verilator",
+                            "covergroup::interface_covergroups_sample_at_their_clocking_events",
+                        ) => (
+                            "runtime_error",
+                            "execute",
+                            // "Null pointer dereferenced" at `cg c;`: it
+                            // samples the variable of the instance a procedure
+                            // constructs at 12 before it holds one, where 19.4
+                            // samples nothing through `null`.
+                            "native testbench failed: exit status: 1",
                         ),
                         ("verilator", "covergroup::reference_arguments_track_their_actuals") => (
                             "mismatch",

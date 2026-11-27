@@ -1765,7 +1765,7 @@ No assertions or exclusions are weakened.
 
 ### Covergroups
 
-The 54 `covergroup::*` cases check what IEEE 1800-2023 fixes of covergroups.
+The 58 `covergroup::*` cases check what IEEE 1800-2023 fixes of covergroups.
 Five are of a covergroup without items: a variable of a covergroup type holds
 a handle or `null` (19.3), `new` and `sample` take the arguments of the
 covergroup and of its sample method, by position, by name and by default
@@ -1865,9 +1865,27 @@ that are arguments of the covergroup
 of a bus state through a `ref` argument
 (`covergroup::bus_transitions_through_a_reference`); each shows the hits as
 the coverage of instances or coverpoints with different `at_least`.
+Two are of covergroups declared in an interface (19.3): two instances of the
+monitor interface of the UVM examples construct an array of handles in an
+`initial foreach` and sample it in the action of a `cover property`, each
+with the ports of its own instance
+(`covergroup::interface_covergroups_sample_their_instance`), and two
+instances of an interface sample at the clocking event of its covergroup the
+instance a procedure constructs from 12 on and that of a declaration with an
+initializer (`covergroup::interface_covergroups_sample_at_their_clocking_events`);
+a task of the interface, called through each instance, displays the
+coverage. One binds an interface with covergroups into each instance of a
+module (23.11): each instance of it samples the ports it binds there, a
+signal of the module through the module's name (23.8) and a `ref` argument
+of a variable port (`covergroup::interface_covergroups_bound_into_each_instance`).
+One samples at a clocking block event, `@(cb)`, which follows the Observed
+region of the block's clocking event, a variable and a clockvar `cb.x`, also
+in a covergroup a process waiting for `@(cb)` samples (14.10, 14.13;
+`covergroup::covergroups_at_clocking_block_events`).
 Celox passes all of them on every backend.
 
-Verilator 5.054 passes 19 cases. It keeps the embedded covergroup in a
+Verilator 5.054 passes 21 cases, the bound interface and the clocking
+block events among them. It keeps the embedded covergroup in a
 shallow copy (`covergroup::shallow_copy_has_no_embedded_covergroup` reads the
 handle of the copy as not `null`), where 8.12 gives the new object a `null`
 handle, and it rejects the bins of
@@ -1920,8 +1938,13 @@ the two cases of `ref` arguments it displays `0 0` for the bins counted by
 reference and the expected coverage of each coverpoint. It fails the six
 cases of transition bins: it rejects the repetitions of four ("Unsupported:
 '[*]' in cover transition", "Unsupported: '[->' in cover transition") and
-displays `0 0` for the bins counted by reference of the other two.
-xezim 0.11.4 passes 30, all six cases of clocking events of declarations and
+displays `0 0` for the bins counted by reference of the other two. Of the
+two cases of covergroups of interfaces it does not compile the C++ it
+generates for the monitor ("'class Vdut_mon__03a__03acg_t' has no member
+named '__PVT____Vint'") and stops with "Null pointer dereferenced" at the
+variable of the instance the procedure constructs at 12, which it samples
+before it holds one.
+xezim 0.11.4 passes 31, all six cases of clocking events of declarations and
 four of the six of constructed instances among them: it takes no sample of
 the instances a procedure constructs at the divided clock, and it never samples a covergroup embedded in a class at an
 event on a property of the class (`@m_z`, `@(posedge clk_bit)`, `@ev`), which
@@ -1942,6 +1965,17 @@ for `1 0 1`), makes no bin for each length of a repetition range in a bin
 array (`2 4` for `2 120`) and neither removes the matches that contain an
 ignored transition nor leaves the bin that only such matches have out of the
 coverage (`4 5 2 4` for `6 6 1 3`).
+It passes the clocking events of a covergroup of an interface, and counts no
+sample of the instances the action of a `cover property` of the interface
+samples (`covergroup::interface_covergroups_sample_their_instance` displays
+`0 0 0.00` four times). It instantiates an interface that `bind` attaches to
+a module once, with its parameter default, and samples nothing there
+(`covergroup::interface_covergroups_bound_into_each_instance` displays
+`u0 0.00 0.00 0.00` for one line of each instance), and its covergroup of a
+clocking block event counts other bins than 14.10 gives
+(`covergroup::covergroups_at_clocking_block_events` displays 75.00 and 50.00
+for 100.00 and 75.00; the covergroup a process waiting for `@(cb)` samples
+gives the expected 75.00).
 It keeps
 the embedded covergroup in a shallow copy too, compares a covergroup variable
 that nothing assigned with `null` as `x`

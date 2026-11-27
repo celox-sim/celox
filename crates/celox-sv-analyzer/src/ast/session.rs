@@ -152,6 +152,23 @@ pub(crate) struct Session {
     /// types it declares (see `covergroups::scope_names`): set once its
     /// parameters are known.
     pub(super) covergroup_scope: Option<Arc<str>>,
+    /// The variables, ports and subroutines that the interface instances and
+    /// port views bound into the scope being analyzed make of its members,
+    /// whose types hold handles of a covergroup type of the interface: the
+    /// scope's own code may not name them, as the handles belong to the body
+    /// of each instance (see `covergroups::reject_outside_names`).
+    pub(super) interface_covergroup_names: HashSet<String>,
+}
+
+/// The covergroup state of the analysis of a scope while the body of an
+/// interface it binds is analyzed (see [`Session::enter_interface_body`]).
+pub(super) struct OuterCovergroups {
+    covergroups: HashMap<String, Arc<covergroups::Covergroup>>,
+    requests: Vec<String>,
+    count_requests: Vec<String>,
+    spawn_requests: Vec<String>,
+    instance_lists: HashMap<String, crate::ast::procedural::covergroup_sites::InstanceList>,
+    names: HashSet<String>,
 }
 
 impl Session {
@@ -175,6 +192,32 @@ impl Session {
             controls_assertions: packages.controls_assertions(),
             ..Self::default()
         }
+    }
+
+    /// Starts analyzing the body of an interface for an instance or a port
+    /// view of it: what its body binds of its covergroup types makes the
+    /// subroutines and samplers of that instance alone, as those of a module
+    /// are made for it. [`Self::leave_interface_body`] gives the scope that
+    /// binds the interface its own back.
+    pub(super) fn enter_interface_body(&mut self) -> OuterCovergroups {
+        OuterCovergroups {
+            covergroups: std::mem::take(&mut self.covergroups),
+            requests: std::mem::take(&mut self.covergroup_requests),
+            count_requests: std::mem::take(&mut self.covergroup_count_requests),
+            spawn_requests: std::mem::take(&mut self.covergroup_spawn_requests),
+            instance_lists: std::mem::take(&mut self.covergroup_instance_lists),
+            names: std::mem::take(&mut self.interface_covergroup_names),
+        }
+    }
+
+    /// Ends what [`Self::enter_interface_body`] started.
+    pub(super) fn leave_interface_body(&mut self, outer: OuterCovergroups) {
+        self.covergroups = outer.covergroups;
+        self.covergroup_requests = outer.requests;
+        self.covergroup_count_requests = outer.count_requests;
+        self.covergroup_spawn_requests = outer.spawn_requests;
+        self.covergroup_instance_lists = outer.instance_lists;
+        self.interface_covergroup_names = outer.names;
     }
 
     /// Gives `packages` back what [`Self::with_packages`] took, with what

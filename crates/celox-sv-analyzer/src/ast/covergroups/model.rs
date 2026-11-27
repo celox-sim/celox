@@ -64,6 +64,12 @@ pub(in crate::ast) struct Covergroup {
     /// [`Self::declaration`], bound in the scope that declares the type, or
     /// in the class of an embedded one.
     pub event: Option<TimingControlId>,
+    /// Whether an interface declares the type (19.3, 25.3). Each instance of
+    /// the interface, and each view of one through a port, holds the
+    /// subroutines of the type under names of its own, as they read its
+    /// members (see [`instance_subroutine`]); only the interface's own body
+    /// uses the type.
+    pub interface: bool,
     /// Why the type cannot be constructed or sampled: something it declares
     /// is not supported, or its header does not bind. The declaration
     /// itself is accepted, so that a covergroup nothing uses keeps a design
@@ -208,6 +214,43 @@ pub(in crate::ast) fn is_spawner(name: &str) -> bool {
 /// Whether subroutine `name` constructs an instance of a covergroup.
 pub(crate) fn is_constructor(name: &str) -> bool {
     is_class(name) && name.ends_with("::$new")
+}
+
+/// The name subroutine `name` of a covergroup type has in the instance of an
+/// interface, or the view of one through a port, whose members are bound
+/// with `prefix`, when `name` is a subroutine of a covergroup type of the
+/// interface, one of `models`, or one of an interface instance its body
+/// binds: `$covergroup@prefix::N::$sample` for `$covergroup::N::$sample`,
+/// `$covergroup@prefix$inner::N::$sample` for `$covergroup@inner::N::$sample`,
+/// as the members of a nested instance are named. The subroutines read the
+/// members of the instance, so two instances of the interface in one scope
+/// have their own; the type, its class and its key stay those of the
+/// interface (IEEE 1800-2023 19.3). The name keeps the suffix of its role,
+/// which tells what the subroutine does, and starts with
+/// [`INSTANCE_PREFIX`], which no other name of the design starts with: every
+/// other covergroup name starts with [`PREFIX`].
+pub(in crate::ast) fn instance_subroutine(
+    name: &str,
+    models: &[Arc<Covergroup>],
+    prefix: &str,
+) -> Option<String> {
+    if let Some(rest) = name.strip_prefix(INSTANCE_PREFIX) {
+        let (inner, rest) = rest.split_once("::")?;
+        return Some(format!("{INSTANCE_PREFIX}{prefix}${inner}::{rest}"));
+    }
+    let (base, _) = name.split_at(name.rfind("::$")?);
+    let rest = name.strip_prefix(PREFIX)?;
+    models
+        .iter()
+        .any(|model| model.interface && model.owner.is_none() && model.name == base)
+        .then(|| format!("{INSTANCE_PREFIX}{prefix}::{rest}"))
+}
+
+/// Whether subroutine `name` is a subroutine of a covergroup type of an
+/// interface in an instance or a port view of it (see
+/// [`instance_subroutine`]).
+pub(in crate::ast) fn is_instance_subroutine(name: &str) -> bool {
+    name.starts_with(INSTANCE_PREFIX)
 }
 
 fn invalid(text: impl Into<String>) -> AnalyzerError {
@@ -385,10 +428,23 @@ pub(in crate::ast) fn build(
         sample_formals: Vec::new(),
         items: Vec::new(),
         event: None,
+        interface: classes::enclosing_unit(tree.declarations(), declaration.tokens)
+            .is_some_and(|unit| unit.kind == celox_sv_syntax::UnitKind::Interface),
         rejection: None,
     };
     fn reject(model: &mut Covergroup, error: AnalyzerError) {
         model.rejection.get_or_insert(deferred(error));
+    }
+    // A class of an interface reads the members of the first instance of
+    // the interface in every instance (a limitation of classes declared in
+    // interfaces): what a covergroup embedded in one samples would be wrong.
+    if model.interface && model.owner.is_some() {
+        reject(
+            &mut model,
+            unsupported(
+                "covergroup embedded in a class declared in an interface (IEEE 1800-2023 19.4, 25.3)",
+            ),
+        );
     }
     let CovergroupKind::Declared { ports, event } = &declaration.kind else {
         reject(
@@ -490,12 +546,10 @@ pub(in crate::ast) fn build(
             &mut model,
             unsupported("covergroup strobe sampling (IEEE 1800-2023 19.7.1)"),
         ),
-        Some(CoverageEvent::Clocking(id)) => {
-            match clocking_rejection(tree, declaration, &model, *id) {
-                Some(rejection) => reject(&mut model, rejection),
-                None => model.event = Some(*id),
-            }
-        }
+        Some(CoverageEvent::Clocking(id)) => match clocking_rejection(tree, &model, *id) {
+            Some(rejection) => reject(&mut model, rejection),
+            None => model.event = Some(*id),
+        },
         Some(CoverageEvent::Block(_)) => reject(
             &mut model,
             unsupported("covergroup block event (IEEE 1800-2023 19.3)"),
@@ -567,26 +621,15 @@ pub(in crate::ast) fn build(
     Ok(model)
 }
 
-/// Why the instances of covergroup `declaration`, of `model`, cannot be
-/// sampled at its clocking event `event` (IEEE 1800-2023 19.3): the
-/// covergroups of interfaces are not supported, and the event may not name
-/// an argument of the covergroup.
+/// Why the instances of covergroup `model` cannot be sampled at its
+/// clocking event `event` (IEEE 1800-2023 19.3): the event
+/// may not name an argument of the covergroup.
 fn clocking_rejection(
     tree: &AnalysisContext<'_>,
-    declaration: &celox_sv_syntax::CovergroupDeclaration,
     model: &Covergroup,
     event: TimingControlId,
 ) -> Option<AnalyzerError> {
     let native = tree.declarations();
-    let unit = classes::enclosing_unit(native, declaration.tokens);
-    // Covergroups of interfaces are not supported: a clocked one is
-    // rejected for every use, also in an interface that is elaborated as a
-    // module is, where its declaration would otherwise be accepted.
-    if unit.is_some_and(|unit| unit.kind == celox_sv_syntax::UnitKind::Interface) {
-        return Some(unsupported(
-            "covergroup sampling event of a covergroup declared in an interface (IEEE 1800-2023 19.3, 25.3)",
-        ));
-    }
     // "A clocking event may refer to arguments of the covergroup" (19.3).
     // The names are compared as written: an argument hides a signal of
     // the scope with its name, which binding the event in the scope would

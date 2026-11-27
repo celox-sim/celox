@@ -879,6 +879,17 @@ struct InterfaceDecl {
     modports: HashMap<String, Vec<ModportItem>>,
     /// The names declared in the interface scope.
     names: HashSet<String>,
+    /// The covergroup types the interface declares (IEEE 1800-2023 19.3),
+    /// with the spans of their declarations.
+    covergroups: HashMap<String, Span>,
+    /// The spans of the type declarations of the interface, by name, which
+    /// a member or a local of a function may take its type from: one that
+    /// holds a handle of a covergroup of the interface names the covergroup,
+    /// or another type declaration that does.
+    types: HashMap<String, Span>,
+    /// The named type each type declaration of the interface stands for,
+    /// such as `cg` of `typedef cg cg_t;`, by the declared name.
+    aliases: HashMap<String, String>,
     /// The references to interface-scope names in the interface text.
     references: Vec<(Span, String)>,
     /// The start offsets of the assignment targets in the interface text.
@@ -978,9 +989,11 @@ impl InterfaceDecl {
             let Some(function) = self.function(&name) else {
                 continue;
             };
-            for called in self.referenced(function.span) {
-                if self.function(called).is_some() && closure.insert(called.to_string()) {
-                    pending.push(called.to_string());
+            for span in self.spans_run_by(function) {
+                for called in self.referenced(span) {
+                    if self.function(called).is_some() && closure.insert(called.to_string()) {
+                        pending.push(called.to_string());
+                    }
                 }
             }
         }
@@ -1038,14 +1051,16 @@ impl InterfaceDecl {
     fn captured_members(&self, functions: &[String]) -> HashMap<String, Direction> {
         let mut captured = HashMap::default();
         for function in functions.iter().filter_map(|name| self.function(name)) {
-            for ((start, end), name) in &self.references {
-                if *start < function.span.0 || *end > function.span.1 || self.member(name).is_none()
-                {
-                    continue;
-                }
-                let direction = captured.entry(name.clone()).or_insert(Direction::Input);
-                if self.lvalues.contains(start) {
-                    *direction = Direction::Output;
+            for span in self.spans_run_by(function) {
+                for ((start, end), name) in &self.references {
+                    if *start < span.0 || *end > span.1 || self.member(name).is_none() {
+                        continue;
+                    }
+                    let direction = captured.entry(name.clone()).or_insert(Direction::Input);
+                    // A covergroup writes nothing of the interface.
+                    if span == function.span && self.lvalues.contains(start) {
+                        *direction = Direction::Output;
+                    }
                 }
             }
         }
@@ -1071,6 +1086,46 @@ impl InterfaceDecl {
             ))),
             None => Ok(()),
         }
+    }
+
+    /// The text that a call of `function` runs: the function, and the
+    /// declarations of the covergroups whose `new` and `sample()` it may
+    /// call, which evaluate the expressions of the covergroup (IEEE
+    /// 1800-2023 19.3) in the scope of the interface. Those are the
+    /// covergroups that the types of what it names may hold, followed
+    /// through the text that declares each: a covergroup type, a type
+    /// declaration (a structure, an array, another type declaration), and
+    /// the data type of a member, for members and locals alike. The calls of
+    /// other functions it passes handles to are in its closure (see
+    /// [`Self::function_closure`]).
+    fn spans_run_by(&self, function: &Function) -> Vec<Span> {
+        let mut spans = vec![function.span];
+        if self.covergroups.is_empty() {
+            return spans;
+        }
+        let mut next = 0;
+        while let Some(&span) = spans.get(next) {
+            next += 1;
+            let found = self
+                .referenced(span)
+                .filter_map(|name| {
+                    self.covergroups
+                        .get(name)
+                        .or_else(|| self.types.get(name))
+                        .or_else(|| {
+                            self.member(name)
+                                .and_then(|member| member.data_type.as_ref())
+                        })
+                })
+                .copied()
+                .collect::<Vec<_>>();
+            for span in found {
+                if !spans.contains(&span) {
+                    spans.push(span);
+                }
+            }
+        }
+        spans
     }
 }
 
@@ -2894,6 +2949,9 @@ impl InterfaceDecl {
             functions: Vec::new(),
             modports: HashMap::default(),
             names: HashSet::default(),
+            covergroups: HashMap::default(),
+            types: HashMap::default(),
+            aliases: HashMap::default(),
             references: Vec::new(),
             lvalues: HashSet::default(),
             clockings: HashSet::default(),
@@ -3172,6 +3230,15 @@ impl InterfaceDecl {
                     )));
                 }
                 self.declare(native_name(&alias.name))?;
+                self.types.insert(native_name(&alias.name), span);
+                if let native::TypeAliasTarget::DataType(target) = alias.target
+                    && let native::DataTypeKind::Named(segments) = &native.data_type(target).kind
+                    && let [segment] = segments.as_slice()
+                    && segment.arguments.is_none()
+                {
+                    self.aliases
+                        .insert(native_name(&alias.name), native_name(&segment.name));
+                }
                 self.items.push(Item::Constant {
                     span,
                     header: HeaderForm::Constant,
@@ -3206,12 +3273,21 @@ impl InterfaceDecl {
                 self.items.push(Item::Function);
             }
             native::BodyItemKind::Data(id) => {
-                let native::DataDeclaration::Variables(declaration) = native.data_declaration(*id)
-                else {
-                    return Err(unsupported(format!(
-                        "dynamic array or class variable in interface `{}`",
-                        self.name
-                    )));
+                let declaration = match native.data_declaration(*id) {
+                    native::DataDeclaration::Variables(declaration) => declaration,
+                    // `cg c = new;`: a variable of a covergroup type of the
+                    // interface that its initializer constructs (19.3).
+                    native::DataDeclaration::Constructed(declaration)
+                        if self.covergroup_type(declaration, native).is_some() =>
+                    {
+                        declaration
+                    }
+                    _ => {
+                        return Err(unsupported(format!(
+                            "dynamic array or class variable in interface `{}`",
+                            self.name
+                        )));
+                    }
                 };
                 if declaration.constant {
                     return Err(unsupported(format!(
@@ -3353,6 +3429,19 @@ impl InterfaceDecl {
                         self.name
                     )));
                 }
+                // A class of the interface with an embedded covergroup is
+                // rejected as the covergroup, as it is where the interface
+                // is not planned (see `covergroups::model::build`).
+                "class"
+                    if native.covergroups.iter().any(|covergroup| {
+                        item.tokens.start <= covergroup.tokens.start
+                            && covergroup.tokens.end <= item.tokens.end
+                    }) =>
+                {
+                    return Err(unsupported(
+                        "covergroup embedded in a class declared in an interface (IEEE 1800-2023 19.4, 25.3)",
+                    ));
+                }
                 _ => {
                     return Err(unsupported(format!(
                         "task, class, or verification declaration in interface `{}`",
@@ -3360,11 +3449,14 @@ impl InterfaceDecl {
                     )));
                 }
             },
-            native::BodyItemKind::Covergroup(_) => {
-                return Err(unsupported(format!(
-                    "covergroup declared in an interface (`{}`; IEEE 1800-2023 19.3)",
-                    self.name
-                )));
+            // A covergroup declares a type of the interface (IEEE 1800-2023
+            // 19.3), no member: its instances are the handle variables the
+            // interface declares with it, whose `new` and methods its own
+            // body binds (see `covergroups::Covergroup::interface`).
+            native::BodyItemKind::Covergroup(id) => {
+                let name = normalize_identifier(&native.covergroup(*id).name.spelling);
+                self.declare(name.clone())?;
+                self.covergroups.insert(name, span);
             }
             // A clocking block declares its name; its process and its
             // variables are those of the interface body (see `clocking`).
@@ -3398,6 +3490,35 @@ impl InterfaceDecl {
             }
         }
         Ok(())
+    }
+
+    /// The covergroup type of the interface, declared before it, whose
+    /// variables `declaration` declares: by its name or through type
+    /// declarations of the interface that stand for it.
+    fn covergroup_type(
+        &self,
+        declaration: &native::VariableDeclaration,
+        native: &native::Declarations,
+    ) -> Option<String> {
+        let native::DataTypeKind::Named(segments) = &native.data_type(declaration.data_type).kind
+        else {
+            return None;
+        };
+        let [segment] = segments.as_slice() else {
+            return None;
+        };
+        if segment.arguments.is_some() {
+            return None;
+        }
+        let mut name = native_name(&segment.name);
+        // Each type declaration is declared once, so the chain ends.
+        for _ in 0..=self.aliases.len() {
+            if self.covergroups.contains_key(&name) {
+                return Some(name);
+            }
+            name = self.aliases.get(&name)?.clone();
+        }
+        None
     }
 
     fn add_member(&mut self, member: Member) -> Result<(), AnalyzerError> {

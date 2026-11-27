@@ -455,6 +455,17 @@ impl ModuleBinding<'_> {
                         .filter_map(|signal| Some((signal.name.clone(), signal.aliased.clone()?))),
                 );
                 let mut bound = instance_symbols(symbols, &names);
+                // The body of an interface exports the subroutines of its
+                // own covergroup types, not those of the interface instances
+                // it binds, which the processes of those instances call.
+                if tree
+                    .root_unit()
+                    .is_ok_and(|unit| unit.kind == celox_sv_syntax::UnitKind::Interface)
+                    && uses_instance_covergroups(&bound)
+                {
+                    return Err(covergroups::nested_instance());
+                }
+                covergroups::record_outside_names(session, &tree.functions, &bound);
                 self.imported.instance_items.extend(
                     bound.locals.iter().map(|local| local.name.clone()).chain(
                         bound
@@ -475,6 +486,35 @@ impl ModuleBinding<'_> {
         }
         Ok(())
     }
+}
+
+/// Whether the processes or the other subroutines of `symbols`, those of an
+/// interface instance, call a subroutine of a covergroup type of the
+/// interface (see `covergroups::instance_subroutine`).
+fn uses_instance_covergroups(symbols: &crate::ast::scope::ScopeSymbols) -> bool {
+    if !symbols
+        .subroutines
+        .iter()
+        .any(|subroutine| covergroups::is_instance_subroutine(&subroutine.name))
+    {
+        return false;
+    }
+    let mut calls = Vec::new();
+    for process in &symbols.initial_processes {
+        module_elaboration::stmt_calls(&process.body, &mut calls);
+    }
+    for process in &symbols.ff_processes {
+        module_elaboration::stmt_calls(&process.body, &mut calls);
+    }
+    for process in &symbols.comb_processes {
+        module_elaboration::stmt_calls(&process.body, &mut calls);
+    }
+    for subroutine in &symbols.subroutines {
+        if !covergroups::is_instance_subroutine(&subroutine.name) {
+            module_elaboration::subroutine_calls(subroutine, &mut calls);
+        }
+    }
+    calls.into_iter().any(covergroups::is_instance_subroutine)
 }
 
 /// Mark the sites of `symbols`, the processes and subroutines of interface

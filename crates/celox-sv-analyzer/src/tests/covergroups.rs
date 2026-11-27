@@ -23,7 +23,10 @@ fn constructors(module: &crate::ir::Module) -> Vec<&str> {
         .subroutines()
         .iter()
         .map(|subroutine| subroutine.name.as_str())
-        .filter(|name| name.starts_with("$covergroup::") && name.ends_with("::$new"))
+        .filter(|name| {
+            (name.starts_with("$covergroup::") || name.starts_with("$covergroup@"))
+                && name.ends_with("::$new")
+        })
         .collect()
 }
 
@@ -1750,15 +1753,29 @@ fn unsupported_coverpoint_constructs_are_rejected_where_used() {
 }
 
 #[test]
-fn coverpoint_of_a_clocking_block_signal_is_rejected() {
-    // 19.5 allows a signal of a clocking block as a coverpoint, a clockvar
-    // whose type a covergroup expression does not yet take.
+fn coverpoints_of_clocking_block_signals_read_their_clockvars() {
+    // 19.5 allows a signal of a clocking block as a coverpoint: a clockvar,
+    // which has the type of its signal and reads the value the block sampled
+    // (14.13), also at the clocking block event (14.10).
+    let ir = analyze(
+        "module Top; bit clk; bit [1:0] d; clocking cb @(posedge clk); input d; endclocking \
+         covergroup cg @(cb); coverpoint cb.d; endgroup cg c; initial c = new; endmodule",
+    )
+    .unwrap();
+    assert_eq!(
+        descriptor(module(&ir, "Top"), "Top.cg").points[0].ty.width,
+        2
+    );
+    // An output clockvar is no value to read (14.3).
     let error = rejected(
         "",
-        "bit clk; bit [1:0] d; clocking cb @(posedge clk); input d; endclocking \
+        "bit clk; bit [1:0] d; clocking cb @(posedge clk); output d; endclocking \
          covergroup cg; coverpoint cb.d; endgroup cg c; initial c = new;",
     );
-    assert!(error.is_unsupported(), "{error}");
+    assert!(
+        matches!(&error, AnalyzerError::InvalidClocking(text) if text.contains("no input clockvar")),
+        "{error}"
+    );
 }
 
 #[test]
@@ -3502,22 +3519,6 @@ fn clocking_events_the_analysis_does_not_support_are_rejected_where_used() {
             "{source}: {error:?}"
         );
     }
-    // A covergroup with a clocking event declared in an interface is
-    // rejected for every use, also in an interface with ports that nothing
-    // but its instance names, which is elaborated as a module is.
-    let source = "interface ifc(input bit clk); covergroup ic @(posedge clk); endgroup \
-                  ic i = new; endinterface \
-                  module Top; bit clk; ifc f(.clk(clk)); endmodule";
-    let error = analyze(source).map(|_| ()).unwrap_err().into_error();
-    assert_eq!(
-        error,
-        AnalyzerError::Unsupported(
-            "covergroup sampling event of a covergroup declared in an interface (IEEE 1800-2023 19.3, 25.3)"
-                .into()
-        ),
-        "{source}"
-    );
-    assert_eq!(error.tracking_issue(), COVERGROUPS_ISSUE);
 }
 
 /// The subroutines of the modules of `ir` whose names end in `suffix`.
@@ -4841,4 +4842,472 @@ fn transition_bins_the_standard_excludes_are_errors() {
          } endgroup cg c; initial begin c = new; c.sample(); end endmodule",
     )
     .unwrap();
+}
+
+/// The covergroup subroutines of `module` whose names end in `suffix`.
+fn covergroup_subroutines<'a>(module: &'a crate::ir::Module, suffix: &str) -> Vec<&'a str> {
+    module
+        .subroutines()
+        .iter()
+        .map(|subroutine| subroutine.name.as_str())
+        .filter(|name| {
+            (name.starts_with("$covergroup::") || name.starts_with("$covergroup@"))
+                && name.ends_with(suffix)
+        })
+        .collect()
+}
+
+/// The instance whose subroutine of a covergroup type of an interface
+/// `name` is, and the class of the type: `a` and `$covergroup::N` of
+/// `$covergroup@a::N::$sample`.
+fn instance_and_class(name: &str) -> (String, String) {
+    let rest = name
+        .strip_prefix("$covergroup@")
+        .unwrap_or_else(|| panic!("{name}"));
+    let (instance, rest) = rest.split_once("::").unwrap();
+    let class = format!("$covergroup::{}", &rest[..rest.rfind("::$").unwrap()]);
+    (instance.to_owned(), class)
+}
+
+/// The covergroup of the monitor interfaces of the UVM examples (sv-tests
+/// `uart_example`, `apb_monitor.sv`): an array of handles that an `initial
+/// foreach` constructs, sampled in the action of a `cover property`, in an
+/// `always` and in a function of the interface.
+const MONITOR_BODY: &str = "covergroup cg_t(); option.per_instance = 1; \
+    RW: coverpoint w { bins read = {0}; bins write = {1}; } \
+    ERR: coverpoint e { bins err = {1}; bins ok = {0}; } \
+    X: cross RW, ERR; endgroup \
+    cg_t arr[2]; cg_t c; \
+    initial begin foreach (arr[i]) arr[i] = new(); c = new; end \
+    sequence done_s; @(posedge clk) $rose(w); endsequence \
+    cover property (done_s) begin foreach (arr[i]) if (sel[i]) arr[i].sample(); end \
+    always @(posedge clk) c.sample(); \
+    function void f(); c.sample(); endfunction \
+    always @(negedge clk) f();";
+
+#[test]
+fn covergroups_of_interfaces_are_types_of_the_elaborated_interface() {
+    // IEEE 1800-2023 19.3: "A covergroup can be defined in a package,
+    // module, program, interface, checker, or class". A type of an
+    // interface is one of the elaborated interface, as one of a module is:
+    // instances of the interface with the same parameters share it. Each
+    // instance holds the subroutines of the type for itself, as they read
+    // its members, and runs the processes of its body that construct and
+    // sample its instances.
+    let monitor = |parameters: &str, instances: &str| {
+        format!(
+            "interface I {parameters}; logic clk, w, e; logic [1:0] sel; {MONITOR_BODY} \
+             endinterface module Top; {instances} endmodule"
+        )
+    };
+    let ir = analyze(&monitor("", "I a(); I b();")).unwrap();
+    let top = module(&ir, "Top");
+    let samplers = covergroup_subroutines(top, "::$sample");
+    assert_eq!(samplers.len(), 2, "{samplers:?}");
+    let class = |name: &str| instance_and_class(name).1;
+    assert_eq!(class(samplers[0]), class(samplers[1]));
+    for (handle, sampler) in ["a", "b"].iter().zip(&samplers) {
+        assert!(instance_and_class(sampler).0 == *handle, "{sampler}");
+        assert!(
+            constructors(top)
+                .iter()
+                .any(|name| *name == sampler.replace("::$sample", "::$new"))
+        );
+    }
+    // The `initial`, the `always`, the action of the `cover property` and
+    // the function of each instance call the subroutines of the instance.
+    let calls_of = |handle: &str| {
+        let sample = samplers
+            .iter()
+            .find(|name| instance_and_class(name).0 == handle)
+            .unwrap();
+        let processes = top
+            .initial_processes()
+            .iter()
+            .flat_map(|process| process.body())
+            .chain(top.ff_processes().iter().flat_map(|process| process.body()))
+            .filter(|stmt| calls(stmt, sample))
+            .count();
+        let function = top
+            .subroutines()
+            .iter()
+            .filter(|subroutine| subroutine.name == format!("{handle}$f"))
+            .flat_map(|subroutine| &subroutine.body)
+            .filter(|stmt| calls(stmt, sample))
+            .count();
+        (processes, function)
+    };
+    assert_eq!(calls_of("a"), calls_of("b"));
+    let (processes, function) = calls_of("a");
+    assert!(processes >= 2 && function == 1, "{processes} {function}");
+    // One type per parameterization of the interface.
+    let ir = analyze(&monitor(
+        "#(int N = 1)",
+        "I #(1) a(); I #(2) b(); I #(1) d();",
+    ))
+    .unwrap();
+    let samplers = covergroup_subroutines(module(&ir, "Top"), "::$sample");
+    let of = |handle: &str| {
+        class(
+            samplers
+                .iter()
+                .find(|name| instance_and_class(name).0 == handle)
+                .unwrap(),
+        )
+    };
+    assert_eq!(of("a"), of("d"));
+    assert_ne!(of("a"), of("b"));
+    // An instance that takes the default of a parameter and one that writes
+    // the same value, by position or by name, share the type (6.22).
+    let ir = analyze(&monitor(
+        "#(int N = 1)",
+        "I a(); I #(1) b(); I #(.N(1)) d(); I #(2) e();",
+    ))
+    .unwrap();
+    let samplers = covergroup_subroutines(module(&ir, "Top"), "::$sample");
+    let of = |handle: &str| {
+        class(
+            samplers
+                .iter()
+                .find(|name| instance_and_class(name).0 == handle)
+                .unwrap(),
+        )
+    };
+    assert_eq!(of("a"), of("b"));
+    assert_eq!(of("a"), of("d"));
+    assert_ne!(of("a"), of("e"));
+    // An instance of such an interface in another interface is rejected:
+    // the outer interface does not export the subroutines of the inner
+    // instance that the processes of the inner instance call.
+    let source = format!(
+        "interface I; logic clk, w, e; logic [1:0] sel; {MONITOR_BODY} endinterface \
+         interface O; I x(); endinterface \
+         module Top; O a(); O b(); endmodule"
+    );
+    let error = analyze(&source).map(|_| ()).unwrap_err().into_error();
+    assert_eq!(
+        error,
+        AnalyzerError::Unsupported(
+            "covergroup declared in an interface instantiated in another interface (IEEE 1800-2023 19.3, 25.3)"
+                .into()
+        )
+    );
+    assert_eq!(error.tracking_issue(), COVERGROUPS_ISSUE);
+    // One that declares a covergroup nothing constructs stays accepted.
+    analyze(
+        "interface I; logic w; covergroup cg; coverpoint w; endgroup endinterface \
+         interface O; I x(); endinterface module Top; O a(); endmodule",
+    )
+    .unwrap();
+    // A module that receives an instance through a port, also of a
+    // modport, holds none of it: the processes of the body run in the
+    // instance alone.
+    let ir = analyze(&format!(
+        "interface I; logic clk, w, e; logic [1:0] sel; {MONITOR_BODY} \
+             modport m(input clk, w, e); endinterface \
+             module M(I p, I.m q); endmodule \
+             module Top; I a(); I b(); M u(.p(a), .q(b)); endmodule"
+    ))
+    .unwrap();
+    let viewer = module(&ir, "M");
+    assert!(covergroup_subroutines(viewer, "").is_empty());
+    assert!(viewer.initial_processes().is_empty() && viewer.ff_processes().is_empty());
+    assert_eq!(
+        covergroup_subroutines(module(&ir, "Top"), "::$sample").len(),
+        2
+    );
+    // A clocking event samples the instances of each instance of the
+    // interface: those a procedure constructs through the list of the
+    // instance, those of a declaration with an initializer through a
+    // hidden variable of the instance, each by the edge procedure of the
+    // instance.
+    for (items, hidden) in [
+        ("g c; initial c = new;", "%covergroup_instance_count0"),
+        ("g c = new;", "%covergroup_site0"),
+    ] {
+        let source = format!(
+            "interface I; logic clk, w; covergroup g @(posedge clk); coverpoint w; endgroup \
+             {items} endinterface \
+             module M(I p); endmodule \
+             module Top; I a(); I b(); M u(.p(a)); endmodule"
+        );
+        let ir = analyze(&source).unwrap_or_else(|error| panic!("{source}: {error}"));
+        let top = module(&ir, "Top");
+        for handle in ["a", "b"] {
+            assert!(
+                top.signals()
+                    .iter()
+                    .any(|signal| signal.name() == format!("{handle}${hidden}")),
+                "{source}"
+            );
+        }
+        assert_eq!(edge_samplers(top).len(), 2, "{source}");
+        let viewer = module(&ir, "M");
+        assert!(viewer.ff_processes().is_empty() && viewer.initial_processes().is_empty());
+        assert!(
+            !viewer
+                .signals()
+                .iter()
+                .any(|signal| signal.name().contains("%covergroup")),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn covergroups_of_interfaces_used_outside_the_interface_are_rejected() {
+    // The subroutines of a covergroup type of an interface are those of
+    // each instance, which only the body of the instance names: a `new` or
+    // a method of the type bound in a scope that binds the instance, or
+    // receives it through a port, is rejected. Calling a function of the
+    // interface that uses the covergroup is not, but through a port it may
+    // not construct an instance with a clocking event.
+    let interface = "interface I; logic clk, w; \
+        covergroup g; coverpoint w; endgroup \
+        covergroup t @(posedge clk); coverpoint w; endgroup \
+        g c; t k; \
+        function void use_c(); c = new; c.sample(); endfunction \
+        function void make_k(); k = new; endfunction \
+        modport m(input clk, w, import use_c, import make_k); endinterface";
+    let outside = AnalyzerError::Unsupported(
+        "covergroup declared in an interface used from outside the interface (IEEE 1800-2023 19.3, 25.3)"
+            .into(),
+    );
+    let through_port = AnalyzerError::Unsupported(
+        "covergroup sampling event of an instance of a covergroup declared in an interface \
+         constructed by a function called through an interface port (IEEE 1800-2023 19.3, 25.5)"
+            .into(),
+    );
+    for (items, error) in [
+        (
+            "module Top; I a(); initial a.c.sample(); endmodule",
+            &outside,
+        ),
+        ("module Top; I a(); initial a.c = new; endmodule", &outside),
+        (
+            "module Top; I a(); initial $display(a.c.get_inst_coverage()); endmodule",
+            &outside,
+        ),
+        (
+            "module M(I p); initial p.c.sample(); endmodule module Top; I a(); M u(.p(a)); endmodule",
+            &outside,
+        ),
+        (
+            "module M(I p); initial p.k = new; endmodule module Top; I a(); M u(.p(a)); endmodule",
+            &outside,
+        ),
+        (
+            "module M(I.m p); initial p.make_k(); endmodule module Top; I a(); M u(.p(a)); endmodule",
+            &through_port,
+        ),
+    ] {
+        let source = format!("{interface} {items}");
+        let found = match analyze(&source) {
+            Ok(_) => panic!("{source}: accepted"),
+            Err(found) => found.into_error(),
+        };
+        assert_eq!(&found, error, "{source}");
+        assert_eq!(found.tracking_issue(), COVERGROUPS_ISSUE);
+    }
+    // What falls out: the functions of the interface, called through the
+    // instance or through a port, use the instance's own subroutines; the
+    // function that constructs an instance with a clocking event may be
+    // called through the instance, whose list holds it.
+    for items in [
+        "module Top; I a(); initial begin a.use_c(); a.make_k(); end endmodule",
+        "module M(I.m p); initial p.use_c(); endmodule module Top; I a(); M u(.p(a)); endmodule",
+    ] {
+        let source = format!("{interface} {items}");
+        analyze(&source).unwrap_or_else(|error| panic!("{source}: {error}"));
+    }
+}
+
+/// An interface whose covergroup's handles a module could read, write and
+/// pass: a variable, a structure member and a queue element of the type,
+/// and functions with a formal and a result of the type.
+const HANDLES: &str = "interface I(input logic clk, input logic [3:0] init); \
+    covergroup cg; CP: coverpoint init { bins b[] = {[0:15]}; } endgroup \
+    cg c; \
+    typedef struct { cg h; int n; } s_t; \
+    s_t s; \
+    cg q[$]; \
+    initial begin c = new; s.h = c; q.push_back(c); end \
+    always @(posedge clk) c.sample(); \
+    function automatic cg get(); return c; endfunction \
+    function automatic void take(cg h); h.sample(); endfunction \
+    function automatic int hits(); int h, t; void'(c.get_inst_coverage(h, t)); return h; endfunction \
+    function automatic void own(); take(c); endfunction \
+    modport mp(input clk, import take, import get, import hits); \
+    endinterface";
+
+#[test]
+fn handles_of_interface_covergroups_stay_in_their_instance() {
+    // The subroutines of a covergroup type of an interface are those of
+    // each instance, which read its members (19.3): a handle of one
+    // instance that reached the code of another would be sampled with the
+    // members of that one. Every way a module could take a handle out of
+    // the body of an instance is rejected: reading or writing a variable
+    // whose type holds one, through an instance or a port, also in a
+    // continuous assignment, and calling a task or function of the
+    // interface with a formal or a result of the type. The interface's own
+    // code passes its handles, and the module calls its other functions.
+    let outside = AnalyzerError::Unsupported(
+        "covergroup declared in an interface used from outside the interface (IEEE 1800-2023 19.3, 25.3)"
+            .into(),
+    );
+    let instances = "logic clk; I a(.clk(clk), .init(4'd1)); I b(.clk(clk), .init(4'd15));";
+    for items in [
+        "initial a.c = b.c;",
+        "initial $display(a.c == null);",
+        "initial $display(a.s.h == null);",
+        "initial $display(a.q.size());",
+        "logic w; assign w = a.c == null;",
+        "initial a.take(b.c);",
+        "initial a.take(null);",
+        "initial $display(b.get() == null);",
+        "function automatic bit f(); return a.c == null; endfunction initial $display(f());",
+    ] {
+        let source = format!("{HANDLES} module Top; {instances} {items} endmodule");
+        let found = match analyze(&source) {
+            Ok(_) => panic!("{items}: accepted"),
+            Err(found) => found.into_error(),
+        };
+        assert_eq!(found, outside, "{items}");
+        assert_eq!(found.tracking_issue(), COVERGROUPS_ISSUE);
+    }
+    for (module, connect) in [
+        (
+            "module M(I p, I q); initial p.c = q.c; endmodule",
+            "M m(.p(a), .q(b));",
+        ),
+        (
+            "module M(I.mp p); initial p.take(p.get()); endmodule",
+            "M m(.p(a));",
+        ),
+        (
+            "module M(I p); initial $display(p.q.size()); endmodule",
+            "M m(.p(a));",
+        ),
+    ] {
+        let handles = HANDLES
+            .replace("typedef struct { cg h; int n; } s_t; s_t s; ", "")
+            .replace(" s.h = c;", "");
+        let source = format!("{handles} {module} module Top; {instances} {connect} endmodule");
+        let found = match analyze(&source) {
+            Ok(_) => panic!("{module}: accepted"),
+            Err(found) => found.into_error(),
+        };
+        assert_eq!(found, outside, "{module}");
+    }
+    for items in [
+        "initial begin a.own(); $display(a.hits(), b.hits()); end",
+        "always @(posedge clk) $display(b.hits());",
+    ] {
+        let source = format!("{HANDLES} module Top; {instances} {items} endmodule");
+        analyze(&source).unwrap_or_else(|error| panic!("{items}: {error}"));
+    }
+    let source = format!(
+        "{} module M(I.mp p); initial $display(p.hits()); endmodule \
+         module Top; {instances} M m(.p(a)); endmodule",
+        HANDLES
+            .replace("typedef struct { cg h; int n; } s_t; s_t s; ", "")
+            .replace(" s.h = c;", "")
+    );
+    analyze(&source).unwrap_or_else(|error| panic!("{source}: {error}"));
+}
+
+#[test]
+fn covergroups_of_classes_of_interfaces_are_rejected() {
+    // A class an interface declares reads the members of the first instance
+    // of the interface in every instance: a covergroup embedded in one is
+    // rejected where it is constructed, also when a port names the
+    // interface, which plans it; so is a covergroup of the interface used
+    // in such a class or through a property of an object.
+    let embedded = AnalyzerError::Unsupported(
+        "covergroup embedded in a class declared in an interface (IEEE 1800-2023 19.4, 25.3)"
+            .into(),
+    );
+    let body = "interface I(input logic [3:0] base); \
+        class K; covergroup kc; coverpoint base; endgroup function new(); kc = new; endfunction endclass \
+        initial begin K k; k = new; end endinterface";
+    for rest in [
+        "module Top; I a(.base(4'd3)); endmodule",
+        "module M(I p); endmodule module Top; I a(.base(4'd3)); M m(.p(a)); endmodule",
+    ] {
+        let source = format!("{body} {rest}");
+        let found = match analyze(&source) {
+            Ok(_) => panic!("{rest}: accepted"),
+            Err(found) => found.into_error(),
+        };
+        assert_eq!(found, embedded, "{rest}");
+        assert_eq!(found.tracking_issue(), COVERGROUPS_ISSUE);
+    }
+    let through = AnalyzerError::Unsupported(
+        "covergroup declared in an interface used through a class (IEEE 1800-2023 19.3, 25.3)"
+            .into(),
+    );
+    for uses in [
+        "class K; cg h; endclass K k; initial begin k = new; k.h = new; k.h.sample(); end",
+        "class K; cg h; function void make(); h = new; endfunction endclass K k; initial begin k = new; k.make(); end",
+    ] {
+        let source = format!(
+            "interface I(input logic [3:0] base); covergroup cg; coverpoint base; endgroup {uses} \
+             endinterface module Top; I a(.base(4'd3)); endmodule"
+        );
+        let found = match analyze(&source) {
+            Ok(_) => panic!("{uses}: accepted"),
+            Err(found) => found.into_error(),
+        };
+        assert_eq!(found, through, "{uses}");
+    }
+}
+
+#[test]
+fn covergroups_of_packages_and_the_compilation_unit_serve_interfaces() {
+    // A covergroup of the compilation unit or of a package used in an
+    // interface is one type of the unit or of the design: its subroutines
+    // are those of the type, shared by every instance of the interface,
+    // also of one nested in another interface and through a port view.
+    let types = [
+        (
+            "covergroup ucg with function sample(logic [3:0] x); coverpoint x; endgroup",
+            "ucg",
+        ),
+        (
+            "package p; covergroup ucg with function sample(logic [3:0] x); coverpoint x; endgroup endpackage \
+             import p::*;",
+            "ucg",
+        ),
+    ];
+    for (declaration, name) in types {
+        for rest in [
+            "module Top; logic clk; I a(.clk(clk), .base(4'd2)); I b(.clk(clk), .base(4'd7)); endmodule",
+            "interface O(input logic clk); I x(.clk(clk), .base(4'd5)); endinterface \
+             module Top; logic clk; O o(.clk(clk)); endmodule",
+            "module S(I.mp p); initial #2 p.s(4'd6); endmodule \
+             module Top; logic clk; I a(.clk(clk), .base(4'd2)); S s(.p(a)); endmodule",
+        ] {
+            let source = format!(
+                "{declaration} interface I(input logic clk, input logic [3:0] base); \
+                 {name} u; initial u = new; always @(posedge clk) u.sample(base); \
+                 function automatic void s(logic [3:0] v); u.sample(v); endfunction \
+                 modport mp(import s); endinterface {rest}"
+            );
+            let ir = analyze(&source).unwrap_or_else(|error| panic!("{source}: {error}"));
+            for module in ir.modules() {
+                assert!(
+                    !module
+                        .subroutines()
+                        .iter()
+                        .any(|subroutine| subroutine.name.starts_with("$covergroup@")),
+                    "{source}: {:?}",
+                    module
+                        .subroutines()
+                        .iter()
+                        .map(|s| &s.name)
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+    }
 }

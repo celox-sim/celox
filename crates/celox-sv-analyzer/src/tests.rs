@@ -3972,7 +3972,10 @@ fn unsupported_constructs_map_to_their_tracking_issues() {
         "covergroup cross with or matches selection (IEEE 1800-2023 19.6.1.2)",
         "covergroup bin array (IEEE 1800-2023 19.5.1)",
         "covergroup expression (semantic type of native expression `x`)",
-        "covergroup declared in an interface (`I`; IEEE 1800-2023 19.3)",
+        "covergroup declared in an interface used from outside the interface (IEEE 1800-2023 \
+         19.3, 25.3)",
+        "covergroup embedded in a class declared in an interface (IEEE 1800-2023 19.4, 25.3)",
+        "covergroup declared in an interface used through a class (IEEE 1800-2023 19.3, 25.3)",
         "covergroup extends (IEEE 1800-2023 19.4.1)",
         "covergroup sample call in a sequence match item (IEEE 1800-2023 19.8.1)",
         // What the parser rejects is named after its location.
@@ -7843,28 +7846,32 @@ fn unconstructed_covergroups_keep_their_bodies_to_themselves() {
         analyze_source(source, Path::new("covergroup-let.sv"))
             .unwrap_or_else(|error| panic!("{source}: {error}"));
     }
-    // The plan of an interface that declares a covergroup, also in a
-    // class, stays rejected: the covergroup with its own construct name.
-    for (items, construct) in [
-        (
-            covergroup.to_string(),
-            "covergroup declared in an interface (`I`; IEEE 1800-2023 19.3)",
+    // Nor does an interface that declares it, which its instances and
+    // the views of them through ports analyze; one in a class of an
+    // interface is rejected as a covergroup embedded in such a class.
+    let source = format!(
+        "interface I; logic clk; logic [15:0] s; {covergroup} endinterface \
+         module M(I p); endmodule \
+         module Top; I i(); M m(.p(i)); endmodule"
+    );
+    plan_interfaces(&[(&source, Path::new("covergroup-body-if.sv"))], &[])
+        .unwrap_or_else(|error| panic!("{source}: {error}"));
+    analyze_source(&source, Path::new("covergroup-body-if.sv"))
+        .unwrap_or_else(|error| panic!("{source}: {error}"));
+    let source = format!(
+        "interface I; logic clk; logic [15:0] s; class C; {covergroup} endclass endinterface \
+         module Top; I i(); endmodule"
+    );
+    let error = match plan_interfaces(&[(&source, Path::new("covergroup-body-if.sv"))], &[]) {
+        Err(error) => error.to_string(),
+        Ok(_) => panic!("{source}: a class in an interface"),
+    };
+    assert!(
+        error.contains(
+            "covergroup embedded in a class declared in an interface (IEEE 1800-2023 19.4, 25.3)"
         ),
-        (
-            format!("class C; {covergroup} endclass"),
-            "task, class, or verification declaration in interface `I`",
-        ),
-    ] {
-        let source = format!(
-            "interface I; logic clk; logic [15:0] s; {items} endinterface \
-             module Top; I i(); endmodule"
-        );
-        let error = match plan_interfaces(&[(&source, Path::new("covergroup-body-if.sv"))], &[]) {
-            Err(error) => error.to_string(),
-            Ok(_) => panic!("{source}: a covergroup in an interface"),
-        };
-        assert!(error.contains(construct), "{error}");
-    }
+        "{error}"
+    );
 }
 
 #[test]

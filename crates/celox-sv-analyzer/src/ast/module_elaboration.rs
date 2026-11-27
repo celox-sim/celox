@@ -9,6 +9,7 @@ mod design_dispatch;
 mod finish;
 mod implicit_nets;
 mod reachable_imports;
+pub(super) use reachable_imports::{stmt_calls, subroutine_calls};
 
 /// The state [`Module::from_selected_scope_once`] elaborates a scope in: what
 /// the scope is elaborated for, and what the phases found of it so far. The
@@ -316,7 +317,7 @@ impl Module {
             let symbols = scope.symbols(syntax_tree, session, inline_randomizations);
             scope.complete_dispatchers();
             scope.drop_unreached_covergroup_subroutines();
-            let imported_parameters = scope.lower_imported();
+            let imported_parameters = scope.lower_imported()?;
             scope.prune_symbolic_functions(syntax_tree);
             Ok(scope.finish(
                 syntax_tree,
