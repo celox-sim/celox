@@ -57,6 +57,17 @@
     },
     {
       "category": "Sequential",
+      "detail": "covergroup::bus_transitions_through_a_reference at 1515:2: expect_output: expected [50, 32, 49, 50, 48, 10], got [48, 32, 48, 10]",
+      "expectation": "Simulation",
+      "name": "covergroup::bus_transitions_through_a_reference",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "covergroup::clocked_instances_take_stop_start_and_sample at 1038:2: expect_output: expected [51, 32, 56, 10, 51, 55, 46, 53, 48, 10], got [48, 32, 48, 10, 53, 48, 46, 48, 48, 10]",
       "expectation": "Simulation",
       "name": "covergroup::clocked_instances_take_stop_start_and_sample",
@@ -398,6 +409,17 @@
     },
     {
       "category": "Sequential",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Warning-COVERIGN: <case>/source_0.sv:5:17: Unsupported: '[->' in cover transition\n    5 |    bins b2 = (2 [-> 3:5]); bins b3 = (3 [-> 3:5]); bins b5 = (5 [* 3]);\n      |                 ^~~\n                   ... For warning description see https://verilator.org/warn/COVERIGN?v=5.054\n                   ... Use \"/* verilator lint_off COVERIGN */\" and lint_on around source to disable this message.\n%Warning-COVERIGN: <case>/source_0.sv:5:41: Unsupported: '[->' in cover transition\n    5 |    bins b2 = (2 [-> 3:5]); bins b3 = (3 [-> 3:5]); bins b5 = (5 [* 3]);\n      |                                         ^~~\n%Warning-COVERIGN: <case>/source_0.sv:5:65: Unsupported: '[*]' in cover transition\n    5 |    bins b2 = (2 [-> 3:5]); bins b3 = (3 [-> 3:5]); bins b5 = (5 [* 3]);\n      |                                                                 ^~\n%Warning-COVERIGN: <case>/source_0.sv:6:22: Unsupported: '[->' in cover transition\n    6 |    bins b6 = (1 => 3 [-> 4:6] => 1); bins b7 = (1 => 2 [= 3:6] => 5); }\n      |                      ^~~\n%Warning-COVERIGN: <case>/source_0.sv:6:56: Unsupported: '[=]' in cover transition\n    6 |    bins b6 = (1 => 3 [-> 4:6] => 1); bins b7 = (1 => 2 [= 3:6] => 5); }\n      |                                                        ^~\n%Warning-COVERIGN: <case>/source_0.sv:8:17: Unsupported: '[->' in cover transition\n    8 |    bins b2 = (2 [-> 3:5]); bins b3 = (3 [-> 3:5]); bins b5 = (5 [* 3]);\n      |                 ^~~\n%Warning-COVERIGN: <case>/source_0.sv:8:41: Unsupported: '[->' in cover transition\n    8 |    bins b2 = (2 [-> 3:5]); bins b3 = (3 [-> 3:5]); bins b5 = (5 [* 3]);\n      |                                         ^~~\n%Warning-COVERIGN: <case>/source_0.sv:8:65: Unsupported: '[*]' in cover transition\n    8 |    bins b2 = (2 [-> 3:5]); bins b3 = (3 [-> 3:5]); bins b5 = (5 [* 3]);\n      |                                                                 ^~\n%Warning-COVERIGN: <case>/source_0.sv:9:22: Unsupported: '[->' in cover transition\n    9 |    bins b6 = (1 => 3 [-> 4:6] => 1); bins b7 = (1 => 2 [= 3:6] => 5); }\n      |                      ^~~\n%Warning-COVERIGN: <case>/source_0.sv:9:56: Unsupported: '[=]' in cover transition\n    9 |    bins b6 = (1 => 3 [-> 4:6] => 1); bins b7 = (1 => 2 [= 3:6] => 5); }\n      |                                                        ^~\n%Warning-COVERIGN: <case>/source_0.sv:11:17: Unsupported: '[->' in cover transition\n   11 |    bins b2 = (2 [-> 3:5]); bins b3 = (3 [-> 3:5]); bins b5 = (5 [* 3]);\n      |                 ^~~\n%Warning-COVERIGN: <case>/source_0.sv:11:41: Unsupported: '[->' in cover transition\n   11 |    bins b2 = (2 [-> 3:5]); bins b3 = (3 [-> 3:5]); bins b5 = (5 [* 3]);\n      |                                         ^~~\n%Warning-COVERIGN: <case>/source_0.sv:11:65: Unsupported: '[*]' in cover transition\n   11 |    bins b2 = (2 [-> 3:5]); bins b3 = (3 [-> 3:5]); bins b5 = (5 [* 3]);\n      |                                                                 ^~\n%Warning-COVERIGN: <case>/source_0.sv:12:22: Unsupported: '[->' in cover transition\n   12 |    bins b6 = (1 => 3 [-> 4:6] => 1); bins b7 = (1 => 2 [= 3:6] => 5); }\n      |                      ^~~\n%Warning-COVERIGN: <case>/source_0.sv:12:56: Unsupported: '[=]' in cover transition\n   12 |    bins b6 = (1 => 3 [-> 4:6] => 1); bins b7 = (1 => 2 [= 3:6] => 5); }\n      |                                                        ^~\n%Warning-COVERIGN: <case>/source_0.sv:14:17: Unsupported: '[->' in cover transition\n   14 |    bins b2 = (2 [-> 3:5]); bins b3 = (3 [-> 3:5]); bins b5 = (5 [* 3]);\n      |                 ^~~\n%Warning-COVERIGN: <case>/source_0.sv:14:41: Unsupported: '[->' in cover transition\n   14 |    bins b2 = (2 [-> 3:5]); bins b3 = (3 [-> 3:5]); bins b5 = (5 [* 3]);\n      |                                         ^~~\n%Warning-COVERIGN: <case>/source_0.sv:14:65: Unsupported: '[*]' in cover transition\n   14 |    bins b2 = (2 [-> 3:5]); bins b3 = (3 [-> 3:5]); bins b5 = (5 [* 3]);\n      |                                                                 ^~\n%Warning-COVERIGN: <case>/source_0.sv:15:22: Unsupported: '[->' in cover transition\n   15 |    bins b6 = (1 => 3 [-> 4:6] => 1); bins b7 = (1 => 2 [= 3:6] => 5); }\n      |                      ^~~\n%Warning-COVERIGN: <case>/source_0.sv:15:56: Unsupported: '[=]' in cover transition\n   15 |    bins b6 = (1 => 3 [-> 4:6] => 1); bins b7 = (1 => 2 [= 3:6] => 5); }\n      |                                                        ^~\n%Warning-COVERIGN: <case>/source_0.sv:17:17: Unsupported: '[->' in cover transition\n   17 |    bins b2 = (2 [-> 3:5]); bins b3 = (3 [-> 3:5]); bins b5 = (5 [* 3]);\n      |                 ^~~\n%Warning-COVERIGN: <case>/source_0.sv:17:41: Unsupported: '[->' in cover transition\n   17 |    bins b2 = (2 [-> 3:5]); bins b3 = (3 [-> 3:5]); bins b5 = (5 [* 3]);\n      |                                         ^~~\n%Warning-COVERIGN: <case>/source_0.sv:17:65: Unsupported: '[*]' in cover transition\n   17 |    bins b2 = (2 [-> 3:5]); bins b3 = (3 [-> 3:5]); bins b5 = (5 [* 3]);\n      |                                                                 ^~\n%Warning-COVERIGN: <case>/source_0.sv:18:22: Unsupported: '[->' in cover transition\n   18 |    bins b6 = (1 => 3 [-> 4:6] => 1); bins b7 = (1 => 2 [= 3:6] => 5); }\n      |                      ^~~\n%Warning-COVERIGN: <case>/source_0.sv:18:56: Unsupported: '[=]' in cover transition\n   18 |    bins b6 = (1 => 3 [-> 4:6] => 1); bins b7 = (1 => 2 [= 3:6] => 5); }\n      |                                                        ^~\n%Error: <case>/source_0.sv:5:9: Transition set without items\n                              : ... note: In instance 'celox_suite_tb.dut'\n    5 |    bins b2 = (2 [-> 3:5]); bins b3 = (3 [-> 3:5]); bins b5 = (5 [* 3]);\n      |         ^~\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.054 for more assistance.\n%Error: <case>/source_0.sv:5:33: Transition set without items\n                               : .",
+      "expectation": "Simulation",
+      "name": "covergroup::overlapping_transitions_of_the_example_of_19_5_2",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "native testbench failed: exit status: 1; see runtime.log and protocol.log\n",
       "expectation": "Simulation",
       "name": "covergroup::procedural_constructions_sample_at_their_clocking_events",
@@ -425,6 +447,17 @@
       "name": "covergroup::reference_arguments_track_their_actuals",
       "phase": "execute",
       "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Warning-COVERIGN: <case>/source_0.sv:7:19: Unsupported: '[*]' in cover transition\n    7 |    bins five = (3 [* 5]);\n      |                   ^~\n                   ... For warning description see https://verilator.org/warn/COVERIGN?v=5.054\n                   ... Use \"/* verilator lint_off COVERIGN */\" and lint_on around source to disable this message.\n%Warning-COVERIGN: <case>/source_0.sv:8:19: Unsupported: '[*]' in cover transition\n    8 |    bins some = (3 [* 3:5]);\n      |                   ^~\n%Warning-COVERIGN: <case>/source_0.sv:9:20: Unsupported: '[->' in cover transition\n    9 |    bins goto3 = (3 [-> 3]);\n      |                    ^~~\n%Warning-COVERIGN: <case>/source_0.sv:10:27: Unsupported: '[->' in cover transition\n   10 |    bins between = (1 => 3 [-> 3] => 5);\n      |                           ^~~\n%Warning-COVERIGN: <case>/source_0.sv:11:19: Unsupported: '[=]' in cover transition\n   11 |    bins non2 = (3 [= 2]);\n      |                   ^~\n%Warning-COVERIGN: <case>/source_0.sv:12:25: Unsupported: '[=]' in cover transition\n   12 |    bins later = (1 => 3 [= 2] => 6);\n      |                         ^~\n%Warning-COVERIGN: <case>/source_0.sv:4:21: Ignoring unsupported: non-constant 'option.at_least'; using default value\n                                          : ... note: In instance 'celox_suite_tb.dut'\n    4 |   option.at_least = least;\n      |                     ^~~~~\n%Error: <case>/source_0.sv:7:9: Transition set without items\n                              : ... note: In instance 'celox_suite_tb.dut'\n    7 |    bins five = (3 [* 5]);\n      |         ^~~~\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.054 for more assistance.\n%Error: <case>/source_0.sv:8:9: Transition set without items\n                              : ... note: In instance 'celox_suite_tb.dut'\n    8 |    bins some = (3 [* 3:5]);\n      |         ^~~~\n%Error: <case>/source_0.sv:9:9: Transition requires at least two values\n                              : ... note: In instance 'celox_suite_tb.dut'\n    9 |    bins goto3 = (3 [-> 3]);\n      |         ^~~~~\n%Error: <case>/source_0.sv:11:9: Transition requires at least two values\n                               : ... note: In instance 'celox_suite_tb.dut'\n   11 |    bins non2 = (3 [= 2]);\n      |         ^~~~\n%Error: Exiting due to 4 error(s)\n",
+      "expectation": "Simulation",
+      "name": "covergroup::repetitions_of_transitions",
+      "phase": "compile",
+      "status": "compile_error",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
@@ -478,6 +511,39 @@
       "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error-UNSUPPORTED: <case>/source_0.sv:5:17: Unsupported: +/- range\n    5 |    bins near = {[11 +/- 1]};\n      |                 ^\n                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.054\n%Error-UNSUPPORTED: <case>/source_0.sv:6:16: Unsupported: +%- range\n    6 |    bins pct = {[7 +%- 25]};\n      |                ^\n%Error: Exiting due to 2 error(s)\n",
       "expectation": "Simulation",
       "name": "covergroup::tolerance_ranges_of_a_bin",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Warning-COVERIGN: <case>/source_0.sv:5:18: Unsupported: '[*]' in cover transition\n    5 |    bins r[] = (3 [* 3:5]);\n      |                  ^~\n                   ... For warning description see https://verilator.org/warn/COVERIGN?v=5.054\n                   ... Use \"/* verilator lint_off COVERIGN */\" and lint_on around source to disable this message.\n%Warning-COVERIGN: <case>/source_0.sv:7:4: Unsupported: 'wildcard' transition list in cover bin\n    7 |    wildcard bins w = (4'b11?? => 4'b00??);\n      |    ^~~~~~~~\n%Warning-COVERIGN: <case>/source_0.sv:18:24: Unsupported: covergroup value range '[...]'\n   18 |    bins u = (0 => 1 => [3:4] => 5);\n      |                        ^\n%Error: <case>/source_0.sv:5:9: Transition set without items\n                              : ... note: In instance 'celox_suite_tb.dut'\n    5 |    bins r[] = (3 [* 3:5]);\n      |         ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.054 for more assistance.\n%Error: Exiting due to 1 error(s)\n",
+      "expectation": "Simulation",
+      "name": "covergroup::transition_arrays_and_ignored_transitions",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "covergroup::transition_bins_of_the_example_of_19_5_2 at 1347:2: expect_output: expected [52, 32, 49, 49, 32, 49, 32, 49, 49, 32, 48, 32, 49, 49, 10], got [48, 32, 48, 32, 48, 32, 48, 32, 48, 32, 48, 10]",
+      "expectation": "Simulation",
+      "name": "covergroup::transition_bins_of_the_example_of_19_5_2",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Warning-COVERIGN: <case>/source_0.sv:6:47: Unsupported: '[*]' in cover transition\n    6 |   coverpoint v { bins r = (a => P => twice(a) [* n]); }\n      |                                               ^~\n                   ... For warning description see https://verilator.org/warn/COVERIGN?v=5.054\n                   ... Use \"/* verilator lint_off COVERIGN */\" and lint_on around source to disable this message.\n%Error: <case>/source_0.sv:6:28: Non-constant expression in transition bin; values must be constants (IEEE 1800-2023 19.5)\n                               : ... note: In instance 'celox_suite_tb.dut'\n    6 |   coverpoint v { bins r = (a => P => twice(a) [* n]); }\n      |                            ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.054 for more assistance.\n%Error: Exiting due to 1 error(s)\n",
+      "expectation": "Simulation",
+      "name": "covergroup::transition_operands_of_arguments",
       "phase": "compile",
       "status": "compile_error",
       "stronger_than_sv": false,

@@ -800,6 +800,129 @@ fn bin_kinds_add_the_calls_of_their_predicates_and_filters() {
     assert_eq!(declared, none);
 }
 
+/// What transition bins add to a sample (19.5.2): the heap follows the
+/// sequences from the value the sample hands over for the coverpoint, so
+/// they add no call of their own, with repetitions, arrays, wildcard
+/// transitions, `default sequence` and ignored transitions alike; a count
+/// that an argument gives is an input of the constructor. A guard is the
+/// call of the predicate bits and an illegal transition the report of a
+/// hit, as for bins of values. None is a call of the heap helper, so the
+/// plan is that of the design with a bin of values.
+#[test]
+fn transitions_add_no_call_to_a_sample() {
+    use coverage::op;
+    let design = |bins: &str| {
+        rtl(
+            "",
+            &format!(
+                "    bit [3:0] v;
+    bit en;
+    covergroup cg(int n);
+        coverpoint v {{
+{bins}
+        }}
+        coverpoint q;
+    endgroup
+    cg c;
+    always @(posedge clk) begin
+        if (c == null) c = new(2);
+        c.sample();
+    end"
+            ),
+        )
+    };
+    let plan = |source: &str| {
+        let (program, facts) = laid_out(timed(source));
+        let calls = coverage_subs(&program.sir);
+        let plan = crate::scheduler::plan_for_test(&program).unwrap();
+        (
+            (
+                plan.settle_reads.is_some(),
+                plan.fallback,
+                plan.lazy,
+                plan.incremental,
+                plan.active,
+            ),
+            facts,
+            calls,
+        )
+    };
+    let of_a_sample = |calls: &[(u64, u64, u64)]| {
+        let bodies = count(calls, op::SAMPLING);
+        assert!(bodies > 0);
+        [
+            op::SAMPLING,
+            op::PRESENT,
+            op::POINTS,
+            op::POINT,
+            op::PREDICATES,
+            op::SAMPLE_END,
+            op::MESSAGE,
+        ]
+        .map(|sub| {
+            let calls = count(calls, sub);
+            assert_eq!(calls % bodies, 0);
+            calls / bodies
+        })
+    };
+    let constructing =
+        |calls: &[(u64, u64, u64)]| [op::NEW, op::INPUT, op::BUILD].map(|sub| count(calls, sub));
+    let (base, base_facts, base_calls) = plan(&design("            bins low = {[0:3]};"));
+    assert!(base.0 && base.2.is_some());
+    assert_eq!(base_facts.heap_calls, 0);
+    assert_eq!(of_a_sample(&base_calls), [1, 0, 1, 0, 0, 1, 0]);
+    let (transitions, facts, calls) = plan(&design(
+        "            bins t = (1 => 2), (3 => 4 => 5);
+            bins r[] = (1, 2 => 3 [* 1:3]);
+            bins g = (1 => 3 [-> 2] => 5);
+            bins nc = (1 => 3 [= 2:3] => 6);
+            wildcard bins w = (4'b11?? => 4'b00??);
+            ignore_bins i = (2 => 3);
+            bins other = default sequence;",
+    ));
+    assert_eq!(facts.heap_calls, 0);
+    assert_eq!(of_a_sample(&calls), [1, 0, 1, 0, 0, 1, 0]);
+    assert_eq!(constructing(&calls), constructing(&base_calls));
+    assert_eq!(transitions, base);
+    // A count of an argument: an input that the constructor hands over.
+    let (counted, facts, calls) = plan(&design("            bins t = (1 => 2 [* n]);"));
+    assert_eq!(facts.heap_calls, 0);
+    assert_eq!(of_a_sample(&calls), [1, 0, 1, 0, 0, 1, 0]);
+    let news = count(&calls, op::NEW);
+    assert_eq!(
+        constructing(&calls),
+        [
+            news,
+            constructing(&base_calls)[1] + news,
+            count(&calls, op::BUILD)
+        ]
+    );
+    assert_eq!(counted, base);
+    // A guard and an illegal transition.
+    let (guarded, facts, calls) = plan(&design(
+        "            bins t = (1 => 2) iff (en);
+            illegal_bins bad = (4 => 5);",
+    ));
+    assert_eq!(facts.heap_calls, 0);
+    assert_eq!(of_a_sample(&calls), [1, 0, 1, 0, 1, 1, 1]);
+    assert_eq!(guarded, base);
+    assert_eq!(facts.handles, base_facts.handles + 1);
+    // Declared and never constructed, a covergroup with transitions is
+    // free as any.
+    let (_, declared) = laid_out(timed(&rtl(
+        "",
+        "    covergroup cg(int n);
+        coverpoint d {
+            bins t[] = (1 => [2:3] [* 1:n]);
+            illegal_bins bad = (4 => 5) iff (q[0]);
+            bins rest = default sequence;
+        }
+    endgroup",
+    )));
+    let (_, none) = laid_out(timed(&rtl("", "")));
+    assert_eq!(declared, none);
+}
+
 /// What crosses add to a sample (19.6): a cross is counted by the heap from
 /// the values the sample hands over for its coverpoints, so it adds no call
 /// of its own, also with bins and `intersect` lists, which the heap makes of

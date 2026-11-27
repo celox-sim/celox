@@ -633,3 +633,91 @@ endmodule
     #[cfg(feature = "wasm-runtime")]
     case!(wasm, build_wasm);
 }
+
+/// The transitions of a coverpoint (IEEE 1800-2023 19.5.2) that are under
+/// way are part of a checkpoint: a simulation restored in the middle of a
+/// sequence, from the checkpoint or from its bytes, ends it as the one
+/// that took it does.
+mod covergroup_transitions {
+    use std::path::Path;
+    const SOURCE: &str = r#"`timescale 1ns/1ns
+module Top;
+    bit clk = 0;
+    bit [3:0] q = 0;
+    always #5 clk = ~clk;
+    always_ff @(posedge clk) q <= q + 4'd1;
+    covergroup cg @(posedge clk);
+        coverpoint q {
+            bins t = (0 => 1 => 2 => 3);
+            bins g = (1 => 4 [-> 1] => 5);
+            bins r[] = (1 => [2:3] [* 1:2]);
+            bins d = default sequence;
+        }
+    endgroup
+    cg c = new;
+endmodule
+"#;
+    /// The hits of each bin of the coverpoint.
+    fn hits(report: &celox::CoverageReport) -> Vec<(String, u64)> {
+        report.covergroups[0].instances[0].items[0]
+            .bins
+            .iter()
+            .filter(|bin| bin.hits != 0)
+            .map(|bin| (bin.name.clone(), bin.hits))
+            .collect()
+    }
+    macro_rules! case {
+        ($name:ident, $build:ident) => {
+            #[test]
+            fn $name() {
+                let build = || {
+                    celox::Simulation::from_sv_sources(
+                        vec![(SOURCE, Path::new("transitions.sv"))],
+                        "Top",
+                    )
+                    .$build()
+                    .unwrap()
+                };
+                let mut source = build();
+                // The rising edges at 5 and 15 sample 0 and 1: `t`, `g`
+                // and the bins of `r` are under way.
+                source.run_until(22).unwrap();
+                assert!(hits(&source.coverage()).is_empty());
+                let checkpoint = source.checkpoint().unwrap();
+                let bytes = checkpoint.to_bytes().unwrap();
+                source.run_until(62).unwrap();
+                let expected = source.coverage();
+                // The edges up to 55 sample 0 to 5; every sample but the
+                // first goes on with `t` or `g`, so `d` has none.
+                assert_eq!(
+                    hits(&expected),
+                    [
+                        ("t".to_owned(), 1),
+                        ("g".to_owned(), 1),
+                        ("r[1=>2]".to_owned(), 1),
+                        ("r[1=>2=>3]".to_owned(), 1)
+                    ]
+                );
+                let mut restored = build();
+                // SAFETY: unchanged bytes from the same build's checkpoint encoder.
+                let decoded = unsafe { restored.checkpoint_from_bytes(&bytes) }.unwrap();
+                restored.restore(&decoded).unwrap();
+                assert_eq!(restored.time(), 22);
+                restored.run_until(62).unwrap();
+                assert_eq!(restored.coverage(), expected);
+                source.restore(&checkpoint).unwrap();
+                source.run_until(62).unwrap();
+                assert_eq!(source.coverage(), expected);
+            }
+        };
+    }
+    case!(interpreter, build_interpreter);
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    case!(native, build_native);
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    case!(tiered, build_tiered);
+    #[cfg(feature = "cranelift")]
+    case!(cranelift, build_cranelift);
+    #[cfg(feature = "wasm-runtime")]
+    case!(wasm, build_wasm);
+}

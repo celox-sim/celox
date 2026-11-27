@@ -1174,6 +1174,18 @@
     "sv_clocking_drives_through_virtual_interfaces": {
       "title": "A synchronous drive in an interface task called through a virtual interface does not mature at the next clocking event: it is driven when it executes, or a time unit after the event",
       "standard": "IEEE 1800-2023 14.16, 25.9"
+    },
+    "sv_transition_bins_end_the_run": {
+      "title": "A design that samples transition bins from an initial procedure without a delay before the coverage queries stops before the $finish that follows them, after displaying what they return",
+      "standard": "IEEE 1800-2023 19.5.2, 20.2"
+    },
+    "sv_transition_repetition_counts": {
+      "title": "Transition bins with repetitions count other samples than 19.5.2 gives: the bins of the example sg count more hits than the clause states, bins of consecutive, goto and nonconsecutive repetitions with counts make a coverpoint of no bins, and bins whose values and counts are arguments of the covergroup count nothing",
+      "standard": "IEEE 1800-2023 19.5.2, 19.5"
+    },
+    "sv_transition_arrays_and_removal": {
+      "title": "A transition bin array does not have a bin for each length of a consecutive repetition range, and an ignored transition neither removes the matches of other bins that contain it nor empties a bin all of whose sequences contain it",
+      "standard": "IEEE 1800-2023 19.5.2, 19.5.5, 19.11"
     }
   },
   "cases": [
@@ -6070,6 +6082,54 @@
       "classification": "xezim_bug",
       "bug": "sv_clocking_drives_through_virtual_interfaces",
       "note": "A class calls the interface task put(), which executes cb.v <= x, at 0 (x = 1) and twice at 1 (2, 3), between clocking events. They mature at the event at 5, where the last executed, 3, is driven (14.16, 14.16.2): v is 0 at 4 and 3 at 6. xezim 0.11.4 reads v as 0 at 6 under the suite's testbench, where v changes to 3 at 6. In the source alone, v changes to 1 at 0 and to 3 at 1, as the drives execute. The same drives in a module, in clocking::drives_before_an_event_mature_in_their_order, mature as expected."
+    },
+    {
+      "suite": "sv",
+      "name": "covergroup::transition_bins_of_the_example_of_19_5_2",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_transition_bins_end_the_run",
+      "note": "19.5.2: the example cg with the trace 4 5 7 11 8 12 2 2 3: sa counts 7=>11 and 8=>12 (2), sb[7=>11] and sb[8=>12] once, sc once, so 4 of 11 bins are covered with at_least 1, 1 with 2 and none with 3. xezim 0.11.4 displays the expected 4 11 1 11 0 11 and then stops before $finish."
+    },
+    {
+      "suite": "sv",
+      "name": "covergroup::overlapping_transitions_of_the_example_of_19_5_2",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_transition_repetition_counts",
+      "note": "19.5.2 states for sg that b2 counts on the 8th and 10th samples, b3 on the 6th, 9th and 11th, b5 on the 15th to 18th, b6 on the 12th and b7 on the 13th: 2, 3, 4, 1, 1 hits, so the coverpoints with at_least 1 to 5 cover 100, 60, 40, 20 and 0 percent. xezim 0.11.4 displays 100.00 80.00 60.00 40.00 20.00, one bin more for each at_least from 2, and stops before $finish."
+    },
+    {
+      "suite": "sv",
+      "name": "covergroup::repetitions_of_transitions",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_transition_repetition_counts",
+      "note": "19.5.2: on the trace, 1,5 => 6,7 counts 2, 3[*5] 2, 3[*3:5] 4, 3[->3] 9, 1 => 3[->3] => 5 1, 3[=2] 10 and 1 => 3[=2] => 6 1, so the instances with at_least 1, 2, 4, 9, 10 and 11 cover 7, 5, 3, 2, 1 and 0 of 7. xezim 0.11.4 displays 0 0 0 0 0 0 of 0 and stops before $finish."
+    },
+    {
+      "suite": "sv",
+      "name": "covergroup::transition_arrays_and_ignored_transitions",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_transition_arrays_and_removal",
+      "note": "19.5.2: r[] = (3 [* 3:5]) is three bins and p[] = (1, 2 => 3), (2 => 3) two, all hit with w: 6 of 6. 19.5.5: the ignored 2=>3 empties long = (1=>2=>3=>4), which leaves the coverage, and the ignored 1=>3=>5 removes the match 0=>1=>3=>5 of u, so with at_least 2 only v (3 hits) of t, u and v is covered: 1 of 3. xezim 0.11.4 displays 4 5 2 4 and stops before $finish."
+    },
+    {
+      "suite": "sv",
+      "name": "covergroup::transition_operands_of_arguments",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_transition_repetition_counts",
+      "note": "19.5: the values and counts of a transition may be arguments of the covergroup: (a => P => twice(a) [* n]) is 1 => 4 => 2 [* 2] for new(1, 2), which the trace 1 4 2 2 3 4 6 matches, 1 => 4 => 2 [* 3] for new(1, 3), which it does not, and 3 => 4 => 6 for new(3, 1), which it does: 1 0 1. xezim 0.11.4 displays 0 0 0 and stops before $finish."
+    },
+    {
+      "suite": "sv",
+      "name": "covergroup::bus_transitions_through_a_reference",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_transition_arrays_and_removal",
+      "note": "19.5.2: wr_rd[] = (AHB_WR, AXI_WR => IDLE [*1:30] => AHB_RD, AXI_RD) is a bin for each write, number of idle states and read, 120 bins, of which the sampled 2 0 0 3 and 1 0 4 (twice) cover 2. xezim 0.11.4 displays 2 4: the bins of the 30 lengths are not made."
     }
   ]
 }

@@ -114,6 +114,13 @@ pub(crate) fn step(
             return Err(format!("has the repetition count {}", show(constant)));
         }
         let value = numeric(&planes(constant).0, constant.ty.width, constant.ty.signed);
+        if value > num_bigint::BigInt::from(u32::MAX) {
+            // Such a step has more states than any coverpoint may have.
+            return Err(format!(
+                "has the repetition count {value}, more than the {MAX_TRANSITION_STATES} states of \
+                 the transitions of a coverpoint allow"
+            ));
+        }
         u32::try_from(&value)
             .ok()
             .filter(|&count| count >= 1)

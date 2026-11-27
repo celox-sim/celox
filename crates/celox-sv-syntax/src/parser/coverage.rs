@@ -283,7 +283,14 @@ impl Parser<'_> {
         let value = self.bins_value()?;
         // The array and `wildcard` forms each alternative has (A.2.11).
         match (&value, &array) {
-            (BinsValue::Transitions(_), Some(BinsArray::Sized(_))) => {
+            // `(e)` may be a set expression in parentheses (19.5.1.2),
+            // which the analysis tells by the type of `e`.
+            (BinsValue::Transitions(sets), Some(BinsArray::Sized(_)))
+                if !matches!(&sets[..], [set] if matches!(&set.steps[..],
+                    [step] if step.repeat.is_none()
+                        && matches!(&step.ranges[..],
+                            [range] if matches!(range.kind, CoverageRangeKind::Value(_))))) =>
+            {
                 return Err(self.error_at(
                     value_start,
                     "an array of transition bins has no size (IEEE 1800-2023 19.5.2)",
@@ -454,6 +461,13 @@ impl Parser<'_> {
                 } else {
                     None
                 };
+                // A `repeat_range` is of covergroup expressions alone
+                // (Syntax 19-3), unlike the ranges of 16.9.2.
+                if self.unbounded(low) || high.is_some_and(|high| self.unbounded(high)) {
+                    return Err(self.error(
+                        "`$` is no repetition count of a transition (IEEE 1800-2023 19.5.2)",
+                    ));
+                }
                 self.expect("]")?;
                 Some(TransitionRepeat {
                     kind,
