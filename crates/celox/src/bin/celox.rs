@@ -83,6 +83,11 @@ struct RunArgs {
     #[command(flatten)]
     save_state: SaveStateArgs,
 
+    /// Write the coverage of the design's covergroups to this file as JSON
+    /// when the run ends, also when it fails (SystemVerilog).
+    #[arg(long, value_name = "FILE", conflicts_with = "compile_only")]
+    coverage_report: Option<PathBuf>,
+
     /// Pass a plusarg such as `+iterations=9` to a SystemVerilog testbench
     /// (repeatable); a positional argument starting with `+` does the same.
     /// They reach `$test$plusargs` and `$value$plusargs` in command-line
@@ -140,6 +145,7 @@ struct RunConfig {
     opt_level: celox::OptLevel,
     max_steps: u64,
     save_state: SaveStateArgs,
+    coverage_report: Option<PathBuf>,
     plusargs: Vec<String>,
 }
 
@@ -208,6 +214,7 @@ fn resolve_run_config(arguments: RunArgs) -> RunConfig {
             .unwrap_or(1_000_000),
         design,
         save_state: arguments.save_state,
+        coverage_report: arguments.coverage_report,
         plusargs: arguments.plusargs,
     }
 }
@@ -220,6 +227,9 @@ fn run_testbench(arguments: RunArgs) -> Result<(), String> {
     }
     if arguments.cdsp.is_some() {
         return Err("--cdsp requires a SystemVerilog testbench".into());
+    }
+    if arguments.coverage_report.is_some() {
+        return Err("--coverage-report requires a SystemVerilog testbench".into());
     }
     if arguments.execution.native_image_input.is_none()
         && !arguments.design.sources.iter().all(|path| {
@@ -250,6 +260,9 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
     arguments.execution.validate_sv().unwrap_or_else(|message| {
         clap::Error::raw(clap::error::ErrorKind::ArgumentConflict, message).exit()
     });
+    if let Some(path) = &arguments.coverage_report {
+        check_coverage_report(path, &arguments)?;
+    }
     // Install before compiling so requests received during compilation are
     // deferred until the first safe simulation boundary.
     let signal =
@@ -354,8 +367,11 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
             report_warnings(simulation.warnings())?;
             let mut execute_counts = None;
             let (result, execute_elapsed) = if let Some(port) = arguments.cdsp {
+                // A port that cannot be opened ends the command before the run.
+                let listener = cdsp::listen(port)?;
                 let start = std::time::Instant::now();
-                let result = cdsp::serve(&mut simulation, max_steps, port, &mut std::io::stdout());
+                let result =
+                    cdsp::serve(&mut simulation, max_steps, listener, &mut std::io::stdout());
                 (result, start.elapsed())
             } else {
                 let progress = if let Some(path) = &arguments.save_state.restore_checkpoint {
@@ -388,6 +404,17 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
                 let elapsed = start.elapsed();
                 execute_counts = counters.and_then(counters::ExecuteCounters::stop);
                 (result, elapsed)
+            };
+            // After the run, its output drained, whether or not it failed.
+            let result = match &arguments.coverage_report {
+                Some(path) => {
+                    let written = write_coverage_report(path, &simulation.coverage());
+                    match (result, written) {
+                        (Err(run), Err(write)) => Err(format!("{run}\ncelox: {write}")),
+                        (result, written) => result.and(written),
+                    }
+                }
+                None => result,
             };
             if arguments.execution.report {
                 writeln!(
@@ -437,6 +464,75 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
         runner::Backend::Wasm => execute!(build_wasm),
         runner::Backend::Tiered => execute!(build_tiered, report_sv_hotspots),
     }
+}
+
+/// Check that `--coverage-report` `path` is none of the files the run reads
+/// or writes, which writing the report would overwrite.
+fn check_coverage_report(path: &Path, arguments: &RunConfig) -> Result<(), String> {
+    let execution = &arguments.execution;
+    let save_state = &arguments.save_state;
+    let mut others: Vec<(&str, &Path)> = Vec::new();
+    for (option, paths) in [
+        ("a source", &arguments.design.sources),
+        ("the project or a file list", &arguments.design.read_files),
+        ("--dpi-lib", &arguments.design.dpi_libraries),
+    ] {
+        others.extend(paths.iter().map(|path| (option, path.as_path())));
+    }
+    for (option, path) in [
+        ("--restore-checkpoint", &save_state.restore_checkpoint),
+        ("--save-state-dir", &save_state.save_state_dir),
+        ("--vcd", &execution.vcd),
+        ("--fst", &execution.fst),
+        ("--settle-profile", &execution.settle_profile),
+        ("--activation-profile", &execution.activation_profile),
+        ("--dump-settle-plan", &execution.dump_settle_plan),
+    ] {
+        others.extend(path.as_deref().map(|path| (option, path)));
+    }
+    let report = file_identity(path);
+    for (option, other) in others {
+        if report.is_some() && file_identity(other) == report {
+            return Err(format!(
+                "--coverage-report {} names the same file as {option} {}",
+                path.display(),
+                other.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// What tells whether two paths name one file: the canonical path where
+/// the file or its directory exists, otherwise the absolute path.
+fn file_identity(path: &Path) -> Option<PathBuf> {
+    if let Ok(path) = path.canonicalize() {
+        return Some(path);
+    }
+    let directory = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    match (directory.canonicalize(), path.file_name()) {
+        (Ok(directory), Some(name)) => Some(directory.join(name)),
+        _ => std::path::absolute(path).ok(),
+    }
+}
+
+/// Write `report` to `path` as pretty JSON (the camelCase serde form of
+/// [`celox::CoverageReport`]), ending in a newline.
+fn write_coverage_report(path: &Path, report: &celox::CoverageReport) -> Result<(), String> {
+    let error = |error: &dyn std::fmt::Display| {
+        format!(
+            "cannot write the coverage report {}: {error}",
+            path.display()
+        )
+    };
+    let mut file = std::io::BufWriter::new(std::fs::File::create(path).map_err(|e| error(&e))?);
+    serde_json::to_writer_pretty(&mut file, report).map_err(|e| error(&e))?;
+    file.write_all(b"\n")
+        .and_then(|()| file.flush())
+        .map_err(|e| error(&e))
 }
 
 fn simulate_sv<B: celox::SimBackend>(

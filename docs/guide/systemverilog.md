@@ -108,6 +108,23 @@ are `unsafe` APIs because the C signatures must match the SV imports. The
 [DPI-C imports](./systemverilog-reference#dpi-c-imports) for the supported
 types and call sites.
 
+## Read covergroup coverage
+
+`Simulation::coverage()` and `Simulator::coverage()` return the coverage of
+the design's covergroups, and `coverage()` of a TypeScript `Simulation`
+returns the same report as an object. `celox run --coverage-report FILE`
+writes it to `FILE` as JSON when the run ends, also when the run fails. A
+run that does not start, such as one that fails to compile, writes none
+and leaves an existing `FILE`, an earlier run's report, as it was:
+
+```sh
+celox run tb.sv --top tb --coverage-report coverage.json
+```
+
+See [Coverage](./systemverilog-reference#coverage) for what the report
+contains and the [CLI guide](./cocotb#run-an-hdl-testbench-directly) for
+the option.
+
 ## Find a specific behavior {#semantics-worth-knowing}
 
 - [Unsupported features](./systemverilog-reference#what-is-not-supported)
