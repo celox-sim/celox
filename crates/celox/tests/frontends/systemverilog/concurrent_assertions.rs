@@ -317,3 +317,129 @@ fn labeled_deferred_assertion_actions_name_the_label() {
     displays.sort();
     assert_eq!(displays, ["D1 Top.blk.D1", "F1 Top.blk.F1"]);
 }
+
+/// A function a concurrent assertion's action calls may fork a background
+/// process on some path, as UVM 1.2's reporting reaches the fork of
+/// `uvm_component::m_set_cl_verb`: the action runs while the fork is not
+/// taken. Neither the assertion's process nor the final procedure that
+/// fails the pending attempts of a strong until property is an initial or
+/// always procedure, which such a call needs (IEEE 1800-2023 13.4.4), so a
+/// fork that runs is an error of the simulation then.
+#[test]
+fn assertion_actions_call_functions_that_may_fork() {
+    let source = |built: &str, property: &str| {
+        format!(
+            "`timescale 1ns/1ns
+            package p;
+                class root;
+                    static root inst;
+                    int spawned;
+                    function new();
+                        fork spawned++; join_none
+                    endfunction
+                    static function root get();
+                        if (inst == null) inst = new;
+                        return inst;
+                    endfunction
+                endclass
+                function automatic int enabled(int verbosity);
+                    root r = root::get();
+                    return verbosity;
+                endfunction
+            endpackage
+            module Top(output int passes, output int failures);
+                import p::*;
+                bit clk, a = 1, b;
+                initial begin
+                    {built}
+                    repeat (3) begin #1 clk = 1; #1 clk = 0; end
+                    $finish;
+                end
+                assert property (@(posedge clk) {property})
+                    passes += enabled(1); else failures += enabled(1);
+            endmodule"
+        )
+    };
+    let built = "void'(root::get());";
+    fn outcome<B: celox::SimBackend>(mut sim: celox::Simulation<B>) -> Result<(u32, u32), String> {
+        sim.run_until(20).map_err(|error| format!("{error:?}"))?;
+        assert!(sim.is_finished());
+        let passes = sim.signal("passes");
+        let failures = sim.signal("failures");
+        Ok((
+            u32::try_from(sim.get(passes)).unwrap(),
+            u32::try_from(sim.get(failures)).unwrap(),
+        ))
+    }
+    let run = |source: &str, native: bool| {
+        let builder = celox::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("action_forks.sv"))],
+            "Top",
+        );
+        if native {
+            outcome(builder.build_native().unwrap())
+        } else {
+            outcome(builder.build_cranelift().unwrap())
+        }
+    };
+    for native in [false, true] {
+        // The initial procedure takes the fork; the actions do not.
+        assert_eq!(
+            run(&source(built, "a"), native),
+            Ok((3, 0)),
+            "native {native}"
+        );
+        assert_eq!(
+            run(&source(built, "a s_until b"), native),
+            Ok((0, 3)),
+            "native {native}"
+        );
+        // The first action takes it, or the final procedure does.
+        for property in ["a", "a s_until b"] {
+            let error = run(&source("", property), native).unwrap_err();
+            assert!(
+                error.contains("13.4.4") && error.contains("concurrent assertion action"),
+                "native {native}, {property}: {error}"
+            );
+        }
+    }
+}
+
+/// An `expect` is a statement of the procedure that holds it (IEEE
+/// 1800-2023 16.17), whose thread an initial procedure creates: the
+/// procedure forks before and after it, and a function its action calls
+/// forks too (13.4.4).
+#[test]
+fn procedures_with_expect_statements_fork() {
+    let source = "`timescale 1ns/1ns
+        module Top(output int forked, output int passed);
+            bit clk, ready = 1;
+            function automatic void spawn();
+                fork forked++; join_none
+            endfunction
+            initial begin
+                fork forever #1 clk = ~clk; join_none
+                expect (@(posedge clk) ready) begin passed++; spawn(); end
+                fork forked++; join_none
+                #3 $finish;
+            end
+        endmodule";
+    fn outcome<B: celox::SimBackend>(mut sim: celox::Simulation<B>) -> (u32, u32) {
+        sim.run_until(20).unwrap();
+        assert!(sim.is_finished());
+        let forked = sim.signal("forked");
+        let passed = sim.signal("passed");
+        (
+            u32::try_from(sim.get(forked)).unwrap(),
+            u32::try_from(sim.get(passed)).unwrap(),
+        )
+    }
+    let builder = || {
+        celox::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("expect_forks.sv"))],
+            "Top",
+        )
+    };
+    assert_eq!(outcome(builder().build_cranelift().unwrap()), (2, 1));
+    assert_eq!(outcome(builder().build_native().unwrap()), (2, 1));
+}
