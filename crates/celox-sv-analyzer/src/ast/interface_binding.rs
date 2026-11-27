@@ -612,11 +612,16 @@ pub(super) fn binding_names_with_prefix(
             (name, bound)
         })
         .collect();
-    // An imported package constant is not an instance-local declaration.
-    // Bind references in exported parameter defaults to its qualified name;
-    // the caller need not import the package's simple name itself.
+    // A name an import makes visible is no instance-local declaration,
+    // though the scope holds a signal by it for a package variable: it
+    // denotes the package item (IEEE 1800-2023 26.3). Bind it to the
+    // qualified name, which the caller need not import itself.
     for (alias, target) in &symbols.aliases {
-        names.entry(alias.clone()).or_insert_with(|| target.clone());
+        if target.contains("::") {
+            names.insert(alias.clone(), target.clone());
+        } else {
+            names.entry(alias.clone()).or_insert_with(|| target.clone());
+        }
     }
     names
 }
