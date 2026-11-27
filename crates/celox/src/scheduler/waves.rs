@@ -664,6 +664,11 @@ impl Plan {
         edges
     }
 
+    pub(super) fn save_clock_levels(&self, g: &mut Generator<'_>, tracked: &[usize]) {
+        let levels = self.sample_clock_levels(g, tracked);
+        g.store_levels(levels);
+    }
+
     /// Sample the tracked positions, leaving the unused high lanes at zero.
     pub(super) fn sample_clock_levels(&self, g: &mut Generator<'_>, tracked: &[usize]) -> Levels {
         let width = self.event_bits;

@@ -476,7 +476,7 @@ impl Plan {
         });
         g.b.switch_to_block(drain);
         g.store_at(g.slots.exit_arg, self.event_bits, self.event_bits, selected);
-        self.ordered_save_levels(g, tracked);
+        self.save_clock_levels(g, tracked);
         let one = g.constant(1, SCHEDULER_FLAG_WIDTH);
         g.store_at(
             g.slots.defer_limit_settle,
@@ -503,7 +503,7 @@ impl Plan {
         });
 
         g.b.switch_to_block(fire);
-        self.ordered_save_levels(g, tracked);
+        self.save_clock_levels(g, tracked);
         g.b.seal_block(SIRTerminator::Jump(evaluated_levels, vec![mask]));
         g.b.switch_to_block(evaluated_levels);
         let waves = g.arena_header_load(std::mem::offset_of!(ArenaHeader, waves));
@@ -580,7 +580,7 @@ impl Plan {
         // blocking evaluation. A post-NBA wave still needs its pre-eval levels.
         let phase = g.arena_header_load(std::mem::offset_of!(ArenaHeader, phase));
         let pre = g.equals(phase, 0);
-        g.if_bit(pre, 0, |g| self.ordered_save_levels(g, tracked));
+        g.if_bit(pre, 0, |g| self.save_clock_levels(g, tracked));
         let empty = g.constant(0, self.event_bits);
         g.b.seal_block(SIRTerminator::Jump(publish_levels, vec![empty]));
         g.b.switch_to_block(publish_levels);
@@ -686,11 +686,6 @@ impl Plan {
             ordered.reset(g);
         }
         g.settle_then("ordered waves: after NBA publication", wave);
-    }
-
-    fn ordered_save_levels(&self, g: &mut Generator<'_>, tracked: &[usize]) {
-        let levels = self.sample_clock_levels(g, tracked);
-        g.store_levels(levels);
     }
 
     fn ordered_raw_levels(&self, g: &mut Generator<'_>, ordered: Ordered, record: bool) {
