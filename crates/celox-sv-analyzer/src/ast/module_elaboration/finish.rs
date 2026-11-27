@@ -94,8 +94,8 @@ impl ScopeElaboration<'_> {
                 .iter()
                 .map(|(name, shapes)| (name.clone(), Arc::new(shapes.clone())))
                 .collect(),
-            subroutines: self.subroutines.iter().cloned().map(Arc::new).collect(),
-            locals: self.locals.iter().cloned().map(Arc::new).collect(),
+            subroutines: self.exported_subroutines(),
+            locals: self.exported_locals(),
             dpi_imports: self.dpi_imports.clone(),
             // A package's signals are its array parameters and constant
             // variables, initialized by its initial processes.
@@ -119,12 +119,71 @@ impl ScopeElaboration<'_> {
             interface_arrays: self.imported.interface_arrays.clone(),
             interface_scopes: self.imported.interface_scopes.clone(),
             interface_declarations: self.imported.interface_declarations.clone(),
+            // A scope that binds an instance of this one names the items of
+            // the instances in it by the names it binds (see
+            // `interface_binding`).
+            instance_items: HashSet::default(),
             interface_instances: self.imported.interface_instances.clone(),
             generate_imports: HashMap::default(),
             // The imports of the scope's blocks bind there only.
             block_imports: HashMap::default(),
             block_calls: HashMap::default(),
         })
+    }
+
+    /// The variables of the scope for the scopes that use its symbols: its
+    /// own, and those of the interface instances it binds (see
+    /// `interface_binding`), which are its state as their signals and
+    /// processes are, though [`Self::lower_imported`] declares them only
+    /// for its own module. A scope that binds an instance of this one, an
+    /// interface, then declares them for it too (IEEE 1800-2023 25.3).
+    fn exported_locals(&self) -> Vec<Arc<LocalVariable>> {
+        let mut known = self
+            .locals
+            .iter()
+            .map(|local| local.name.as_str())
+            .collect::<HashSet<_>>();
+        self.locals
+            .iter()
+            .cloned()
+            .map(Arc::new)
+            .chain(
+                self.imported
+                    .locals
+                    .iter()
+                    .filter(|local| {
+                        self.imported.instance_items.contains(&local.name)
+                            && known.insert(&local.name)
+                    })
+                    .cloned(),
+            )
+            .collect()
+    }
+
+    /// The subroutines of the scope for the scopes that use its symbols:
+    /// its own, and those of the interface instances it binds, as
+    /// [`Self::exported_locals`].
+    fn exported_subroutines(&self) -> Vec<Arc<Subroutine>> {
+        let mut known = self
+            .subroutines
+            .iter()
+            .map(|subroutine| subroutine.name.as_str())
+            .collect::<HashSet<_>>();
+        self.subroutines
+            .iter()
+            .cloned()
+            .map(Arc::new)
+            .chain(
+                self.imported
+                    .subroutines
+                    .iter()
+                    .filter(|subroutine| {
+                        self.imported.instance_items.contains(&subroutine.name)
+                            && known.insert(&subroutine.name)
+                    })
+                    .cloned(),
+            )
+            .collect()
     }
 
     /// Drops the subroutines of the covergroup types that the scope's own

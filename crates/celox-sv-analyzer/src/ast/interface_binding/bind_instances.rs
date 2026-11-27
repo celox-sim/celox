@@ -455,6 +455,14 @@ impl ModuleBinding<'_> {
                         .filter_map(|signal| Some((signal.name.clone(), signal.aliased.clone()?))),
                 );
                 let mut bound = instance_symbols(symbols, &names);
+                self.imported.instance_items.extend(
+                    bound.locals.iter().map(|local| local.name.clone()).chain(
+                        bound
+                            .subroutines
+                            .iter()
+                            .map(|subroutine| subroutine.name.clone()),
+                    ),
+                );
                 // The instance's processes and subroutines run in it, so
                 // their reports name its scope (IEEE 1800-2023 20.10), as
                 // their `%m` does (21.2.1.5).
