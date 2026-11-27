@@ -18,8 +18,10 @@ const MAGIC: &[u8; 8] = b"CELOXCP1";
 // construction of a covergroup, the strings its `with` filters read, and
 // with a filter whether its constructions share their bins. Version 13 keeps
 // the crosses of a covergroup: their bins, their options and the hits of the
-// automatic cross bins that were sampled.
-const VERSION: u32 = 13;
+// automatic cross bins that were sampled. Version 14 keeps the transition bins
+// of a covergroup with their sequences, and with each instance the threads of
+// its transitions under way and the values they still need.
+const VERSION: u32 = 14;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CheckpointFileError {

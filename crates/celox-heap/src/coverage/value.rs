@@ -325,6 +325,18 @@ impl Matcher {
         }
     }
 
+    /// The lists of bins that a value of a coverpoint of `width` bits is
+    /// in, each once and ascending, with the empty list where a value is in
+    /// no bin; `four_state` is whether the type has values with x or z
+    /// bits. A wildcard pattern stands for a value of its bin alone: which
+    /// other bins have the values it stands for is not known here.
+    pub(crate) fn classes(&self, width: u32, four_state: bool) -> Vec<Vec<u32>> {
+        match self {
+            Self::Narrow(matcher) => matcher.classes(width, four_state),
+            Self::Wide(matcher) => matcher.classes(width, four_state),
+        }
+    }
+
     /// Call `mark` with each bin that holds the value of bits `value` with
     /// the x and z bits `mask`, of which there are some.
     pub(crate) fn holding_exact(&self, value: &BigUint, mask: &BigUint, mark: &mut dyn FnMut(u32)) {
@@ -726,6 +738,51 @@ impl<K: Key> MatcherOf<K> {
             }
         }
         removed
+    }
+
+    /// See [`Matcher::classes`].
+    fn classes(&self, width: u32, four_state: bool) -> Vec<Vec<u32>> {
+        let mut classes: BTreeSet<Vec<u32>> = BTreeSet::new();
+        let mut covered = BigUint::ZERO;
+        for segment in &self.segments {
+            let first = segment.first as usize;
+            classes.insert(self.hits[first..first + segment.count as usize].to_vec());
+            covered += segment.high.bits() - segment.low.bits() + 1u8;
+        }
+        // The patterns of one value follow each other.
+        let mut at = 0;
+        while at < self.patterns.len() {
+            let pattern = &self.patterns[at];
+            let same: Vec<u32> = self.patterns[at..]
+                .iter()
+                .take_while(|other| other.value == pattern.value && other.mask == pattern.mask)
+                .map(|other| other.bin)
+                .collect();
+            at += same.len();
+            let mut bins = same;
+            bins.sort_unstable();
+            bins.dedup();
+            classes.insert(bins);
+        }
+        for wild in &self.wild {
+            classes.insert(vec![wild.bin]);
+        }
+        // A 4-state type has 4^width - 2^width values with x or z bits, of
+        // which the patterns list some, each once; a type of more than 31
+        // bits has more than any list holds.
+        let unlisted_unknown = four_state && {
+            let listed: BTreeSet<(BigUint, BigUint)> = self
+                .patterns
+                .iter()
+                .map(|pattern| (pattern.value.bits(), pattern.mask.bits()))
+                .filter(|(_, mask)| *mask != BigUint::ZERO)
+                .collect();
+            width > 31 || (listed.len() as u64) < (1u64 << (2 * width)) - (1u64 << width)
+        };
+        if covered < BigUint::from(1u8) << width || unlisted_unknown {
+            classes.insert(Vec::new());
+        }
+        classes.into_iter().collect()
     }
 
     /// Call `hit` with each bin that holds the value of bits `value` with
