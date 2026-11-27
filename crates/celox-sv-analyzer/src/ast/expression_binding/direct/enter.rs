@@ -904,11 +904,24 @@ fn enter_inside(
     let ExprKind::Set(items) = &native.expression(*right).kind else {
         return Err(unsupported("inside expression"));
     };
+    // An unpacked array in the set stands for its elements (IEEE 1800-2023
+    // 11.4.13), which is not implemented: it is rejected rather than taken
+    // as a singular value. The left operand is singular.
+    let array = |session: &mut Session, id: ExprId| {
+        expression_types::type_of(tree, session, id, native, dimensions)
+            .is_ok_and(|ty| matches!(session.types.data(ty), semantic_types::TyData::Array { .. }))
+    };
+    if array(session, *left) {
+        return Err(unsupported("an unpacked array as the operand of inside"));
+    }
     let mut children = vec![(*left, None)];
     let mut ranges = Vec::new();
     for item in items {
         match item.kind {
             DimensionKind::Index(id) => {
+                if array(session, id) {
+                    return Err(unsupported("an unpacked array in the set of inside"));
+                }
                 children.push((id, None));
                 ranges.push(false);
             }

@@ -195,6 +195,30 @@ pub(in crate::ast) fn typed_string(
         .is_ok_and(|ty| matches!(session.types.data(ty), semantic_types::TyData::String))
 }
 
+/// Whether native expression `id` is an unpacked array, judged before it is
+/// bound: a variable the scope declares with unpacked dimensions by its
+/// shape, and a name or a member or element of a value by its semantic
+/// type. Another expression is never one.
+pub(in crate::ast) fn unpacked_array(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> bool {
+    match &native.expression(ungroup(id, native)).kind {
+        ExprKind::Name(name) => {
+            if let Some(shape) = dimensions.get(&instances::normalize_identifier(&name.spelling)) {
+                return !shape.unpacked.is_empty();
+            }
+        }
+        ExprKind::Member { .. } | ExprKind::Select { .. } => {}
+        _ => return false,
+    }
+    expression_types::type_of(tree, session, id, native, dimensions)
+        .is_ok_and(|ty| matches!(session.types.data(ty), semantic_types::TyData::Array { .. }))
+}
+
 /// Whether native expression `id` has type `string`, judged before it is
 /// bound: a string variable, or a method of a string value that returns one.
 pub(in crate::ast) fn native_string(
