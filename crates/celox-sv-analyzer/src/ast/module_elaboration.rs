@@ -167,6 +167,18 @@ impl Module {
                 header_ports,
             );
             session.foreign_requests_wait = wait;
+            // A round of package analyses only collects the requests, and
+            // keeps what the scope would hand over (see
+            // `Packages::analyze_packages`).
+            if session.foreign_batch {
+                if let Ok(module) = &result
+                    && !declarations_only
+                    && let Some(symbols) = &module.symbols
+                {
+                    classes::foreign::keep_finish(syntax_tree, session, symbols);
+                }
+                return result;
+            }
             // Unless the scope saw no names of those, and is analyzed again
             // with them.
             if !classes::foreign::build_requested(session) {
