@@ -42,6 +42,12 @@
 //! is clear. The cross products are never listed: an instance has a
 //! counter for each automatic bin that was sampled, and the number of bins
 //! comes from the bins of the coverpoints (19.11.2).
+//!
+//! A transition bin (19.5.2) counts the samples at which the values the
+//! coverpoint was sampled with last match one of its sequences of value
+//! sets. An instance keeps, for each coverpoint with transition bins, the
+//! threads of the sequences that are under way; a coverpoint that is not
+//! sampled leaves them where they are.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -59,13 +65,15 @@ mod report;
 mod shape;
 #[cfg(test)]
 mod tests;
+mod transitions;
 mod value;
 
 pub use descriptor::{
     BinArray, BinDescriptor, BinFilter, BinKind, BinValues, Bound, Constant, CrossBinDescriptor,
     CrossDescriptor, FilterDescriptor, GroupTypeOptions, InputDescriptor, ItemTypeOptions,
     MAX_SELECT_DEPTH, Operand, OptionId, OptionInit, OptionKind, OptionValue, PointDescriptor,
-    PointType, RangeDescriptor, Select, TypeDescriptor, TypeOptionId, ValueType,
+    PointType, RangeDescriptor, Repeat, Select, TransitionStep, TypeDescriptor, TypeOptionId,
+    ValueType,
 };
 pub use report::{
     BinReport, BinReportKind, CoverItemKind, CoverItemReport, CoverageReport,
@@ -76,6 +84,7 @@ pub use shape::{RangeValue, Resolved, ResolvedItem, resolve, resolve_warnings, v
 use cross::{CrossScratch, Crossed};
 use descriptor::Level;
 use shape::{BinClass, Item, PointOptions, PointShape, SetInput, Shape, ValueKey, bin_name};
+use transitions::{Counting, Progress, TransitionScratch};
 use value::{KeyValue, Matcher, bias, low_ones, numeric, ones};
 
 /// The heap operation of every coverage operation: the low byte of the
@@ -139,6 +148,35 @@ pub const MAX_CROSS_WORK: u64 = 1 << 26;
 /// whatever `option.cross_num_print_missing` asks for; the others are
 /// counted in `omitted_bins`.
 pub const MAX_CROSS_MISSING_ROWS: usize = 1 << 12;
+
+/// The most states the transitions of a coverpoint have (19.5.2): a step
+/// whose repetition has the high count `n` has `n + 1`, twice as many for a
+/// goto or nonconsecutive repetition, and with `[]` each sequence of a
+/// length that a repetition `[* low:high]` stands for is a sequence of its
+/// own, of as many states as samples. An instance keeps at most one thread
+/// for each state outside the gaps of nonconsecutive repetitions (see
+/// [`MAX_TRANSITION_THREADS`]). A construction that needs more is a
+/// [`Fault::Coverage`], found before anything that grows with the counts is
+/// made.
+pub const MAX_TRANSITION_STATES: usize = 1 << 16;
+
+/// The most threads the transitions of a coverpoint of an instance have
+/// under way after a sample. Without a nonconsecutive repetition (`[=]`)
+/// before another step there are never more than the states of its
+/// sequences ([`MAX_TRANSITION_STATES`]); the gap after such a repetition
+/// keeps the continuations it started until the first of them matches,
+/// and gaps whose continuations differ are threads of their own. A sample
+/// that leaves more is a [`Fault::Coverage`].
+pub const MAX_TRANSITION_THREADS: usize = 1 << 18;
+
+/// The most steps that finding the transition bins left without a sequence
+/// by the ignored and illegal sequences of their coverpoint takes in a
+/// construction (19.5.5, 19.5.6). A step is a class of values the value
+/// sets of the coverpoint tell apart, looked at in a state of a sequence
+/// with the threads of ignored and illegal sequences under way, or one
+/// sample of a sequence of values of a bin array. Beyond it the
+/// construction is a [`Fault::Coverage`].
+pub const MAX_TRANSITION_WORK: u64 = 1 << 26;
 
 /// The coverage operations. `key` is the key of a covergroup type (see
 /// [`type_key`]), `object` the handle of an instance, `item` an item of the
@@ -439,6 +477,9 @@ struct Instance {
     /// By cross, the hits of its automatic bins that were sampled, by the
     /// key of their cross product in the shape.
     crosses: Vec<FxHashMap<u128, u64>>,
+    /// By coverpoint, how far its transitions went (19.5.2); empty where
+    /// the shape has no transition bin.
+    transitions: Vec<Progress>,
     /// The samples taken while the covergroup was collecting.
     samples: u64,
 }
@@ -841,6 +882,8 @@ pub(crate) struct Scratch {
     messages: Vec<String>,
     /// What counting a sample in the crosses uses.
     cross: CrossScratch,
+    /// What counting a sample in the transitions uses.
+    transitions: TransitionScratch,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -884,6 +927,8 @@ impl Registry {
         for instance in &mut self.instances {
             if instance.live && !reachable(instance.handle) {
                 instance.live = false;
+                // No sample can come: the transitions under way never end.
+                instance.transitions.iter_mut().for_each(Progress::release);
             }
         }
     }
@@ -916,8 +961,10 @@ impl Registry {
                     .map(|array| array.hits.len())
                     .sum();
                 let products: usize = instance.crosses.iter().map(FxHashMap::len).sum();
+                let transitions: usize = instance.transitions.iter().map(Progress::size).sum();
                 instance.counts.len() * 8
                     + (values + products) * 24
+                    + transitions
                     + options.name.len()
                     + options.comment.len()
                     + options
@@ -993,6 +1040,7 @@ impl Registry {
             counts: Vec::new(),
             default_arrays: Vec::new(),
             crosses: Vec::new(),
+            transitions: Vec::new(),
             samples: 0,
         });
         self.by_handle.insert(handle, index);
@@ -1425,6 +1473,10 @@ impl Registry {
         instance.counts = vec![0; shape.counters as usize];
         instance.default_arrays = vec![DefaultArray::default(); shape.arrays as usize];
         instance.crosses = vec![FxHashMap::default(); shape.crosses.len()];
+        // Only a coverpoint with transition bins has a state of its own.
+        if shape.points.iter().any(|point| point.transitions.is_some()) {
+            instance.transitions = vec![Progress::default(); shape.points.len()];
+        }
         let name = String::from_utf8_lossy(&instance.options.name);
         Ok(shape
             .warnings
@@ -1460,6 +1512,7 @@ impl Registry {
         sampled: &[Sampled],
         illegal: &mut Vec<String>,
         scratch: &mut CrossScratch,
+        sequences: &mut TransitionScratch,
     ) -> Result<(), String> {
         let Self {
             types, instances, ..
@@ -1506,6 +1559,10 @@ impl Registry {
         let CrossScratch { hits, spans, .. } = &mut *scratch;
         // The illegal bins that the value being counted hit.
         let mut hit: Vec<u32> = Vec::new();
+        // The illegal transition bins, with the transition.
+        let mut hit_transitions: Vec<(u32, String)> = Vec::new();
+        // What keeps the transitions of a coverpoint from being counted.
+        let mut failed: Option<String> = None;
         let mut count = |point: usize,
                          value: &[u64],
                          mask: &[u64],
@@ -1513,9 +1570,10 @@ impl Registry {
                          illegal: &mut Vec<String>| {
             let ty = &points[point].ty;
             let start = hits.len() as u32;
+            let point_shape = &shape.points[point];
             count_value(
                 ty,
-                &shape.points[point],
+                point_shape,
                 value,
                 mask,
                 &|bit| holds(point, bit),
@@ -1524,19 +1582,47 @@ impl Registry {
                 &mut hit,
                 crossing.then_some(&mut *hits),
             );
+            // The values of the coverpoint do not change how its
+            // transitions go on (19.5.5, 19.5.6).
+            if let Some(transitions) = &point_shape.transitions
+                && let Err(reason) = transitions.sample(
+                    &mut instance.transitions[point],
+                    sequences,
+                    value,
+                    mask,
+                    Counting {
+                        ty,
+                        bins: &point_shape.bins,
+                        holds: &|bit| holds(point, bit),
+                        counts: &mut instance.counts,
+                        illegal: &mut hit_transitions,
+                        counted: crossing.then_some(&mut *hits),
+                    },
+                )
+            {
+                failed.get_or_insert(format!("coverpoint `{}`: {reason}", points[point].name));
+            }
             if crossing {
                 spans[point] = (start, hits.len() as u32);
             }
-            for bin in hit.drain(..) {
-                illegal.push(format!(
+            let line = |bin: u32, what: &str| {
+                format!(
                     "illegal_bins `{}` of coverpoint `{}` of covergroup `{}` (instance `{}`): \
-                     value {}",
-                    bin_name(&points[point], &shape.points[point].bins[bin as usize].id),
+                     {what}",
+                    bin_name(&points[point], &point_shape.bins[bin as usize].id),
                     points[point].name,
                     descriptor.name,
                     String::from_utf8_lossy(&instance.options.name),
-                    show_sample(ty, value, mask),
+                )
+            };
+            for bin in hit.drain(..) {
+                illegal.push(line(
+                    bin,
+                    &format!("value {}", show_sample(ty, value, mask)),
                 ));
+            }
+            for (bin, transition) in hit_transitions.drain(..) {
+                illegal.push(line(bin, &transition));
             }
         };
         let mut at = 0;
@@ -1624,6 +1710,9 @@ impl Registry {
                     at += 1;
                 }
             }
+        }
+        if let Some(reason) = failed {
+            return Err(reason);
         }
         for (index, cross) in shape.crosses.iter().enumerate() {
             let item = points.len() + index;
@@ -1902,6 +1991,7 @@ impl Heap {
                 &sampled,
                 &mut messages,
                 &mut self.coverage_scratch.cross,
+                &mut self.coverage_scratch.transitions,
             );
             self.cover_check(instance, result);
         }

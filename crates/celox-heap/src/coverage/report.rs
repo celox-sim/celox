@@ -116,8 +116,9 @@ pub enum CoverItemKind {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BinReport {
-    /// The name as 19.11.3 gives it, such as `b`, `auto[3]`, `auto[0:3]`
-    /// or, for an automatic bin of a cross, `<b,auto[3]>`.
+    /// The name as 19.11.3 gives it, such as `b`, `auto[3]`, `auto[0:3]`,
+    /// for a bin of an array of transition bins `b[4=>5=>6]` (19.5.2) or,
+    /// for an automatic bin of a cross, `<b,auto[3]>`.
     pub name: String,
     pub kind: BinReportKind,
     pub hits: u64,
@@ -132,7 +133,7 @@ pub struct BinReport {
 pub enum BinReportKind {
     /// A bin that counts towards coverage.
     Bins,
-    /// A `default` bin.
+    /// A `default` or `default sequence` bin.
     Default,
     /// An `ignore_bins` bin.
     Ignore,
@@ -160,13 +161,17 @@ fn listed(registry: &Registry, instance: &Instance, point: usize) -> (Vec<Listed
         let kind = match (bin.kind, bin.class) {
             (BinKind::Illegal, _) => BinReportKind::Illegal,
             (BinKind::Ignore, _) => BinReportKind::Ignore,
-            (BinKind::Bins, BinClass::Value) => BinReportKind::Bins,
-            (BinKind::Bins, BinClass::Default | BinClass::DefaultArray(_)) => {
-                BinReportKind::Default
-            }
+            (BinKind::Bins, BinClass::Value | BinClass::Transition) => BinReportKind::Bins,
+            (
+                BinKind::Bins,
+                BinClass::Default | BinClass::DefaultArray(_) | BinClass::DefaultSequence,
+            ) => BinReportKind::Default,
         };
         match bin.class {
-            BinClass::Value | BinClass::Default => bins.push(Listed {
+            BinClass::Value
+            | BinClass::Default
+            | BinClass::Transition
+            | BinClass::DefaultSequence => bins.push(Listed {
                 id: bin.id.clone(),
                 kind,
                 hits: instance.counts[bin.counter as usize],

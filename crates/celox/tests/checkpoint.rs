@@ -414,6 +414,22 @@ endmodule
                 let mut corrupt = bytes.clone();
                 *corrupt.last_mut().unwrap() ^= 1;
                 assert!(unsafe { restored.checkpoint_from_bytes(&corrupt) }.is_err());
+                // A well-formed file of version 13, before the transition
+                // bins of covergroups: the version is the first field of the
+                // payload, a one-byte varint, and the checksum is FNV-1a.
+                assert_eq!(bytes[24], 14);
+                let mut older = bytes.clone();
+                older[24] = 13;
+                let hash = older[24..]
+                    .iter()
+                    .fold(0xcbf29ce484222325u64, |hash, byte| {
+                        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+                    });
+                older[16..24].copy_from_slice(&hash.to_le_bytes());
+                assert!(matches!(
+                    unsafe { restored.checkpoint_from_bytes(&older) },
+                    Err(celox::CheckpointFileError::InvalidContainer)
+                ));
             }
         };
     }
