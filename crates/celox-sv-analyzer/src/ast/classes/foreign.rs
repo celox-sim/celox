@@ -66,9 +66,29 @@ pub(in crate::ast) struct Registry {
     /// name the package qualifies with its own (see `specialize`): its
     /// syntax and imports tell them, the same for every analysis.
     open: HashMap<String, Option<HashSet<String>>>,
+    /// What each scope of a round of package analyses would hand over to
+    /// the specializations when it finishes, by scope, in the order the
+    /// scopes were first analyzed (see `keep_finish`).
+    kept: Vec<(Option<String>, Kept)>,
+}
+
+/// What a scope hands over to the specializations when it finishes (see
+/// `finish`): the declarations it exports and its symbols.
+#[derive(Clone, Debug)]
+struct Kept {
+    declarations: HashMap<String, Rc<DeclarationScope>>,
+    symbols: ScopeSymbols,
 }
 
 impl Registry {
+    /// Whether a scope asked for a specialization.
+    pub fn has_requests(&self) -> bool {
+        self.request_count() > 0
+    }
+    /// The number of specializations scopes asked for.
+    pub fn request_count(&self) -> usize {
+        self.requests.values().map(Vec::len).sum()
+    }
     pub fn revision(&self) -> u64 {
         self.revision
     }
@@ -191,6 +211,33 @@ impl Registry {
             } else {
                 symbols.extend(&extra.clone().without(&local_storage));
             }
+            symbols.declarations_only = declarations_only;
+        }
+        // A package sees what the specializations it sees were made with:
+        // the routines and variables the scopes that asked for them handed
+        // over, as a full analysis of their package does (see `specialize`).
+        // Those of the packages analyzed after it reach it through the
+        // specializations they asked for (see `Packages::analyze_packages`).
+        if let Ok(unit) = tree.root_unit()
+            && unit.kind == celox_sv_syntax::UnitKind::Package
+            && !self.prepared.is_empty()
+        {
+            let package = instances::normalize_identifier(&unit.name.spelling);
+            let view = caller_view(&self.argument_symbols, &package);
+            let present = symbols
+                .signals
+                .iter()
+                .chain(&symbols.state_signals)
+                .map(|signal| signal.name())
+                .collect::<HashSet<_>>();
+            let local_storage = view
+                .state_signals
+                .iter()
+                .filter(|signal| present.contains(signal.name()) || local_member(signal.name()))
+                .map(|signal| signal.name().to_owned())
+                .collect::<HashSet<_>>();
+            let declarations_only = symbols.declarations_only;
+            symbols.extend(&view.without(&local_storage));
             symbols.declarations_only = declarations_only;
         }
     }
@@ -441,61 +488,7 @@ fn specialize(
     if let Some(caller) = caller {
         // Preserve the owner's existing bindings when caller metadata also
         // contains imported classes or routines from that package.
-        imports.extend(&ScopeSymbols {
-            classes: caller.classes.clone(),
-            class_member_types: caller.class_member_types.clone(),
-            // Only bound class members cross the template boundary. Module
-            // constants must not become visible in the package's lexical scope.
-            constant_types: caller
-                .constant_types
-                .iter()
-                .filter(|(name, _)| {
-                    name.rsplit_once("::")
-                        .is_some_and(|(owner, _)| caller.class_member_types.contains_key(owner))
-                })
-                .map(|(name, ty)| (name.clone(), ty.clone()))
-                .collect(),
-            state_signals: caller
-                .state_signals
-                .iter()
-                .filter(|signal| {
-                    !signal.name().starts_with(&format!("{name}::"))
-                        && signal
-                            .package_variable
-                            .as_ref()
-                            .is_none_or(|(owner, _)| owner != name)
-                })
-                .cloned()
-                .collect(),
-            // Only qualified routines, the methods of classes the actual
-            // type arguments name: a body of the package resolves an
-            // unqualified call in its own scope, not the caller's (26.3).
-            subroutine_params: qualified(&caller.subroutine_params),
-            subroutine_shapes: qualified(&caller.subroutine_shapes),
-            subroutines: caller
-                .subroutines
-                .iter()
-                .filter(|subroutine| subroutine.name.contains("::"))
-                .cloned()
-                .collect(),
-            // With the variables they declare (see `handed_over`).
-            locals: {
-                let declared = caller
-                    .subroutines
-                    .iter()
-                    .filter(|subroutine| subroutine.name.contains("::"))
-                    .flat_map(|subroutine| declared_names(subroutine))
-                    .collect::<HashSet<_>>();
-                caller
-                    .locals
-                    .iter()
-                    .filter(|local| declared.contains(local.name.as_str()))
-                    .cloned()
-                    .collect()
-            },
-            function_return_types: qualified(&caller.function_return_types),
-            ..Default::default()
-        });
+        imports.extend(&caller_view(caller, name));
     } else {
         imports.declarations_only = true;
     }
@@ -582,6 +575,69 @@ fn specialize(
     })
 }
 
+/// The symbols of `caller`, handed over by the scopes that asked for
+/// specializations (see `hand_over`), that a scope sees besides its own:
+/// the classes and their member types, the constants bound to their
+/// members, the variables of other packages than `name`, and the
+/// qualified routines with the variables they declare.
+fn caller_view(caller: &ScopeSymbols, name: &str) -> ScopeSymbols {
+    ScopeSymbols {
+        classes: caller.classes.clone(),
+        class_member_types: caller.class_member_types.clone(),
+        // Only bound class members cross the template boundary. Module
+        // constants must not become visible in the package's lexical scope.
+        constant_types: caller
+            .constant_types
+            .iter()
+            .filter(|(name, _)| {
+                name.rsplit_once("::")
+                    .is_some_and(|(owner, _)| caller.class_member_types.contains_key(owner))
+            })
+            .map(|(name, ty)| (name.clone(), ty.clone()))
+            .collect(),
+        state_signals: caller
+            .state_signals
+            .iter()
+            .filter(|signal| {
+                !signal.name().starts_with(&format!("{name}::"))
+                    && signal
+                        .package_variable
+                        .as_ref()
+                        .is_none_or(|(owner, _)| owner != name)
+            })
+            .cloned()
+            .collect(),
+        // Only qualified routines, the methods of classes the actual
+        // type arguments name: a body of the package resolves an
+        // unqualified call in its own scope, not the caller's (26.3).
+        subroutine_params: qualified(&caller.subroutine_params),
+        subroutine_shapes: qualified(&caller.subroutine_shapes),
+        subroutines: caller
+            .subroutines
+            .iter()
+            .filter(|subroutine| subroutine.name.contains("::"))
+            .cloned()
+            .collect(),
+        // With the variables they declare (see `handed_over`).
+        locals: {
+            let declared = caller
+                .subroutines
+                .iter()
+                .filter(|subroutine| subroutine.name.contains("::"))
+                .flat_map(|subroutine| declared_names(subroutine))
+                .collect::<HashSet<_>>();
+            caller
+                .locals
+                .iter()
+                .filter(|local| declared.contains(local.name.as_str()))
+                .cloned()
+                .collect()
+        },
+        function_return_types: qualified(&caller.function_return_types),
+        ..Default::default()
+    }
+}
+
 /// Whether each of `classes` that specializes one of the classes `open` of
 /// package `name` inherits from classes of the package alone, whose members
 /// its syntax tells: through the class it extends, and for an interface
@@ -633,6 +689,18 @@ fn inherits_within(name: &str, classes: &[Arc<Class>], open: &HashSet<String>) -
     true
 }
 
+/// The package scope `tree` is, by name, or [`packages::UNIT`] for a
+/// compilation unit; `None` for another scope.
+fn package_owner(tree: &AnalysisContext<'_>) -> Option<String> {
+    match tree.root_unit() {
+        Ok(unit) if unit.kind == celox_sv_syntax::UnitKind::Package => {
+            Some(instances::normalize_identifier(&unit.name.spelling))
+        }
+        Err(_) => Some(packages::UNIT.to_owned()),
+        _ => None,
+    }
+}
+
 /// Records what scope `tree` declared that specializations of package class
 /// templates may name, and makes the specializations still to be made.
 pub(in crate::ast) fn finish(
@@ -642,29 +710,68 @@ pub(in crate::ast) fn finish(
 ) -> Converted<()> {
     let declarations =
         specializations::export_declarations(tree, session, &caller.class_member_types);
-    session.foreign.declarations.extend(declarations);
-    let package_owner = match tree.root_unit() {
-        Ok(unit) if unit.kind == celox_sv_syntax::UnitKind::Package => {
-            Some(instances::normalize_identifier(&unit.name.spelling))
-        }
-        Err(_) => Some(packages::UNIT.to_owned()),
-        _ => None,
+    let package_owner = package_owner(tree);
+    record(session, declarations, caller, package_owner.as_deref());
+    complete(session)
+}
+
+/// Keep what scope `tree`, analyzed in a round of package analyses, would
+/// hand over when it finishes, in place of what an earlier round kept of
+/// it: [`finish_kept`] hands it over once the rounds end.
+pub(in crate::ast) fn keep_finish(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    caller: &ScopeSymbols,
+) {
+    let declarations =
+        specializations::export_declarations(tree, session, &caller.class_member_types);
+    let owner = package_owner(tree);
+    let kept = Kept {
+        declarations,
+        symbols: caller.clone(),
     };
+    let registry = &mut session.foreign;
+    match registry.kept.iter_mut().find(|(known, _)| *known == owner) {
+        Some((_, known)) => *known = kept,
+        None => registry.kept.push((owner, kept)),
+    }
+}
+
+/// Hand over what the scopes of the rounds of package analyses kept, in
+/// the order they were analyzed, and make the specializations still to be
+/// made, once for all of them (see [`keep_finish`]).
+pub(in crate::ast) fn finish_kept(session: &mut Session) -> Converted<()> {
+    for (owner, kept) in std::mem::take(&mut session.foreign.kept) {
+        record(session, kept.declarations, &kept.symbols, owner.as_deref());
+    }
+    complete(session)
+}
+
+/// Record the declarations scope `package_owner` (none for a scope other
+/// than a package) exports, and hand its symbols `caller` over.
+fn record(
+    session: &mut Session,
+    declarations: HashMap<String, Rc<DeclarationScope>>,
+    caller: &ScopeSymbols,
+    package_owner: Option<&str>,
+) {
+    session.foreign.declarations.extend(declarations);
     #[cfg(debug_assertions)]
     let mut by_scans = session.foreign.argument_symbols.clone();
-    hand_over(
-        &mut session.foreign.argument_symbols,
-        caller,
-        package_owner.as_deref(),
-    );
+    hand_over(&mut session.foreign.argument_symbols, caller, package_owner);
     #[cfg(debug_assertions)]
     {
-        hand_over_by_scans(&mut by_scans, caller, package_owner.as_deref());
+        hand_over_by_scans(&mut by_scans, caller, package_owner);
         debug_assert!(
             by_scans == session.foreign.argument_symbols,
             "the symbols handed over by name sets differ from those of the scans"
         );
     }
+}
+
+/// Make the specializations no full analysis has made yet, with every
+/// symbol handed over.
+fn complete(session: &mut Session) -> Converted<()> {
     let registry = &session.foreign;
     let caller = registry.argument_symbols.clone();
     let names = registry

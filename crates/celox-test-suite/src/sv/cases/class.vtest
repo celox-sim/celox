@@ -7541,3 +7541,73 @@ module Top(output int bad, output bit done);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq bad 0) (assert_eq done 1))
+
+; IEEE 1800-2023 8.25, 26.3: specializations of a package's class template that
+; several packages ask for, each for its own class, and calls through a base
+; class handle in a package that dispatch to the overrides of classes of the
+; packages analyzed after it.
+(case package_class_specializations_across_packages
+  (source "cross_packages.sv" #"
+package lib;
+  virtual class base;
+    pure virtual function string name();
+    virtual function int weight(); return 1; endfunction
+  endclass
+  class registry #(type T = base);
+    static int made;
+    static function base create();
+      T t;
+      t = new;
+      made++;
+      return t;
+    endfunction
+    static function string type_name(); T t; t = new; return {"reg:", t.name()}; endfunction
+  endclass
+  function int total(base items[$]);
+    int sum;
+    sum = 0;
+    foreach (items[i]) sum += items[i].weight();
+    return sum;
+  endfunction
+endpackage
+package p1;
+  import lib::*;
+  class a extends base;
+    function string name(); return "a"; endfunction
+    function int weight(); return 2; endfunction
+  endclass
+  function string describe(base item); return {item.name(), "/", registry#(a)::type_name()}; endfunction
+endpackage
+package p2;
+  import lib::*;
+  import p1::*;
+  class b extends a;
+    function string name(); return "b"; endfunction
+    function int weight(); return 5; endfunction
+  endclass
+  function base make(); return registry#(b)::create(); endfunction
+endpackage
+package p3;
+  import lib::*;
+  import p2::*;
+  class c extends base;
+    function string name(); return "c"; endfunction
+  endclass
+  function base make_c(); return registry#(c)::create(); endfunction
+endpackage
+module Top(output int sum, output int made, output bit done);
+  import lib::*;
+  initial begin
+    base items[$];
+    items.push_back(p2::make());
+    items.push_back(p3::make_c());
+    items.push_back(lib::registry#(p1::a)::create());
+    sum = lib::total(items);
+    made = lib::registry#(p2::b)::made + lib::registry#(p3::c)::made * 10;
+    if (p1::describe(items[0]) != "b/reg:a" || p1::describe(items[1]) != "c/reg:a") $fatal(1, "dispatch %s %s", p1::describe(items[0]), p1::describe(items[1]));
+    done = 1;
+  end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (assert_eq sum 8) (assert_eq made 11) (assert_eq done 1))

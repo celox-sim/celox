@@ -54,8 +54,37 @@ impl ScopeElaboration<'_> {
         // The array parameters of the packages the module uses are constant
         // signals of the module, like its own.
         self.signals.extend(self.imported.signals.iter().cloned());
-        self.signals
-            .extend(self.imported.state_signals.iter().cloned());
+        // A package declares its own variables: the references to them that
+        // its imports carry, which the specializations of another package
+        // share (see `Packages::analyze_packages`), are not taken.
+        let own_package = match syntax_tree.root_unit() {
+            Ok(unit) if unit.kind == celox_sv_syntax::UnitKind::Package => {
+                Some(instances::normalize_identifier(&unit.name.spelling))
+            }
+            _ => None,
+        };
+        let declared = own_package.as_ref().map(|_| {
+            self.signals
+                .iter()
+                .map(|signal| signal.name.clone())
+                .collect::<HashSet<_>>()
+        });
+        self.signals.extend(
+            self.imported
+                .state_signals
+                .iter()
+                .filter(|signal| {
+                    !(own_package.as_ref().is_some_and(|own| {
+                        signal
+                            .package_variable
+                            .as_ref()
+                            .is_some_and(|(package, _)| package == own)
+                    }) && declared
+                        .as_ref()
+                        .is_some_and(|declared| declared.contains(&signal.name)))
+                })
+                .cloned(),
+        );
         // The specializations of parameterized interfaces that the scope's
         // declarations name reach their instances like those the packages
         // name (25.9).

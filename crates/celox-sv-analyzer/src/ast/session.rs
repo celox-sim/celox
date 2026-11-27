@@ -27,6 +27,11 @@ pub(crate) struct Session {
     /// waits for it rather than analyzing the package at once (see
     /// [`classes::foreign::build_requested`]).
     pub(super) foreign_requests_wait: bool,
+    /// Whether the packages are analyzed in rounds that only collect the
+    /// specializations they request (see `Packages::analyze_packages`): a
+    /// scope analysis ends after one pass, keeping what it would hand over
+    /// to the specializations (see [`classes::foreign::keep_finish`]).
+    pub(super) foreign_batch: bool,
     pub(super) dimensions: dimensions::State,
     pub(super) inline_randomizations: Vec<classes::constraints::Inline>,
     pub(super) next_call_site: usize,
