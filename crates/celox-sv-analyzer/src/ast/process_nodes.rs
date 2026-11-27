@@ -172,6 +172,14 @@ impl InitialProcess {
         self.synthetic
     }
 
+    /// Whether this process runs the actions of a module's concurrent
+    /// assertion: the assertion's own, or the final procedure that fails the
+    /// pending attempts of a strong until property. A procedure holding an
+    /// `expect` does not.
+    pub fn runs_assertion_actions(&self) -> bool {
+        self.assertion_actions
+    }
+
     /// Whether this process holds variable declaration initializers.
     pub fn is_initializer(&self) -> bool {
         self.kind == celox_design::ProcessKind::Initializer

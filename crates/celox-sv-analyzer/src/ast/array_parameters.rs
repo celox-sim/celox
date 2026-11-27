@@ -666,6 +666,7 @@ impl ArrayParameter {
             validation_body: Vec::new(),
             synthetic: true,
             repeats: false,
+            assertion_actions: false,
         })
     }
 }

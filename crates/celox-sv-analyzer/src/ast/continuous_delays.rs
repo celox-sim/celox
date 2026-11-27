@@ -133,6 +133,7 @@ pub(super) fn lower(
                 validation_body: Vec::new(),
                 synthetic: true,
                 repeats: false,
+                assertion_actions: false,
             });
         }
         // Freeze the value after assignment conversion: widening uses the
@@ -202,6 +203,7 @@ pub(super) fn lower(
             validation_body: Vec::new(),
             synthetic: true,
             repeats: true,
+            assertion_actions: false,
         });
         let assignment = Assignment::new(lhs.clone(), Expr::Ident(driven));
         process.body = vec![Stmt::Assign {
