@@ -612,6 +612,16 @@ pub(super) fn binding_names_with_prefix(
             (name, bound)
         })
         .collect();
+    // The members of the interface instances in the instance are members of
+    // it under their own instance names, `handle.inner.member` (IEEE
+    // 1800-2023 23.6, 25.3).
+    for (path, target) in &symbols.interface_members {
+        if let Some(bound) = names.get(target) {
+            imported
+                .interface_members
+                .insert(format!("{handle}.{path}"), bound.clone());
+        }
+    }
     // A name an import makes visible is no instance-local declaration,
     // though the scope holds a signal by it for a package variable: it
     // denotes the package item (IEEE 1800-2023 26.3). Bind it to the

@@ -1387,3 +1387,40 @@
   (for value (list 0 1 0x7f 0xfe)
     (modify (set x value))
     (assert_eq y (trunc 8 (+ value 1)))))
+
+(case state_of_nested_interface_instances
+  ; An interface instance inside another interface has its own variables,
+  ; processes and tasks in each instance of the outer interface (IEEE
+  ; 1800-2023 25.3), which hierarchical names reach through both instances
+  ; (23.6): each `I` counts the calls its `mid` makes and samples its own `d`.
+  (source "nested_state.sv" #"
+interface inner(input bit clk, input bit [7:0] d);
+    int calls, ticks;
+    bit [7:0] seen;
+    task automatic note();
+        calls++;
+    endtask
+    always @(posedge clk) seen <= d;
+    always_ff @(posedge clk) ticks <= ticks + 1;
+endinterface
+interface mid(input bit clk, input bit [7:0] d);
+    inner I(.clk(clk), .d(d));
+    initial begin #3 I.note(); #10 I.note(); end
+endinterface
+module Top(output int calls0, output int ticks0, output bit [7:0] seen0,
+           output int calls1, output bit [7:0] seen1);
+    bit clk;
+    bit [7:0] d = 1, e = 10;
+    always #5 clk = ~clk;
+    mid m0(.clk(clk), .d(d));
+    mid m1(.clk(clk), .d(e));
+    initial begin #7 d = 2; #10 d = 3; #20 e = 11; end
+    initial begin
+        #27 calls0 = m0.I.calls; ticks0 = m0.I.ticks; seen0 = m0.I.seen;
+        calls1 = m1.I.calls; seen1 = m1.I.seen;
+    end
+endmodule
+"#)
+  (top Top) (run_until 40)
+  (assert_eq calls0 2) (assert_eq ticks0 3) (assert_eq seen0 3)
+  (assert_eq calls1 2) (assert_eq seen1 10))

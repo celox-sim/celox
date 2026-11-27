@@ -402,6 +402,53 @@ endmodule
         }
     }
 
+    /// 14.13, 25.3: the clocking block of an interface instance inside
+    /// another interface belongs to each instance of the outer one: `m1.I`
+    /// samples its own `d` (xezim 0.11.4 gives it `m0.I`'s samples, see the
+    /// `interfaces::state_of_nested_interface_instances` shared case for
+    /// the shape without a clocking block).
+    fn clocking_blocks_of_nested_interface_instances(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+interface inner(input bit clk, input bit [7:0] d);
+    int calls, ticks;
+    bit [7:0] seen;
+    clocking cb @(posedge clk);
+        input d;
+    endclocking
+    task automatic note();
+        calls++;
+    endtask
+    always @(cb) seen = cb.d;
+    always_ff @(posedge clk) ticks <= ticks + 1;
+endinterface
+interface mid(input bit clk, input bit [7:0] d);
+    inner I(.clk(clk), .d(d));
+    initial begin #3 I.note(); #10 I.note(); end
+endinterface
+module Top(output int calls0, output int ticks0, output bit [7:0] seen0,
+           output int calls1, output bit [7:0] seen1);
+    bit clk;
+    bit [7:0] d = 1, e = 10;
+    always #5 clk = ~clk;
+    mid m0(.clk(clk), .d(d));
+    mid m1(.clk(clk), .d(e));
+    initial begin #7 d = 2; #10 d = 3; #20 e = 11; end
+    initial begin
+        #27 calls0 = m0.I.calls; ticks0 = m0.I.ticks; seen0 = m0.I.seen;
+        calls1 = m1.I.calls; seen1 = m1.I.seen;
+    end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(true);
+        sim.run_until(40).unwrap();
+        for (name, value) in [("calls0", 2u32), ("ticks0", 3), ("seen0", 3), ("calls1", 2), ("seen1", 10)] {
+            let signal = sim.signal(name);
+            assert_eq!(sim.get(signal), BigUint::from(value), "{name}");
+        }
+    }
+
     /// 14.3, 14.16.1: an inout clockvar reads the value sampled at the
     /// latest clocking event, not the value its drive puts on the signal;
     /// in a program the clocking block works alike (24.3).
