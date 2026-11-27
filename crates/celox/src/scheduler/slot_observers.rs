@@ -111,6 +111,18 @@ pub(super) enum AfterWrites {
 }
 
 impl Generator<'_> {
+    /// The host service called at generated update points.
+    pub(super) fn update_service(&self) -> Option<u32> {
+        self.observer_service.filter(|_| {
+            self.program
+                .runtime
+                .runtime_schema
+                .scheduler
+                .as_ref()
+                .is_some_and(|s| s.update_points)
+        })
+    }
+
     /// The host that watches every update sees the one just made
     /// (`AFTER_UPDATE`) when the observer flag of the arena is set. Its
     /// writes are host inputs of the slot, settled as `after` says; the

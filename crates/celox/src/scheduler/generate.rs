@@ -165,6 +165,7 @@ impl Plan {
                 .as_ref()
                 .map(|_| (program, HashSet::default())),
             shared: program.shared_storage(),
+            settle_can_finish: false,
             comb,
             continuations: Vec::new(),
             eager: None,
@@ -190,6 +191,13 @@ impl Plan {
                 .then_some((capacity / 8).max(1) as u64)
             },
         };
+        g.settle_can_finish = program
+            .sir
+            .updates
+            .observe
+            .iter()
+            .chain(self.incremental.iter().flat_map(|cone| &cone.units))
+            .any(|unit| g.unit_finishes(unit));
         let mut guards = if cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen")))
             && (self.cyclic || !self.service_processes.is_empty())
         {
@@ -309,14 +317,7 @@ impl Plan {
         let finish_exit = g.exit_block(SchedulerExit::Finish);
         // A host that watches every update sees each kernel run, the host
         // clocks a slot applies and each settle (IEEE 1800-2023 38.36.1).
-        let updates = self.service_function.filter(|_| {
-            program
-                .runtime
-                .runtime_schema
-                .scheduler
-                .as_ref()
-                .is_some_and(|scheduler| scheduler.update_points)
-        });
+        let updates = g.update_service();
         let pick = g.b.new_block();
         let entry_done = pick;
         self.apply_host_clocks(

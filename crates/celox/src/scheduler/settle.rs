@@ -147,6 +147,28 @@ impl Generator<'_> {
     /// settle.
     pub(super) fn settle_then(&mut self, reason: &'static str, target: celox_sir::BlockId) {
         self.count(ActivationKind::SettleCall, "requests", |_| reason.into());
+        // Return directly on a clean request, before storing a continuation.
+        // Captures and finish checks still need the shared boundary.
+        if self.settle_reads.is_some() && self.observers.is_none() && !self.settle_can_finish {
+            let dirty = self.load(self.slots.dirty, SCHEDULER_FLAG_WIDTH);
+            let zero = self.constant(0, SCHEDULER_FLAG_WIDTH);
+            let mut required = self.binary(1, dirty, BinaryOp::Ne, zero);
+            if self.update_service().is_some() {
+                let watching = self.arena_header_load(std::mem::offset_of!(
+                    crate::simulator::native_io::ArenaHeader,
+                    observes_updates
+                ));
+                let watching = self.equals(watching, 1);
+                required = self.binary(1, required, BinaryOp::Or, watching);
+            }
+            let enter = self.b.new_block();
+            self.b.seal_block(SIRTerminator::Branch {
+                cond: required,
+                true_block: (enter, Vec::new()),
+                false_block: (target, Vec::new()),
+            });
+            self.b.switch_to_block(enter);
+        }
         let case = match self.continuations.iter().position(|&block| block == target) {
             Some(index) => index,
             None => {
@@ -267,11 +289,7 @@ impl Generator<'_> {
         self.observers_after(internal_exit);
         // Match the backend's phase boundary: a captured finish must not
         // skip later combinational writes, captures or observer snapshots.
-        if units.iter().any(|unit| self.unit_finishes(unit))
-            || self
-                .incremental
-                .is_some_and(|cone| cone.units.iter().any(|unit| self.unit_finishes(unit)))
-        {
+        if self.settle_can_finish {
             self.check_finish(finish_exit);
         }
         if let Some((service, checks, events)) = updates {

@@ -82,6 +82,42 @@ fn counts_slots_domains_and_quiet_judgments() {
 }
 
 #[test]
+fn clean_settle_requests_enter_only_when_observed() {
+    struct Updates;
+    impl<B: celox::SimBackend> celox::SlotObserver<B> for Updates {
+        fn before_domains(&mut self, _: &mut celox::SlotIo<'_, B>, _: u64) {}
+        fn end_of_slot(&mut self, _: &mut celox::SlotIo<'_, B>, _: u64) {}
+        fn observes_updates(&self) -> bool {
+            true
+        }
+    }
+
+    let source = DESIGN.replace(
+        "endmodule",
+        "assert property (@(posedge clk) cnt < 128); endmodule",
+    );
+    for watching in [false, true] {
+        let mut sim =
+            Simulation::from_sv_sources(vec![(source.as_str(), Path::new("settle.sv"))], "Top")
+                .observable_updates(true)
+                .activation_profile(true)
+                .build_native()
+                .unwrap();
+        if watching {
+            sim.observe_slots(Box::new(Updates), &[]);
+        }
+        sim.run_until(100).unwrap();
+        assert_eq!(outputs(&mut sim), (10, 20));
+        let profile = sim.activation_profile().unwrap();
+        let requests = count(&profile, ActivationKind::SettleCall, "requests");
+        let entered = count(&profile, ActivationKind::Settle, "entered");
+        let dirty = count(&profile, ActivationKind::Settle, "dirty");
+        assert!(requests > dirty && dirty > 0);
+        assert_eq!(entered, if watching { requests } else { dirty });
+    }
+}
+
+#[test]
 fn a_profiled_native_image_counts_after_it_is_reloaded() {
     let mut built = simulation(true);
     built.run_until(100).unwrap();
