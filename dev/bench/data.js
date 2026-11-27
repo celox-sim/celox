@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795812771876,
+  "lastUpdate": 1795814205475,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -470181,6 +470181,42 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-veryl-cc-x86_64/heliodor_suite_smp_linux_boot_4hart_execution",
             "unit": "ms",
             "value": 1409152.722758
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "e14bbb1347848a1fb1414188a09995f7f6eb88e0",
+          "message": "perf(sv): collect the foreign specializations of packages in rounds (#4803)",
+          "timestamp": "2026-11-27T07:09:38Z",
+          "url": "https://github.com/celox-sim/celox/commit/e14bbb1347848a1fb1414188a09995f7f6eb88e0"
+        },
+        "date": 1795814205475,
+        "cpu": "Intel Xeon 6975P-C",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-native-x86_64/heliodor_suite_smp_linux_boot_4hart_compilation",
+            "unit": "ms",
+            "value": 259977.66667
+          },
+          {
+            "name": "heliodor-native-x86_64/heliodor_suite_smp_linux_boot_4hart_execution",
+            "unit": "ms",
+            "value": 1155316.002537
+          },
+          {
+            "name": "heliodor-celox-jit/heliodor_suite_smp_linux_boot_4hart_execution",
+            "unit": "ms",
+            "value": 1155137.261527
           }
         ]
       }
