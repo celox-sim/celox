@@ -1363,15 +1363,24 @@ fn watchable(variables: &SymbolicVariables, id: &crate::SourceVarId) -> bool {
         .is_some_and(|var| var.module_affiliated && var.metadata.array_dims.is_empty())
 }
 
-/// Declare a hidden object `path` of `width` bits and return it.
+/// The id past every variable of `variables`, which the first hidden
+/// object declared among them takes.
+fn next_id(variables: &SymbolicVariables) -> u32 {
+    variables.keys().map(|id| id.0 + 1).max().unwrap_or(0)
+}
+
+/// Declare a hidden object `path` of `width` bits with id `next`, the id
+/// past every variable (see `next_id`), and return it; `next` moves past it.
 fn declare_hidden(
     variables: &mut SymbolicVariables,
+    next: &mut u32,
     path: Vec<String>,
     width: usize,
     is_4state: bool,
 ) -> crate::SourceVarId {
     use celox_design::{DomainKind, PortTypeKind, VariableMetadata};
-    let id = crate::SourceVarId(variables.keys().map(|id| id.0 + 1).max().unwrap_or(0));
+    let id = crate::SourceVarId(*next);
+    *next += 1;
     variables.insert(
         id,
         crate::symbolic::artifact::SymbolicVariable {
@@ -1438,6 +1447,7 @@ fn declare_slots(
 ) -> Vec<celox_design::CounterSlots<crate::SourceVarId>> {
     candidates.sort_unstable();
     candidates.dedup();
+    let mut next = next_id(variables);
     candidates
         .into_iter()
         .map(|signal| {
@@ -1445,6 +1455,7 @@ fn declare_slots(
             let mut counter = |kind: &str| {
                 declare_hidden(
                     variables,
+                    &mut next,
                     vec![format!("$counter[{name}]"), kind.to_string()],
                     EVENT_COUNTER_WIDTH,
                     false,
@@ -1474,6 +1485,7 @@ pub fn declare_pending_slots(
         .collect();
     streams.sort_unstable();
     streams.dedup();
+    let mut next = next_id(variables);
     streams
         .into_iter()
         .map(|(signal, write)| {
@@ -1491,6 +1503,7 @@ pub fn declare_pending_slots(
             let mut hidden = |kind: &str, width: usize, is_4state: bool| {
                 declare_hidden(
                     variables,
+                    &mut next,
                     vec![stream.clone(), kind.to_string()],
                     width,
                     is_4state,
