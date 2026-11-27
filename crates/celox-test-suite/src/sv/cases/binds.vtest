@@ -1,0 +1,74 @@
+(group binds (category hierarchy))
+
+(case module_into_every_instance
+  ; A bind directive instantiates its module in every instance of the
+  ; target module, as if at the end of it: the actuals name the objects of
+  ; that instance, not those visible where the directive is (IEEE 1800-2023
+  ; 23.11).
+  (source "binds.sv" #"
+module twice(input logic [7:0] in, output logic [7:0] out);
+    assign out = in * 2;
+endmodule
+module unit(input logic [7:0] x, output logic [7:0] t);
+    logic [7:0] y;
+    assign y = x + 1;
+endmodule
+module Top(output logic [7:0] a, output logic [7:0] b);
+    logic [7:0] y = 8'hff;
+    unit ua(.x(8'd3), .t(a));
+    unit ub(.x(8'd5), .t(b));
+endmodule
+bind unit twice d(.in(y), .out(t));
+"#)
+  (top Top) (run_until 1)
+  (assert_eq a 8) (assert_eq b 12))
+
+(case interface_into_interface
+  ; A bind directive in a module binds an interface, as a bus monitor's
+  ; checker, into each instance of an interface, connected by named and
+  ; implicit named port connections to the target's ports and variables
+  ; (IEEE 1800-2023 23.11, 23.3.2.3).
+  (source "binds.sv" #"
+interface watch(input logic clk, input logic [7:0] data, output int count);
+    initial count = 0;
+    always @(posedge clk) count <= count + data;
+endinterface
+interface bus(input logic clk);
+    logic [7:0] data;
+    int count;
+endinterface
+module agent(input logic clk, input logic [7:0] value, output int seen);
+    bus b(clk);
+    assign b.data = value;
+    assign seen = b.count;
+    bind bus watch w(.clk, .data, .count);
+endmodule
+module Top(output int first, output int second);
+    logic clk = 0;
+    always #5 clk = ~clk;
+    agent p(.clk(clk), .value(8'd2), .seen(first));
+    agent q(.clk(clk), .value(8'd7), .seen(second));
+endmodule
+"#)
+  (top Top) (run_until 31)
+  (assert_eq first 6) (assert_eq second 21))
+
+(case parameters_from_the_target_scope
+  ; The parameter values of a bind instantiation, like its port actuals,
+  ; are those of the target instance (IEEE 1800-2023 23.11).
+  (source "binds.sv" #"
+module scaled #(parameter int K = 1)(input int in, output int out);
+    assign out = in * K;
+endmodule
+module stage #(parameter int N = 1)(input int x, output int r);
+    int y;
+    assign y = x + N;
+endmodule
+module Top(output int a, output int b);
+    stage #(.N(10)) s1(.x(1), .r(a));
+    stage #(.N(20)) s2(.x(2), .r(b));
+    bind stage scaled #(.K(N)) m(.in(y), .out(r));
+endmodule
+"#)
+  (top Top) (run_until 1)
+  (assert_eq a 110) (assert_eq b 440))

@@ -28,7 +28,7 @@ Celox は IEEE Std 1800™-2023 が規定する SystemVerilog を実装します
 
 以下の構文や節は未実装であり、コンパイル時に拒否します。
 
-- **検証・設計構造ブロック:** `bind`、`checker`、`config`、ユーザー定義プリミティブ（UDP）、`specify` ブロック。clocking ブロックは一部に対応します。[clocking ブロック](#clocking-blocks)を参照してください。covergroup は一部に対応します。[カバーグループ](#covergroups)を参照してください。
+- **検証・設計構造ブロック:** `checker`、`config`、ユーザー定義プリミティブ（UDP）、`specify` ブロック。clocking ブロックは一部に対応します。[clocking ブロック](#clocking-blocks)を参照してください。covergroup は一部に対応します。[カバーグループ](#covergroups)を参照してください。
 - **union と配列・コンテナの混在型:** `tagged` union、unpacked union、packed union の代入パターン、`chandle` の固定長 unpacked 配列（`chandle a[4]`、typedef 経由を含む）、動的コンテナの固定長 unpacked 配列（`int a[2][$]`、typedef 経由を含む）、多次元固定長 unpacked 配列を要素とする動的コンテナ（`int a[][2][3]`）。
 - **制御フロー:** `disable fork` 以外の `disable` 文。宣言初期化子、`final`、`always_comb`、`always_ff` 内の `fork`（これらの文脈にはスケジューラ用のプロセス基盤がありません）。
 - **集合帰属:** 制約以外の `inside` 式・`case inside` 項目の集合に置いた unpacked 配列（`x inside {arr}`。`arr` の要素を表す、11.4.13）。配列の要素（`x inside {arr[0]}`）と、制約内の配列プロパティは対応しています。
@@ -84,6 +84,14 @@ Celox は IEEE Std 1800™-2023 が規定する SystemVerilog を実装します
 | **program 宣言（Clause 24）** | ポートとパラメータを持ちインスタンス化された `program` ブロック（`initial` 手続きは reactive region セットで実行） | モジュール内に入れ子にした program。匿名 program。未インスタンス化 program の暗黙トップ扱い |
 
 program の region と `$exit` に関する差異は[標準準拠コードに影響する逸脱](#deviations-standard-code)を参照してください。
+
+### bind 指令 {#bind-directives}
+
+| 観点 | 対応 | 未対応 |
+| --- | --- | --- |
+| **bind 指令（23.11）** | モジュール、インターフェース、コンパイル単位に書いた `bind target inst ...;`。モジュールまたはインターフェース `target` のすべてのインスタンスに、モジュール、program、インターフェースのインスタンス（パラメータ値とポート接続はターゲットのスコープの名前で解決）を bind します。インターフェースのターゲットにはインターフェースのインスタンスを bind します | ターゲットのインスタンスリスト（`bind m: u1, u2 ...`）とターゲットインスタンス（`bind top.u ...`）。generate ブロック内の bind 指令。ターゲットまたは bind 指令を書いたスコープのインターフェースポートやインターフェースインスタンスを実引数に書いたインスタンス化。設計の別のソースが宣言するターゲット（ソースは 1 つずつ解析します。CLI の既定である単一コンパイル単位は 1 つのソースです） |
+
+bind 指令を含むモジュールのインスタンスが設計に複数あっても bind は 1 回だけ行います。標準では同じ名前を 2 回目に bind するとエラーです。また bind のインスタンス化からは、ターゲットのスコープから見える `$unit` の宣言も見えます。標準ではこれらは見えません。
 
 ### unpacked 構造体 {#unpacked-structures}
 

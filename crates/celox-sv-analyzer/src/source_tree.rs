@@ -5,6 +5,7 @@ use std::path::Path;
 use crate::AnalyzerError;
 mod scopes;
 pub(crate) use scopes::ScopeHandle;
+mod binds;
 mod spans;
 pub(crate) use spans::{CovergroupInteriors, Ranges, SourceText, Spans, Starts};
 
@@ -223,7 +224,28 @@ impl SourceTree {
 }
 
 pub(crate) fn parse_source(code: &str, path: &Path) -> Result<SourceTree, AnalyzerError> {
-    source_tree(celox_sv_syntax::Declarations::parse(code, path), path)
+    source_tree(
+        with_binds(celox_sv_syntax::Declarations::parse(code, path))?,
+        path,
+    )
+}
+
+/// `declarations` parsed again with the instantiations of their bind
+/// directives in their target scopes (see [`binds`]), or as they are when
+/// they have none.
+fn with_binds(
+    declarations: Result<celox_sv_syntax::Declarations, celox_sv_syntax::ParseError>,
+) -> Result<Result<celox_sv_syntax::Declarations, celox_sv_syntax::ParseError>, AnalyzerError> {
+    match declarations {
+        Ok(declarations) if binds::any(&declarations.tokens) => {
+            let tokens = binds::spliced(&declarations)?;
+            Ok(celox_sv_syntax::Declarations::from_tokens(
+                declarations.sources,
+                tokens,
+            ))
+        }
+        declarations => Ok(declarations),
+    }
 }
 
 /// The validated tree of a parsed source.
@@ -290,7 +312,10 @@ pub(crate) fn parse_source_with_first_modules(
         tokens.extend_from_slice(&source.tokens[kept..]);
         tokens
     };
-    let declarations = celox_sv_syntax::Declarations::from_tokens(preprocessor.sources, tokens);
+    let declarations = with_binds(celox_sv_syntax::Declarations::from_tokens(
+        preprocessor.sources,
+        tokens,
+    ))?;
     Ok((source_tree(declarations, path)?, names))
 }
 
