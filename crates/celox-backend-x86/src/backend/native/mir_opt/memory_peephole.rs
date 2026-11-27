@@ -158,8 +158,8 @@ pub(super) fn fold_contiguous_load_packs(func: &mut MFunction) {
 ///
 /// The source and destination ranges must be disjoint, each loaded SSA value
 /// must be consumed only by its matching Store, and every pair must be
-/// adjacent. These conditions make the replacement independent of alias and
-/// scheduling speculation while removing one allocation value per chunk.
+/// adjacent. Independent pairs with the same displacement can cover a
+/// contiguous range even when their widths or their address order differ.
 pub(super) fn fold_contiguous_memory_copies(func: &mut MFunction) {
     let mut use_counts = HashMap::<VReg, usize>::default();
     for block in &func.blocks {
@@ -187,39 +187,52 @@ pub(super) fn fold_contiguous_memory_copies(func: &mut MFunction) {
                 cursor += 1;
                 continue;
             };
-            let chunk_bytes = size.bytes() as usize;
-            let mut pairs = 1usize;
-            while let Some((next_src, next_dst, next_size)) =
-                direct_copy_pair(&original, cursor + pairs * 2, &use_counts)
-            {
-                let Some(delta) = pairs
-                    .checked_mul(chunk_bytes)
-                    .and_then(|delta| i32::try_from(delta).ok())
-                else {
-                    break;
-                };
-                if next_size != size
-                    || src_offset.checked_add(delta) != Some(next_src)
-                    || dst_offset.checked_add(delta) != Some(next_dst)
+            let displacement = i64::from(dst_offset) - i64::from(src_offset);
+            let mut low = i64::from(src_offset);
+            let mut high = low + i64::from(size.bytes());
+            let start = cursor;
+            let mut pieces = Vec::new();
+            cursor += 2;
+            // Keep every source disjoint from every destination. Otherwise
+            // a later load could see the value of an earlier store.
+            while let Some((src, dst, size)) = direct_copy_pair(&original, cursor, &use_counts) {
+                let next_low = low.min(i64::from(src));
+                let next_high = high.max(i64::from(src) + i64::from(size.bytes()));
+                if i64::from(dst) - i64::from(src) != displacement
+                    || next_high - next_low > displacement.abs()
                 {
                     break;
                 }
-                pairs += 1;
+                pieces.push((src, size, cursor));
+                low = next_low;
+                high = next_high;
+                cursor += 2;
             }
-            let byte_len = pairs * chunk_bytes;
-            let src_end = i64::from(src_offset) + byte_len as i64;
-            let dst_end = i64::from(dst_offset) + byte_len as i64;
-            let disjoint = src_end <= i64::from(dst_offset) || dst_end <= i64::from(src_offset);
-            if byte_len >= 16 && disjoint {
-                rewritten.push(MInst::MemCopy {
-                    src_offset,
-                    dst_offset,
-                    byte_len,
-                });
-                cursor += pairs * 2;
-            } else {
-                rewritten.push(original[cursor].clone());
-                cursor += 1;
+            if pieces.is_empty() || high - low < 16 {
+                rewritten.extend_from_slice(&original[start..cursor]);
+                continue;
+            }
+            pieces.push((src_offset, size, start));
+            pieces.sort_unstable_by_key(|&(src, _, _)| src);
+            let groups = pieces.chunk_by(|&(src, size, _), &(next, _, _)| {
+                i64::from(src) + i64::from(size.bytes()) == i64::from(next)
+            });
+            for group in groups {
+                let src_offset = group[0].0;
+                let &(last, size, _) = group.last().unwrap();
+                let byte_len =
+                    (i64::from(last) - i64::from(src_offset) + i64::from(size.bytes())) as usize;
+                if byte_len >= 16 {
+                    rewritten.push(MInst::MemCopy {
+                        src_offset,
+                        dst_offset: (i64::from(src_offset) + displacement) as i32,
+                        byte_len,
+                    });
+                } else {
+                    for &(_, _, index) in group {
+                        rewritten.extend_from_slice(&original[index..index + 2]);
+                    }
+                }
             }
         }
         block.insts = rewritten;
