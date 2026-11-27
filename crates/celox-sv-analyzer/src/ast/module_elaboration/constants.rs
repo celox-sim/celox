@@ -14,6 +14,107 @@ impl ScopeElaboration<'_> {
         constant_types
     }
 
+    /// The elaborated scope that names the covergroup types the scope
+    /// declares (see `covergroups::scope_names`), once its parameters are
+    /// known: its name and a hash of what tells its specializations apart
+    /// (IEEE 1800-2023 6.22). That is the value of each value parameter
+    /// with its resolved type, which a parameter without a type takes from
+    /// its value (6.20.2); the elements of each unpacked array parameter,
+    /// or the pattern its instance binds when they are not constants of the
+    /// scope; and the semantic type of each type parameter. Instances that
+    /// give a parameter the same value of the same type share the types,
+    /// however they write the value, and whether they take a default or
+    /// write it.
+    pub(super) fn covergroup_scope(
+        &self,
+        syntax_tree: &AnalysisContext<'_>,
+        session: &mut Session,
+    ) -> Converted<Arc<str>> {
+        use std::hash::{Hash, Hasher};
+        let mut values = Vec::new();
+        // The types of the parameters before each one, which its value may
+        // name, as binding them collects them.
+        let mut types = HashMap::default();
+        for parameter in &self.parameters {
+            let name = parameter.name();
+            let r#type = dimensions::parameter_type_from_const_env(&self.const_env, name)
+                .or_else(|| parameter.resolved_type(&types));
+            if let Some(r#type) = r#type {
+                types.insert(name.to_owned(), r#type);
+            }
+            let unbounded = parameters::unbounded_parameter_marker(name);
+            let value = if self.const_env.get(&unbounded) == Some(&1) {
+                "$".to_owned()
+            } else if let Some(value) = self.const_env.get(name) {
+                value.to_string()
+            } else {
+                // A real value, or one with unknown bits or wider than the
+                // numeric constants hold: by its literal, or by the
+                // expression, whose operands are hashed with their own
+                // parameters.
+                parameter
+                    .value()
+                    .map(|value| literal_text(value, parameter.floating.is_some()))
+                    .unwrap_or_default()
+            };
+            let r#type = match r#type {
+                Some(ExprType { width, signed }) => {
+                    format!("{width}{}", if signed { "s" } else { "" })
+                }
+                None => String::new(),
+            };
+            values.push((
+                name.to_owned(),
+                format!(
+                    "{:?}{}{type}={value}",
+                    parameter.floating,
+                    if parameter.declared_is_2state {
+                        "b"
+                    } else {
+                        "l"
+                    },
+                ),
+            ));
+        }
+        for parameter in &self.array_parameters {
+            let name = parameter.signal.name();
+            let elements = parameters::element_keys(name, &self.const_env);
+            let value = if elements.is_empty() {
+                parameter.bound_text(&mut session.types)
+            } else {
+                elements
+                    .iter()
+                    .map(|key| {
+                        self.const_env
+                            .get(key)
+                            .map_or_else(String::new, i128::to_string)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            values.push((name.to_owned(), format!("[]={value}")));
+        }
+        for name in type_parameters::names(syntax_tree)? {
+            let value = match self.type_aliases.get(&name) {
+                Some(ty) => match semantic_types::of_type(
+                    &mut session.types,
+                    &syntax_tree.functions,
+                    ty,
+                    &self.const_env,
+                ) {
+                    Some(id) => format!("{id:?}"),
+                    None => format!("{ty:?}"),
+                },
+                None => String::new(),
+            };
+            values.push((name, format!("type={value}")));
+        }
+        values.sort();
+        let mut hasher = fxhash::FxHasher::default();
+        values.hash(&mut hasher);
+        Ok(format!("{}#{:016x}", self.name, hasher.finish()).into())
+    }
+
     /// The parameters, constants, types, enumeration members and array parameters
     /// of the scope. Returns the context that calls its constant functions, which
     /// the later phases bind in.
@@ -160,6 +261,11 @@ impl ScopeElaboration<'_> {
             &self.parameters,
             &self.imported.parameter_values,
         );
+        // The parameters have their values: the covergroup types are named
+        // by them from the type aliases below on.
+        if !self.is_package {
+            session.covergroup_scope = Some(self.covergroup_scope(syntax_tree, session)?);
+        }
         self.declare_class_scopes(syntax_tree, session);
         self.type_aliases =
             type_aliases_from_scope_with_env(syntax_tree, session, &self.const_env)?.into();
@@ -503,4 +609,28 @@ impl ScopeElaboration<'_> {
         }
         Ok(())
     }
+}
+
+/// Parameter value `value` as the name of a covergroup type writes it (see
+/// [`ScopeElaboration::covergroup_scope`]): a literal by the value it
+/// denotes, a real one when the parameter is `real`, so that `4'b1x0z` and
+/// `4'B1X0Z`, or `1.5` and `1.50`, are one value; another expression as it
+/// is written.
+fn literal_text(value: &ConstExpr, real: bool) -> String {
+    if let ConstExpr::Literal(text) = value {
+        let digits = text.replace('_', "");
+        if real && let Ok(value) = digits.parse::<f64>() {
+            return format!("r{:x}", value.to_bits());
+        }
+        if let Some(literal) = crate::typecheck::parse_integral_literal(text) {
+            return format!(
+                "{}{}'{:x}/{:x}",
+                literal.width,
+                if literal.signed { "s" } else { "" },
+                literal.value,
+                literal.mask
+            );
+        }
+    }
+    canonical_text::const_expr(value)
 }

@@ -7813,3 +7813,120 @@ endmodule
         assert_eq!(bins(&report, "Top.cg", 0, "cp"), bins(&report, "Top.dg", 0, "cp"));
     }
 }
+
+sv_backends! {
+    /// 19.11.3, 6.22: instances of a module whose parameter takes its default
+    /// and instances that write the same value, by position or by name, share
+    /// the covergroup type: with `merge_instances` the coverage of the type is
+    /// that of the three samples together, and the report lists it once.
+    fn module_instances_with_the_same_parameter_values_share_types(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module M #(int N = 2) (input logic [3:0] d, output bit [63:0] t);
+    covergroup cg; type_option.merge_instances = 1; coverpoint d { bins b[] = {[0:15]}; } endgroup
+    cg c;
+    initial begin c = new; #1 c.sample(); #1 t = $realtobits(c.get_coverage()); end
+endmodule
+module Top(output bit [63:0] ta, tb, tc, te, tf, tg);
+    logic [3:0] x = 1, y = 2, z = 3;
+    M a(.d(x), .t(ta));
+    M #(2) b(.d(y), .t(tb));
+    M #(.N(2)) c(.d(z), .t(tc));
+    M #(3) e(.d(z), .t(te));
+    M #(32'sd2) f(.d(z), .t(tf));
+    M #(4'd2) g(.d(z), .t(tg));
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(3).unwrap();
+        for name in ["ta", "tb", "tc", "tf", "tg"] {
+            assert_eq!(real(&mut sim, name), 18.75, "{name}");
+        }
+        assert_eq!(real(&mut sim, "te"), 6.25);
+        let report = sim.coverage();
+        assert_eq!(instances_of_types(&report, "M.cg"), [1, 5]);
+    }
+}
+
+/// The number of instances of each covergroup type named `name` in
+/// `report`, fewest first.
+fn instances_of_types(report: &celox::CoverageReport, name: &str) -> Vec<usize> {
+    let mut groups = report
+        .covergroups
+        .iter()
+        .filter(|group| group.name == name)
+        .map(|group| group.instances.len())
+        .collect::<Vec<_>>();
+    groups.sort();
+    groups
+}
+
+sv_backends! {
+    /// 6.22, 6.20.2: an unpacked array parameter is a value of the
+    /// specialization like any other parameter. Instances whose arrays hold
+    /// other values have types of their own, with the bins those values
+    /// give; one that writes the default shares the type of one that takes
+    /// it.
+    fn module_instances_with_other_array_parameters_have_other_types(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module M #(int A [2] = '{1, 2}) (input logic [3:0] d, output bit [63:0] t);
+    covergroup cg; coverpoint d { bins first = {A[0]}; bins high = {15}; } endgroup
+    cg c;
+    initial begin c = new; #1 c.sample(); #1 t = $realtobits(c.get_inst_coverage()); end
+endmodule
+module Top(output bit [63:0] ta, tb, tc);
+    logic [3:0] x = 1, y = 5;
+    M a(.d(x), .t(ta));
+    M #('{5, 2}) b(.d(y), .t(tb));
+    M #('{1, 2}) c(.d(x), .t(tc));
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(3).unwrap();
+        for name in ["ta", "tb", "tc"] {
+            assert_eq!(real(&mut sim, name), 50.0, "{name}");
+        }
+        let report = sim.coverage();
+        assert_eq!(instances_of_types(&report, "M.cg"), [1, 2]);
+    }
+}
+
+sv_backends! {
+    /// 6.22, 6.20.2: a value parameter without a type takes the type of its
+    /// value, so instances that give it values of other widths have types
+    /// of their own, with the automatic bins of a coverpoint of that width
+    /// (19.5.3); two that give it the same value of the same width, however
+    /// written, share one.
+    fn module_instances_with_parameter_values_of_other_types_have_other_types(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module M #(parameter P = 1) (input logic [7:0] d, output bit [63:0] t);
+    logic [$bits(P)-1:0] v;
+    assign v = d[$bits(P)-1:0];
+    covergroup cg; coverpoint v; endgroup
+    cg c;
+    initial begin c = new; #1 c.sample(); #1 t = $realtobits(c.get_inst_coverage()); end
+endmodule
+module Top(output bit [63:0] ta, tb, tc, te);
+    logic [7:0] x = 1;
+    M a(.d(x), .t(ta));
+    M #(1'b1) b(.d(x), .t(tb));
+    M #(4'b1) c(.d(x), .t(tc));
+    M #(4'h1) e(.d(x), .t(te));
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(false);
+        sim.run_until(3).unwrap();
+        // 64 automatic bins of a 32-bit value, 2 of a bit, 16 of 4 bits.
+        assert_eq!(real(&mut sim, "ta"), 100.0 / 64.0);
+        assert_eq!(real(&mut sim, "tb"), 50.0);
+        assert_eq!(real(&mut sim, "tc"), 6.25);
+        assert_eq!(real(&mut sim, "te"), 6.25);
+        let report = sim.coverage();
+        assert_eq!(instances_of_types(&report, "M.cg"), [1, 1, 2]);
+    }
+}

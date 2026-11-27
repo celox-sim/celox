@@ -158,3 +158,34 @@ pub(super) fn bind_patterns(
     }
     Ok(bindings)
 }
+
+/// The names of the type parameters the root unit of `tree` declares, in its
+/// parameter port list and among its body items.
+pub(super) fn names(tree: &SyntaxTree) -> Converted<Vec<String>> {
+    let unit = tree.root_unit()?;
+    let mut names = unit
+        .parameters
+        .iter()
+        .flatten()
+        .filter(|parameter| matches!(parameter.kind, celox_sv_syntax::ParameterKind::Type { .. }))
+        .map(|parameter| instances::normalize_identifier(&parameter.name.spelling))
+        .collect::<Vec<_>>();
+    let mut pending = tree.body_membership()?;
+    while let Some(id) = pending.pop() {
+        match &tree.declarations().body_item(id).kind {
+            celox_sv_syntax::BodyItemKind::Region(items) => pending.extend(items.iter().copied()),
+            celox_sv_syntax::BodyItemKind::Parameter(id) => names.extend(
+                tree.declarations()
+                    .parameter_declaration(*id)
+                    .parameters
+                    .iter()
+                    .filter(|parameter| {
+                        matches!(parameter.kind, celox_sv_syntax::ParameterKind::Type { .. })
+                    })
+                    .map(|parameter| instances::normalize_identifier(&parameter.name.spelling)),
+            ),
+            _ => {}
+        }
+    }
+    Ok(names)
+}
