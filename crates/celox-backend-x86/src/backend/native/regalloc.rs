@@ -133,7 +133,7 @@ pub(crate) fn cancellation_error() -> RegallocError {
 
 /// Whether this error reports cancellation rather than an allocation bug.
 pub(crate) fn is_cancellation(error: &RegallocError) -> bool {
-    std::ptr::eq(error.phase, CANCELLED_PHASE)
+    error.phase == CANCELLED_PHASE
 }
 
 impl fmt::Display for RegallocError {
