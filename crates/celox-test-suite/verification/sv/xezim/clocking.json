@@ -1,0 +1,26 @@
+{
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "clocking::drives_through_virtual_interfaces_mature_at_the_event at 148:20: assert_eq v6: expected 0x3, got 0x0",
+      "expectation": "Simulation",
+      "name": "clocking::drives_through_virtual_interfaces_mature_at_the_event",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "clocking::interface_clocking_blocks_through_virtual_interfaces at 56:3: assert_eq seen: expected 0xd0a0401, got 0xX0X0000",
+      "expectation": "Simulation",
+      "name": "clocking::interface_clocking_blocks_through_virtual_interfaces",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

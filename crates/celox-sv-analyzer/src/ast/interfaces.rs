@@ -32,6 +32,10 @@ pub struct InterfacePrototype {
     pub header_dependent_cast: bool,
     /// What analyzing the signature warned about.
     pub warnings: Vec<crate::ir::AnalyzerWarning>,
+    /// The members Celox declares for the interface's clocking blocks (see
+    /// `clocking::variables`): its instances bind them, but no contract of
+    /// another language names them.
+    pub internal: Vec<String>,
 }
 
 /// The prototype of an interface, with what its public form leaves out.
@@ -258,6 +262,7 @@ fn prototypes(
                 };
                 let prototype = InterfacePrototype {
                     name: interface.name.clone(),
+                    internal: interface.clocking_members.clone(),
                     warnings: warnings::components(&files[interface.file].syntax_tree)
                         .remove(&interface.name)
                         .unwrap_or_default(),
@@ -274,13 +279,35 @@ fn prototypes(
                         .members
                         .iter()
                         .filter(|member| {
+                            let written = |span: &Span, name: &String, root: &str| {
+                                name == root
+                                    && interface.lvalues.contains(&span.0)
+                                    && !interface.functions.iter().any(|function| {
+                                        function.span.0 <= span.0 && span.1 <= function.span.1
+                                    })
+                            };
+                            // A synchronous drive `cb.x <= e` writes the signal
+                            // `x` of clockvar `cb.x` (14.16), whose reference
+                            // is to `cb`.
+                            let file = &files[interface.file];
+                            let member_of = |span: &Span, var: &str| {
+                                let index =
+                                    file.tokens.partition_point(|&(start, _)| start < span.1);
+                                file.tokens.get(index).map(|&token| file.text(token)) == Some(".")
+                                    && file.tokens.get(index + 1).is_some_and(|&token| {
+                                        normalize_identifier(file.text(token)) == var
+                                    })
+                            };
                             member.initializer.is_some()
                                 || behavior_captures.get(&member.name) == Some(&Direction::Output)
-                                || interface.references.iter().any(|(span, name)| {
-                                    name == &member.name
-                                        && interface.lvalues.contains(&span.0)
-                                        && !interface.functions.iter().any(|function| {
-                                            function.span.0 <= span.0 && span.1 <= function.span.1
+                                || interface
+                                    .references
+                                    .iter()
+                                    .any(|(span, name)| written(span, name, &member.name))
+                                || interface.clocking_outputs.iter().any(|(block, var)| {
+                                    var == &member.name
+                                        && interface.references.iter().any(|(span, name)| {
+                                            written(span, name, block) && member_of(span, var)
                                         })
                                 })
                         })
@@ -837,6 +864,13 @@ struct InterfaceDecl {
     references: Vec<(Span, String)>,
     /// The start offsets of the assignment targets in the interface text.
     lvalues: HashSet<usize>,
+    /// The names of the clocking blocks of the interface.
+    clockings: HashSet<String>,
+    /// The members the clocking blocks declare, in declaration order.
+    clocking_members: Vec<String>,
+    /// The output and inout clockvars of the clocking blocks, by block, which
+    /// a synchronous drive `cb.x <= e` writes.
+    clocking_outputs: Vec<(String, String)>,
 }
 
 impl InterfaceDecl {
@@ -997,6 +1031,27 @@ impl InterfaceDecl {
             }
         }
         captured
+    }
+
+    /// Reject `captured`, the members that the tasks and functions a module
+    /// calls through an interface port reach, when they use a clocking
+    /// block: the module would see its samples through copies that the
+    /// clocking block event does not wait for (14.13).
+    fn reject_clocking_captures(
+        &self,
+        captured: &HashMap<String, Direction>,
+    ) -> Result<(), AnalyzerError> {
+        match self
+            .clockings
+            .iter()
+            .find(|block| captured.contains_key(*block))
+        {
+            Some(block) => Err(unsupported(format!(
+                "clocking block `{block}` of interface `{}` used by a task or function called through an interface port",
+                self.name
+            ))),
+            None => Ok(()),
+        }
     }
 }
 
@@ -1448,7 +1503,9 @@ impl<'a> Design<'a> {
                 .collect();
             let functions = interface.function_closure(&called);
             let mut call_driven = HashSet::default();
-            for (member, direction) in interface.captured_members(&functions) {
+            let captured = interface.captured_members(&functions);
+            interface.reject_clocking_captures(&captured)?;
+            for (member, direction) in captured {
                 let listed = listed.entry(member.clone()).or_insert(direction);
                 if direction == Direction::Output {
                     *listed = Direction::Output;
@@ -1532,7 +1589,9 @@ impl<'a> Design<'a> {
                 continue;
             }
             let closure = interface.function_closure(&HashSet::from_iter([item.clone()]));
-            for (member, direction) in interface.captured_members(&closure) {
+            let captured = interface.captured_members(&closure);
+            interface.reject_clocking_captures(&captured)?;
+            for (member, direction) in captured {
                 if direction == Direction::Output {
                     written.insert(member.clone());
                     call_driven.insert(member);
@@ -2818,6 +2877,9 @@ impl InterfaceDecl {
             names: HashSet::default(),
             references: Vec::new(),
             lvalues: HashSet::default(),
+            clockings: HashSet::default(),
+            clocking_members: Vec::new(),
+            clocking_outputs: Vec::new(),
         };
         for port in &unit.ports {
             let native::PortKind::Named(name) = &port.kind else {
@@ -3285,11 +3347,29 @@ impl InterfaceDecl {
                     self.name
                 )));
             }
-            native::BodyItemKind::Clocking(_) => {
-                return Err(unsupported(format!(
-                    "clocking block in interface `{}`",
-                    self.name
-                )));
+            // A clocking block declares its name; its process and its
+            // variables are those of the interface body (see `clocking`).
+            // Its variables are members of each instance, which calls
+            // through virtual interfaces reach (25.9).
+            native::BodyItemKind::Clocking(id) => {
+                let Some(block) = clocking::block(native, *id)? else {
+                    return Ok(());
+                };
+                for name in clocking::variables(&block) {
+                    self.clocking_members.push(name.clone());
+                    self.add_member(Member {
+                        name,
+                        data_type: None,
+                        dimensions: Vec::new(),
+                        initializer: None,
+                    })?;
+                }
+                for var in block.vars.iter().filter(|var| var.output.is_some()) {
+                    self.clocking_outputs
+                        .push((block.name.clone(), var.name.clone()));
+                }
+                self.clockings.insert(block.name.clone());
+                self.items.push(Item::Process(span));
             }
             _ => {
                 return Err(unsupported(format!(

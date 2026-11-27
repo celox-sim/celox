@@ -658,6 +658,11 @@ pub(super) fn veryl_interface_contracts(
             let Some(name) = port.name().strip_prefix("h$") else {
                 continue;
             };
+            // What Celox declares for a clocking block is no member a
+            // contract names.
+            if signature.internal.iter().any(|internal| internal == name) {
+                continue;
+            }
             source.push_str(&format!(
                 "var {name}: {};\n",
                 veryl_type(port.r#type(), signature)?
