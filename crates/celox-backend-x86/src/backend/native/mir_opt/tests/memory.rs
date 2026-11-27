@@ -78,6 +78,56 @@ fn folds_contiguous_single_use_state_copies() {
 }
 
 #[test]
+fn mixed_width_state_copies_can_be_out_of_address_order() {
+    // Source bytes 0..16 exactly cover one vector. Leave a gap before
+    // byte 17, and preserve execution order if the destination aliases.
+    for displacement in [128, 4] {
+        let mut insts = Vec::new();
+        for (index, (offset, size)) in [
+            (8, OpSize::S64),
+            (17, OpSize::S8),
+            (0, OpSize::S16),
+            (4, OpSize::S32),
+            (2, OpSize::S16),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let value = VReg(index as u32);
+            insts.push(MInst::Load {
+                dst: value,
+                base: BaseReg::SimState,
+                offset,
+                size,
+            });
+            insts.push(MInst::Store {
+                src: value,
+                base: BaseReg::SimState,
+                offset: offset + displacement,
+                size,
+            });
+        }
+        let original = insts.clone();
+        let mut func = make_func(insts, 5);
+        fold_contiguous_memory_copies(&mut func);
+        let result = &func.blocks[0].insts;
+        if displacement == 4 {
+            assert_eq!(*result, original);
+        } else {
+            assert_eq!(
+                result[0],
+                MInst::MemCopy {
+                    src_offset: 0,
+                    dst_offset: displacement,
+                    byte_len: 16
+                }
+            );
+            assert_eq!(result[1..], original[2..4]);
+        }
+    }
+}
+
+#[test]
 fn does_not_fold_state_copy_when_loaded_value_has_another_use() {
     let mut func = make_func(
         vec![
