@@ -155,3 +155,49 @@ fn illegal_clockvar_uses_are_errors() {
         assert_invalid(items, rule);
     }
 }
+
+/// A variable that hides an interface instance of the same name is no
+/// interface instance: a member path through it names no clockvar.
+#[test]
+fn variables_hide_interface_instances_with_clocking_blocks() {
+    let source = "`timescale 1ns/1ns
+interface bus(input bit clk); logic [3:0] x; clocking cb @(posedge clk); input x; endclocking endinterface
+module Top;
+    typedef struct packed { logic [3:0] x; } inner_t;
+    typedef struct packed { inner_t cb; } outer_t;
+    bit clk;
+    bus bus(clk);
+    function automatic logic [3:0] f(outer_t bus); return bus.cb.x; endfunction
+    initial $display(\"%0d\", f(4'h5));
+endmodule";
+    analyze(source).unwrap_or_else(|error| panic!("{error}"));
+}
+
+/// A module that calls an interface task through an interface port works on
+/// copies of the members it reaches, which the samples of a clocking block
+/// would reach after the clocking block event: Celox rejects it by name.
+#[test]
+fn clocking_blocks_reached_through_interface_ports_are_unsupported() {
+    for port in ["bus.m b", "bus b"] {
+        let source = format!(
+            "`timescale 1ns/1ns
+interface bus(input bit clk);
+    logic [3:0] d;
+    clocking cb @(posedge clk); input d; endclocking
+    task automatic read(output logic [3:0] v); @(cb); v = cb.d; endtask
+    modport m(import read);
+endinterface
+module user({port});
+    initial begin logic [3:0] v; b.read(v); end
+endmodule
+module Top; bit clk; bus i(clk); user u(i); endmodule"
+        );
+        match analyze(&source).map_err(AnalyzerError::into_error) {
+            Err(AnalyzerError::Unsupported(text)) => assert!(
+                text.contains("clocking block `cb` of interface `bus` used by a task"),
+                "{port}: {text}"
+            ),
+            other => panic!("{port}: {other:?}"),
+        }
+    }
+}

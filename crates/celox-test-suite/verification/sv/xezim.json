@@ -5,6 +5,7 @@
     "xezim/array_locators.json",
     "xezim/binary_file_io.json",
     "xezim/class.json",
+    "xezim/clocking.json",
     "xezim/concurrent_assertions.json",
     "xezim/container_formals.json",
     "xezim/containers.json",

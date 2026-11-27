@@ -660,6 +660,26 @@ pub(super) fn delay_ticks(
         })
 }
 
+/// The names of the variables clocking block `block` declares (see the
+/// module documentation), its own name first.
+pub(super) fn variables(block: &Block<'_>) -> Vec<String> {
+    let mut names = vec![
+        block.name.clone(),
+        marker(&block.name),
+        drives_issued(&block.name),
+        drives_matured(&block.name),
+    ];
+    for var in &block.vars {
+        if var.input.is_some() {
+            names.push(sampled(&block.name, &var.name));
+        }
+        if matches!(var.input, Some(InputSkew::Delay(_))) {
+            names.push(skewed(&block.name, &var.name));
+        }
+    }
+    names
+}
+
 /// Reject a use of a clocking block's name as an event variable, which it
 /// is only to Celox: a trigger or an assignment of the clocking block event
 /// (14.10).
@@ -678,6 +698,69 @@ pub(super) fn reject_block_use(
                 "clocking block `{name}` is no event variable: it can only be waited for (IEEE 1800-2023 14.10)"
             )));
         }
+    }
+    Ok(())
+}
+
+/// Reject a clockvar of a clocking block of an interface instance named
+/// through the instance, `bus.cb.x`, or through a virtual interface,
+/// `vif.cb.x`, which Celox does not support.
+pub(super) fn reject_foreign(
+    id: celox_sv_syntax::ExprId,
+    native: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+) -> Converted<()> {
+    use celox_sv_syntax::ExprKind;
+    let ExprKind::Member {
+        expression: inner,
+        separator,
+        name: var,
+    } = &native
+        .expression(expression_binding::ungroup(id, native))
+        .kind
+    else {
+        return Ok(());
+    };
+    let ExprKind::Member {
+        expression: base,
+        separator: inner_separator,
+        name: block,
+    } = &native
+        .expression(expression_binding::ungroup(*inner, native))
+        .kind
+    else {
+        return Ok(());
+    };
+    if separator != "." || inner_separator != "." {
+        return Ok(());
+    }
+    let block = instances::normalize_identifier(&block.spelling);
+    let foreign = match virtual_interfaces::native_member(tree, session, *inner, native, dimensions)
+    {
+        Some((_, ty, _)) => virtual_interfaces::member(session, &ty, &marker(&block)).is_ok(),
+        None => match &native
+            .expression(expression_binding::ungroup(*base, native))
+            .kind
+        {
+            // A variable of that name, such as a structure formal, hides
+            // the interface instance.
+            ExprKind::Name(handle) => {
+                let handle = instances::normalize_identifier(&handle.spelling);
+                dimensions.get(&handle).is_none()
+                    && scope::imported(tree)
+                        .interface_members
+                        .contains_key(&format!("{handle}.{}", marker(&block)))
+            }
+            _ => false,
+        },
+    };
+    if foreign {
+        return Err(unsupported(format!(
+            "clockvar `{block}.{}` of a clocking block of another scope, through an interface instance or a virtual interface",
+            instances::normalize_identifier(&var.spelling)
+        )));
     }
     Ok(())
 }
