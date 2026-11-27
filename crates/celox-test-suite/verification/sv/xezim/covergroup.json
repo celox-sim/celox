@@ -57,6 +57,17 @@
     },
     {
       "category": "Sequential",
+      "detail": "covergroup::bus_transitions_through_a_reference at 1515:2: expect_output: expected [50, 32, 49, 50, 48, 10], got [50, 32, 52, 10]",
+      "expectation": "Simulation",
+      "name": "covergroup::bus_transitions_through_a_reference",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
       "name": "covergroup::clocked_instances_take_stop_start_and_sample",
@@ -398,6 +409,17 @@
     },
     {
       "category": "Sequential",
+      "detail": "the simulation ended before the script did",
+      "expectation": "Simulation",
+      "name": "covergroup::overlapping_transitions_of_the_example_of_19_5_2",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
       "name": "covergroup::procedural_constructions_sample_at_their_clocking_events",
@@ -425,6 +447,17 @@
       "name": "covergroup::reference_arguments_track_their_actuals",
       "phase": "execute",
       "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "the simulation ended before the script did",
+      "expectation": "Simulation",
+      "name": "covergroup::repetitions_of_transitions",
+      "phase": "execute",
+      "status": "mismatch",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
@@ -480,6 +513,39 @@
       "name": "covergroup::tolerance_ranges_of_a_bin",
       "phase": "compile",
       "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "the simulation ended before the script did",
+      "expectation": "Simulation",
+      "name": "covergroup::transition_arrays_and_ignored_transitions",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "the simulation ended before the script did",
+      "expectation": "Simulation",
+      "name": "covergroup::transition_bins_of_the_example_of_19_5_2",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "the simulation ended before the script did",
+      "expectation": "Simulation",
+      "name": "covergroup::transition_operands_of_arguments",
+      "phase": "execute",
+      "status": "mismatch",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []

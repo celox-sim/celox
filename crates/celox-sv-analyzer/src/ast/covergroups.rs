@@ -28,8 +28,8 @@ mod model;
 
 pub(crate) use compile::Bound;
 pub(super) use compile::{
-    ITEM, Layout, Level, Member, OptionType, SelectTree, cross_name, filter, option_member,
-    point_name, select_tree, variable_names,
+    ITEM, Layout, Level, Member, OptionType, SelectTree, cross_name, filter, one_value_transition,
+    option_member, point_name, select_tree, variable_names,
 };
 pub(super) use methods::{
     check_place, construct, construct_at_site, option_assignment, overall, result_shape,

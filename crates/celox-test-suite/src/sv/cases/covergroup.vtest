@@ -1313,3 +1313,203 @@ endmodule"#)
 endmodule"#)
  (top Top) (run_to_finish)
  (expect_output "6 24\n4 24\n37.50 12.50\n"))
+
+; 19.5.2: the example `cg` with its trace `4 5 7 11 8 12 2 2 3`: `sa`
+; counts 7=>11 and 8=>12, `sb[]` has a bin for each of the nine sequences,
+; of which those two count once, and `sc` counts 12=>2=>2=>3 once; the
+; `default sequence` bin is no bin of the coverage. The same bins with
+; `at_least` 2 and 3 show the hits.
+(case transition_bins_of_the_example_of_19_5_2
+ (source "transition_bins.sv" #"module Top;
+ bit [4:1] v_a;
+ covergroup cg(int least);
+  option.at_least = least;
+  coverpoint v_a
+  {
+   bins sa   = (4 => 5 => 6), ([7:9],10 => 11,12);
+   bins sb[] = (4 => 5 => 6), ([7:9],10 => 11,12);
+   bins sc   = (12 => 3 [-> 1]);
+   bins allother = default sequence ;
+  }
+ endgroup
+ cg a = new(1), b = new(2), c = new(3);
+ bit [4:1] trace [9] = '{4, 5, 7, 11, 8, 12, 2, 2, 3};
+ int covered, total;
+ initial begin
+  foreach (trace[i]) begin v_a = trace[i]; a.sample(); b.sample(); c.sample(); end
+  void'(a.get_inst_coverage(covered, total)); $write("%0d %0d ", covered, total);
+  void'(b.get_inst_coverage(covered, total)); $write("%0d %0d ", covered, total);
+  void'(c.get_inst_coverage(covered, total)); $display("%0d %0d", covered, total);
+  $finish;
+ end
+endmodule"#)
+ (top Top) (run_to_finish)
+ (expect_output "4 11 1 11 0 11\n"))
+
+; 19.5.2: the example `sg` with its trace: `b2` counts twice, `b3` three
+; times, `b5` four times, `b6` and `b7` once. Coverpoint `pk` has the same
+; bins with `at_least` k, so it covers the bins of k hits or more.
+(case overlapping_transitions_of_the_example_of_19_5_2
+ (source "overlapping_transitions.sv" #"module Top;
+ bit [3:0] v;
+ covergroup sg;
+  p1: coverpoint v { option.at_least = 1;
+   bins b2 = (2 [-> 3:5]); bins b3 = (3 [-> 3:5]); bins b5 = (5 [* 3]);
+   bins b6 = (1 => 3 [-> 4:6] => 1); bins b7 = (1 => 2 [= 3:6] => 5); }
+  p2: coverpoint v { option.at_least = 2;
+   bins b2 = (2 [-> 3:5]); bins b3 = (3 [-> 3:5]); bins b5 = (5 [* 3]);
+   bins b6 = (1 => 3 [-> 4:6] => 1); bins b7 = (1 => 2 [= 3:6] => 5); }
+  p3: coverpoint v { option.at_least = 3;
+   bins b2 = (2 [-> 3:5]); bins b3 = (3 [-> 3:5]); bins b5 = (5 [* 3]);
+   bins b6 = (1 => 3 [-> 4:6] => 1); bins b7 = (1 => 2 [= 3:6] => 5); }
+  p4: coverpoint v { option.at_least = 4;
+   bins b2 = (2 [-> 3:5]); bins b3 = (3 [-> 3:5]); bins b5 = (5 [* 3]);
+   bins b6 = (1 => 3 [-> 4:6] => 1); bins b7 = (1 => 2 [= 3:6] => 5); }
+  p5: coverpoint v { option.at_least = 5;
+   bins b2 = (2 [-> 3:5]); bins b3 = (3 [-> 3:5]); bins b5 = (5 [* 3]);
+   bins b6 = (1 => 3 [-> 4:6] => 1); bins b7 = (1 => 2 [= 3:6] => 5); }
+ endgroup
+ sg c = new;
+ bit [3:0] trace [18] = '{1, 4, 3, 2, 3, 3, 2, 2, 3, 2, 3, 1, 5, 5, 5, 5, 5, 5};
+ initial begin
+  foreach (trace[i]) begin v = trace[i]; c.sample(); end
+  $display("%0.2f %0.2f %0.2f %0.2f %0.2f", c.p1.get_inst_coverage(), c.p2.get_inst_coverage(),
+   c.p3.get_inst_coverage(), c.p4.get_inst_coverage(), c.p5.get_inst_coverage());
+  $finish;
+ end
+endmodule"#)
+ (top Top) (run_to_finish)
+ (expect_output "100.00 60.00 40.00 20.00 0.00\n"))
+
+; 19.5.2: a set of transitions, consecutive repetitions with a count and a
+; range, goto and nonconsecutive repetitions alone and between steps, on one
+; trace. Their hits are 2, 2, 4, 9, 1, 10 and 1: the coverpoints with
+; `at_least` 1, 2, 4, 9, 10 and 11 cover 7, 5, 3, 2, 1 and none of the 7.
+(case repetitions_of_transitions
+ (source "repetitions.sv" #"module Top;
+ bit [3:0] v;
+ covergroup cg(int least);
+  option.at_least = least;
+  coverpoint v {
+   bins sets = (1, 5 => 6, 7);
+   bins five = (3 [* 5]);
+   bins some = (3 [* 3:5]);
+   bins goto3 = (3 [-> 3]);
+   bins between = (1 => 3 [-> 3] => 5);
+   bins non2 = (3 [= 2]);
+   bins later = (1 => 3 [= 2] => 6);
+  }
+ endgroup
+ cg c[6];
+ int least [6] = '{1, 2, 4, 9, 10, 11};
+ bit [3:0] trace [24] = '{1, 6, 5, 7, 3, 3, 3, 3, 3, 3, 1, 2, 3, 4, 3, 0, 3, 5, 1, 3, 3, 2, 6, 6};
+ int covered, total;
+ initial begin
+  foreach (c[i]) c[i] = new(least[i]);
+  foreach (trace[k]) begin v = trace[k]; foreach (c[i]) c[i].sample(); end
+  foreach (c[i]) begin void'(c[i].get_inst_coverage(covered, total)); $write("%0d ", covered); end
+  $display("of %0d", total);
+  $finish;
+ end
+endmodule"#)
+ (top Top) (run_to_finish)
+ (expect_output "7 5 3 2 1 0 of 7\n"))
+
+; 19.5.2, 19.5.4, 19.5.5: `name[]` has a bin for each sequence of values, over
+; each length of a repetition range, a sequence listed twice being one bin; a
+; wildcard transition; an ignored sequence that removes the only sequence of
+; a bin (`2=>3` of `1=>2=>3=>4`), which leaves the coverage, and the match of
+; another bin that it is part of; ignored values advance transitions.
+(case transition_arrays_and_ignored_transitions
+ (source "transition_arrays.sv" #"module Top;
+ bit [3:0] v, a;
+ covergroup arrays;
+  coverpoint v {
+   bins r[] = (3 [* 3:5]);
+   bins p[] = (1, 2 => 3), (2 => 3);
+   wildcard bins w = (4'b11?? => 4'b00??);
+  }
+ endgroup
+ covergroup ignored;
+  option.at_least = 2;
+  coverpoint a {
+   ignore_bins ignore_vals = {7,8};
+   ignore_bins ignore_trans = (1=>3=>5);
+   bins long = (1 => 2 => 3 => 4);
+   ignore_bins short = (2 => 3);
+   bins t = (7 => 8 => 7 => 8);
+   bins u = (0 => 1 => [3:4] => 5);
+   bins v = (0 => 1);
+  }
+ endgroup
+ arrays x = new;
+ ignored y = new;
+ bit [3:0] vs [15] = '{3, 3, 3, 3, 3, 3, 1, 3, 2, 3, 12, 1, 15, 3, 14};
+ bit [3:0] avs [18] = '{1, 2, 3, 4, 7, 8, 7, 8, 0, 1, 3, 5, 0, 1, 4, 5, 0, 1};
+ int covered, total;
+ initial begin
+  foreach (vs[i]) begin v = vs[i]; x.sample(); end
+  foreach (avs[i]) begin a = avs[i]; y.sample(); end
+  void'(x.get_inst_coverage(covered, total)); $write("%0d %0d ", covered, total);
+  void'(y.get_inst_coverage(covered, total)); $display("%0d %0d", covered, total);
+  $finish;
+ end
+endmodule"#)
+ (top Top) (run_to_finish)
+ (expect_output "6 6 1 3\n"))
+
+; 19.5: the values and counts of transitions may be arguments of the
+; covergroup and calls of functions of them, which `new` evaluates: two
+; instances of one type count different sequences.
+(case transition_operands_of_arguments
+ (source "transition_arguments.sv" #"module Top;
+ bit [3:0] v;
+ localparam bit [3:0] P = 4;
+ function automatic int twice(int x); return 2 * x; endfunction
+ covergroup cg(int a, int n);
+  coverpoint v { bins r = (a => P => twice(a) [* n]); }
+ endgroup
+ cg c1 = new(1, 2), c2 = new(1, 3), c3 = new(3, 1);
+ bit [3:0] trace [7] = '{1, 4, 2, 2, 3, 4, 6};
+ int covered, total;
+ initial begin
+  foreach (trace[i]) begin v = trace[i]; c1.sample(); c2.sample(); c3.sample(); end
+  void'(c1.get_inst_coverage(covered, total)); $write("%0d ", covered);
+  void'(c2.get_inst_coverage(covered, total)); $write("%0d ", covered);
+  void'(c3.get_inst_coverage(covered, total)); $display("%0d", covered);
+  $finish;
+ end
+endmodule"#)
+ (top Top) (run_to_finish)
+ (expect_output "1 0 1\n"))
+
+; The shape of a real design, through a `ref` argument of a covergroup with
+; a clocking event: a write, a run of 1 to 30 idle states and a read, as an
+; array of 120 bins between parameters, beside an ignore bin of values,
+; which leaves the transitions as they are. The states change at the
+; falling edges and are sampled at the rising ones: 2=>0=>0=>3 once and
+; 1=>0=>4 twice.
+(case bus_transitions_through_a_reference
+ (source "bus_transitions.sv" #"module Top;
+ localparam bit [3:0] IDLE = 0, AHB_WR = 1, AXI_WR = 2, AHB_RD = 3, AXI_RD = 4;
+ bit clk = 0;
+ always #5 clk = ~clk;
+ logic [3:0] state = IDLE;
+ covergroup cg(ref logic [3:0] st) @(posedge clk);
+  coverpoint st {
+   bins wr_rd[] = (AHB_WR, AXI_WR => IDLE [*1:30] => AHB_RD, AXI_RD);
+   ignore_bins dont_care = {IDLE, 4'hf, (AXI_RD | AXI_WR), (AHB_RD | AHB_WR)};
+  }
+ endgroup
+ cg c = new(state);
+ logic [3:0] trace [10] = '{AXI_WR, IDLE, IDLE, AHB_RD, AHB_WR, IDLE, AXI_RD, AHB_WR, IDLE, AXI_RD};
+ int covered, total;
+ initial begin
+  foreach (trace[i]) @(negedge clk) state = trace[i];
+  #10;
+  void'(c.get_inst_coverage(covered, total)); $display("%0d %0d", covered, total);
+  $finish;
+ end
+endmodule"#)
+ (top Top) (run_to_finish)
+ (expect_output "2 120\n"))
