@@ -869,6 +869,8 @@ struct Generator<'a> {
     incremental: Option<&'a Incremental>,
     partitioned_glue: Option<(&'a LaidOutProgram, HashSet<celox_sir::BlockId>)>,
     shared: HashMap<AbsoluteAddr, AbsoluteAddr>,
+    /// A settle boundary must check for a captured finish even when clean.
+    settle_can_finish: bool,
     /// The shared settle, emitted by [`Self::emit_settle`].
     comb: celox_sir::BlockId,
     /// Where the shared settle continues, by case: case `i + 1` continues

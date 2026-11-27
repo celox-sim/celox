@@ -64,13 +64,12 @@ def clocks(path, profile, given):
     return 1, 'no clock (absolute counts)'
 
 
-def share(table, key):
+def share(table, key, requests):
     kind, subject, measure = key
     whole = SHARES.get(measure)
     if whole is None:
-        if kind == 'settle_call':
-            entered = table.get(('settle', '', 'entered'))
-            return table[key] / entered if entered else None
+        if kind == 'settle_call' and measure == 'requests':
+            return table[key] / requests if requests else None
         return None
     total = table.get((kind, subject, whole))
     return table[key] / total if total else None
@@ -99,9 +98,11 @@ def show(args):
     scheduler = profile.get('scheduler')
     if scheduler:
         print('scheduler: ' + ', '.join(f'{k} {v}' for k, v in scheduler.items()))
+    requests = sum(count for (kind, _, measure), count in table.items()
+                   if (kind, measure) == ('settle_call', 'requests'))
     findings = []
     for key, count in table.items():
-        part = share(table, key)
+        part = share(table, key, requests)
         if key[2] == 'quiet' and part is not None and part >= 0.2:
             findings.append(f'{part:.1%} of the {key[1]} domain judgments found no edge ({count / base:.3f}/clock)')
         if key == ('settle', '', 'dirty') and part is not None:
@@ -123,7 +124,7 @@ def show(args):
         order = [key for key in order if table[key]]
     for key in order:
         count = table[key]
-        part = share(table, key)
+        part = share(table, key, requests)
         part = f'{part:7.1%}' if part is not None else ' ' * 7
         print(f'{key[0]:<13} {key[2]:<18} {count:>14} {count / base:>10.3f} {part}  {key[1]}')
     if idle and not args.all:
