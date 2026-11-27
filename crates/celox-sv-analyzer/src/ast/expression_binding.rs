@@ -60,7 +60,7 @@ pub(super) use streams::{
 pub(super) use strings::{
     alias_name, call as string_call, fixed_array_element as fixed_string_array_element,
     method as string_method, native_string, string_value, to_string as string_operand,
-    typed_string,
+    typed_string, unpacked_array,
 };
 fn disagreement() -> AnalyzerError {
     AnalyzerError::Parse("invalid native expression ownership".into())

@@ -185,6 +185,69 @@ fn replication_counts_of_unresolved_parameters_are_rejected() {
     }
 }
 
+/// An unpacked array in the set of `inside` stands for its elements (IEEE
+/// 1800-2023 11.4.13), which is not implemented: such a set is rejected
+/// rather than compared with the array as one value, for fixed-size arrays,
+/// queues, dynamic and associative arrays, and class properties, in `inside`
+/// expressions and `case inside` items. The left operand of `inside`, and a
+/// `case` item, is singular. A set of elements of arrays is taken.
+#[test]
+fn unpacked_arrays_in_inside_sets_are_rejected() {
+    for (body, want) in [
+        (
+            "int a[4]; initial x = 3 inside {a};",
+            "an unpacked array in the set of inside",
+        ),
+        (
+            "int q[$]; initial x = 3 inside {1, q};",
+            "an unpacked array in the set of inside",
+        ),
+        (
+            "int d[]; initial x = 3 inside {d};",
+            "an unpacked array in the set of inside",
+        ),
+        (
+            "int m[int]; initial x = 3 inside {m};",
+            "an unpacked array in the set of inside",
+        ),
+        (
+            "class C; int q[$]; endclass C c; initial begin c = new; x = 3 inside {c.q}; end",
+            "an unpacked array in the set of inside",
+        ),
+        (
+            "int a[2]; initial x = a inside {1};",
+            "an unpacked array as the operand of inside",
+        ),
+        (
+            "int a[2]; int v; initial case (v) inside a: x = 1; default: x = 0; endcase",
+            "an unpacked array in the set of inside",
+        ),
+        (
+            "int a[2]; int v; initial case (v) a: x = 1; default: x = 0; endcase",
+            "an unpacked array as a case item",
+        ),
+    ] {
+        let source = format!("module Top(output bit x); {body} endmodule");
+        let Err(error) = Simulator::from_sv_sources(vec![(&source, Path::new("inside.sv"))], "Top")
+            .build_cranelift()
+        else {
+            panic!("{body} is accepted");
+        };
+        assert!(error.to_string().contains(want), "{body}: {error}");
+    }
+    let source = "module Top(output bit x, output bit y);
+        int a[4] = '{1, 2, 3, 4};
+        int q[$] = '{5};
+        initial begin x = 3 inside {a[2], q[0]}; y = 4 inside {a[2], q[0]}; end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("inside.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("x")), BigUint::from(1u8));
+    assert_eq!(sim.get(sim.signal("y")), BigUint::from(0u8));
+}
+
 /// A multi-word result whose width is no multiple of 64 keeps the bits above
 /// its width clear: the carry out of a sum, the borrow of a difference or a
 /// negation, the high bits of a product or a left shift, the sign fill of an
