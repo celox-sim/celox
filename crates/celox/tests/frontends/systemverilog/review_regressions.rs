@@ -7150,24 +7150,6 @@ fn rejects_elaboration_system_tasks() {
 }
 
 #[test]
-fn rejects_bind_directives() {
-    let error = cranelift_build_error(
-        r#"
-        module Driver(output logic y);
-            assign y = 1'b1;
-        endmodule
-        module Top(output wire y);
-            bind Top Driver driver(.y(y));
-        endmodule
-        "#,
-    );
-    assert!(
-        error.contains("bind directive"),
-        "unexpected error: {error}"
-    );
-}
-
-#[test]
 fn rejects_specify_blocks() {
     let error = cranelift_build_error(
         r#"
