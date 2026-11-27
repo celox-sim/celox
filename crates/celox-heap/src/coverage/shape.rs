@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 use super::cross::{CrossInputs, CrossShape};
 use super::descriptor::{
     BinArray, BinDescriptor, BinFilter, BinKind, BinValues, Bound, Constant, Operand,
-    PointDescriptor, PointType, RangeDescriptor, TypeDescriptor, ValueType,
+    PointDescriptor, PointType, RangeDescriptor, TransitionStep, TypeDescriptor, ValueType,
 };
+use super::transitions::{self, TransitionBuilder, TransitionShape};
 use super::value::{
     Exact, Interval, KeyValue, Matched, Matcher, Partition, Values, Wild, bias, numeric, ones,
     value_of_key,
@@ -113,7 +114,7 @@ pub fn value_count(ty: &PointType, wildcard: bool, range: RangeValue<'_>) -> Opt
 }
 
 /// The bits of the two planes of `constant` in its width.
-fn planes(constant: &Constant) -> (BigUint, BigUint) {
+pub(crate) fn planes(constant: &Constant) -> (BigUint, BigUint) {
     let ones = ones(constant.ty.width);
     (&constant.value & &ones, &constant.mask & &ones)
 }
@@ -177,7 +178,7 @@ fn push_cast(
 
 /// `constant` as source code writes it: a number, or its bits where some
 /// are x or z.
-fn show(constant: &Constant) -> String {
+pub(crate) fn show(constant: &Constant) -> String {
     let (value, mask) = planes(constant);
     if mask.bits() == 0 {
         return numeric(&value, constant.ty.width, constant.ty.signed).to_string();
@@ -424,6 +425,9 @@ pub(crate) struct PointShape {
     pub defaults: Vec<u32>,
     /// Whether one of them is a `default` bin array.
     pub default_array: bool,
+    /// The sequences of the transition bins and the `default sequence`
+    /// bins (19.5.2), if the coverpoint has any.
+    pub transitions: Option<Box<TransitionShape>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -446,10 +450,13 @@ pub(crate) struct BinShape {
 
 impl BinShape {
     /// Whether the bin counts towards coverage: it is a `bins` bin with a
-    /// value (19.11.1) that is no `default` bin (19.5). These are the bins
-    /// of a coverpoint that a cross has cross products of (19.6).
+    /// value or a sequence (19.11.1) that is no `default` or `default
+    /// sequence` bin (19.5, 19.5.2). These are the bins of a coverpoint
+    /// that a cross has cross products of (19.6).
     pub(crate) fn coverable(&self) -> bool {
-        self.kind == BinKind::Bins && self.class == BinClass::Value && !self.empty
+        self.kind == BinKind::Bins
+            && matches!(self.class, BinClass::Value | BinClass::Transition)
+            && !self.empty
     }
 }
 
@@ -464,6 +471,11 @@ pub(crate) enum BinClass {
     /// this number among those of the shape. The counter of the bin has the
     /// hits of all of them.
     DefaultArray(u32),
+    /// Sequences of values of the coverpoint (19.5.2).
+    Transition,
+    /// The samples that end no sequence of another transition bin and go
+    /// on with none (`default sequence`, 19.5.2).
+    DefaultSequence,
 }
 
 /// What names a bin of a coverpoint: the bins of two instances that are
@@ -497,6 +509,9 @@ pub(crate) enum NameTag {
     /// `name[index]`: the bin of this index in an array of a fixed number
     /// of bins.
     Index(u32),
+    /// `name[v1=>v2=>...]`: the bin of this sequence of values in an array
+    /// of a bin for each sequence of a transition (19.5.2).
+    Sequence(Vec<ValueKey>),
 }
 
 /// A value of a coverpoint as the identity of a bin and of what a `default`
@@ -549,7 +564,23 @@ pub(crate) fn bin_name(point: &PointDescriptor, id: &BinId) -> String {
             value.show(point.ty.width, point.ty.signed)
         ),
         NameTag::Index(index) => format!("{}[{index}]", declared()),
+        NameTag::Sequence(values) => format!(
+            "{}[{}]",
+            declared(),
+            show_sequence(values.iter(), point.ty.width, point.ty.signed)
+        ),
     }
+}
+
+/// The sequence of values `values` of a type of `width` bits and signedness
+/// `signed` as 19.5.2 writes a transition: `4=>5=>6`.
+pub(crate) fn show_sequence<'a>(
+    values: impl Iterator<Item = &'a ValueKey>,
+    width: u32,
+    signed: bool,
+) -> String {
+    let shown: Vec<String> = values.map(|value| value.show(width, signed)).collect();
+    shown.join("=>")
 }
 
 /// The options of a coverpoint that decide its bins.
@@ -565,7 +596,7 @@ pub(crate) fn key(ty: &PointType, value: &BigInt) -> BigUint {
 }
 
 /// Values of a bin in the order its declaration lists them.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) enum Item {
     /// The values of the keys `low..=high`.
     Range { low: BigUint, high: BigUint },
@@ -646,10 +677,7 @@ pub(crate) fn value_items(
     let mut warnings = Vec::new();
     match &bin.values {
         BinValues::Ranges { ranges, .. } => {
-            for range in ranges {
-                let range = evaluate(range, inputs)?;
-                resolve_into(&point.ty, bin.wildcard, range, &mut items, &mut warnings);
-            }
+            return range_items(&point.ty, bin.wildcard, ranges, inputs);
         }
         BinValues::Set(index) => {
             let set = sets
@@ -679,7 +707,25 @@ pub(crate) fn value_items(
                 None => {}
             }
         }
-        BinValues::Default => {}
+        BinValues::Default | BinValues::Transitions(_) | BinValues::DefaultSequence => {}
+    }
+    Ok((items, warnings))
+}
+
+/// The values of the range list `ranges` of a bin of a coverpoint of type
+/// `ty` in their order, where `wildcard` is whether the declaration is
+/// `wildcard`, with the warnings of their resolution (19.5.7).
+pub(crate) fn range_items(
+    ty: &PointType,
+    wildcard: bool,
+    ranges: &[RangeDescriptor],
+    inputs: &[Option<Constant>],
+) -> Result<(Vec<Item>, Vec<String>), String> {
+    let mut items = Vec::new();
+    let mut warnings = Vec::new();
+    for range in ranges {
+        let range = evaluate(range, inputs)?;
+        resolve_into(ty, wildcard, range, &mut items, &mut warnings);
     }
     Ok((items, warnings))
 }
@@ -1026,15 +1072,15 @@ impl Cursor<'_> {
 /// The values of keys that were seen, as disjoint ranges by their low key,
 /// and those with x or z bits.
 #[derive(Default)]
-struct Seen {
+pub(crate) struct Seen {
     ranges: BTreeMap<BigUint, BigUint>,
-    exact: BTreeSet<(BigUint, BigUint)>,
+    pub exact: BTreeSet<(BigUint, BigUint)>,
 }
 
 impl Seen {
     /// See the values of the keys `low..=high`: those that were not seen
     /// yet, in their order.
-    fn fresh(&mut self, low: &BigUint, high: &BigUint) -> Vec<(BigUint, BigUint)> {
+    pub(crate) fn fresh(&mut self, low: &BigUint, high: &BigUint) -> Vec<(BigUint, BigUint)> {
         // The ranges that meet `low..=high`, in order.
         let mut meeting: Vec<(BigUint, BigUint)> = Vec::new();
         if let Some((start, end)) = self.ranges.range(..low).next_back()
@@ -1103,6 +1149,7 @@ pub(crate) fn build(
             values: Values::default(),
             defaults: Vec::new(),
             default_array: false,
+            transitions: TransitionBuilder::default(),
             arrays: &mut shape.arrays,
             counters: &mut shape.counters,
             warnings: &mut shape.warnings,
@@ -1116,6 +1163,10 @@ pub(crate) fn build(
                 BinValues::Ranges { .. } | BinValues::Set(_) => {
                     builder.declared(decl as u32, bin, construction, options)?
                 }
+                BinValues::Transitions(sequences) => {
+                    builder.transitions(decl as u32, bin, sequences, construction)?
+                }
+                BinValues::DefaultSequence => builder.default_sequence(decl as u32, bin)?,
             }
         }
         let PointBuilder {
@@ -1123,8 +1174,10 @@ pub(crate) fn build(
             values,
             defaults,
             default_array,
+            transitions,
             ..
         } = builder;
+        let transitions = transitions.finish(point, &mut bins)?;
         let removes: Vec<bool> = bins.iter().map(|bin| bin.kind != BinKind::Bins).collect();
         let Matched {
             matcher,
@@ -1166,6 +1219,7 @@ pub(crate) fn build(
             matcher,
             defaults,
             default_array,
+            transitions,
         });
     }
     let inputs = CrossInputs {
@@ -1186,6 +1240,7 @@ struct PointBuilder<'a> {
     values: Values,
     defaults: Vec<u32>,
     default_array: bool,
+    transitions: TransitionBuilder,
     arrays: &'a mut u32,
     counters: &'a mut u32,
     warnings: &'a mut Vec<Warning>,
@@ -1339,6 +1394,89 @@ impl PointBuilder<'_> {
         Ok(())
     }
 
+    /// The bin of the `default sequence` declaration `decl` (19.5.2).
+    fn default_sequence(&mut self, decl: u32, bin: &BinDescriptor) -> Result<(), String> {
+        let id = BinId {
+            decl,
+            tag: NameTag::Scalar,
+        };
+        let index = self.bin(id, BinClass::DefaultSequence, Some(bin))?;
+        self.transitions.default_sequence(index, bin.kind);
+        Ok(())
+    }
+
+    /// The bins of the transition declaration `decl` of `sequences`
+    /// (19.5.2): one for all of them, or with `[]` one for each sequence of
+    /// values they stand for. The values of a step are resolved as those of
+    /// a bin (19.5.7), and no ignore or illegal value is taken from them
+    /// (19.5.5, 19.5.6).
+    fn transitions(
+        &mut self,
+        decl: u32,
+        bin: &BinDescriptor,
+        sequences: &[Vec<TransitionStep>],
+        construction: &Construction<'_>,
+    ) -> Result<(), String> {
+        let point = self.point;
+        let subject = format!(
+            "{} `{}` of coverpoint `{}`",
+            bin.kind.keyword(),
+            bin.name,
+            point.name
+        );
+        let mut compiled = Vec::with_capacity(sequences.len());
+        for steps in sequences {
+            let mut list = Vec::with_capacity(steps.len());
+            for step in steps {
+                let (items, warnings) =
+                    range_items(&point.ty, bin.wildcard, &step.values, construction.inputs)?;
+                self.warnings
+                    .extend(warnings.into_iter().map(|text| Warning {
+                        subject: subject.clone(),
+                        text,
+                    }));
+                let step = transitions::step(items, &step.repeat, construction.inputs)
+                    .map_err(|reason| format!("{subject} {reason}"))?;
+                list.push(step);
+            }
+            // "Transition bin specifications of length 0 shall be illegal",
+            // and a repetition range stands for each of its counts.
+            if let [only] = &list[..]
+                && only.low == 1
+            {
+                return Err(format!(
+                    "{subject} has a transition of length 0 (IEEE 1800-2023 19.5.2)"
+                ));
+            }
+            compiled.push(list);
+        }
+        match &bin.array {
+            BinArray::Scalar => {
+                let id = BinId {
+                    decl,
+                    tag: NameTag::Scalar,
+                };
+                let index = self.bin(id, BinClass::Transition, Some(bin))?;
+                for steps in compiled {
+                    self.transitions.sequence(point, index, bin.kind, steps)?;
+                }
+            }
+            BinArray::Open => {
+                let mut transitions = std::mem::take(&mut self.transitions);
+                let made =
+                    transitions.array(point, &subject, decl, bin.kind, compiled, &mut |id| {
+                        self.bin(id, BinClass::Transition, Some(bin))
+                    });
+                self.transitions = transitions;
+                made?;
+            }
+            BinArray::Fixed(_) => {
+                return Err(format!("{subject} is a transition bin array with a size"));
+            }
+        }
+        Ok(())
+    }
+
     /// Give bin `bin` the values `items`.
     fn hold(&mut self, bin: u32, items: Vec<Item>) {
         for item in items {
@@ -1399,10 +1537,10 @@ impl PointBuilder<'_> {
                 ));
             }
             // The values of such a value are not known here.
-            let removing = point
-                .bins
-                .iter()
-                .any(|other| other.kind != BinKind::Bins && other.values != BinValues::Default);
+            let removing = point.bins.iter().any(|other| {
+                other.kind != BinKind::Bins
+                    && matches!(other.values, BinValues::Ranges { .. } | BinValues::Set(_))
+            });
             let text = match bin.kind {
                 BinKind::Bins if removing || options.detect_overlap => Some(
                     "is matched as a pattern: `ignore_bins`, `illegal_bins` and \
@@ -1585,18 +1723,26 @@ impl PointBuilder<'_> {
     }
 }
 
-/// `range` with its operands evaluated from the constants and `inputs`.
-pub(crate) fn evaluate<'a>(
-    range: &'a RangeDescriptor,
+/// The value of `operand` from the constants and `inputs`.
+pub(crate) fn operand_value<'a>(
+    operand: &'a Operand,
     inputs: &'a [Option<Constant>],
-) -> Result<RangeValue<'a>, String> {
-    let operand = |operand: &'a Operand| match operand {
+) -> Result<&'a Constant, String> {
+    match operand {
         Operand::Constant(constant) => Ok(constant),
         Operand::Input(index) => inputs
             .get(*index as usize)
             .and_then(Option::as_ref)
             .ok_or_else(|| format!("input {index} is not an integral input")),
-    };
+    }
+}
+
+/// `range` with its operands evaluated from the constants and `inputs`.
+pub(crate) fn evaluate<'a>(
+    range: &'a RangeDescriptor,
+    inputs: &'a [Option<Constant>],
+) -> Result<RangeValue<'a>, String> {
+    let operand = |operand: &'a Operand| operand_value(operand, inputs);
     let bound = |bound: &'a Bound| match bound {
         Bound::Open => Ok(None),
         Bound::Operand(value) => operand(value).map(Some),

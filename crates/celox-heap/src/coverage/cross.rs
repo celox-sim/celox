@@ -22,7 +22,9 @@ use fxhash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use super::descriptor::{BinKind, Constant, CrossDescriptor, Select, TypeDescriptor};
-use super::shape::{BinId, PointShape, ResolvedItem, Warning, bin_name, evaluate, key, resolve};
+use super::shape::{
+    BinClass, BinId, PointShape, ResolvedItem, Warning, bin_name, evaluate, key, resolve,
+};
 use super::{MAX_CROSS_CLASSES, MAX_CROSS_WORK, MAX_WILDCARD_EXPANSION};
 
 /// No position and no class: a bin that takes no part in a cross.
@@ -213,21 +215,38 @@ impl CrossInputs<'_> {
                 for item in resolved.items {
                     marked.clear();
                     let mut mark = |bin: u32| marked.push(bin);
+                    // A transition bin holds the values of its last steps:
+                    // "the binsof operator uses the last value of the
+                    // transition" (19.6.1.1).
+                    let last = shape
+                        .transitions
+                        .as_ref()
+                        .map(|transitions| &transitions.last);
                     let removed = match item {
-                        ResolvedItem::Range { low, high } => shape.matcher.holding(
-                            point.ty.width,
-                            &key(&point.ty, &low),
-                            &key(&point.ty, &high),
-                            &mut mark,
-                        ),
+                        ResolvedItem::Range { low, high } => {
+                            let (low, high) = (key(&point.ty, &low), key(&point.ty, &high));
+                            if let Some(last) = last {
+                                last.holding(point.ty.width, &low, &high, &mut mark);
+                            }
+                            shape
+                                .matcher
+                                .holding(point.ty.width, &low, &high, &mut mark)
+                        }
                         ResolvedItem::Exact { value, mask } => {
+                            if let Some(last) = last {
+                                last.holding_exact(&value, &mask, &mut mark);
+                            }
                             shape.matcher.holding_exact(&value, &mask, &mut mark);
                             false
                         }
                     };
                     for &bin in &marked {
                         holding[bin as usize] = true;
-                        let filtered = shape.bins[bin as usize].filter.is_some();
+                        let bin_shape = &shape.bins[bin as usize];
+                        let filtered = bin_shape.filter.is_some();
+                        // A transition keeps the values that ignore and
+                        // illegal bins take (19.5.5, 19.5.6).
+                        let removed = removed && bin_shape.class != BinClass::Transition;
                         if (removed || filtered) && candidate(bin) {
                             return Err(format!(
                                 "covergroup cross `intersect` of {subject} meets values of \
