@@ -102,6 +102,20 @@ C と SV の型を一致させる必要があるため、どちらも `unsafe` A
 `celox run` コマンドは `--dpi-lib PATH` で共有ライブラリをリンクします。
 対応する型と呼び出し位置は [DPI-C imports](./systemverilog-reference#dpi-c-imports)を参照してください。
 
+## covergroup のカバレッジを読む
+
+`Simulation::coverage()` と `Simulator::coverage()` は設計の covergroup のカバレッジを返し、
+TypeScript の `Simulation` の `coverage()` は同じレポートをオブジェクトとして返します。
+`celox run --coverage-report FILE` は実行が終わったとき、失敗した場合も含めて、それを JSON として `FILE` に書き出します。
+コンパイルに失敗した実行など、開始しなかった実行は書き出さず、既存の `FILE`（以前の実行のレポート）はそのまま残ります。
+
+```sh
+celox run tb.sv --top tb --coverage-report coverage.json
+```
+
+レポートの内容は[カバレッジ](./systemverilog-reference#coverage)を、オプションは
+[CLI ガイド](./cocotb)を参照してください。
+
 ## 個別の挙動を調べる {#semantics-worth-knowing}
 
 - [未対応の機能](./systemverilog-reference#what-is-not-supported)

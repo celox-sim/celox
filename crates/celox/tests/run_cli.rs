@@ -1672,3 +1672,779 @@ fn include_trailing_semicolons_warn_by_default_and_error_in_strict_mode() {
         }
     }
 }
+
+/// `--coverage-report` writes the covergroup coverage as pretty JSON when
+/// the run ends: the format is the interface, pinned here exactly. The
+/// design's output stays alone on stdout.
+#[test]
+fn sv_coverage_report_is_written_after_the_run() {
+    let source = r#"module Top;
+    bit [1:0] v;
+    bit w;
+    covergroup cg;
+        cp: coverpoint v {
+            bins lo = {0};
+            bins hi = {1};
+            illegal_bins bad = {3};
+        }
+        cw: coverpoint w;
+        x: cross cp, cw;
+    endgroup
+    cg c = new;
+    initial begin
+        v = 0; w = 1; c.sample();
+        $display("sampled");
+    end
+endmodule
+"#;
+    let temporary = tempfile::tempdir().unwrap();
+    let report = temporary.path().join("coverage.json");
+    let output = run(
+        &[("top.sv", source)],
+        &["--coverage-report", report.to_str().unwrap()],
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"sampled\n");
+    // The JSON of `coverage_json()` in `celox-napi`, pretty-printed and
+    // ended by a newline.
+    assert_eq!(
+        std::fs::read_to_string(&report).unwrap(),
+        concat!(
+            r#"{
+  "coverage": 41.666666666666664,
+  "covergroups": [
+    {
+      "name": "Top.cg",
+      "comment": "",
+      "weight": 1,
+      "goal": 100,
+      "mergeInstances": false,
+      "coverage": 41.666666666666664,
+      "covered": 3,
+      "total": 8,
+      "items": [
+        {
+          "name": "cp",
+          "kind": "coverpoint",
+          "coverpoints": [],
+          "comment": "",
+          "weight": 1,
+          "goal": 100,
+          "atLeast": 1,
+          "coverage": 50.0,
+          "covered": 1,
+          "total": 2,
+          "bins": [
+            {
+              "name": "lo",
+              "kind": "bins",
+              "hits": 1,
+              "covered": true
+            },
+            {
+              "name": "hi",
+              "kind": "bins",
+              "hits": 0,
+              "covered": false
+            },
+            {
+              "name": "bad",
+              "kind": "illegal",
+              "hits": 0,
+              "covered": false
+            }
+          ],
+          "omittedBins": 0
+        },
+        {
+          "name": "cw",
+          "kind": "coverpoint",
+          "coverpoints": [],
+          "comment": "",
+          "weight": 1,
+          "goal": 100,
+          "atLeast": 1,
+          "coverage": 50.0,
+          "covered": 1,
+          "total": 2,
+          "bins": [
+            {
+              "name": "auto[0]",
+              "kind": "bins",
+              "hits": 0,
+              "covered": false
+            },
+            {
+              "name": "auto[1]",
+              "kind": "bins",
+              "hits": 1,
+              "covered": true
+            }
+          ],
+          "omittedBins": 0
+        },
+        {
+          "name": "x",
+          "kind": "cross",
+          "coverpoints": [
+            "cp",
+            "cw"
+          ],
+          "comment": "",
+          "weight": 1,
+          "goal": 100,
+          "atLeast": 1,
+          "coverage": 25.0,
+          "covered": 1,
+          "total": 4,
+          "bins": [
+            {
+              "name": "<lo,auto[1]>",
+              "kind": "bins",
+              "hits": 1,
+              "covered": true
+            }
+          ],
+          "omittedBins": 3
+        }
+      ],
+      "instances": [
+        {
+          "name": "Top.cg#0",
+          "comment": "",
+          "weight": 1,
+          "goal": 100,
+          "atLeast": 1,
+          "perInstance": false,
+          "collecting": true,
+          "live": true,
+          "samples": 1,
+          "coverage": 41.666666666666664,
+          "covered": 3,
+          "total": 8,
+          "items": [
+            {
+              "name": "cp",
+              "kind": "coverpoint",
+              "coverpoints": [],
+              "comment": "",
+              "weight": 1,
+              "goal": 100,
+              "atLeast": 1,
+              "coverage": 50.0,
+              "covered": 1,
+              "total": 2,
+              "bins": [
+                {
+                  "name": "lo",
+                  "kind": "bins",
+                  "hits": 1,
+                  "covered": true
+                },
+                {
+                  "name": "hi",
+                  "kind": "bins",
+                  "hits": 0,
+                  "covered": false
+                },
+                {
+                  "name": "bad",
+                  "kind": "illegal",
+                  "hits": 0,
+                  "covered": false
+                }
+              ],
+              "omittedBins": 0
+            },
+            {
+              "name": "cw",
+              "kind": "coverpoint",
+              "coverpoints": [],
+              "comment": "",
+              "weight": 1,
+              "goal": 100,
+              "atLeast": 1,
+              "coverage": 50.0,
+              "covered": 1,
+              "total": 2,
+              "bins": [
+                {
+                  "name": "auto[0]",
+                  "kind": "bins",
+                  "hits": 0,
+                  "covered": false
+                },
+                {
+                  "name": "auto[1]",
+                  "kind": "bins",
+                  "hits": 1,
+                  "covered": true
+                }
+              ],
+              "omittedBins": 0
+            },
+            {
+              "name": "x",
+              "kind": "cross",
+              "coverpoints": [
+                "cp",
+                "cw"
+              ],
+              "comment": "",
+              "weight": 1,
+              "goal": 100,
+              "atLeast": 1,
+              "coverage": 25.0,
+              "covered": 1,
+              "total": 4,
+              "bins": [
+                {
+                  "name": "<lo,auto[1]>",
+                  "kind": "bins",
+                  "hits": 1,
+                  "covered": true
+                }
+              ],
+              "omittedBins": 3
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}"#,
+            "\n"
+        )
+    );
+}
+
+/// The bins of the first item of the first instance in a coverage report,
+/// with their hits.
+fn coverage_hits(report: &serde_json::Value) -> Vec<(String, u64)> {
+    report["covergroups"][0]["instances"][0]["items"][0]["bins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|bin| {
+            (
+                bin["name"].as_str().unwrap().to_owned(),
+                bin["hits"].as_u64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+/// Samples `v` at times 0, 1 and 2, one value each.
+const COVERAGE_SAMPLES_SOURCE: &str = "`timescale 1ns/1ns
+module Top;
+  bit [1:0] v;
+  covergroup cg; cp: coverpoint v; endgroup
+  cg c = new;
+  initial repeat (3) begin c.sample(); v++; #1; end
+endmodule
+";
+
+/// A run that fails on an illegal bin hit still writes its report, which
+/// counts the hit; a design without covergroups writes an empty one.
+#[test]
+fn sv_coverage_report_is_written_when_the_run_fails() {
+    let source = r#"module Top;
+    bit [1:0] v;
+    covergroup cg;
+        cp: coverpoint v {
+            bins lo = {0};
+            illegal_bins bad = {3};
+        }
+    endgroup
+    cg c = new;
+    initial begin
+        v = 3; c.sample();
+        v = 0; c.sample();
+    end
+endmodule
+"#;
+    let temporary = tempfile::tempdir().unwrap();
+    let report = temporary.path().join("coverage.json");
+    let output = run(
+        &[("top.sv", source)],
+        &["--coverage-report", report.to_str().unwrap()],
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("illegal_bins `bad`"),
+        "{output:?}"
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
+    let instance = &json["covergroups"][0]["instances"][0];
+    assert_eq!(instance["samples"], 2);
+    assert_eq!(
+        coverage_hits(&json),
+        [("lo".to_owned(), 1), ("bad".to_owned(), 1)]
+    );
+
+    // `$fatal` and the step limit end the run with its samples so far,
+    // which replace the report of the run before.
+    for (ending, extra, hits) in [
+        ("$fatal(1, \"stop\");", &[][..], [1, 1, 0, 0]),
+        (
+            "forever #1 begin v = 2; c.sample(); end",
+            &["--max-steps", "4"][..],
+            [1, 1, 3, 0],
+        ),
+    ] {
+        let source = format!(
+            "`timescale 1ns/1ns\nmodule Top; bit [1:0] v; \
+             covergroup cg; cp: coverpoint v; endgroup cg c = new; \
+             initial begin c.sample(); v = 1; c.sample(); {ending} end endmodule"
+        );
+        let mut arguments = vec!["--coverage-report", report.to_str().unwrap()];
+        arguments.extend_from_slice(extra);
+        let output = run(&[("top.sv", &source)], &arguments);
+        assert_eq!(output.status.code(), Some(1), "{ending}: {output:?}");
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
+        let expected: Vec<_> = hits
+            .iter()
+            .enumerate()
+            .map(|(value, &hits)| (format!("auto[{value}]"), hits))
+            .collect();
+        assert_eq!(coverage_hits(&json), expected, "{ending}");
+        assert_eq!(
+            json["covergroups"][0]["instances"][0]["samples"],
+            hits.iter().sum::<u64>(),
+            "{ending}"
+        );
+    }
+
+    let empty = temporary.path().join("empty.json");
+    let output = run(
+        &[(
+            "top.sv",
+            "module Top; initial $display(\"done\"); endmodule",
+        )],
+        &["--coverage-report", empty.to_str().unwrap()],
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        std::fs::read_to_string(&empty).unwrap(),
+        "{\n  \"coverage\": 100.0,\n  \"covergroups\": []\n}\n"
+    );
+}
+
+/// A report that cannot be written fails the run after it ran; a Veryl
+/// run has no covergroups and rejects the option.
+#[test]
+fn sv_coverage_report_errors() {
+    let temporary = tempfile::tempdir().unwrap();
+    let unwritable = temporary.path().join("missing").join("coverage.json");
+    let output = run(
+        &[(
+            "top.sv",
+            "module Top; initial $display(\"done\"); endmodule",
+        )],
+        &["--coverage-report", unwritable.to_str().unwrap()],
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(output.stdout, b"done\n");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot write the coverage report"),
+        "{stderr}"
+    );
+    // A failed run that cannot write its report names both.
+    let output = run(
+        &[(
+            "top.sv",
+            "module Top; initial $error(\"failed\"); endmodule",
+        )],
+        &["--coverage-report", unwritable.to_str().unwrap()],
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "reported an assertion failure or $error\ncelox: cannot write the coverage report"
+        ),
+        "{stderr}"
+    );
+
+    let output = run(
+        &[("top.veryl", "module Top {}")],
+        &["--coverage-report", "coverage.json"],
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("--coverage-report requires a SystemVerilog testbench"),
+        "{output:?}"
+    );
+}
+
+/// A run that does not start writes no report: a file at the path is left
+/// byte for byte as it was, and none is created where there was none.
+/// That is a compilation error, a checkpoint that cannot be restored, a
+/// `--save-state-on` signal that does not exist, a CDSP port that cannot
+/// be opened, and invalid arguments (status 2).
+#[test]
+fn sv_coverage_report_of_a_run_that_does_not_start_is_untouched() {
+    let temporary = tempfile::tempdir().unwrap();
+    let report = temporary.path().join("coverage.json");
+    let junk = temporary.path().join("junk.checkpoint");
+    std::fs::write(&junk, "garbage").unwrap();
+    let busy = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = busy.local_addr().unwrap().port().to_string();
+    let bad = "module Top; initial undeclared = 1; endmodule";
+    let cases: [(&str, &str, Vec<&str>, i32); 5] = [
+        ("compilation", bad, vec![], 1),
+        (
+            "restore",
+            COVERAGE_SAMPLES_SOURCE,
+            vec!["--restore-checkpoint", junk.to_str().unwrap()],
+            1,
+        ),
+        (
+            "save-state-on",
+            COVERAGE_SAMPLES_SOURCE,
+            vec!["--save-state-on", "Top.nosuch", "--save-state-at", "1"],
+            1,
+        ),
+        ("cdsp", COVERAGE_SAMPLES_SOURCE, vec!["--cdsp", &port], 1),
+        (
+            "arguments",
+            COVERAGE_SAMPLES_SOURCE,
+            vec!["--jit", "hotspot", "--backend", "native"],
+            2,
+        ),
+    ];
+    let earlier = b"{\"earlier\": true}\n";
+    for (case, source, extra, status) in cases {
+        for existing in [true, false] {
+            if existing {
+                std::fs::write(&report, earlier).unwrap();
+            } else if report.exists() {
+                std::fs::remove_file(&report).unwrap();
+            }
+            let mut arguments = vec!["--coverage-report", report.to_str().unwrap()];
+            arguments.extend(extra.iter().copied());
+            let output = run(&[("top.sv", source)], &arguments);
+            assert_eq!(output.status.code(), Some(status), "{case}: {output:?}");
+            if existing {
+                assert_eq!(std::fs::read(&report).unwrap(), earlier, "{case}");
+            } else {
+                assert!(!report.exists(), "{case}: {output:?}");
+            }
+        }
+    }
+    drop(busy);
+}
+
+/// A report path that is a file the project resolution read, the manifest
+/// found without `--project` or a file list named directly or by another
+/// file list, is rejected and the file is kept.
+#[test]
+fn sv_coverage_report_must_not_name_a_resolved_project_file() {
+    let temporary = tempfile::tempdir().unwrap();
+    let dir = temporary.path();
+    std::fs::write(dir.join("top.sv"), COVERAGE_SAMPLES_SOURCE).unwrap();
+    std::fs::write(dir.join("inner.f"), "top.sv\n").unwrap();
+    std::fs::write(dir.join("outer.f"), "-f inner.f\n").unwrap();
+    let manifest = "[targets.sim]\ntop = \"Top\"\nfilelists = [\"outer.f\"]\n";
+    std::fs::write(dir.join("celox.toml"), manifest).unwrap();
+    for (arguments, file, what) in [
+        (
+            &["--target", "sim", "--coverage-report", "celox.toml"][..],
+            "celox.toml",
+            "the project or a file list",
+        ),
+        (
+            &["--target", "sim", "--coverage-report", "inner.f"][..],
+            "inner.f",
+            "the project or a file list",
+        ),
+        (
+            &[
+                "-f",
+                "outer.f",
+                "--top",
+                "Top",
+                "--coverage-report",
+                "outer.f",
+            ][..],
+            "outer.f",
+            "the project or a file list",
+        ),
+        (
+            &[
+                "-f",
+                "outer.f",
+                "--top",
+                "Top",
+                "--coverage-report",
+                "inner.f",
+            ][..],
+            "inner.f",
+            "the project or a file list",
+        ),
+        (
+            &["--target", "sim", "--coverage-report", "top.sv"][..],
+            "top.sv",
+            "a source",
+        ),
+    ] {
+        let before = std::fs::read(dir.join(file)).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_celox"))
+            .current_dir(dir)
+            .arg("run")
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{arguments:?}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.starts_with(&format!(
+                "celox: --coverage-report {file} names the same file as {what} "
+            )),
+            "{arguments:?}: {stderr}"
+        );
+        assert_eq!(std::fs::read(dir.join(file)).unwrap(), before, "{file}");
+    }
+}
+
+/// A report path that another argument names as a file of the run is
+/// rejected before anything runs, and that file is kept.
+#[test]
+fn sv_coverage_report_must_not_name_another_file_of_the_run() {
+    let temporary = tempfile::tempdir().unwrap();
+    let source = temporary.path().join("top.sv");
+    std::fs::write(&source, COVERAGE_SAMPLES_SOURCE).unwrap();
+    let checkpoint = temporary.path().join("copy.checkpoint");
+    std::fs::write(&checkpoint, "keep").unwrap();
+    let same = temporary.path().join("same.json");
+    std::fs::write(&same, "keep").unwrap();
+    let relative = temporary.path().join(".").join("same.json");
+    for (option, path, report) in [
+        ("--vcd", &same, &same),
+        ("--vcd", &same, &relative),
+        ("--restore-checkpoint", &checkpoint, &checkpoint),
+        ("--settle-profile", &same, &same),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_celox"))
+            .arg("run")
+            .arg(&source)
+            .args(["--top", "Top", option])
+            .arg(path)
+            .arg("--coverage-report")
+            .arg(report)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{option}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.starts_with("celox: --coverage-report ")
+                && stderr.contains(&format!("names the same file as {option} ")),
+            "{option}: {stderr}"
+        );
+        assert_eq!(std::fs::read(path).unwrap(), b"keep", "{option}");
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_celox"))
+        .arg("run")
+        .arg(&source)
+        .args(["--top", "Top", "--coverage-report"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("names the same file as a source"),
+        "{output:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&source).unwrap(),
+        COVERAGE_SAMPLES_SOURCE
+    );
+}
+
+/// A run resumed from a checkpoint reports the samples taken before the
+/// checkpoint and those after it.
+#[cfg(unix)]
+#[test]
+fn sv_coverage_report_of_a_restored_run_keeps_earlier_samples() {
+    use std::{
+        io::BufRead,
+        process::{Child, Stdio},
+        time::Duration,
+    };
+    struct Running(Child);
+    impl Drop for Running {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("top.sv");
+    std::fs::write(
+        &source,
+        "`timescale 1ns/1ns
+module Top;
+  bit [1:0] v;
+  covergroup cg; cp: coverpoint v; endgroup
+  cg c = new;
+  always #1 begin c.sample(); v++; end
+endmodule
+",
+    )
+    .unwrap();
+    let mut process = Running(
+        Command::new(env!("CARGO_BIN_EXE_celox"))
+            .arg("run")
+            .arg(&source)
+            .args(["--top", "Top", "--unlimited", "--save-state-dir"])
+            .arg(dir.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let (tx, rx) = std::sync::mpsc::channel();
+    let stderr = process.0.stderr.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stderr).lines() {
+            if tx.send(line.unwrap()).is_err() {
+                break;
+            }
+        }
+    });
+    let wait = |message: &str| loop {
+        let line = rx
+            .recv_timeout(Duration::from_secs(60))
+            .unwrap_or_else(|error| panic!("{message}: {error}"));
+        if line.contains(message) {
+            break;
+        }
+    };
+    wait("SIGUSR1 checkpoint ready");
+    // Let the run take samples before the checkpoint.
+    std::thread::sleep(Duration::from_millis(500));
+    let pid = process.0.id();
+    // SAFETY: signal a live child owned by this test.
+    assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGUSR1) }, 0);
+    wait("saved SIGUSR1 checkpoint");
+    drop(process);
+    reader.join().unwrap();
+    let checkpoint = dir.path().join(format!("signal-{pid}-1.checkpoint"));
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&checkpoint).unwrap()).unwrap();
+    let time = state["time"].as_u64().unwrap();
+    let report = dir.path().join("coverage.json");
+    let output = Command::new(env!("CARGO_BIN_EXE_celox"))
+        .arg("run")
+        .arg(&source)
+        .args([
+            "--top",
+            "Top",
+            "--max-steps",
+            "3",
+            "--no-checkpoint-on-signal",
+            "--restore-checkpoint",
+        ])
+        .arg(&checkpoint)
+        .arg("--coverage-report")
+        .arg(&report)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("exceeded --max-steps 3"),
+        "{output:?}"
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
+    // One sample at each of the times 1 to `time` before the checkpoint,
+    // then at most one in each of the three steps after it.
+    let samples = json["covergroups"][0]["instances"][0]["samples"]
+        .as_u64()
+        .unwrap();
+    assert!(
+        time > 3 && (time..=time + 3).contains(&samples),
+        "{time} {samples}"
+    );
+    let hits: Vec<_> = (0..4u64)
+        .map(|value| (format!("auto[{value}]"), (samples + 3 - value) / 4))
+        .collect();
+    assert_eq!(coverage_hits(&json), hits);
+}
+
+/// A CDSP session writes the report when its client leaves.
+#[test]
+fn sv_coverage_report_of_a_cdsp_session() {
+    use std::{
+        io::{BufRead, BufReader, Write},
+        net::{SocketAddr, TcpStream},
+        process::Stdio,
+        time::Duration,
+    };
+    fn send(stream: &mut impl Write, message: serde_json::Value) {
+        serde_json::to_writer(&mut *stream, &message).unwrap();
+        stream.write_all(&[0]).unwrap();
+    }
+    fn receive(stream: &mut impl BufRead) -> serde_json::Value {
+        let mut frame = Vec::new();
+        assert!(stream.read_until(0, &mut frame).unwrap() > 0);
+        assert_eq!(frame.pop(), Some(0));
+        serde_json::from_slice(&frame).unwrap()
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("top.sv");
+    std::fs::write(&source, COVERAGE_SAMPLES_SOURCE).unwrap();
+    let report = dir.path().join("coverage.json");
+    let mut server = Command::new(env!("CARGO_BIN_EXE_celox"))
+        .arg("run")
+        .arg(&source)
+        .args(["--top", "Top", "--cdsp", "0", "--coverage-report"])
+        .arg(&report)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stderr = BufReader::new(server.stderr.take().unwrap());
+    let address = loop {
+        let mut line = String::new();
+        assert!(stderr.read_line(&mut line).unwrap() > 0, "no CDSP listener");
+        if let Some(address) = line.trim().strip_prefix("CDSP listening at cxxrtl+tcp://") {
+            break address.parse::<SocketAddr>().unwrap();
+        }
+    };
+    let timeout = Duration::from_secs(15);
+    let mut write = TcpStream::connect_timeout(&address, timeout).unwrap();
+    write.set_read_timeout(Some(timeout)).unwrap();
+    let mut read = BufReader::new(write.try_clone().unwrap());
+    send(
+        &mut write,
+        serde_json::json!({ "type": "greeting", "version": 0 }),
+    );
+    assert_eq!(receive(&mut read)["type"], "greeting");
+    send(
+        &mut write,
+        serde_json::json!({
+            "type": "command", "command": "run_simulation", "until_time": null,
+            "until_diagnostics": [], "sample_item_values": false,
+        }),
+    );
+    assert_eq!(receive(&mut read)["command"], "run_simulation");
+    assert_eq!(receive(&mut read)["event"], "simulation_finished");
+    drop((read, write));
+    assert!(server.wait().unwrap().success());
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
+    assert_eq!(
+        coverage_hits(&json),
+        [
+            ("auto[0]".to_owned(), 1),
+            ("auto[1]".to_owned(), 1),
+            ("auto[2]".to_owned(), 1),
+            ("auto[3]".to_owned(), 0),
+        ]
+    );
+}

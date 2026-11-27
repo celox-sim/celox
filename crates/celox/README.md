@@ -12,7 +12,8 @@ cargo install celox
 ```
 
 It also installs `veryl-celox`, so Veryl 0.20.3 or later runs the command as
-`veryl celox`.
+`veryl celox`. `celox run --coverage-report FILE` writes the coverage of a
+SystemVerilog design's covergroups to `FILE` as JSON when the run ends.
 
 See the [CLI and cocotb guide](https://celox-sim.github.io/celox/guide/cocotb).
 
