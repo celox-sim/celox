@@ -1015,6 +1015,8 @@ fn malformed_covergroups_are_syntax_errors() {
         "coverpoint x { bins b = {1} with item; }",
         // The array and `wildcard` forms each alternative has.
         "coverpoint x { bins b[2] = (1 => 2); }",
+        "coverpoint x { bins b[2] = (1, 2); }",
+        "coverpoint x { bins b[2] = (1 [* 2]); }",
         "coverpoint x { bins b[] = default sequence; }",
         "coverpoint x { bins b[2] = default sequence; }",
         "coverpoint x { wildcard bins b = default; }",
@@ -1027,6 +1029,9 @@ fn malformed_covergroups_are_syntax_errors() {
         "coverpoint x { bins b = (1 [* ]); }",
         "coverpoint x { bins b = (1 [-> 2:]); }",
         "coverpoint x { bins b = (1 [* 2:3:4]); }",
+        // A repeat_range has no `$` (Syntax 19-3).
+        "coverpoint x { bins b = (1 => 2 [* 1:$]); }",
+        "coverpoint x { bins b = (1 => 2 [-> $]); }",
         "coverpoint x { bins b = (1 => 2) (3 => 4); }",
         // Cross bins.
         "cross a, b { wildcard bins w = binsof(a); }",

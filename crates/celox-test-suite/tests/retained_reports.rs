@@ -1487,8 +1487,45 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             | "covergroup::constructed_instances_take_stop_start_and_sample"
                             | "covergroup::constructed_instances_of_a_divided_clock_sample_before_the_updates"
                             | "covergroup::reference_arguments_track_their_actuals"
-                            | "covergroup::reference_arguments_are_read_at_each_sample",
+                            | "covergroup::reference_arguments_are_read_at_each_sample"
+                            | "covergroup::transition_bins_of_the_example_of_19_5_2"
+                            | "covergroup::overlapping_transitions_of_the_example_of_19_5_2"
+                            | "covergroup::repetitions_of_transitions"
+                            | "covergroup::transition_arrays_and_ignored_transitions"
+                            | "covergroup::transition_operands_of_arguments"
+                            | "covergroup::bus_transitions_through_a_reference",
                         ) => ("compile_error", "compile", "Invalid module item"),
+                        (
+                            "verilator",
+                            "covergroup::repetitions_of_transitions"
+                            | "covergroup::transition_arrays_and_ignored_transitions"
+                            | "covergroup::transition_operands_of_arguments",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "Unsupported: '[*]' in cover transition",
+                        ),
+                        (
+                            "verilator",
+                            "covergroup::overlapping_transitions_of_the_example_of_19_5_2",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "Unsupported: '[->' in cover transition",
+                        ),
+                        ("verilator", "covergroup::transition_bins_of_the_example_of_19_5_2") => (
+                            "mismatch",
+                            "execute",
+                            // "4 11 1 11 0 11" expected, "0 0" for each
+                            // instance displayed.
+                            "expect_output: expected [52, 32, 49, 49, 32, 49, 32, 49, 49, 32, 48, 32, 49, 49, 10], got [48, 32, 48, 32, 48, 32, 48, 32, 48, 32, 48, 10]",
+                        ),
+                        ("verilator", "covergroup::bus_transitions_through_a_reference") => (
+                            "mismatch",
+                            "execute",
+                            // "2 120" expected, "0 0" displayed.
+                            "expect_output: expected [50, 32, 49, 50, 48, 10], got [48, 32, 48, 10]",
+                        ),
                         (
                             "icarus",
                             "covergroup::embedded_covergroups_sample_at_events_of_their_class"

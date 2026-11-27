@@ -1765,7 +1765,7 @@ No assertions or exclusions are weakened.
 
 ### Covergroups
 
-The 48 `covergroup::*` cases check what IEEE 1800-2023 fixes of covergroups.
+The 54 `covergroup::*` cases check what IEEE 1800-2023 fixes of covergroups.
 Five are of a covergroup without items: a variable of a covergroup type holds
 a handle or `null` (19.3), `new` and `sample` take the arguments of the
 covergroup and of its sample method, by position, by name and by default
@@ -1853,6 +1853,18 @@ assignments drive, beside an input argument
 without a clocking event reads at each `sample()` through its declarations,
 also from a task, an `int` and an element of an unpacked array it takes as a
 whole (`covergroup::reference_arguments_are_read_at_each_sample`).
+Six are of transition bins (19.5.2): the example `cg` of the clause with its
+trace (`covergroup::transition_bins_of_the_example_of_19_5_2`) and its
+example `sg`, whose hits the clause states sample by sample
+(`covergroup::overlapping_transitions_of_the_example_of_19_5_2`), each
+repetition on one trace (`covergroup::repetitions_of_transitions`), bin
+arrays, a wildcard transition and the ignored transitions of 19.5.5
+(`covergroup::transition_arrays_and_ignored_transitions`), values and counts
+that are arguments of the covergroup
+(`covergroup::transition_operands_of_arguments`), and an array of 120 bins
+of a bus state through a `ref` argument
+(`covergroup::bus_transitions_through_a_reference`); each shows the hits as
+the coverage of instances or coverpoints with different `at_least`.
 Celox passes all of them on every backend.
 
 Verilator 5.054 passes 19 cases. It keeps the embedded covergroup in a
@@ -1905,7 +1917,10 @@ not compile the C++ it generates for the covergroups embedded in a class of
 the module, and does not parse `'{new, new}`; of the divided clock it
 displays `0` for the bins counted by reference and the expected 37.50. Of
 the two cases of `ref` arguments it displays `0 0` for the bins counted by
-reference and the expected coverage of each coverpoint.
+reference and the expected coverage of each coverpoint. It fails the six
+cases of transition bins: it rejects the repetitions of four ("Unsupported:
+'[*]' in cover transition", "Unsupported: '[->' in cover transition") and
+displays `0 0` for the bins counted by reference of the other two.
 xezim 0.11.4 passes 30, all six cases of clocking events of declarations and
 four of the six of constructed instances among them: it takes no sample of
 the instances a procedure constructs at the divided clock, and it never samples a covergroup embedded in a class at an
@@ -1917,6 +1932,16 @@ and the expected 18.75 for the one at a signal of the module. It passes the
 an element of an unpacked array that a covergroup takes as a `ref` argument
 (`covergroup::reference_arguments_are_read_at_each_sample` displays `3 24`,
 `2 24` and 0.00 for `6 24`, `4 24` and 12.50, and stops before `$finish`).
+It fails the six cases of transition bins. Of the example `cg` of 19.5.2 it
+displays the expected `4 11 1 11 0 11` and stops before `$finish`, as it
+does in four more of them; it counts more hits of the example `sg` than the
+clause states (`100.00 80.00 60.00 40.00 20.00` for `100.00 60.00 40.00
+20.00 0.00`), makes no bin of the coverpoint of the repetitions (`0 0 0 0 0 0
+of 0`), counts nothing where the values and counts are arguments (`0 0 0`
+for `1 0 1`), makes no bin for each length of a repetition range in a bin
+array (`2 4` for `2 120`) and neither removes the matches that contain an
+ignored transition nor leaves the bin that only such matches have out of the
+coverage (`4 5 2 4` for `6 6 1 3`).
 It keeps
 the embedded covergroup in a shallow copy too, compares a covergroup variable
 that nothing assigned with `null` as `x`
