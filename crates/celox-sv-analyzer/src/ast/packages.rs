@@ -612,7 +612,7 @@ impl Packages {
         let specialized = design.foreign.states();
         self.state_modules()
             .filter(|module| !specialized.contains_key(module.name()))
-            .chain(specialized.values())
+            .chain(specialized.values().map(|module| &**module))
             .any(crate::ir::Module::constructs_covergroup)
     }
 
@@ -625,7 +625,7 @@ impl Packages {
             .filter(|module| !specialized.contains_key(module.name()))
             .cloned()
             .collect::<Vec<_>>();
-        states.extend(specialized.values().cloned());
+        states.extend(specialized.values().map(|module| (**module).clone()));
         states.sort_by(|left, right| {
             left.name().cmp(right.name()).then_with(|| {
                 left.signals()
