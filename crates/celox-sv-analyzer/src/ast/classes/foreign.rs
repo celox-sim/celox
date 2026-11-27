@@ -45,16 +45,19 @@ impl DeclarationScope {
     }
 }
 
+/// The symbols and modules of the specializations are shared, as the
+/// isolated sessions of constant queries copy the registry (see
+/// `expression_types::constant_session`).
 #[derive(Clone, Debug, Default)]
 pub(in crate::ast) struct Registry {
     owners: HashMap<String, Rc<Owner>>,
     templates: HashMap<String, String>,
     requests: HashMap<String, Vec<Request>>,
-    prepared: HashMap<String, ScopeSymbols>,
+    prepared: HashMap<String, Rc<ScopeSymbols>>,
     complete: HashSet<String>,
-    argument_symbols: ScopeSymbols,
+    argument_symbols: Rc<ScopeSymbols>,
     active: HashSet<String>,
-    states: HashMap<String, crate::ir::Module>,
+    states: HashMap<String, Rc<crate::ir::Module>>,
     revision: u64,
     generics: HashMap<String, String>,
     specializations: HashMap<String, Rc<specializations::Specialization>>,
@@ -77,7 +80,7 @@ pub(in crate::ast) struct Registry {
 #[derive(Clone, Debug)]
 struct Kept {
     declarations: HashMap<String, Rc<DeclarationScope>>,
-    symbols: ScopeSymbols,
+    symbols: Rc<ScopeSymbols>,
 }
 
 impl Registry {
@@ -209,7 +212,7 @@ impl Registry {
             if local_storage.is_empty() {
                 symbols.extend(extra);
             } else {
-                symbols.extend(&extra.clone().without(&local_storage));
+                symbols.extend(&(**extra).clone().without(&local_storage));
             }
             symbols.declarations_only = declarations_only;
         }
@@ -241,7 +244,7 @@ impl Registry {
             symbols.declarations_only = declarations_only;
         }
     }
-    pub fn states(&self) -> &HashMap<String, crate::ir::Module> {
+    pub fn states(&self) -> &HashMap<String, Rc<crate::ir::Module>> {
         &self.states
     }
 }
@@ -444,11 +447,13 @@ fn build_inner(session: &mut Session, name: &str, caller: Option<&ScopeSymbols>)
             .insert(class.clone(), specialization.clone());
     }
     registry.declarations.extend(symbols.declarations.drain());
-    registry.prepared.insert(name.into(), symbols.symbols);
+    registry
+        .prepared
+        .insert(name.into(), Rc::new(symbols.symbols));
     if caller.is_some() {
         registry.complete.insert(name.into());
         if let Some(module) = symbols.state_module {
-            registry.states.insert(name.into(), module);
+            registry.states.insert(name.into(), Rc::new(module));
         }
     }
     registry.revision += 1;
@@ -761,7 +766,7 @@ pub(in crate::ast) fn keep_finish(
     let owner = package_owner(tree);
     let kept = Kept {
         declarations,
-        symbols: caller.clone(),
+        symbols: Rc::new(caller.clone()),
     };
     let registry = &mut session.foreign;
     match registry.kept.iter_mut().find(|(known, _)| *known == owner) {
@@ -790,13 +795,17 @@ fn record(
 ) {
     session.foreign.declarations.extend(declarations);
     #[cfg(debug_assertions)]
-    let mut by_scans = session.foreign.argument_symbols.clone();
-    hand_over(&mut session.foreign.argument_symbols, caller, package_owner);
+    let mut by_scans = (*session.foreign.argument_symbols).clone();
+    hand_over(
+        Rc::make_mut(&mut session.foreign.argument_symbols),
+        caller,
+        package_owner,
+    );
     #[cfg(debug_assertions)]
     {
         hand_over_by_scans(&mut by_scans, caller, package_owner);
         debug_assert!(
-            by_scans == session.foreign.argument_symbols,
+            by_scans == *session.foreign.argument_symbols,
             "the symbols handed over by name sets differ from those of the scans"
         );
     }
@@ -806,7 +815,7 @@ fn record(
 /// symbol handed over.
 fn complete(session: &mut Session) -> Converted<()> {
     let registry = &session.foreign;
-    let caller = registry.argument_symbols.clone();
+    let caller = Rc::clone(&registry.argument_symbols);
     let names = registry
         .requests
         .keys()
@@ -814,7 +823,7 @@ fn complete(session: &mut Session) -> Converted<()> {
         .cloned()
         .collect::<Vec<_>>();
     for name in names {
-        build(session, &name, Some(&caller))?;
+        build(session, &name, Some(&*caller))?;
     }
     Ok(())
 }
