@@ -70,6 +70,16 @@ pub(super) fn constant_elements_and_shape(
 }
 
 impl ArrayParameter {
+    /// The pattern the instance binds the parameter to, as the name of an
+    /// analysis writes it (see [`BoundPattern::canonical`]), or nothing for
+    /// a parameter that takes its default.
+    pub(super) fn bound_text(&self, table: &mut semantic_types::TyTable) -> String {
+        self.bound
+            .as_ref()
+            .map(|bound| bound.canonical(table))
+            .unwrap_or_default()
+    }
+
     /// The elements of the parameter when it is a one-dimensional array of
     /// packed integral elements whose value is a constant in `dims` (see
     /// [`constant_elements`]).

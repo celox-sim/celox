@@ -240,6 +240,7 @@ impl Module {
         let syntax_tree = &specialization;
         // The collectors below each elaborate the same generate scopes.
         let previous = generate::memoize(syntax_tree, session);
+        let covergroup_scope = session.covergroup_scope.clone();
         let module = (|session: &mut Session| -> Result<Self, AnalyzerError> {
             let mut scope = ScopeElaboration {
                 name,
@@ -314,6 +315,7 @@ impl Module {
             ))
         })(session);
         generate::restore(session, previous);
+        session.covergroup_scope = covergroup_scope;
         module
     }
 }

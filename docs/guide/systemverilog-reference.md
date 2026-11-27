@@ -598,10 +598,18 @@ the coverage `$get_coverage` gives. Reading the report changes nothing and
 advances no time.
 
 - **A covergroup type belongs to its elaborated scope.** Instances of a
-  module with the same parameter values share the covergroup types the
-  module declares, as they share its typedefs; 6.22 makes them types of each
-  instance. Elaborations with other parameter values declare types of their
-  own, which the report lists under one name. A covergroup of a package is
+  module or a program share the covergroup types it declares when each
+  parameter has the same value of the same type (a parameter without a type
+  takes the type of its value, 6.20.2), each unpacked array parameter the
+  same elements, and each type parameter the same type; 6.22 makes them
+  types of each instance. They share them whether an instance takes the
+  default of a parameter or writes the same value, and however it writes
+  it. The exception is an array parameter whose elements are not integral
+  constants of up to 127 bits, such as an array of structures: an instance
+  that takes its default shares the type with the others that take it, and
+  one that writes a pattern with those that write the same pattern. Elaborations
+  with other parameters declare types of their own, which the report lists
+  under one name. A covergroup of a package is
   one type of the design, and one of a compilation unit a type of its
   source file.
 - **`sample()` on `null` samples nothing**, for an embedded covergroup that

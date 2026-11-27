@@ -60,12 +60,15 @@ fn covergroup_types_are_types_of_their_scopes() {
     let parameterized = "module M #(parameter int W = 1); covergroup cg; endgroup \
          cg c; initial c = new; endmodule";
     let packages = analyze_packages(&[]).unwrap();
-    let elaborated = |width: i128| {
+    let elaborated_with = |overrides: &[(&str, i128)]| {
         let ir = analyze_source_module_with_packages(
             parameterized,
             Path::new("covergroups.sv"),
             "M",
-            &HashMap::from_iter([("W".to_string(), width)]),
+            &overrides
+                .iter()
+                .map(|(name, value)| (name.to_string(), *value))
+                .collect(),
             &packages,
             &mut packages.design(),
         )
@@ -75,8 +78,56 @@ fn covergroup_types_are_types_of_their_scopes() {
             .map(str::to_owned)
             .collect::<Vec<_>>()
     };
+    let elaborated = |width: i128| elaborated_with(&[("W", width)]);
     assert_eq!(elaborated(2), elaborated(2));
     assert_ne!(elaborated(2), elaborated(3));
+    // An elaboration that takes the default of a parameter and one that
+    // writes the same value share the type (6.22): it is named by the values
+    // of the parameters, not by the overrides.
+    assert_eq!(elaborated_with(&[]), elaborated(1));
+    assert_ne!(elaborated_with(&[]), elaborated(2));
+    // The values are told by their types too: a value parameter without a
+    // type takes the type of its value (6.20.2), so `1'b1` and `4'b1` make
+    // two types, and `4'b1` and `4'h1` one. A parameter of a type converts
+    // the value to it: `2`, `32'sd2` and `4'd2` are the same `int`.
+    let typed = |source: &str, value: &str| {
+        let ir = crate::analyze_source_module_with_parameter_expr_overrides(
+            source,
+            Path::new("covergroups.sv"),
+            "M",
+            &HashMap::from_iter([(
+                "P".to_string(),
+                crate::ir::ConstExpr::Literal(value.to_string()),
+            )]),
+            &crate::ModuleInterfaces::default(),
+        )
+        .unwrap_or_else(|error| panic!("{value}: {error}"));
+        constructors(module(&ir, "M"))
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let implicit = "module M #(parameter P = 1); covergroup cg; endgroup \
+         cg c; initial c = new; endmodule";
+    assert_ne!(typed(implicit, "1'b1"), typed(implicit, "4'b1"));
+    assert_ne!(typed(implicit, "4'b1"), typed(implicit, "4'sb1"));
+    assert_eq!(typed(implicit, "4'b1"), typed(implicit, "4'h1"));
+    let int = "module M #(parameter int P = 1); covergroup cg; endgroup \
+         cg c; initial c = new; endmodule";
+    assert_eq!(typed(int, "2"), typed(int, "32'sd2"));
+    assert_eq!(typed(int, "2"), typed(int, "4'd2"));
+    assert_ne!(typed(int, "2"), typed(int, "3"));
+    // Values the numeric constants do not hold: reals, values with unknown
+    // bits and wide values are told by their resolved literals.
+    let real = "module M #(parameter real P = 1.0); covergroup cg; endgroup \
+         cg c; initial c = new; endmodule";
+    assert_eq!(typed(real, "1.5"), typed(real, "1.50"));
+    assert_ne!(typed(real, "1.5"), typed(real, "2.5"));
+    assert_ne!(typed(implicit, "4'b1x0z"), typed(implicit, "4'b1x01"));
+    assert_ne!(typed(implicit, "4'b1x0z"), typed(implicit, "4'b100z"));
+    let wide = |high: &str| format!("140'h{high}{}", "0".repeat(32));
+    assert_ne!(typed(implicit, &wide("1")), typed(implicit, &wide("2")));
+    assert_eq!(typed(implicit, &wide("1")), typed(implicit, &wide("1")));
     // A covergroup of a package is named by the package.
     let ir = analyze(
         "package p; covergroup cg; endgroup endpackage \
