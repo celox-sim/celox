@@ -207,8 +207,8 @@ pub(super) fn package_watched_properties(
     design: &sv::Design,
     keys: &mut BTreeSet<u32>,
 ) {
-    for state in packages.specialized_state_modules(design) {
-        ff::watched_properties(&state, keys);
+    for state in packages.specialized_state_modules_unordered(design) {
+        ff::watched_properties(state, keys);
     }
 }
 
@@ -216,8 +216,7 @@ pub(super) fn package_watched_properties(
 /// `ff::TIME_FORMAT`).
 pub(super) fn packages_call_time_format(packages: &sv::Packages, design: &sv::Design) -> bool {
     packages
-        .specialized_state_modules(design)
-        .iter()
+        .specialized_state_modules_unordered(design)
         .any(ff::calls_time_format)
 }
 
