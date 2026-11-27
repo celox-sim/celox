@@ -75,6 +75,8 @@ mod array_parameters;
 mod assertion_control;
 #[path = "frontends/systemverilog/binary_file_io.rs"]
 mod binary_file_io;
+#[path = "frontends/systemverilog/binds.rs"]
+mod binds;
 #[path = "frontends/systemverilog/class.rs"]
 mod class;
 #[path = "frontends/systemverilog/corpus.rs"]

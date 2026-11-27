@@ -29,7 +29,7 @@ Measured conformance is published on the [verification page](/verification/).
 
 These constructs and clauses are not implemented and are always rejected at compile time:
 
-- **Verification and design-level blocks:** `bind`, `checker`, `config`, user-defined primitives (UDP), and `specify` blocks. Clocking blocks are supported in part; see [Clocking blocks](#clocking-blocks). Covergroups are supported in part; see [Coverage groups](#covergroups).
+- **Verification and design-level blocks:** `checker`, `config`, user-defined primitives (UDP), and `specify` blocks. Clocking blocks are supported in part; see [Clocking blocks](#clocking-blocks). Covergroups are supported in part; see [Coverage groups](#covergroups).
 - **Unions and mixed array/container types:** `tagged` unions, unpacked unions, packed union assignment patterns, fixed-size unpacked arrays of `chandle` (`chandle a[4]`, including via `typedef`), fixed-size unpacked arrays of dynamic containers (`int a[2][$]`, including via `typedef`), and dynamic containers of multidimensional fixed-size unpacked arrays (`int a[][2][3]`).
 - **Control flow:** `disable` statements other than `disable fork`; `fork` inside declaration initializers, `final`, `always_comb`, and `always_ff` (no process scheduler in those contexts).
 - **Set membership:** unpacked arrays in the set of an `inside` expression or `case inside` item outside constraints (`x inside {arr}`, which stands for the elements of `arr`, 11.4.13); elements of arrays (`x inside {arr[0]}`) are supported, and so are array properties in constraints.
@@ -85,6 +85,14 @@ For static-variable storage of interface tasks and functions called across modul
 | **Program declarations (Clause 24)** | Instantiated `program` blocks with ports and parameters; their `initial` procedures run in the reactive region set | Programs nested in modules; anonymous programs; uninstantiated programs as implicit top levels |
 
 Program region and `$exit` differences are listed under [Deviations affecting standard-conforming code](#deviations-standard-code).
+
+### Bind directives {#bind-directives}
+
+| Aspect | Supported | Not supported |
+| --- | --- | --- |
+| **Bind directives (23.11)** | `bind target inst ...;` in a module, an interface or the compilation unit, which binds a module, program or interface instance (with parameter values and port connections, named from the target's scope) into every instance of the module or interface `target`; an interface target takes interface instances | Bind target instance lists (`bind m: u1, u2 ...`) and target instances (`bind top.u ...`); bind directives in generate blocks; instantiations whose actuals name an interface port or interface instance of the target or of the scope holding the directive; targets that another source of the design declares (each source is parsed on its own; one compilation unit, the CLI default, is one source) |
+
+A bind directive binds once however many instances of the module holding it the design has, whereas the standard makes a second binding of the same name an error, and its instantiation also sees the declarations of `$unit` that the target scope sees, which the standard hides from it.
 
 ### Unpacked structures {#unpacked-structures}
 
