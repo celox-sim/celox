@@ -1076,6 +1076,7 @@ pub(super) fn lower(
             validation_body: Vec::new(),
             synthetic: true,
             repeats: false,
+            assertion_actions: false,
         });
     }
     // One process for each such procedure: it waits on what the procedure
@@ -1154,6 +1155,7 @@ pub(super) fn lower(
             validation_body: Vec::new(),
             synthetic: true,
             repeats: false,
+            assertion_actions: false,
         });
     }
     Ok(controls

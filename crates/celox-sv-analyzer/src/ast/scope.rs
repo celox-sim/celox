@@ -448,6 +448,7 @@ impl ScopeSymbols {
                         .collect(),
                     synthetic: process.synthetic,
                     repeats: process.repeats,
+                    assertion_actions: process.assertion_actions,
                 })
                 .collect();
             self.signals.push(signal);
@@ -737,6 +738,7 @@ impl ScopeSymbols {
                         .collect(),
                     synthetic: process.synthetic,
                     repeats: process.repeats,
+                    assertion_actions: process.assertion_actions,
                 })
                 .collect(),
             aliases: HashMap::default(),
