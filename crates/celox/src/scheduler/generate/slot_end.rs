@@ -467,12 +467,7 @@ impl Plan {
             // Another pass judges them, as after the host clocks of
             // the slot, against the levels now.
             g.b.switch_to_block(rewave);
-            let mut levels = g.no_levels();
-            for (bit, &event) in tracked.iter().enumerate() {
-                let level = g.level(&self.events[event]);
-                levels = g.with_level(levels, level, bit);
-            }
-            g.store_levels(levels);
+            self.save_clock_levels(g, tracked);
             g.b.seal_block(SIRTerminator::Jump(pick, Vec::new()));
         }
     }
@@ -641,12 +636,7 @@ impl Plan {
                     );
                 }
             }
-            let mut levels = g.no_levels();
-            for (bit, &event) in tracked.iter().enumerate() {
-                let level = g.level(&self.events[event]);
-                levels = g.with_level(levels, level, bit);
-            }
-            g.store_levels(levels);
+            self.save_clock_levels(g, tracked);
             let zero = g.constant(0, self.event_bits);
             g.store(slots.exit_arg, self.event_bits, zero);
             if !self.gating.is_empty() {
@@ -724,12 +714,7 @@ impl Plan {
                     phase_value,
                 );
                 if phase == 2 {
-                    let mut levels = g.no_levels();
-                    for (bit, &event) in tracked.iter().enumerate() {
-                        let level = g.level(&self.events[event]);
-                        levels = g.with_level(levels, level, bit);
-                    }
-                    g.store_levels(levels);
+                    self.save_clock_levels(g, tracked);
                     let zero = g.constant(0, self.event_bits);
                     g.store(slots.exit_arg, self.event_bits, zero);
                     if !self.gating.is_empty() {
