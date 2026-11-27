@@ -28,7 +28,8 @@ def profile(quiet, dirty):
             counter('domain', 'eval_apply', 1000, 'tb.clk'),
             counter('settle', 'entered', 3000),
             counter('settle', 'dirty', dirty),
-            counter('settle_call', 'requests', 3000, 'generate/slot_end.rs:120'),
+            counter('settle_call', 'requests', 3000, 'process phase'),
+            counter('settle_call', 'requests', 2000, 'slot end'),
         ],
         'settle_partitions': {'settles': 10, 'runs': [10, 4], 'changed': [10, 1]},
     }
@@ -57,6 +58,7 @@ class ActivationProfileTests(unittest.TestCase):
         self.assertIn('55.0% of the simple domain judgments found no edge (1.100/clock)', text)
         self.assertIn('the settle ran in 50.0% of its 3.000 entries per clock', text)
         self.assertIn('partition runs/clock', text)
+        self.assertRegex(text, r'settle_call\s+requests\s+3000\s+3\.000\s+60\.0%\s+process phase')
         self.assertRegex(text, r'domain_judge\s+quiet\s+1100\s+1\.100\s+55\.0%\s+simple')
 
     def test_show_without_cycles_uses_the_most_frequent_domain(self):
