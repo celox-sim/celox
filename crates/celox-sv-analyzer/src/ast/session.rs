@@ -11,6 +11,10 @@ pub(crate) struct Session {
     /// interface's are where its tasks are called through virtual
     /// interfaces: each instance has them once (see `virtual_interface_calls`).
     pub(super) shares_static_formals: bool,
+    /// While a synchronous drive is bound, its target without the selects:
+    /// the clockvar there names its clocking signal, which the drive updates
+    /// (IEEE 1800-2023 14.16), not the value its clocking block sampled.
+    pub(super) clockvar_drive: Option<celox_sv_syntax::ExprId>,
     /// Packages analyzed for their declarations alone, no executable body
     /// (see `Packages::analyze_needed`).
     pub(super) declarations_only: bool,

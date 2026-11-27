@@ -1360,6 +1360,7 @@ fn lower_statements(
                     position: None,
                     pending,
                     unit: false,
+                    re_nba: false,
                 };
                 kernel.nonblocking(index, &site, |builder| {
                     let value = coerce_sir_expression(

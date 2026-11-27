@@ -65,11 +65,14 @@
 //! 1 string) | bytes, a string written like the value of a string object. A
 //! box handle in a saved frame is written as one more than the index of its
 //! box.
+//! Version 9 adds, after the boxes, the updates that are synchronous drives
+//! (see [`NbaRecord::drive`]): count u32, then per update: queue u8 (0 NBA,
+//! 1 Re-NBA, 2 future) | index u32 in that queue.
 
 use std::io::{self, Read, Write};
 
 const MAGIC: &[u8; 8] = b"CXSTATE\0";
-const VERSION: u16 = 8;
+const VERSION: u16 = 9;
 
 mod activations;
 use activations::*;
@@ -245,6 +248,10 @@ pub struct NbaRecord {
     /// Little-endian bytes of the assigned value and its unknown bits.
     pub value: Vec<u8>,
     pub mask: Vec<u8>,
+    /// A synchronous drive of a clocking block output, of which only the
+    /// last of those that mature together for the same bits is driven (IEEE
+    /// 1800-2023 14.16.2).
+    pub drive: bool,
 }
 
 /// Contents of a state file.
@@ -298,7 +305,9 @@ impl StateFile {
             .map(|schedule| &schedule.processes)
             .filter(|processes| **processes != ProcessRecord::default());
         let version = processes.map_or(1, |p| {
-            if !p.boxes.is_empty() {
+            if drives(p).next().is_some() {
+                9
+            } else if !p.boxes.is_empty() {
                 8
             } else if !p.call_stacks.is_empty() {
                 7
@@ -706,7 +715,32 @@ fn put_processes(w: &mut impl Write, processes: &ProcessRecord, version: u16) ->
             put_bytes(w, &saved.bytes)?;
         }
     }
+    if version >= 9 {
+        let drives: Vec<_> = drives(processes).collect();
+        put_len(w, drives.len())?;
+        for (queue, index) in drives {
+            w.write_all(&[queue])?;
+            put_len(w, index)?;
+        }
+    }
     Ok(())
+}
+
+/// The queue (0 NBA, 1 Re-NBA, 2 future) and the index in it of each
+/// synchronous drive of `processes` (see the version 9 section).
+fn drives(processes: &ProcessRecord) -> impl Iterator<Item = (u8, usize)> + '_ {
+    let delayed = processes.delayed_nba.iter().map(|(_, _, update)| update);
+    let drives =
+        |queue: u8, update: (usize, &NbaRecord)| update.1.drive.then_some((queue, update.0));
+    let nba = processes.nba_queue.iter().enumerate();
+    let re_nba = processes.re_nba_queue.iter().enumerate();
+    nba.filter_map(move |update| drives(0, update))
+        .chain(re_nba.filter_map(move |update| drives(1, update)))
+        .chain(
+            delayed
+                .enumerate()
+                .filter_map(move |update| drives(2, update)),
+        )
 }
 
 fn get_flag(r: &mut impl Read) -> Result<bool, StateFileError> {
@@ -773,6 +807,7 @@ fn get_processes(r: &mut impl Read, version: u16) -> Result<ProcessRecord, State
                 width: get_u64(r)?,
                 value: get_len_bytes(r)?,
                 mask: get_len_bytes(r)?,
+                drive: false,
             })
         })
         .collect::<Result<_, StateFileError>>()?;
@@ -812,6 +847,7 @@ fn get_processes(r: &mut impl Read, version: u16) -> Result<ProcessRecord, State
                         width: get_u64(r)?,
                         value: get_len_bytes(r)?,
                         mask: get_len_bytes(r)?,
+                        drive: false,
                     },
                 ))
             })
@@ -844,7 +880,31 @@ fn get_processes(r: &mut impl Read, version: u16) -> Result<ProcessRecord, State
             })
             .collect::<Result<_, StateFileError>>()?;
     }
+    if version >= 9 {
+        for _ in 0..get_u32(r)? {
+            let queue = get_u8(r)?;
+            let index = get_u32(r)? as usize;
+            let update = match queue {
+                0 => result.nba_queue.get_mut(index),
+                1 => result.re_nba_queue.get_mut(index),
+                2 => result
+                    .delayed_nba
+                    .get_mut(index)
+                    .map(|(_, _, update)| update),
+                _ => None,
+            };
+            update
+                .ok_or_else(|| StateFileError::Malformed(format!("drive {queue} {index}")))?
+                .drive = true;
+        }
+    }
     Ok(result)
+}
+
+fn get_u8(r: &mut impl Read) -> io::Result<u8> {
+    let mut byte = [0; 1];
+    r.read_exact(&mut byte)?;
+    Ok(byte[0])
 }
 
 fn get_u16(r: &mut impl Read) -> io::Result<u16> {
@@ -970,6 +1030,7 @@ mod tests {
                         width: 3,
                         value: vec![5],
                         mask: vec![2],
+                        drive: false,
                     }],
                     domain_counters: vec![("clk".into(), [1, 2, 3])],
                     host_writes: vec![("go".into(), vec![1], vec![])],
@@ -1075,6 +1136,32 @@ mod tests {
         let mut bytes = Vec::new();
         file.write_to(&mut bytes).unwrap();
         assert_eq!(bytes[8..10], 4u16.to_le_bytes());
+        assert_eq!(StateFile::read_from(bytes.as_slice()).unwrap(), file);
+    }
+
+    #[test]
+    fn synchronous_drives_round_trip_in_v9() {
+        let mut file = sample();
+        let processes = &mut file.schedule.as_mut().unwrap().processes;
+        let update = processes.nba_queue[0].clone();
+        processes.re_nba_queue = vec![
+            update.clone(),
+            NbaRecord {
+                drive: true,
+                ..update.clone()
+            },
+        ];
+        processes.delayed_nba = vec![(
+            7,
+            false,
+            NbaRecord {
+                drive: true,
+                ..update
+            },
+        )];
+        let mut bytes = Vec::new();
+        file.write_to(&mut bytes).unwrap();
+        assert_eq!(bytes[8..10], 9u16.to_le_bytes());
         assert_eq!(StateFile::read_from(bytes.as_slice()).unwrap(), file);
     }
 

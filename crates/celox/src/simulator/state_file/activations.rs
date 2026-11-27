@@ -446,13 +446,11 @@ impl<B: SimBackend> Simulator<B> {
                     }
                     kernel
                 } else {
-                    if a.live
-                        || !a.private.is_empty()
-                        || !a.locals.is_empty()
-                        || !a.pending.is_empty()
-                        || a.join.is_some()
-                    {
-                        return Err(bad("detached live activation without parent"));
+                    // A retired child slot, or a detached activation (the
+                    // pending synchronous drive of a clocking block), whose
+                    // ancestry reaches no root, so it may start no children.
+                    if !a.pending.is_empty() || a.join.is_some() {
+                        return Err(bad("detached activation with children"));
                     }
                     let id = next;
                     next += 1;

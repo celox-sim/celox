@@ -798,6 +798,7 @@ fn scan_context(
             Stmt::DelayedNonblocking {
                 control,
                 assignment,
+                ..
             } => {
                 scan_context(
                     std::slice::from_ref(&**control),
@@ -959,7 +960,9 @@ fn unwrap_stmts(
             Stmt::DelayedNonblocking {
                 control,
                 assignment,
+                re_nba,
             } => Stmt::DelayedNonblocking {
+                re_nba,
                 control: Box::new(
                     unwrap_stmts(vec![*control], unwanted, disables)
                         .into_iter()

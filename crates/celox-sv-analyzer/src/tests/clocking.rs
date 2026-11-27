@@ -41,7 +41,7 @@ const BLOCK: &str = "clocking cb @(posedge clk); input d; output q; endclocking"
 #[test]
 fn clocking_blocks_are_analyzed() {
     for items in [
-        &format!("{BLOCK} initial begin @(cb); q = cb.d; @(cb.d); q = cb.d[3:0]; end"),
+        &format!("{BLOCK} initial begin @(cb); q = cb.d; cb.q <= cb.d + 1; cb.q[3:0] <= 4'h5; end"),
         // A default clocking or a global clocking declaration only matters
         // to `##` and `$global_clock`, which Celox rejects (14.12, 14.14).
         &"default clocking @(posedge clk); default input #10ns output #5ns; endclocking"
@@ -55,6 +55,9 @@ fn clocking_blocks_are_analyzed() {
         // A local event of the block's name hides the block (14.10 makes
         // a trigger of the block event an error).
         &format!("{BLOCK} initial begin event cb; -> cb; @(cb); end"),
+        &"parameter D = 2; clocking cb @(posedge clk); output #D q; endclocking \
+          initial begin automatic int e = 1; @(cb); cb.q <= e; end"
+            .to_string(),
     ] {
         let source =
             format!("`timescale 1ns/1ns\nmodule Top; bit clk; logic [7:0] d, q; {items} endmodule");
@@ -66,7 +69,7 @@ fn clocking_blocks_are_analyzed() {
 fn unsupported_clocking_constructs_name_themselves() {
     for (items, construct) in [
         (&format!("{BLOCK} initial ##2 q = 1;"), "cycle delay"),
-        (&format!("{BLOCK} initial cb.q <= 1;"), "synchronous drive"),
+        (&format!("{BLOCK} initial cb.q <= ##2 1;"), "cycle delay"),
         (
             &"clocking cb @(posedge clk); input negedge d; endclocking".to_string(),
             "edge",
@@ -84,6 +87,7 @@ fn unsupported_clocking_constructs_name_themselves() {
                 .to_string(),
             "clocking block",
         ),
+        (&format!("{BLOCK} initial cb.q[i] <= 1;"), "run-time index"),
         (
             &"if (1) begin : g clocking cb @(posedge clk); input d; endclocking end".to_string(),
             "generate block",
@@ -97,6 +101,16 @@ fn unsupported_clocking_constructs_name_themselves() {
             &"typedef struct { logic a; } s_t; s_t s; clocking cb @(posedge clk); input s; endclocking"
                 .to_string(),
             "unpacked structure",
+        ),
+        (
+            &format!("{BLOCK} initial begin logic [7:0] q; cb.q <= 1; end"),
+            "hides the clocking signal",
+        ),
+        (
+            &"parameter D = 2; clocking cb @(posedge clk); output #D q; endclocking \
+              initial begin localparam D = 4; cb.q <= 1; end"
+                .to_string(),
+            "hides a name of its output skew",
         ),
     ] {
         assert_unsupported(items, construct);
@@ -112,6 +126,10 @@ fn illegal_clockvar_uses_are_errors() {
         // 14.16: a clockvar is written by synchronous drives alone.
         (&format!("{BLOCK} initial cb.q = 1;"), "synchronous drive"),
         (&format!("{BLOCK} assign cb.q = 1;"), "synchronous drive"),
+        (
+            &format!("{BLOCK} initial cb.q <= #1 1;"),
+            "intra-assignment delay",
+        ),
         // 14.10: the clocking block event is only waited for.
         (&format!("{BLOCK} initial -> cb;"), "no event variable"),
         (&format!("{BLOCK} initial cb = null;"), "no event variable"),

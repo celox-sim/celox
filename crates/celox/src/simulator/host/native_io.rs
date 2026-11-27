@@ -699,6 +699,8 @@ impl Scope<'_> {
             lsb,
             width,
             value: (value, mask),
+            drive: false,
+            at_event: Default::default(),
         })
     }
 
@@ -768,6 +770,8 @@ impl Scope<'_> {
             lsb: site.lsb,
             width: site.width,
             value: self.value(site.value)?,
+            drive: false,
+            at_event: Default::default(),
         });
         Ok(())
     }
@@ -797,6 +801,8 @@ impl Scope<'_> {
                             lsb: site.lsb,
                             width: site.width,
                             value: self.value(site.value)?,
+                            drive: false,
+                            at_event: Default::default(),
                         };
                         if site.delay > 0 {
                             let due = timestamp.checked_add(site.delay).ok_or_else(|| {
@@ -1520,6 +1526,7 @@ mod tests {
                         position: None,
                         pending: Some(pending),
                         unit: false,
+                        re_nba: false,
                     })
                     .collect(),
             ],
@@ -1554,6 +1561,8 @@ mod tests {
             lsb,
             width,
             value: value(bits, mask),
+            drive: false,
+            at_event: Default::default(),
         };
         scope.store_value(target, &value(0x55, 0)).unwrap();
         scope.store_value(staged[0], &value(0x55, 0)).unwrap();

@@ -415,6 +415,7 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                             .map(|position| position.map(|id| resolve(&id))),
                         pending: site.pending.as_ref().map(resolve),
                         unit: site.unit,
+                        re_nba: site.re_nba,
                     })
                     .collect(),
             })

@@ -61,7 +61,9 @@ pub(super) fn select_nba_paths(
     // concurrently. Always queue its
     // captured value, rather than leaving one shared pending slot per kernel.
     for site in &timing.nba_sites {
-        if site.delay > 0 || processes[site.process].frame.is_some() {
+        // So are the updates of the Re-NBA region (14.16), which no flagged
+        // publication of the NBA region may take.
+        if site.delay > 0 || site.re_nba || processes[site.process].frame.is_some() {
             for switch in &timing.nba_switches {
                 if switch.value == site.value {
                     staged.remove(&switch.switch);

@@ -211,6 +211,7 @@ impl Ff<'_, '_> {
                 let sv::ir::Stmt::DelayedNonblocking {
                     control,
                     assignment,
+                    ..
                 } = stmt
                 else {
                     return;
@@ -570,6 +571,7 @@ impl Ff<'_, '_> {
                         position: None,
                         pending: Some(pending),
                         unit: true,
+                        re_nba: false,
                     })
                 })
                 .collect(),

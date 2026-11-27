@@ -362,14 +362,11 @@ impl BodyBuilder<'_, '_, '_> {
                 timing_control,
                 repeat_count,
             } => {
-                if *nonblocking {
-                    clocking::reject_drive(
-                        *left,
-                        self.syntax().declarations(),
-                        &self.tree,
-                        self.session,
-                        &self.dims,
-                    )?;
+                if *nonblocking
+                    && let Some(drive) =
+                        self.synchronous_drive(*left, *right, *timing, *timing_control)?
+                {
+                    return Ok(drive);
                 }
                 if timing.is_some() {
                     return self.intra_assignment(

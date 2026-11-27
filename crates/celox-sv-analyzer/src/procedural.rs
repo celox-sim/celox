@@ -95,9 +95,13 @@ pub enum StmtBase<E, L> {
     },
     /// A nonblocking assignment scheduled by an intra-assignment delay.
     /// The control describes the delay; it does not suspend the caller.
+    /// With `re_nba` the update happens in the Re-NBA region of its time
+    /// slot rather than in the NBA region: a synchronous drive of a
+    /// clocking block output (IEEE 1800-2023 14.16).
     DelayedNonblocking {
         control: Box<StmtBase<E, L>>,
         assignment: Box<StmtBase<E, L>>,
+        re_nba: bool,
     },
     If {
         condition: E,
@@ -357,9 +361,11 @@ impl<E, L> StmtBase<E, L> {
             StmtBase::DelayedNonblocking {
                 control,
                 assignment,
+                re_nba,
             } => StmtBase::DelayedNonblocking {
                 control: Box::new(control.map(fe, fl)),
                 assignment: Box::new(assignment.map(fe, fl)),
+                re_nba,
             },
             StmtBase::Assign {
                 lhs,
@@ -557,6 +563,7 @@ impl<E, L> StmtBase<E, L> {
             StmtBase::DelayedNonblocking {
                 control,
                 assignment,
+                ..
             } => {
                 control.visit(fe, fl, fcall);
                 assignment.visit(fe, fl, fcall);
@@ -694,6 +701,7 @@ impl<E, L> StmtBase<E, L> {
             StmtBase::DelayedNonblocking {
                 control,
                 assignment,
+                ..
             } => {
                 control.visit_mut(fe, fl, fname);
                 assignment.visit_mut(fe, fl, fname);
@@ -822,6 +830,7 @@ impl<E, L> StmtBase<E, L> {
             StmtBase::DelayedNonblocking {
                 control,
                 assignment,
+                ..
             } => {
                 control.walk_mut(f);
                 assignment.walk_mut(f);
@@ -883,6 +892,7 @@ impl<E, L> StmtBase<E, L> {
             StmtBase::DelayedNonblocking {
                 control,
                 assignment,
+                ..
             } => {
                 control.walk_scoped(f, detached);
                 assignment.walk_scoped(f, detached);

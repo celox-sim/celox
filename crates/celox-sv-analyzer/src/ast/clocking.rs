@@ -12,7 +12,10 @@
 //!   skew, which a process of its own assigns with nonblocking assignments
 //!   of that delay at each change of the signal, so that in the Observed
 //!   region of a slot it holds the signal's final value of the slot the skew
-//!   earlier.
+//!   earlier;
+//! - [`drives_issued`] and [`drives_matured`], the counts of the
+//!   synchronous drives executed between clocking events and of those of
+//!   them that matured, which keep their order (14.16.2).
 //!
 //! The process of the block waits for the clocking event, records its time,
 //! waits for the Observed region, samples the inputs of `#1step` skew (their
@@ -77,6 +80,18 @@ pub(super) struct Block<'a> {
 pub(super) fn marker(block: &str) -> String {
     // `%` starts no identifier of the source (see `continuous_delays`).
     format!("%clocking${block}")
+}
+
+/// The count of the synchronous drives through clocking block `block` that
+/// were executed between its clocking events, each of which takes the count
+/// before it as its turn (see `procedural::synchronous_drives`).
+pub(super) fn drives_issued(block: &str) -> String {
+    format!("%drives_issued${block}")
+}
+
+/// The count of those drives that have matured: the turn of the next one.
+pub(super) fn drives_matured(block: &str) -> String {
+    format!("%drives_matured${block}")
 }
 
 /// The variable that holds the sampled value of input clockvar `var` of
@@ -336,6 +351,13 @@ pub(super) fn signals(
     };
     push(block.name.clone(), event);
     push(marker(&block.name), time);
+    let mut count = Type::new(TypeKind::Bit);
+    count.packed_ranges.push(PackedRange::new(
+        ConstExpr::Literal("63".into()),
+        ConstExpr::Literal("0".into()),
+    ));
+    push(drives_issued(&block.name), count.clone());
+    push(drives_matured(&block.name), count);
     for var in &block.vars {
         if var.input.is_none() {
             continue;
@@ -396,6 +418,20 @@ pub(super) fn now() -> Expr {
         // In ticks of the global precision, which only compare here.
         args: vec![Some(Expr::Literal("64'd1".into()))],
         arg_order: Vec::new(),
+    }
+}
+
+/// Whether the latest clocking event of clocking block `block` occurred in
+/// the current time slot.
+pub(super) fn occurred(block: &str) -> Expr {
+    Expr::Binary {
+        left: Box::new(Expr::Ident(marker(block))),
+        op: BinaryOp::Eq,
+        right: Box::new(Expr::Binary {
+            left: Box::new(now()),
+            op: BinaryOp::Add,
+            right: Box::new(Expr::Literal("65'd1".into())),
+        }),
     }
 }
 
@@ -543,6 +579,7 @@ pub(super) fn reject_write(
     }
     reject_block_use(root, native, tree, session, dimensions)?;
     match clockvar_path(root, native, tree, session, dimensions) {
+        Some(_) if session.clockvar_drive == Some(root) => Ok(()),
         Some((block, var, _)) => Err(invalid(format!(
             "write to clockvar `{block}.{var}` other than by a synchronous drive (IEEE 1800-2023 14.16)"
         ))),
@@ -571,6 +608,20 @@ pub(super) fn declared<'a>(
         }
     }
     Ok(None)
+}
+
+/// The global precision ticks of output skew `skew` (3.14.3, 14.4).
+pub(super) fn skew_ticks(
+    skew: OutputSkew,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+) -> Converted<u64> {
+    match skew {
+        OutputSkew::Zero => Ok(0),
+        OutputSkew::Step => Ok(1),
+        OutputSkew::Delay(value) => delay_ticks(value, tree, session, dimensions),
+    }
 }
 
 /// The global precision ticks of skew delay `value` (14.4).
@@ -648,6 +699,7 @@ pub(super) fn skew_process(block: &str, var: &str, ticks: u64) -> (Stmt, Vec<Stm
             rhs: Expr::Ident(var.to_string()),
             nonblocking: true,
         }),
+        re_nba: false,
     };
     let change = Stmt::WaitEvent(vec![crate::procedural::EventItemBase {
         edge: crate::procedural::EventEdge::Any,
@@ -655,37 +707,4 @@ pub(super) fn skew_process(block: &str, var: &str, ticks: u64) -> (Stmt, Vec<Stm
         iff: None,
     }]);
     (delayed(), vec![change, delayed()])
-}
-
-/// Reject the synchronous drive `left <= ...` of a clockvar (14.16), which
-/// Celox does not support yet; a drive of an input clockvar is illegal
-/// (14.3).
-pub(super) fn reject_drive(
-    left: celox_sv_syntax::ExprId,
-    native: &celox_sv_syntax::Declarations,
-    tree: &AnalysisContext<'_>,
-    session: &mut Session,
-    dimensions: &PackedDimensions,
-) -> Converted<()> {
-    let mut root = expression_binding::ungroup(left, native);
-    while let celox_sv_syntax::ExprKind::Select { expression, .. } = &native.expression(root).kind {
-        root = expression_binding::ungroup(*expression, native);
-    }
-    let Some((block, var, _)) = clockvar_path(root, native, tree, session, dimensions) else {
-        return Ok(());
-    };
-    let output = declared(tree, &block)?
-        .and_then(|declared| {
-            declared
-                .vars
-                .into_iter()
-                .find(|clockvar| clockvar.name == var)
-        })
-        .and_then(|clockvar| clockvar.output);
-    match output {
-        Some(_) => Err(unsupported("synchronous drive (IEEE 1800-2023 14.16)")),
-        None => Err(invalid(format!(
-            "`{block}.{var}` is no output clockvar of clocking block `{block}`, which a synchronous drive writes (IEEE 1800-2023 14.3)"
-        ))),
-    }
 }
