@@ -12,7 +12,9 @@ use super::*;
 use crate::ast::covergroups::{ITEM, Layout, Level, Member, OptionType, SelectTree};
 use celox_sv_syntax::{
     BinsArray, CoverageItem, CoverageOption, CoverpointItem, CrossBins, SelectKind,
+    TransitionRepeatKind, TransitionSet,
 };
+use num_bigint::BigInt;
 use system_functions::{ContainerKind, ContainerOp};
 
 /// What `N::$new` evaluates and hands to the heap before it builds the
@@ -1287,6 +1289,177 @@ impl Construction<'_> {
         Ok(heap::BinValues::ranges(values))
     }
 
+    /// Whether native expression `value` is known to be a single value: of
+    /// an integral, a real or a string type. Any other, and one whose type
+    /// the analysis cannot tell, may be an array (19.5.1.2).
+    fn is_single_value(&self, builder: &mut BodyBuilder<'_, '_, '_>, value: ExprId) -> bool {
+        let native = self.site.tree.declarations();
+        expression_types::type_of(&builder.tree, builder.session, value, native, &builder.dims)
+            .is_ok_and(|ty| {
+                matches!(
+                    builder.session.types.data(ty),
+                    semantic_types::TyData::Packed(_)
+                        | semantic_types::TyData::Real
+                        | semantic_types::TyData::Shortreal
+                        | semantic_types::TyData::String
+                )
+            })
+    }
+
+    /// Repetition count `count` of a step of a transition of a bin
+    /// (19.5.2): a constant where it folds, which is a positive number, or
+    /// an input that `new` evaluates and the construction checks. The
+    /// value of a constant comes with it. `place` names the bin.
+    fn count(
+        &mut self,
+        builder: &mut BodyBuilder<'_, '_, '_>,
+        count: ExprId,
+        place: &str,
+    ) -> Converted<(heap::Operand, Option<BigInt>)> {
+        let native = self.site.tree.declarations();
+        let integral =
+            expression_types::type_of(&builder.tree, builder.session, count, native, &builder.dims)
+                .is_ok_and(|ty| {
+                    matches!(
+                        builder.session.types.data(ty),
+                        semantic_types::TyData::Packed(_)
+                    )
+                });
+        if !integral {
+            return Err(invalid(format!(
+                "a repetition count of {place} is not an integral expression (IEEE 1800-2023 19.5.2)"
+            )));
+        }
+        let operand = self.operand(builder, count, place)?;
+        let value = match &operand {
+            heap::Operand::Constant(constant) => {
+                // "a non-negative integer constant expression" (16.9.2).
+                let Some(value) = known_number(constant).filter(|value| *value >= BigInt::ZERO)
+                else {
+                    return Err(invalid(format!(
+                        "a repetition count of {place} is not a non-negative integer (IEEE 1800-2023 16.9.2, 19.5.2)"
+                    )));
+                };
+                // A repetition of no sample is an empty sequence (16.9.2.1),
+                // which the heap does not take as a step.
+                if value == BigInt::ZERO {
+                    return Err(unsupported(
+                        "covergroup transition repetition of no sample (IEEE 1800-2023 19.5.2)",
+                    ));
+                }
+                // A step of more samples has more states than the
+                // transitions of a coverpoint may have.
+                if value >= BigInt::from(heap::MAX_TRANSITION_STATES) {
+                    return Err(unsupported(format!(
+                        "covergroup transition repetition count above {}, beyond the {} states the transitions of a coverpoint may have (IEEE 1800-2023 19.5.2)",
+                        heap::MAX_TRANSITION_STATES - 1,
+                        heap::MAX_TRANSITION_STATES
+                    )));
+                }
+                Some(value)
+            }
+            heap::Operand::Input(_) => None,
+        };
+        Ok((operand, value))
+    }
+
+    /// The transitions `sets` of bin declaration `bins`, `declared`
+    /// (19.5.2): the values of each step, which are resolved and warned of
+    /// as those of a range list (19.5.7), and the counts of its repetition.
+    /// A transition of one step whose repetition is of 1 sample at least is
+    /// of length 0, as is one of one value that is no array.
+    fn transitions(
+        &mut self,
+        builder: &mut BodyBuilder<'_, '_, '_>,
+        bins: &Bins,
+        sets: &[TransitionSet],
+        declared: &Declared<'_>,
+    ) -> Converted<heap::BinValues> {
+        let Declared {
+            point, name, place, ..
+        } = declared;
+        let length_0 = || {
+            invalid(format!(
+                "{place} has a transition of length 0 (IEEE 1800-2023 19.5.2)"
+            ))
+        };
+        let mut sequences = Vec::with_capacity(sets.len());
+        for set in sets {
+            let single = set.steps.len() == 1;
+            let mut steps = Vec::with_capacity(set.steps.len());
+            for step in &set.steps {
+                if single && step.repeat.is_none() {
+                    return Err(length_0());
+                }
+                let mut values = Vec::new();
+                for range in &step.ranges {
+                    let value = self.range(builder, range, place)?;
+                    let mut details = Vec::new();
+                    self.resolved(point, bins.wildcard, value, &mut values, &mut details);
+                    self.warn(builder, &point.name, name, details, range.tokens);
+                }
+                // The values of a wildcard value matched as a pattern are
+                // not listed, so no bin of an array can be made of them
+                // (19.5.4).
+                if bins.array.is_some() && patterned(&point.ty, bins.wildcard, &values) {
+                    return Err(unsupported(format!(
+                        "covergroup wildcard value of more than {} ranges of values in a bin array or a bin with a filter (IEEE 1800-2023 19.5.4)",
+                        heap::MAX_WILDCARD_EXPANSION
+                    )));
+                }
+                let repeat = match &step.repeat {
+                    None => heap::Repeat::Once,
+                    Some(repeat) => {
+                        let (low, low_value) = self.count(builder, repeat.low, place)?;
+                        let (high, high_value) = match repeat.high {
+                            Some(high) => self.count(builder, high, place)?,
+                            None => (low.clone(), low_value.clone()),
+                        };
+                        if let (Some(low), Some(high)) = (&low_value, &high_value)
+                            && high < low
+                        {
+                            return Err(invalid(format!(
+                                "the repetition range {low}:{high} of {place} has a maximum below its minimum (IEEE 1800-2023 16.9.2)"
+                            )));
+                        }
+                        // "a single covergroup_value_range with a
+                        // repeat_range evaluating to 1", also as the
+                        // minimum of a range, which stands for each of its
+                        // numbers ("3 [* 3:5]" is "the same as" its three
+                        // sequences).
+                        if single && low_value == Some(BigInt::from(1)) {
+                            return Err(length_0());
+                        }
+                        match repeat.kind {
+                            TransitionRepeatKind::Consecutive => {
+                                heap::Repeat::Consecutive(low, high)
+                            }
+                            TransitionRepeatKind::Goto => heap::Repeat::Goto(low, high),
+                            TransitionRepeatKind::NonConsecutive => {
+                                heap::Repeat::NonConsecutive(low, high)
+                            }
+                        }
+                    }
+                };
+                steps.push(heap::TransitionStep { values, repeat });
+            }
+            // A step none of whose values takes part (19.5.7) is matched by
+            // no sample, so its transition is none of the bin, as a value
+            // that takes part in no value is none of a bin of values.
+            if steps.iter().all(|step| !step.values.is_empty()) {
+                sequences.push(steps);
+            }
+        }
+        // A bin left with no transition has no sequence: it is empty and
+        // takes no part in coverage, and an ignored or illegal one takes
+        // nothing from other bins (19.5.5, 19.5.6, 19.11), as an empty bin
+        // of values does.
+        if sequences.is_empty() {
+            return Ok(heap::BinValues::ranges(Vec::new()));
+        }
+        Ok(heap::BinValues::Transitions(sequences))
+    }
+
     /// Bin declaration `bins` of coverpoint `point` (19.5.1 to 19.5.6),
     /// whose predicate bits are `bits` and whose values are of the type
     /// `item_type` of the variable of the coverpoint.
@@ -1362,11 +1535,15 @@ impl Construction<'_> {
             },
             BinsValue::Set(set) => self.set(builder, bins, *set, &declared)?,
             BinsValue::Default => heap::BinValues::Default,
-            BinsValue::Transitions(_) | BinsValue::DefaultSequence => {
-                return Err(unsupported(
-                    "covergroup transition bins (IEEE 1800-2023 19.5.2)",
-                ));
-            }
+            BinsValue::Transitions(sets) => match covergroups::one_value_transition(sets) {
+                // `(e)` is a parenthesized set expression unless `e` is known
+                // to be a single value, which makes a transition of length 0.
+                Some(value) if !self.is_single_value(builder, value) => {
+                    self.set(builder, bins, value, &declared)?
+                }
+                _ => self.transitions(builder, bins, sets, &declared)?,
+            },
+            BinsValue::DefaultSequence => heap::BinValues::DefaultSequence,
         };
         let mut bin = heap::BinDescriptor::new(name, values);
         bin.kind = match bins.kind {
@@ -1597,6 +1774,54 @@ fn taking_part(ty: &heap::PointType, item: heap::ResolvedItem) -> heap::RangeDes
     }
 }
 
+/// The number `constant` stands for, by the signedness of its type, or
+/// `None` where it has an x or z bit.
+fn known_number(constant: &heap::Constant) -> Option<BigInt> {
+    if constant.mask.bits() != 0 {
+        return None;
+    }
+    let width = u64::from(constant.ty.width);
+    let value = BigInt::from(constant.value.clone());
+    Some(
+        if constant.ty.signed && width != 0 && constant.value.bit(width - 1) {
+            value - (BigInt::from(1) << width)
+        } else {
+            value
+        },
+    )
+}
+
+/// Whether one of the values `values` of a bin of a coverpoint of type
+/// `ty`, `wildcard` if the declaration is, is matched as a pattern: a
+/// wildcard constant of more ranges of values than are listed (19.5.4, see
+/// `heap::MAX_WILDCARD_EXPANSION`).
+fn patterned(ty: &heap::PointType, wildcard: bool, values: &[heap::RangeDescriptor]) -> bool {
+    wildcard
+        && values.iter().any(|value| {
+            range_value(value).is_some_and(|value| heap::value_count(ty, true, value).is_none())
+        })
+}
+
+/// Whether coverpoint `point` has an ignored or illegal transition beside
+/// a wildcard transition value that is matched as a pattern, whose values a
+/// construction cannot list to find what the transition removes (19.5.4,
+/// 19.5.5, 19.5.6).
+fn removal_beside_patterns(point: &heap::PointDescriptor) -> bool {
+    let transitions = || {
+        point.bins.iter().filter_map(|bin| match &bin.values {
+            heap::BinValues::Transitions(sequences) => Some((bin, sequences)),
+            _ => None,
+        })
+    };
+    transitions().any(|(bin, _)| bin.kind != heap::BinKind::Bins)
+        && transitions().any(|(bin, sequences)| {
+            sequences
+                .iter()
+                .flatten()
+                .any(|step| patterned(&point.ty, bin.wildcard, &step.values))
+        })
+}
+
 /// The subroutines `value` calls.
 fn subroutine_calls(value: &Expr, calls: &mut Vec<String>) {
     match value {
@@ -1775,6 +2000,12 @@ pub(super) fn body(
                             declaration += 1;
                         }
                     }
+                }
+                if removal_beside_patterns(&points[point]) {
+                    return Err(unsupported(format!(
+                        "covergroup ignored or illegal transition beside a wildcard transition value of more than {} ranges of values (IEEE 1800-2023 19.5.4, 19.5.5, 19.5.6)",
+                        heap::MAX_WILDCARD_EXPANSION
+                    )));
                 }
                 point += 1;
             }

@@ -1600,13 +1600,51 @@ fn unsupported_coverpoint_constructs_are_rejected_where_used() {
              array of an object with integral elements of at most 64 bits nor an array parameter \
              with integral elements (IEEE 1800-2023 19.5.1.2)",
         ),
+        // The values of a wildcard transition value matched as a pattern
+        // are not listed: no bin array has one, and no ignored or illegal
+        // transition can be taken from it.
         (
-            "bit [3:0] x; covergroup cg; coverpoint x { bins b = (1 => 2); } endgroup",
-            "covergroup transition bins (IEEE 1800-2023 19.5.2)",
+            "longint x; covergroup cg; coverpoint x { wildcard bins b[] = \
+             (64'h???????????????1 => 0); } endgroup",
+            "covergroup wildcard value of more than 65536 ranges of values in a bin array or a \
+             bin with a filter (IEEE 1800-2023 19.5.4)",
         ),
         (
-            "bit [3:0] x; covergroup cg; coverpoint x { bins b = default sequence; } endgroup",
-            "covergroup transition bins (IEEE 1800-2023 19.5.2)",
+            "longint x; covergroup cg; coverpoint x { wildcard bins b = \
+             (64'h???????????????1 => 0); ignore_bins i = (1 => 2); } endgroup",
+            "covergroup ignored or illegal transition beside a wildcard transition value of more \
+             than 65536 ranges of values (IEEE 1800-2023 19.5.4, 19.5.5, 19.5.6)",
+        ),
+        // A repetition of no sample is an empty sequence (16.9.2.1), and a
+        // count of 65536 samples or more is beyond the states of the
+        // transitions of a coverpoint.
+        (
+            "bit [3:0] x; covergroup cg; coverpoint x { bins b = (1 => 2 [* 0]); } endgroup",
+            "covergroup transition repetition of no sample (IEEE 1800-2023 19.5.2)",
+        ),
+        (
+            "bit [3:0] x; covergroup cg; coverpoint x { bins b = (1 => 2 [* 0:1] => 3); } endgroup",
+            "covergroup transition repetition of no sample (IEEE 1800-2023 19.5.2)",
+        ),
+        (
+            "bit [3:0] x; covergroup cg; coverpoint x { bins b = (1 => 2 [* 70000]); } endgroup",
+            "covergroup transition repetition count above 65535, beyond the 65536 states the \
+             transitions of a coverpoint may have (IEEE 1800-2023 19.5.2)",
+        ),
+        (
+            "bit [3:0] x; covergroup cg; \
+             coverpoint x { bins b = (1 => 2 [* 68'h1_0000_0000_0000_0003]); } endgroup",
+            "covergroup transition repetition count above 65535, beyond the 65536 states the \
+             transitions of a coverpoint may have (IEEE 1800-2023 19.5.2)",
+        ),
+        // `(e)` that may be an array takes the path of a set expression.
+        (
+            "bit [3:0] x; localparam bit [3:0] S [3] = '{1, 2, 3}; \
+             localparam bit [3:0] T [2] = '{4, 5}; localparam bit SEL = 1; \
+             covergroup cg; coverpoint x { bins a[] = (SEL ? S : T); } endgroup",
+            "covergroup bins of a set expression that is neither a dynamic array, a queue or an \
+             array of an object with integral elements of at most 64 bits nor an array parameter \
+             with integral elements (IEEE 1800-2023 19.5.1.2)",
         ),
         (
             "covergroup cg; type_option.real_interval = 2.0; endgroup",
@@ -4421,4 +4459,386 @@ fn errors_of_covergroup_arguments_name_the_covergroup() {
         )
     );
     assert_eq!(error.tracking_issue(), COVERGROUPS_ISSUE);
+}
+
+/// Operand `operand` of a bin as `constant_ranges` shows it.
+fn operand_text(operand: &celox_heap::coverage::Operand) -> String {
+    use celox_heap::coverage::Operand;
+    match operand {
+        Operand::Constant(constant) if constant.mask.bits() != 0 => {
+            format!("{:b}/{:b}", constant.value, constant.mask)
+        }
+        Operand::Constant(constant)
+            if constant.ty.signed && constant.value.bit(u64::from(constant.ty.width) - 1) =>
+        {
+            let modulus = num_bigint::BigInt::from(1) << constant.ty.width;
+            (num_bigint::BigInt::from(constant.value.clone()) - modulus).to_string()
+        }
+        Operand::Constant(constant) => constant.value.to_string(),
+        Operand::Input(index) => format!("input{index}"),
+    }
+}
+
+/// The transitions of `bin` as 19.5.2 writes them, with the counts of each
+/// repetition as a range: `(1,5 => 6[*2:2]), (3[->1:1])`.
+fn transition_text(bin: &celox_heap::coverage::BinDescriptor) -> String {
+    use celox_heap::coverage::{BinValues, Bound, RangeDescriptor, Repeat};
+    let BinValues::Transitions(sequences) = &bin.values else {
+        panic!("bin `{}` is no transition bin: {:?}", bin.name, bin.values);
+    };
+    let bound = |bound: &Bound| match bound {
+        Bound::Open => "$".to_string(),
+        Bound::Operand(value) => operand_text(value),
+    };
+    sequences
+        .iter()
+        .map(|steps| {
+            let steps: Vec<String> = steps
+                .iter()
+                .map(|step| {
+                    let values: Vec<String> = step
+                        .values
+                        .iter()
+                        .map(|value| match value {
+                            RangeDescriptor::Value(value) => operand_text(value),
+                            RangeDescriptor::Range { low, high } => {
+                                format!("[{}:{}]", bound(low), bound(high))
+                            }
+                        })
+                        .collect();
+                    let repeat = |kind: &str, low, high| {
+                        format!("[{kind}{}:{}]", operand_text(low), operand_text(high))
+                    };
+                    let repeat = match &step.repeat {
+                        Repeat::Once => String::new(),
+                        Repeat::Consecutive(low, high) => repeat("*", low, high),
+                        Repeat::Goto(low, high) => repeat("->", low, high),
+                        Repeat::NonConsecutive(low, high) => repeat("=", low, high),
+                    };
+                    format!("{}{repeat}", values.join(","))
+                })
+                .collect();
+            format!("({})", steps.join(" => "))
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+#[test]
+fn transition_bins_compile_to_the_descriptor_of_the_type() {
+    use celox_heap::coverage::{BinArray, BinKind, BinValues, InputDescriptor, Operand, ValueType};
+    // 19.5.2, 19.5.5, 19.5.6: each form of a transition bin, with values
+    // and counts that are constants, parameters, enumerators, arguments of
+    // the covergroup and calls of functions of these, which `new`
+    // evaluates.
+    let ir = analyze(
+        "module Top; bit [3:0] v; bit en; \
+         typedef enum bit [3:0] { IDLE, RD = 5, WR = 9 } st_t; st_t s; \
+         localparam int P = 4; localparam int S [3] = '{1, 2, 3}; \
+         function automatic int twice(int x); return 2 * x; endfunction \
+         covergroup cg(int a, int n); \
+         coverpoint v { \
+           bins one = (1 => 2); \
+           bins sets = (1, 5 => 6, 7); \
+           bins lists = ([7:9], 10 => 11), (4 => 5 => 6); \
+           bins rep = (3 [* 5]); \
+           bins reps = (3 [* 3:5]); \
+           bins go = (1 => 3 [-> 3] => 5); \
+           bins non = (1 => 3 [= 2:4] => 6); \
+           bins arg = (a => P => twice(a) [* n]); \
+           bins arr[] = (1, 2 => 3 [* 1:2]); \
+           wildcard bins w = (4'b11?? => 4'b00??); \
+           ignore_bins ig = (2 => 3); \
+           illegal_bins bad = (4 => 5 => 6) iff (en); \
+           bins other = default sequence; \
+           illegal_bins never = default sequence; \
+           bins set = (S); \
+           bins each[] = (S); \
+           bins two[2] = (S); \
+         } \
+         coverpoint s { bins t = (IDLE => RD, WR); } \
+         endgroup \
+         cg c; initial begin c = new(1, 2); c.sample(); end endmodule",
+    )
+    .unwrap();
+    let top = module(&ir, "Top");
+    let descriptor = descriptor(top, "Top.cg");
+    let [v, s] = descriptor.points.as_slice() else {
+        panic!("{:?}", descriptor.points);
+    };
+    let text = |name| transition_text(bin(v, name));
+    assert_eq!(text("one"), "(1 => 2)");
+    assert_eq!(text("sets"), "(1,5 => 6,7)");
+    assert_eq!(text("lists"), "([7:9],10 => 11), (4 => 5 => 6)");
+    assert_eq!(text("rep"), "(3[*5:5])");
+    assert_eq!(text("reps"), "(3[*3:5])");
+    assert_eq!(text("go"), "(1 => 3[->3:3] => 5)");
+    assert_eq!(text("non"), "(1 => 3[=2:4] => 6)");
+    // `a`, `twice(a)` and `n` are evaluated by `new`, each an input.
+    assert_eq!(text("arg"), "(input0 => 4 => input1[*input2:input2])");
+    assert_eq!(text("arr"), "(1,2 => 3[*1:2])");
+    // `?` is z: the bits of the mask.
+    assert_eq!(text("w"), "(1100/11 => 0/11)");
+    assert_eq!(transition_text(bin(s, "t")), "(0 => 5,9)");
+    let shape = |name| {
+        let bin = bin(v, name);
+        (bin.kind, bin.array.clone(), bin.wildcard, bin.iff)
+    };
+    assert_eq!(shape("arr"), (BinKind::Bins, BinArray::Open, false, None));
+    assert_eq!(shape("w"), (BinKind::Bins, BinArray::Scalar, true, None));
+    assert_eq!(
+        shape("ig"),
+        (BinKind::Ignore, BinArray::Scalar, false, None)
+    );
+    assert_eq!(
+        shape("bad"),
+        (BinKind::Illegal, BinArray::Scalar, false, Some(0))
+    );
+    assert_eq!(bin(v, "other").values, BinValues::DefaultSequence);
+    assert_eq!(bin(v, "other").kind, BinKind::Bins);
+    assert_eq!(bin(v, "never").values, BinValues::DefaultSequence);
+    assert_eq!(bin(v, "never").kind, BinKind::Illegal);
+    assert_eq!(v.predicates, 1);
+    // `(S)` of an array is a parenthesized set expression (19.5.1.2): the
+    // elements of the parameter are the values of the bin.
+    assert_eq!(
+        constant_ranges(bin(v, "set")),
+        (vec!["1".to_string(), "2".into(), "3".into()], None)
+    );
+    assert_eq!(constant_ranges(bin(v, "each")).0, ["1", "2", "3"]);
+    assert_eq!(bin(v, "each").array, BinArray::Open);
+    assert_eq!(constant_ranges(bin(v, "two")).0, ["1", "2", "3"]);
+    assert!(
+        matches!(&bin(v, "two").array, BinArray::Fixed(Operand::Constant(size)) if size.value == 2u8.into())
+    );
+    let int = ValueType {
+        width: 32,
+        signed: true,
+    };
+    assert_eq!(
+        descriptor.inputs,
+        [
+            InputDescriptor::Integral(int),
+            InputDescriptor::Integral(int),
+            InputDescriptor::Integral(int)
+        ]
+    );
+}
+
+#[test]
+fn transition_bins_the_standard_excludes_are_errors() {
+    // What the declaration alone shows is an error where the covergroup is
+    // declared, whether or not something uses it.
+    for (declaration, rule) in [
+        // 19.5.2: "Transition bin specifications of length 0 shall be
+        // illegal": a trans_set of one step without a repetition.
+        (
+            "bit [3:0] x; covergroup cg; coverpoint x { bins b = (1, 2); } endgroup",
+            "bin `b` of coverpoint `x` of covergroup `Top.cg` has a transition of length 0 (IEEE \
+             1800-2023 19.5.2)",
+        ),
+        (
+            "bit [3:0] x; covergroup cg; coverpoint x { bins b = ([0:1]); } endgroup",
+            "bin `b` of coverpoint `x` of covergroup `Top.cg` has a transition of length 0 (IEEE \
+             1800-2023 19.5.2)",
+        ),
+        (
+            "bit [3:0] x; covergroup cg; coverpoint x { bins b = (1 => 2), (3); } endgroup",
+            "bin `b` of coverpoint `x` of covergroup `Top.cg` has a transition of length 0 (IEEE \
+             1800-2023 19.5.2)",
+        ),
+        // 19.5.2: "Transitions that specify sequences of unbounded or
+        // undetermined varying length cannot be used with the multiple
+        // bins construct".
+        (
+            "bit [3:0] x; covergroup cg; coverpoint x { bins b[] = (1 => 3 [-> 2]); } endgroup",
+            "bin `b` of coverpoint `x` of covergroup `Top.cg` is an array of transition bins with \
+             a goto or nonconsecutive repetition, whose sequences are of unbounded length (IEEE \
+             1800-2023 19.5.2)",
+        ),
+        (
+            "bit [3:0] x; covergroup cg; coverpoint x { bins b[] = (3 [= 2]); } endgroup",
+            "bin `b` of coverpoint `x` of covergroup `Top.cg` is an array of transition bins with \
+             a goto or nonconsecutive repetition, whose sequences are of unbounded length (IEEE \
+             1800-2023 19.5.2)",
+        ),
+        // 19.5.5, 19.5.6: "Ignored transition bins cannot specify a
+        // sequence of unbounded or undetermined varying length", nor
+        // illegal ones.
+        (
+            "bit [3:0] x; covergroup cg; coverpoint x { ignore_bins b = (1 => 3 [-> 2]); } \
+             endgroup",
+            "`ignore_bins b` of coverpoint `x` of covergroup `Top.cg` is a transition with a goto \
+             or nonconsecutive repetition, a sequence of unbounded length (IEEE 1800-2023 19.5.5)",
+        ),
+        (
+            "bit [3:0] x; covergroup cg; coverpoint x { illegal_bins b = (3 [= 1:2] => 1); } \
+             endgroup",
+            "`illegal_bins b` of coverpoint `x` of covergroup `Top.cg` is a transition with a goto \
+             or nonconsecutive repetition, a sequence of unbounded length (IEEE 1800-2023 19.5.6)",
+        ),
+        // 19.5: "A default bin cannot be explicitly ignored".
+        (
+            "bit [3:0] x; covergroup cg; coverpoint x { ignore_bins b = default sequence; } \
+             endgroup",
+            "`ignore_bins b` of coverpoint `x` of covergroup `Top.cg` is a default bin, which \
+             cannot be ignored (IEEE 1800-2023 19.5)",
+        ),
+        // 19.8.1: an argument of the sample method is no operand of a bin.
+        (
+            "covergroup cg with function sample(bit [3:0] x, int n); \
+             coverpoint x { bins b = (1 => 2 [* n]); } endgroup",
+            "argument `n` of the sample method of covergroup `Top.cg` is used in a bin: it is \
+             visible in coverpoint expressions and their guards only (IEEE 1800-2023 19.8.1)",
+        ),
+    ] {
+        let rule = rule.split_whitespace().collect::<Vec<_>>().join(" ");
+        for used in ["", "cg c; initial c = new;"] {
+            let error = rejected("", &format!("{declaration} {used}"));
+            assert_eq!(
+                error,
+                AnalyzerError::InvalidCovergroup(rule.clone()),
+                "{declaration} {used}"
+            );
+        }
+    }
+    // What needs the values of the operands or their types is an error
+    // where the type is used.
+    for (declaration, rule) in [
+        // One value alone is a parenthesized set expression where it is an
+        // array (19.5.1.2), else a transition of length 0 (19.5.2).
+        (
+            "bit [3:0] x; covergroup cg; coverpoint x { bins b = (1); } endgroup",
+            "bin `b` of coverpoint `x` of covergroup `Top.cg` has a transition of length 0 (IEEE \
+             1800-2023 19.5.2)",
+        ),
+        (
+            "bit [3:0] x; covergroup cg; coverpoint x { bins b[2] = (1); } endgroup",
+            "bin `b` of coverpoint `x` of covergroup `Top.cg` has a transition of length 0 (IEEE \
+             1800-2023 19.5.2)",
+        ),
+        (
+            "bit [3:0] x; covergroup cg(int a); coverpoint x { bins b = (a); } endgroup",
+            "bin `b` of coverpoint `x` of covergroup `Top.cg` has a transition of length 0 (IEEE \
+             1800-2023 19.5.2)",
+        ),
+        // "a single covergroup_value_range with a repeat_range evaluating
+        // to 1": also the minimum of a range of repetitions, which stands
+        // for each of its counts.
+        (
+            "bit [3:0] x; covergroup cg; coverpoint x { bins b = (0 [* 1]); } endgroup",
+            "bin `b` of coverpoint `x` of covergroup `Top.cg` has a transition of length 0 (IEEE \
+             1800-2023 19.5.2)",
+        ),
+        (
+            "bit [3:0] x; localparam int ONE = 1; \
+             covergroup cg; coverpoint x { bins b = ([0:1] [* ONE:3]); } endgroup",
+            "bin `b` of coverpoint `x` of covergroup `Top.cg` has a transition of length 0 (IEEE \
+             1800-2023 19.5.2)",
+        ),
+        (
+            "bit [3:0] x; covergroup cg; coverpoint x { bins b = (2 [-> 1]); } endgroup",
+            "bin `b` of coverpoint `x` of covergroup `Top.cg` has a transition of length 0 (IEEE \
+             1800-2023 19.5.2)",
+        ),
+        // 16.9.2: a count is a non-negative integer, and the minimum of a
+        // range is at most its maximum.
+        (
+            "bit [3:0] x; localparam int M = -1; \
+             covergroup cg; coverpoint x { bins b = (1 => 2 [-> 1:M]); } endgroup",
+            "a repetition count of bin `b` of coverpoint `x` of covergroup `Top.cg` is not a \
+             non-negative integer (IEEE 1800-2023 16.9.2, 19.5.2)",
+        ),
+        (
+            "bit [3:0] x; covergroup cg; coverpoint x { bins b = (1 => 2 [= 4'bx1]); } endgroup",
+            "a repetition count of bin `b` of coverpoint `x` of covergroup `Top.cg` is not a \
+             non-negative integer (IEEE 1800-2023 16.9.2, 19.5.2)",
+        ),
+        (
+            "bit [3:0] x; covergroup cg; coverpoint x { bins b = (1 => 2 [* 3:2]); } endgroup",
+            "the repetition range 3:2 of bin `b` of coverpoint `x` of covergroup `Top.cg` has a \
+             maximum below its minimum (IEEE 1800-2023 16.9.2)",
+        ),
+        (
+            "bit [3:0] x; covergroup cg; coverpoint x { bins b = (1 => 2 [* 1.5]); } endgroup",
+            "a repetition count of bin `b` of coverpoint `x` of covergroup `Top.cg` is not an \
+             integral expression (IEEE 1800-2023 19.5.2)",
+        ),
+        // 19.5: what a covergroup_expression may read, in step values and
+        // counts.
+        (
+            "bit [3:0] x; int lim; \
+             covergroup cg; coverpoint x { bins b = (1 => 2 [* lim]); } endgroup",
+            "`lim` in bin `b` of coverpoint `x` of covergroup `Top.cg` is neither a constant nor \
+             an argument of the covergroup (IEEE 1800-2023 19.5)",
+        ),
+        (
+            "bit [3:0] x; covergroup cg(ref bit [3:0] r); \
+             coverpoint r { bins b = (r => 1); } endgroup",
+            "`r` in bin `b` of coverpoint `r` of covergroup `Top.cg` is a ref argument of the \
+             covergroup, which a covergroup_expression cannot read (IEEE 1800-2023 19.5)",
+        ),
+        (
+            "bit [3:0] x; \
+             function automatic int f(output int o); o = 1; return 2; endfunction \
+             int k; covergroup cg; coverpoint x { bins b = (1 => 2 [* f(k)]); } endgroup",
+            "`k` in bin `b` of coverpoint `x` of covergroup `Top.cg` is neither a constant nor \
+             an argument of the covergroup (IEEE 1800-2023 19.5)",
+        ),
+        (
+            "bit [3:0] x; \
+             function automatic int f(output int o); o = 1; return 2; endfunction \
+             covergroup cg(int k); coverpoint x { bins b = (f(k) => 2); } endgroup",
+            "the function called in bin `b` of coverpoint `x` of covergroup `Top.cg` has an \
+             output, inout or ref argument (IEEE 1800-2023 19.5)",
+        ),
+    ] {
+        analyze(&format!("module Top; {declaration} cg c; endmodule"))
+            .unwrap_or_else(|error| panic!("{declaration}: {error}"));
+        // A `ref` argument is that of a declaration (19.3).
+        let used = if declaration.contains("cg(ref") {
+            "cg c = new(x);"
+        } else if declaration.contains("cg(int") {
+            "cg c; initial c = new(1);"
+        } else {
+            "cg c; initial c = new;"
+        };
+        let error = rejected("", &format!("{declaration} {used}"));
+        let rule = rule.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(
+            error,
+            AnalyzerError::InvalidCovergroup(rule),
+            "{declaration}"
+        );
+    }
+    // The forms A.2.11 excludes are errors of the parser.
+    for declaration in [
+        "bins b[2] = (1 => 2);",
+        "bins b[] = default sequence;",
+        "wildcard bins b = default sequence;",
+        "bins b = (1 => 2 [* 1:$]);",
+    ] {
+        let source = format!(
+            "module Top; bit [3:0] x; covergroup cg; coverpoint x {{ {declaration} }} endgroup \
+             endmodule"
+        );
+        let error = analyze(&source).expect_err(&source);
+        assert!(
+            !matches!(
+                error,
+                AnalyzerError::InvalidCovergroup(_) | AnalyzerError::Unsupported(_)
+            ),
+            "{declaration}: {error}"
+        );
+    }
+    // A bounded repetition range in a bin array is legal (19.5.2: only the
+    // goto and the nonconsecutive repetitions are unbounded), as are a
+    // repetition range from 1 after another step and, in an ignored bin,
+    // a consecutive one.
+    analyze(
+        "module Top; bit [3:0] x; covergroup cg; coverpoint x { \
+         bins b[] = (3 [* 3:5]); bins c = (1 => 2 [-> 1:2]); ignore_bins i = (1 => 2 [* 1:2]); \
+         } endgroup cg c; initial begin c = new; c.sample(); end endmodule",
+    )
+    .unwrap();
 }

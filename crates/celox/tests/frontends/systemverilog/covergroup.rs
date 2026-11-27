@@ -7930,3 +7930,6 @@ endmodule
         assert_eq!(instances_of_types(&report, "M.cg"), [1, 1, 2]);
     }
 }
+
+#[path = "covergroup_transitions.rs"]
+mod transitions;

@@ -225,7 +225,7 @@ For `expect (property_spec) action_block` (16.17), the executing process makes o
 
 A covergroup (clause 19) is a type: declared in a module, a program, a package, the compilation unit or a generate block, or embedded in a class (19.4). `new` constructs an instance, with the arguments of the covergroup; `sample()` samples it, with the arguments of a `with function sample` declaration, and so does each occurrence of the clocking event of the covergroup (`covergroup cg @(posedge clk);`) for each of its instances (19.3); `get_inst_coverage()`, `get_coverage()`, `T::get_coverage()` and `$get_coverage()` give coverage, also of a coverpoint or cross (`c.cp.get_inst_coverage()`, `T::cp::get_coverage()`) and with the covered bins and the bins in two `int` variables (`c.get_coverage(covered, total)`); `start()`, `stop()` and `set_inst_name()` control an instance (19.8). The results are read through `Simulation::coverage()` (see [Coverage](#coverage)).
 
-A coverpoint (19.5) is of an integral type of any width: with or without a label, with a type of its own, and with an `iff` guard, whose expression is evaluated first. Its expression and its guard read the arguments of the covergroup and of `sample`, then the members of the class of an embedded covergroup, then the names of the scope. Its bins are the automatic bins of 19.5.3, also those of an enumeration, or the bins it declares for values (19.5.1 to 19.5.6): one bin, a bin for each value (`bins b[]`) or a number of bins (`bins b[N]`) of a list of values and ranges, also ranges with a tolerance (`[a +/- b]`, `[a +%- b]`), of the values a `with` expression keeps, or of the elements of an array; `default` bins; `ignore_bins` and `illegal_bins`; `wildcard` bins; and a guard on any of them (`iff`). A bin value is a constant, an argument of the covergroup or a call of a function with these, which the construction evaluates, so the instances of one type may differ in their bins. A sample of an illegal value is reported as an error.
+A coverpoint (19.5) is of an integral type of any width: with or without a label, with a type of its own, and with an `iff` guard, whose expression is evaluated first. Its expression and its guard read the arguments of the covergroup and of `sample`, then the members of the class of an embedded covergroup, then the names of the scope. Its bins are the automatic bins of 19.5.3, also those of an enumeration, or the bins it declares for values (19.5.1 to 19.5.6): one bin, a bin for each value (`bins b[]`) or a number of bins (`bins b[N]`) of a list of values and ranges, also ranges with a tolerance (`[a +/- b]`, `[a +%- b]`), of the values a `with` expression keeps, or of the elements of an array; `default` bins; `ignore_bins` and `illegal_bins`; `wildcard` bins; and a guard on any of them (`iff`). A bin value is a constant, an argument of the covergroup or a call of a function with these, which the construction evaluates, so the instances of one type may differ in their bins. A sample of an illegal value is reported as an error. Transition bins (19.5.2) count sequences of the values of the coverpoint: `bins t = (1 => 2 => 3), (4 => 5);`, with a list of values and ranges at each step (`(1, [5:7] => 6, 7)`), the consecutive, goto and nonconsecutive repetitions with a count or a range (`3 [* 5]`, `3 [* 3:5]`, `1 => 3 [-> 2] => 5`, `3 [= 1:2]`), a bin for each sequence of values (`bins t[] = (...)`), `wildcard` transitions, `ignore_bins` and `illegal_bins` of transitions and `default sequence`, each with a guard; their values and counts are operands as bin values are, and a sample that ends an illegal transition is reported as an error.
 
 A cross (19.6) crosses two or more coverpoints of the covergroup, or variables, which get a coverpoint of their own: an integral variable or net, a property of the class of an embedded covergroup, or an argument of the covergroup or of `sample`. It has a bin for each combination of bins of its coverpoints that take part in their coverage, and its `bins`, `ignore_bins` and `illegal_bins` take the combinations their select expressions select: `binsof(cp)` and `binsof(cp.bin)`, with `intersect {...}`, `!`, `&&`, `||`, parentheses, and the identifier of the cross itself, which selects every combination. A cross and each of its bins may have a guard (`iff`). A sample of an illegal combination is reported as an error.
 
@@ -237,7 +237,7 @@ A construct of the **Not supported** column is rejected where a `new` or a metho
 | --- | --- | --- |
 | **Declarations (19.3, 19.4)** | A covergroup of a module, a program, a package, the compilation unit or a generate block; a covergroup embedded in a class; variables of a covergroup type | `covergroup extends` (19.4.1); a covergroup declared in an interface, which is rejected with the interface in most positions, and always when it has a clocking event; one declared in a checker or in a loop generate block; constructing or sampling a covergroup type that a module takes as a type parameter (it declares variables there) |
 | **Coverpoints (19.5)** | Coverpoints of an integral type of any width, with or without a label, with a type of their own, and with an `iff` guard | A coverpoint of a `real` type; one of an enumeration whose enumerators have x or z bits; a coverpoint of a clockvar of a clocking block |
-| **Bins (19.5)** | The automatic bins of 19.5.3, also those of an enumeration; bins of values and ranges (`bins b = {0, [1:3], [8:$]};`) whose values are constants, arguments of the covergroup or calls of functions with these; bin arrays (`bins b[]`, `bins b[N]`); ranges with a tolerance (`[a +/- b]`, `[a +%- b]`) of integral operands; `default` and `default[]` bins; `ignore_bins` and `illegal_bins`; `wildcard` bins; a guard on a bin (`bins b = {1} iff (en);`); `with` filters (`bins b[] = {[0:255]} with (item % 3 == 0);`, `bins b = cp with (f(item));`); bins of a set expression (`bins b[] = S;`) that is an array parameter with integral elements, or a dynamic array, a queue or a constant array of the class of an embedded covergroup with integral elements of at most 64 bits | Transition bins and `default sequence` bins (19.5.2); `bins b[N] = default` (the standard does not say how the values are distributed); a `with` filter on a bin array, on `ignore_bins` or on `illegal_bins` whose values are constants and more than 1,048,576, such as `ignore_bins b = cp with (...)` on an `int` coverpoint (on one `bins` bin such a filter is supported, see [Coverage](#coverage)); a wildcard value of more than 65,536 ranges of values in a bin array or under such a filter; a set expression of any other form: an assignment pattern, a concatenation, a fixed-size array that is no parameter, an array of strings, handles or elements of more than 64 bits; a tolerance range with a `real` operand; a bin value that is not integral |
+| **Bins (19.5)** | The automatic bins of 19.5.3, also those of an enumeration; bins of values and ranges (`bins b = {0, [1:3], [8:$]};`) whose values are constants, arguments of the covergroup or calls of functions with these; bin arrays (`bins b[]`, `bins b[N]`); ranges with a tolerance (`[a +/- b]`, `[a +%- b]`) of integral operands; `default` and `default[]` bins; `ignore_bins` and `illegal_bins`; `wildcard` bins; a guard on a bin (`bins b = {1} iff (en);`); `with` filters (`bins b[] = {[0:255]} with (item % 3 == 0);`, `bins b = cp with (f(item));`); bins of a set expression (`bins b[] = S;`) that is an array parameter with integral elements, or a dynamic array, a queue or a constant array of the class of an embedded covergroup with integral elements of at most 64 bits, also written in parentheses (`bins b = (S);`); transition bins (19.5.2) of every form of the clause: steps of values and ranges, `[* n]`, `[* a:b]`, `[-> n]`, `[-> a:b]`, `[= n]` and `[= a:b]`, `bins t[]` (without goto and nonconsecutive repetitions, as 19.5.2 requires), `wildcard` transitions, `ignore_bins` and `illegal_bins` of transitions (without goto and nonconsecutive repetitions, 19.5.5, 19.5.6), `default sequence`, guards, and values and counts that are constants, arguments of the covergroup or calls of functions with these (see [Coverage](#coverage)) | A transition repetition count of 0 (`[* 0]`, `[* 0:2]`: `covergroup transition repetition of no sample`) and a constant count above 65,535 (`covergroup transition repetition count above 65535 …`); `option.detect_overlap` for transition bins, which it does not look at; an ignored or illegal transition of a coverpoint that has a wildcard transition value of more than 65,536 ranges of values (`covergroup ignored or illegal transition beside a wildcard transition value …`); `bins b[N] = default` (the standard does not say how the values are distributed); a `with` filter on a bin array, on `ignore_bins` or on `illegal_bins` whose values are constants and more than 1,048,576, such as `ignore_bins b = cp with (...)` on an `int` coverpoint (on one `bins` bin such a filter is supported, see [Coverage](#coverage)); a wildcard value of more than 65,536 ranges of values in a bin array or under such a filter; a set expression of any other form: an assignment pattern, a concatenation, a fixed-size array that is no parameter, an array of strings, handles or elements of more than 64 bits; a tolerance range with a `real` operand; a bin value that is not integral |
 | **Crosses (19.6)** | Crosses of coverpoints and of integral variables or nets (a variable gets a coverpoint of its own), with or without a label, with an `iff` guard; `bins`, `ignore_bins` and `illegal_bins` of select expressions of `binsof(cp)` and `binsof(cp.bin)`, with `intersect {...}` lists whose values are constants, arguments of the covergroup or calls of functions with these, `!`, `&&`, `\|\|`, parentheses and the identifier of the cross (`bins all = X;`); a guard on a cross bin | `with` and `matches` in a select expression (19.6.1.2); cross set expressions and functions declared in a cross body (19.6.1.3, 19.6.1.4); `!` before a parenthesized selection (`!(binsof(a) && binsof(b))`) and a conditional cross set expression, both rejected where the covergroup is declared; a cross that lists one item twice; `binsof` of a coverpoint that the cross does not cross; `&&` and `\|\|` that alternate through more than 32 levels of parentheses; an `intersect` list that meets values only a sample sorts into bins (see [Coverage](#coverage)) |
 | **Options (19.7, 19.7.1)** | Every member of `option` in the definition, at the levels 19.10 gives it; the members of `type_option` in the definition with a constant value: `weight`, `goal`, `comment` (a string literal), `merge_instances`, `distribute_first`, and `strobe`, which has no effect on a covergroup without a clocking event (19.3); in a procedure, the members of `option` of an instance and of its items, and of `type_option` of the type and of its items, through `::` or through an instance, read and assigned with `=` | `type_option.real_interval` (real coverpoints are not supported); `type_option.strobe` read in a procedure; a `type_option.comment` that is no string literal, such as a string parameter; a member assigned with another operator (`+=`, `++`) or with `<=`; a member read in the select of a place that an increment or a compound assignment writes (`arr[c.cp.option.weight]++`); `option` or `type_option` used as a whole structure; `type_option.strobe = 1` of a covergroup with a clocking event (`covergroup strobe sampling`), as no sample is taken in the Postponed region |
 | **Sampling (19.3, 19.8.1)** | `sample()`; the clocking event of a covergroup (`covergroup cg @(posedge clk);`) for each instance: one that a declaration of a module or a program constructs with `new` as its initializer (`cg c = new;`, also in a generate block, a loop's included), and one that any other `new` constructs, in a procedure, a task, a function, the `new` method of the class of an embedded covergroup (19.4) or another declaration initializer of a module or a program (`C obj = new;`, `cg a[2] = '{new, new};`, a static property of a class). The event is any event control on signals, with edges, changes, `or` and comma lists and `iff` (9.4.2), on named events (also of an object: `@ev`, `@(this.ev)`, and `@(obj.ev)` where `ev` is a named event of the object a handle property `obj` holds), on properties of the class of an embedded covergroup (`@m_z`, `@(posedge clk_bit)`), on hierarchical names and on members of the interface instance a virtual interface variable or property denotes (`@(posedge vif.clk)`). It is bound where the covergroup is declared: in its scope, also a package or the compilation unit, or in the class of an embedded one. The instances of a covergroup of a module or a program, whatever constructs them, are sampled by the samplers of the type: at one `posedge` or `negedge` of a one-bit variable, with or without `iff`, with the flip-flops of the edge, before their nonblocking assignments; at every other event, and in a program, by processes that wait for it. An instance of an embedded covergroup, or of a covergroup of a package or the compilation unit, is sampled by a process its construction starts: see [Clocking events of covergroups](#deviations-standard-code) for how each differs from 19.3 | An instance with a clocking event that a declaration of a package or the compilation unit constructs, itself or through a subroutine or a class constructor it calls (`covergroup sampling event of an instance that a declaration of a package or the compilation unit constructs`); an instance of a covergroup embedded in a class, or of a covergroup of a package or the compilation unit, constructed in an `always_comb`, `always_latch` or `always_ff` procedure, a continuous assignment or a final procedure, itself or through a subroutine or constructor (`covergroup sampling event of an instance constructed in an always_comb procedure`, `… in an always_latch procedure`, `… in a continuous assignment`, `… in an always_ff procedure`, `… in a final procedure`), which would start a process there (an instance of a covergroup of a module or a program may be constructed in each); an event of an embedded covergroup on a value member of an object that a handle property holds, such as 19.4's `@(m_obj.m_ev)` with an `int m_ev`, also in `iff` (`covergroup sampling event on a member of an object that a handle property holds`), as no event control of a process supports one; every use of a covergroup with a clocking event that is declared in an interface, `sample()`, `get_coverage()` and the options included; a clocking event that names an argument of the covergroup (19.3: "A clocking event may refer to arguments of the covergroup"); clocking events under `Simulator` (see [Celox execution model](#celox-execution-model)); a block event (`@@(begin f)`); `sample()` in a sequence match item |
@@ -660,9 +660,11 @@ advances no time.
   `option.get_inst_coverage`, `get_inst_coverage` gives what `get_coverage`
   does (Table 19-1); without `merge_instances` it is always the coverage of
   the instance.
-- **`option.detect_overlap`** warns of each pair of overlapping bins of a
-  coverpoint with a `$warning` report of the `new` that constructs the
-  instance (Table 19-1).
+- **`option.detect_overlap`** warns of each pair of overlapping bins of
+  values of a coverpoint with a `$warning` report of the `new` that
+  constructs the instance (Table 19-1). It does not look at transition
+  bins, whose overlapping transition lists Table 19-1 asks to warn of too
+  ([#4294](https://github.com/celox-sim/celox/issues/4294)).
 - **`type_option.strobe`** has no effect on a covergroup without a clocking
   event: it "only applies to the scheduling of samples triggered by a
   clocking event" (19.3). A nonzero value on one with a clocking event is
@@ -813,6 +815,108 @@ advances no time.
   `[A +%- B]` is `A * B / 100` as integers divide, towards zero, which is
   what the standard's conversion of `A*B/100.0` gives for the values a
   `real` holds exactly.
+- **Transition bins** (19.5.2). A transition bin counts a sample at
+  which the values its coverpoint was sampled with last match one of its
+  sequences, at most once a sample and also where matches overlap; every
+  sample of the coverpoint may start each sequence. Where 19.5.2 is
+  silent, or where its sentences can be read more than one way, Celox
+  reads it so:
+  - Steps compose as the sequences of 16.9.2: the step after a goto
+    repetition follows its last sample at once; samples of other values may
+    come before each sample of a goto or nonconsecutive repetition, but not
+    before the first sample of the transition; the sample that starts the
+    step after a nonconsecutive repetition may itself be a value of the
+    repetition. A trailing goto or nonconsecutive repetition matches at the
+    sample that gives it its count (`b2` and `b3` of the clause's example).
+  - The gap after a nonconsecutive repetition (`1 => 2 [=1:2] => 5`) ends
+    with the first match of a continuation that started in it, or with a
+    sample of the repetition's values, so one start and one count give one
+    match: `1 2 5 5` counts once, `1 2 5 2 5` twice. This is how `b7` of the
+    clause counts at the 13th sample alone.
+  - `default sequence` counts a sample at which no other transition bin of
+    the coverpoint counts and no sequence under way before the sample, with
+    a sample of its first step, goes on. It does not count the first sample
+    of the coverpoint. The ignored and illegal transitions are among the
+    bins it looks at: their matches and the sequences they have under way
+    keep it from counting. A matched bin whose guard is false keeps it from
+    counting too, as a value of a bin whose guard is false is no `default`
+    value (19.5); 19.5.2's "when none of the coverpoint's other nondefault
+    sequence transition bins increments" alone would count that sample.
+    A value `default` bin does not look at transition bins.
+  - A guard is read at the sample a match ends with; the sequences under
+    way go on whatever the guards are. A coverpoint that is not sampled,
+    because its guard is false or it or its covergroup is stopped, keeps
+    its sequences where they are.
+  - An ignored or illegal transition removes a match of another bin when
+    it matched within the samples of that match (19.5.5: `2=>3` removes
+    `1=>2=>3=>4`), and a bin every sequence of values of which contains one
+    has no sequence and takes no part in the coverage. This does not depend
+    on guards: the guard of an ignored bin gates its own count and that of
+    an illegal bin its error. Ignored and illegal values do not change
+    transitions (19.5.5, 19.5.6).
+  - `name[]` has a bin for each sequence of values its transitions stand
+    for, over each length of a consecutive repetition range, in the order
+    of the transitions, then of the lengths, then of the values with the
+    first step changing fastest (the list of `sa` in 19.5.2), named
+    `name[4=>5=>6]`; a sequence a declaration lists twice is one bin.
+    `binsof(cp.t) intersect {...}` selects a transition bin by the values of
+    its last step, an element of an array by its last value (19.6.1.1).
+  - A sample with x or z bits is in a step of exactly those bits and breaks
+    every other sequence, as for value bins (19.5.4).
+  - A value of a step that the coverpoint type does not have takes no
+    part (19.5.7), with the warning of a bin value: of the build for a
+    constant, of `new` for one an argument gives. A transition with a step
+    left without a value is matched by no sample and is none of its bin; a
+    bin left without a transition is empty and not listed, an ignored or
+    illegal one takes nothing from other bins, and an array has no bins
+    for it (`bins w = (20 => 1);` on 4 bits).
+  - A repetition count is a non-negative integer and the maximum of a
+    range is not below its minimum (16.9.2): a constant that is not is an
+    error of the build. A count of 0 (`[* 0]`, `[* 0:2]`), an empty
+    sequence (16.9.2.1), is not supported: a constant is rejected where the
+    covergroup is used, and a 0 that an argument gives ends the simulation
+    with an error at `new`, as does a negative count of an argument. A
+    constant count above 65,535 is rejected, as no step of it fits the
+    states of a coverpoint (see the limits); an argument count of 2^32 or
+    more ends the simulation with an error at `new` that says the count is
+    too large. A transition of one step without a repetition, or with one
+    whose minimum is 1 (`(3 [* 1:2])` is "the same as" `(3), (3=>3)`), is
+    of length 0 and an error (19.5.2). `(e)` alone, also with `[]` or `[N]`,
+    is a set expression in parentheses (19.5.1.2) unless `e` is of an
+    integral, real or string type, which makes it a transition of length
+    0; a set expression of a form Celox does not support, such as
+    `(SEL ? S : T)`, is rejected as one.
+  - An illegal transition is reported with the values of the shortest of
+    its matches (`transition 4=>5=>6`), `illegal_bins b = default sequence`
+    with the value before the sample and the sampled one (`transition
+    2=>3`).
+
+  The limits: the sequences of a coverpoint have at most 65,536 states
+  (`MAX_TRANSITION_STATES`; a step of a repetition up to `n` has `n + 1`,
+  twice as many for a goto or nonconsecutive one, and each sequence of a
+  `name[]` array as many as it has samples), a `name[]` declaration lists at
+  most 1,048,576 sequences of values, and finding the bins that ignored and
+  illegal transitions empty takes at most 2^26 steps
+  (`MAX_TRANSITION_WORK`): a construction beyond one of them ends the
+  simulation with an error. A `name[]` declaration with a repetition range
+  is a sequence for each of its lengths, each of as many states as samples:
+  `bins b[] = (1, 2 => 0 [* 1:N] => 3, 4)` has the sequences of 3 to N + 2
+  samples, N (N + 1) / 2 + 2 N states, which is beyond the limit from
+  N = 360 on; with N = 1000 (4,000 bins of up to 1,002 samples) the `new`
+  that constructs the instance ends the simulation with the error
+  "coverpoint `...` has transitions of more than 65536 states". Below the
+  limit, a sample costs work in proportion to the number of those
+  sequences that are under way: a sample of a first value starts one for
+  each length. A sample after which the sequences of a
+  coverpoint are under way in more than 2^18 ways
+  (`MAX_TRANSITION_THREADS`, which only the continuations of
+  nonconsecutive gaps reach) ends the simulation with an error. A
+  wildcard transition value of more than 65,536 ranges of values is
+  matched when it is sampled, so a coverpoint with one may have no ignored
+  or illegal transition, and a `name[]` declaration may have none: a
+  constant value is rejected where the covergroup is used, one that an
+  argument gives ends the simulation with an error at `new`. A coverpoint
+  without transition bins does no work for them.
 - **Automatic bins of a signed coverpoint start at its lowest value**, and
   are named by their values: `auto[3]`, `auto[0:3]`, `auto[NAME]` for an
   enumerator. A coverpoint without a label has the name of its variable

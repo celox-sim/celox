@@ -13,7 +13,8 @@ use celox_heap::coverage::{OptionId, TypeOptionId};
 use celox_sv_syntax::{
     Bins, BinsArray, BinsKind, BinsValue, CoverageItem, CoverageOption, CoverageRange,
     CoverageRangeKind, CovergroupDeclaration, CovergroupKind, Coverpoint, CoverpointItem, Cross,
-    CrossBins, CrossItem, ExprId, ExprKind, SelectId, SelectKind, TokenRange, TypeId,
+    CrossBins, CrossItem, ExprId, ExprKind, SelectId, SelectKind, TokenRange, TransitionRepeatKind,
+    TransitionSet, TypeId,
 };
 
 fn invalid(text: impl Into<String>) -> AnalyzerError {
@@ -511,7 +512,18 @@ pub(in crate::ast) fn construction_operands(bins: &Bins) -> Vec<ExprId> {
         }
         BinsValue::CoverpointWith { with, .. } => operands.push(*with),
         BinsValue::Set(set) => operands.push(*set),
-        BinsValue::Transitions(_) | BinsValue::DefaultSequence | BinsValue::Default => {}
+        // The values of the steps and the counts of their repetitions
+        // (19.5.2).
+        BinsValue::Transitions(sets) => {
+            for step in sets.iter().flat_map(|set| &set.steps) {
+                operands.extend(range_operands(&step.ranges));
+                if let Some(repeat) = &step.repeat {
+                    operands.push(repeat.low);
+                    operands.extend(repeat.high);
+                }
+            }
+        }
+        BinsValue::DefaultSequence | BinsValue::Default => {}
     }
     operands
 }
@@ -975,10 +987,46 @@ fn check_select(
 
 /// What the standard excludes of bin declaration `bins` of the coverpoint
 /// named `point`, which `place` names, as the declaration alone shows: an
-/// ignored `default` bin (19.5), and the name of another coverpoint before
-/// `with` (19.5.1.1).
+/// ignored `default` bin (19.5), the name of another coverpoint before
+/// `with` (19.5.1.1), and of transitions (19.5.2, 19.5.5, 19.5.6) one of
+/// length 0, which is one step without a repetition (one value alone may
+/// be an array, see [`one_value_transition`]), and a goto or
+/// nonconsecutive repetition in a bin array or in an ignored or illegal
+/// bin.
 fn check_bins(bins: &Bins, point: &str, place: &str) -> Converted<()> {
     let name = instances::normalize_identifier(&bins.name.spelling);
+    if let BinsValue::Transitions(sets) = &bins.value {
+        for set in sets {
+            if let [step] = &set.steps[..]
+                && step.repeat.is_none()
+                && one_value_transition(sets).is_none()
+            {
+                return Err(invalid(format!(
+                    "bin `{name}` of {place} has a transition of length 0 (IEEE 1800-2023 19.5.2)"
+                )));
+            }
+        }
+        let unbounded = sets
+            .iter()
+            .flat_map(|set| &set.steps)
+            .filter_map(|step| step.repeat.as_ref())
+            .any(|repeat| repeat.kind != TransitionRepeatKind::Consecutive);
+        if unbounded && bins.array.is_some() {
+            return Err(invalid(format!(
+                "bin `{name}` of {place} is an array of transition bins with a goto or nonconsecutive repetition, whose sequences are of unbounded length (IEEE 1800-2023 19.5.2)"
+            )));
+        }
+        if unbounded && bins.kind != BinsKind::Bins {
+            let (keyword, clause) = if bins.kind == BinsKind::IgnoreBins {
+                ("ignore_bins", "19.5.5")
+            } else {
+                ("illegal_bins", "19.5.6")
+            };
+            return Err(invalid(format!(
+                "`{keyword} {name}` of {place} is a transition with a goto or nonconsecutive repetition, a sequence of unbounded length (IEEE 1800-2023 {clause})"
+            )));
+        }
+    }
     match &bins.value {
         BinsValue::Default | BinsValue::DefaultSequence if bins.kind == BinsKind::IgnoreBins => {
             Err(invalid(format!(
@@ -997,14 +1045,30 @@ fn check_bins(bins: &Bins, point: &str, place: &str) -> Converted<()> {
     }
 }
 
-/// What of bin declaration `bins` the analysis does not support: bins of
-/// transitions, and a `default` bin array with a size, whose values the
-/// standard does not distribute.
+/// The value of transition list `sets` that is one value alone, `(e)`,
+/// if it is: an array `e` makes it a parenthesized set expression, as a
+/// transition of one value is of length 0 (19.5.1.2, 19.5.2).
+pub(in crate::ast) fn one_value_transition(sets: &[TransitionSet]) -> Option<ExprId> {
+    match sets {
+        [set] => match &set.steps[..] {
+            [step] if step.repeat.is_none() => match &step.ranges[..] {
+                [range] => match range.kind {
+                    CoverageRangeKind::Value(value) => Some(value),
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// What of bin declaration `bins` the analysis does not support: a
+/// `default` bin array with a size, whose values the standard does not
+/// distribute.
 fn unsupported_bins(bins: &Bins) -> Option<&'static str> {
     match &bins.value {
-        BinsValue::Transitions(_) | BinsValue::DefaultSequence => {
-            Some("covergroup transition bins (IEEE 1800-2023 19.5.2)")
-        }
         BinsValue::Default if matches!(bins.array, Some(BinsArray::Sized(_))) => {
             Some("covergroup default bin array with a size (IEEE 1800-2023 19.5)")
         }
