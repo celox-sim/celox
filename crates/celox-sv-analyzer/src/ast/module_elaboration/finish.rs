@@ -89,11 +89,7 @@ impl ScopeElaboration<'_> {
             function_return_types: (*self.packed_dimensions.function_return_types).clone(),
             constant_functions: syntax_tree.functions.clone(),
             subroutine_params: self.subroutine_params.clone(),
-            subroutine_shapes: self
-                .subroutine_shapes
-                .iter()
-                .map(|(name, shapes)| (name.clone(), Arc::new(shapes.clone())))
-                .collect(),
+            subroutine_shapes: self.subroutine_shapes.clone(),
             subroutines: self.exported_subroutines(),
             locals: self.exported_locals(),
             dpi_imports: self.dpi_imports.clone(),

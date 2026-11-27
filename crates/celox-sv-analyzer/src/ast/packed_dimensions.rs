@@ -29,7 +29,7 @@ pub(super) struct PackedDimensions {
     pub(super) type_query: bool,
     /// The declared shape of each argument of each subroutine, for
     /// assignment patterns passed as arguments.
-    pub(super) subroutine_param_shapes: Arc<HashMap<String, Vec<VariableDimensions>>>,
+    pub(super) subroutine_param_shapes: Arc<HashMap<String, Arc<Vec<VariableDimensions>>>>,
     pub(super) subroutine_directions: Arc<lifetimes::Directions>,
     pub(super) subroutine_param_names: Arc<HashMap<String, Vec<String>>>,
     /// The class whose method is being bound.
