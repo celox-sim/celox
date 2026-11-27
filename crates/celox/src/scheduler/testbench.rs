@@ -627,6 +627,7 @@ fn generate(
         incremental: None,
         partitioned_glue: None,
         shared: program.shared_storage(),
+        settle_can_finish: false,
         comb,
         continuations: vec![],
         eager: None,
