@@ -225,6 +225,51 @@ for (const event of sim.drainRuntimeEvents()) {
 }
 ```
 
+### Coverage {#coverage}
+
+`coverage()` returns the covergroup coverage of the simulation (IEEE 1800-2023
+clause 19) as of the last completed step: every covergroup type that has an
+instance, with its coverpoints and crosses, their bins and hits, for the type
+and for each instance. The report is a `CoverageReport` object, parsed from
+the JSON of the Rust `Simulation::coverage()`. Each call builds it;
+reading it changes nothing and advances no time. A design without
+covergroups, any Veryl design included, reports `{ coverage: 100,
+covergroups: [] }`. Hit and sample counts are JavaScript numbers, exact up to
+`Number.MAX_SAFE_INTEGER`.
+
+Covergroups are SystemVerilog: list the `.sv` source in the module
+definition. A hit of an `illegal_bins` bin is an `"error"` report that
+`drainRuntimeEvents()` returns, and its hit is in the report too.
+
+```typescript
+const Top: ModuleDefinition<Record<string, never>> = {
+  __celox_module: true,
+  name: "Top",
+  sources: [{ path: "Top.sv", content: source }], // declares and samples covergroups
+  ports: {},
+  events: [],
+};
+const sim = Simulation.create(Top);
+sim.runUntil(1000);
+const report = sim.coverage();
+console.log(`$get_coverage() = ${report.coverage}%`);
+for (const group of report.covergroups) {
+  for (const item of group.items) {
+    for (const bin of item.bins) {
+      console.log(`${group.name}.${item.name} ${bin.name}: ${bin.hits}`);
+    }
+  }
+}
+```
+
+Only `Simulation` reports coverage; the event-based `Simulator` has no
+`coverage()`. A `Simulator` runs no process, so a design that constructs a
+covergroup in a declaration initializer (`cg c = new;`) or an `initial` block
+fails to build as one. The one construction it runs, in a clocked procedure
+(`always @(posedge clk) if (c == null) c = new;`), would report its illegal
+bin hits as runtime events, which the `Simulator` handle does not drain.
+Covergroups are not available in the browser (WASI) build.
+
 ## Simulator Options
 
 Both `Simulator` and `Simulation` accept the following options:

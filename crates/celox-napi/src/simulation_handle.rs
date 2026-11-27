@@ -353,6 +353,20 @@ impl NativeSimulationHandle {
             .collect())
     }
 
+    /// The covergroup coverage of the simulation (IEEE 1800-2023 clause 19)
+    /// as JSON: a `celox::CoverageReport` with camelCase field names, as of
+    /// the last completed step. Each call builds the report; reading it
+    /// changes nothing.
+    #[napi]
+    pub fn coverage_json(&self) -> Result<String> {
+        let sim = self
+            .sim
+            .as_ref()
+            .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
+        serde_json::to_string(&sim.coverage())
+            .map_err(|e| Error::from_reason(format!("Failed to serialize coverage: {e}")))
+    }
+
     /// Make runs and steps fail after the time step of a report of at least
     /// `severity` (`"info"`, `"warning"`, `"error"` or `"fatal"`); `null`
     /// fails only at `$fatal`.

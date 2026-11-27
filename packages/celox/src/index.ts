@@ -64,7 +64,12 @@ export {
 /** @internal */
 export type {
 	AssertionSite,
+	BinReport,
 	ClockEdge,
+	CoverageReport,
+	CovergroupInstanceReport,
+	CovergroupReport,
+	CoverItemReport,
 	CreateResult,
 	EventHandle,
 	FourStateSignalValue,

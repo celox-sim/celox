@@ -290,6 +290,23 @@ describe("Simulation", () => {
 		expect(() => sim.runUntil(100)).toThrow("disposed");
 	});
 
+	test("coverage needs a handle that reports it", () => {
+		const mock = createMockNative();
+		const sim = Simulation.create(TopModule, {
+			__nativeCreate: mock.create,
+		});
+
+		expect(() => sim.coverage()).toThrow(
+			"This simulation does not support coverage reports",
+		);
+		const report = { coverage: 100, covergroups: [] };
+		mock.handle.coverage = vi.fn().mockReturnValue(report);
+		expect(sim.coverage()).toBe(report);
+		sim.dispose();
+		expect(() => sim.coverage()).toThrow("disposed");
+		expect(mock.handle.coverage).toHaveBeenCalledTimes(1);
+	});
+
 	test("dump delegates to handle", () => {
 		const mock = createMockNative();
 		const sim = Simulation.create(TopModule, {

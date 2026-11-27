@@ -2,7 +2,9 @@
 
 Celox は **Rust API** から SystemVerilog をシミュレートできます。
 ソースファイルとトップモジュールを指定して使います。
-TypeScript パッケージと Vite プラグインは、現時点では Veryl のみを読み込みます。
+Vite プラグインは、現時点では Veryl のみを読み込みます。TypeScript パッケージは、
+モジュール定義のソースのうちパスが `.sv` または `.svh` で終わるものを SystemVerilog として
+コンパイルします。
 
 Celox は IEEE Std 1800™-2023 に従います。
 標準をなぞる代わりに、[対応範囲と逸脱事項のページ](./systemverilog-reference)では
