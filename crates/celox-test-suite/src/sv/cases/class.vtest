@@ -7611,3 +7611,74 @@ endmodule
 "#)
   (top Top) (run_until 0)
   (assert_eq sum 8) (assert_eq made 11) (assert_eq done 1))
+
+(case casts_of_specializations_reached_from_other_packages
+  ; A module that imports only the package of a class template reaches,
+  ; through the virtual methods of its specializations, the `$cast` of a
+  ; specialization that a package of its type argument asked for, to a
+  ; class that another package extends (IEEE 1800-2023 8.16, 8.25, 26.3):
+  ; `total()` sums the ids of the objects each specialization creates.
+  (source "casts.sv" #"
+package up;
+  virtual class obj;
+    virtual function int id(); return 0; endfunction
+  endclass
+  virtual class wrapper;
+    pure virtual function obj create_cast();
+  endclass
+  wrapper known[$];
+  function automatic int total();
+    int sum = 0;
+    foreach (known[i]) begin
+      obj o = known[i].create_cast();
+      sum += o.id();
+    end
+    return sum;
+  endfunction
+  class registry #(type T = obj) extends wrapper;
+    static registry #(T) me = get();
+    static function registry #(T) get();
+      if (me == null) begin me = new; known.push_back(me); end
+      return me;
+    endfunction
+    static function T create();
+      obj o;
+      T t = new;
+      o = t;
+      $cast(create, o);
+    endfunction
+    virtual function obj create_cast();
+      return create();
+    endfunction
+  endclass
+endpackage
+package seqs;
+  import up::*;
+  class vseq extends obj;
+    typedef registry #(vseq) type_id;
+    virtual function int id(); return 1; endfunction
+  endclass
+endpackage
+package seqs2;
+  import up::*;
+  import seqs::*;
+  class vseq2 extends vseq;
+    typedef registry #(vseq2) type_id;
+    virtual function int id(); return 2; endfunction
+  endclass
+endpackage
+module agent(output int v);
+  import up::*;
+  initial v = total();
+endmodule
+module Top(output int v, output int w);
+  import seqs::*;
+  import seqs2::*;
+  agent a(v);
+  initial begin
+    vseq s = seqs2::vseq2::type_id::create();
+    w = s.id();
+  end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq v 3) (assert_eq w 2))
