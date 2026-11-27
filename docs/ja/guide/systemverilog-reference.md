@@ -129,7 +129,7 @@ program の region と `$exit` に関する差異は[標準準拠コードに影
 | --- | --- | --- |
 | **宣言（14.3、14.4）** | module、program 内の名前付き clocking ブロック。clocking イベントはエッジ、named event、`iff` ガード付きのいずれも可。ポートとブロックより前に宣言した変数の `input`、`output`、`input ... output`、`inout` clockvar。`default` スキュー。入力スキュー `#1step`、`#0`、定数遅延。出力スキュー `#0`、`#1step`、定数遅延。遅延は整数定数、時間リテラル、固定小数点リテラル（`#0.5`、スコープの時間単位） | `##` サイクル遅延とそれが使う default clocking（14.11、14.12）。`$global_clock`（14.14）。エッジ指定のスキュー。その他の実数定数のスキュー（`real` パラメータの `#D`）。unpacked 構造体、unpacked 配列、コンテナの clockvar。階層式の clockvar（14.5）。clocking ブロック内の property、sequence、`let` 宣言。generate ブロック内と interface 内の clocking ブロック |
 | **イベントとサンプリング（14.10、14.13、14.15）** | `@(cb)`（clocking イベントのタイムスロットの Observed region の後に再開）。入力 clockvar とその選択・メンバの読み出し。clockvar のイベント制御（`@(cb.x)`、`@(posedge cb.x[0])`） | — |
-| **同期ドライブ（14.16）** | — | 同期ドライブ（`cb.x <= e`） |
+| **同期ドライブ（14.16）** | 定数選択の `cb.x <= e` と `cb.x[c] <= e`。clocking イベント時にも、イベント間にも（次のイベントで成熟）実行でき、Re-NBA region で出力スキュー後に更新。同じ Re-NBA region で成熟するドライブは、範囲が部分的に重なる場合もビットごとに最後に実行した値だけを駆動し、clocking イベント時に実行したドライブはそれより前に実行したドライブより後とみなす（14.16.2） | 実行時インデックスの選択へのドライブ。ドライブ内の `##`。ネットへのドライブ。手続き自身の変数が clockvar の信号を隠す場合や、手続き自身の宣言が出力スキューの名前を隠す場合のドライブ |
 
 ### named event と mailbox {#named-events}
 

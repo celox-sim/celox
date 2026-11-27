@@ -425,6 +425,8 @@ impl<B: SimBackend> SimulationState<B> {
                         lsb: site.lsb,
                         width: site.width,
                         value: update,
+                        drive: false,
+                        at_event: Default::default(),
                     };
                     if site.delay > 0 {
                         // Past the last timestamp there is no time to

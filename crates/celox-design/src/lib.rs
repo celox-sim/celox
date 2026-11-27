@@ -1617,6 +1617,12 @@ pub struct NbaSite<A> {
     /// never runs them.
     #[serde(default)]
     pub unit: bool,
+    /// The update happens in the Re-NBA region of its time slot rather
+    /// than in the NBA region, as a program's does: a synchronous drive of
+    /// a clocking block output (IEEE 1800-2023 14.16). Such a site always
+    /// takes the queued path.
+    #[serde(default)]
+    pub re_nba: bool,
 }
 
 impl<A: Copy> NbaSite<A> {
@@ -1631,6 +1637,7 @@ impl<A: Copy> NbaSite<A> {
             position: self.position.map(|position| position.map(&mut map)),
             pending: self.pending.map(&mut map),
             unit: self.unit,
+            re_nba: self.re_nba,
         }
     }
 }

@@ -237,6 +237,8 @@ pub struct NbaSiteRefs {
     /// The site belongs to a fused flip-flop domain: its commit unit, not
     /// a process kernel, stages the update and sets the pending flag.
     pub unit: bool,
+    /// See [`celox_design::NbaSite::re_nba`].
+    pub re_nba: bool,
 }
 
 /// Control slots and sites of one process kernel.
@@ -716,6 +718,8 @@ mod tests {
             lsb: 2,
             width: 3,
             value: v(0b101, 0b010),
+            drive: false,
+            at_event: Default::default(),
         };
         assert_eq!(
             update.merge_into(&v(0xff, 0x00)),

@@ -659,6 +659,7 @@ impl Flow<'_> {
             Stmt::DelayedNonblocking {
                 control,
                 assignment,
+                ..
             } => {
                 self.stmt(control, written)?;
                 self.stmt(assignment, written)

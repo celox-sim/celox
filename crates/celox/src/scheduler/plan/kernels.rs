@@ -110,6 +110,8 @@ impl PlanBuilder<'_> {
                 Some("the process suspends inside function calls")
             } else if slots.program.is_some() {
                 Some("a program process runs in the reactive region set")
+            } else if process.nbas.iter().any(|site| site.re_nba) {
+                Some("a synchronous drive updates in the Re-NBA region")
             } else if !process.host_requests.is_empty() && !service_processes.contains(&index) {
                 Some("the process makes host requests")
             } else if service_processes.contains(&index)

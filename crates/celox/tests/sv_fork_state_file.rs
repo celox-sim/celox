@@ -264,6 +264,7 @@ endmodule"#;
             width: 32,
             value: vec![1],
             mask: vec![0],
+            drive: false,
         };
         match region {
             0 => p.nba_queue.push(update),
@@ -643,4 +644,38 @@ fn compound_event_baselines_restore_and_probe_entries_cannot_resume() {
     assert_eq!(target.get(target.signal("q")), 0u8.into());
     target.run_until(4).unwrap();
     assert_eq!(target.get(target.signal("q")), 3u8.into());
+}
+
+/// A synchronous drive issued before its clocking event waits for the event
+/// in an activation of no parent (IEEE 1800-2023 14.16), which a state file
+/// saved in between carries across.
+#[test]
+fn pending_synchronous_drives_survive_restore() {
+    let source = r#"`timescale 1ns/1ns
+module Top(output int q);
+ logic clk = 0;
+ always #5 clk = ~clk;
+ int r = 0;
+ clocking cb @(posedge clk); output r; endclocking
+ initial begin #3; cb.r <= 1; end
+ assign q = r;
+endmodule"#;
+    let mut origin = Simulation::from_sv_sources(vec![(source, Path::new("drive.sv"))], "Top")
+        .build_interpreter()
+        .unwrap();
+    origin.run_until(4).unwrap();
+    assert_eq!(origin.get(origin.signal("q")), 0u8.into());
+    let file = bytes(&origin.save_state().unwrap());
+    let mut native = Simulation::from_sv_sources(vec![(source, Path::new("drive.sv"))], "Top")
+        .build_native()
+        .unwrap();
+    native.load_state(&file).unwrap();
+    native.run_until(6).unwrap();
+    assert_eq!(native.get(native.signal("q")), 1u8.into());
+    let mut interpreter = Simulation::from_sv_sources(vec![(source, Path::new("drive.sv"))], "Top")
+        .build_interpreter()
+        .unwrap();
+    interpreter.load_state(&file).unwrap();
+    interpreter.run_until(6).unwrap();
+    assert_eq!(interpreter.get(interpreter.signal("q")), 1u8.into());
 }

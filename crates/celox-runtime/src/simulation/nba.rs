@@ -32,12 +32,30 @@ impl<B: SimBackend> SimulationState<B> {
         let Some((lsb, width)) = refs.range(backend) else {
             return Ok(());
         };
-        let program = self.model.processes[process].program.is_some();
+        // A program's updates, and synchronous drives, happen in the Re-NBA
+        // region (IEEE 1800-2023 4.4.2.8, 14.16).
+        let program = self.model.processes[process].program.is_some() || refs.re_nba;
+        // A drive executed before the clocking event it matures at waits for
+        // the event in a process of the analysis, a child activation of no
+        // parent: every drive executed at the event is later.
+        let deferred = refs.re_nba
+            && process >= self.kernel_count
+            && self
+                .process_state
+                .activations
+                .get(process)
+                .is_some_and(|activation| activation.parent.is_none());
         let update = NbaUpdate {
             target: refs.target,
             lsb,
             width,
             value: read(backend, refs.value),
+            drive: refs.re_nba,
+            at_event: if refs.re_nba && !deferred {
+                (BigUint::from(1u8) << width) - 1u8
+            } else {
+                BigUint::default()
+            },
         };
         if refs.delay > 0 {
             let time = self.scheduler.time.checked_add(refs.delay).ok_or_else(|| {
@@ -46,13 +64,13 @@ impl<B: SimBackend> SimulationState<B> {
                     signals: Vec::new(),
                 })
             })?;
-            self.process_state
-                .delayed_nba
-                .entry(time)
-                .or_default()
-                .push((program, update));
+            let queued = self.process_state.delayed_nba.entry(time).or_default();
+            let update = coalesce_drives(queued, update, |(_, queued)| queued);
+            queued.push((program, update));
         } else if program {
-            self.process_state.re_nba_queue.push(update);
+            let queue = &mut self.process_state.re_nba_queue;
+            let update = coalesce_drives(queue, update, |queued| queued);
+            queue.push(update);
         } else {
             self.process_state.nba_queue.push(update);
         }
@@ -233,6 +251,8 @@ impl<B: SimBackend> SimulationState<B> {
                         lsb,
                         width,
                         value: read(backend, value),
+                        drive: false,
+                        at_event: Default::default(),
                     };
                     self.process_state
                         .delayed_nba
@@ -246,6 +266,8 @@ impl<B: SimBackend> SimulationState<B> {
                     lsb,
                     width,
                     value: Value::default(),
+                    drive: false,
+                    at_event: Default::default(),
                 };
                 self.publish_update(backend, &update, NbaValue::Staged(value))?;
                 if record {
@@ -286,7 +308,15 @@ impl<B: SimBackend> SimulationState<B> {
                 self.write_signal(backend, target, |backend| backend.set(target, merged))?;
             }
             Err(value) => {
-                let merged = NbaUpdate { value, ..*update }.merge_into(&read(backend, target));
+                let merged = NbaUpdate {
+                    value,
+                    target: update.target,
+                    lsb: update.lsb,
+                    width: update.width,
+                    drive: update.drive,
+                    at_event: BigUint::default(),
+                }
+                .merge_into(&read(backend, target));
                 self.write_signal(backend, target, |backend| {
                     if target.is_4state {
                         backend.set_four_state(target, merged.0, merged.1);
@@ -350,9 +380,89 @@ pub struct NbaUpdate {
     pub lsb: usize,
     pub width: usize,
     pub value: Value,
+    /// A synchronous drive (IEEE 1800-2023 14.16): of the drives of the
+    /// same bits that mature in one Re-NBA region, only the last is driven
+    /// (14.16.2).
+    #[serde(default)]
+    pub drive: bool,
+    /// The bits of a drive whose value a drive executed at its clocking
+    /// event gave, relative to `lsb`; the other bits come from drives
+    /// executed before the event, which are earlier than any executed at it
+    /// (14.16.2). Only drives that mature together are merged, all queued
+    /// in one time slot, so a state file, saved between slots, has no use
+    /// for it.
+    #[serde(skip)]
+    pub at_event: BigUint,
+}
+
+/// `update` with the queued synchronous drives of `queue` that drive some
+/// of its bits taken out of the queue and merged with it: of the drives of
+/// a bit that mature together only the last one executed is driven (IEEE
+/// 1800-2023 14.16.2), and the bits of an earlier drive that `update`
+/// leaves alone are still driven. The queued drives of a target drive
+/// disjoint bits, so each bit `update` shares with one comes from `update`
+/// itself.
+fn coalesce_drives<T>(
+    queue: &mut Vec<T>,
+    mut update: NbaUpdate,
+    update_of: impl Fn(&T) -> &NbaUpdate,
+) -> NbaUpdate {
+    if !update.drive {
+        return update;
+    }
+    while let Some(index) = queue
+        .iter()
+        .position(|queued| update_of(queued).drives_bits_of(&update))
+    {
+        let earlier = queue.remove(index);
+        update = update_of(&earlier).under(&update);
+    }
+    update
 }
 
 impl NbaUpdate {
+    /// Whether `self` and `other` are drives of some of the same bits.
+    fn drives_bits_of(&self, other: &Self) -> bool {
+        self.drive
+            && other.drive
+            && self.target == other.target
+            && self.lsb < other.lsb + other.width
+            && other.lsb < self.lsb + self.width
+    }
+
+    /// The drive of the bits of the queued `self` and of the overlapping
+    /// `later`, with the value of `later` where both drive a bit, but where
+    /// `self` has the value of a drive executed at the clocking event and
+    /// `later` one executed before it.
+    fn under(&self, later: &Self) -> Self {
+        let lsb = self.lsb.min(later.lsb);
+        let width = (self.lsb + self.width).max(later.lsb + later.width) - lsb;
+        let all = (BigUint::from(1u8) << width) - 1u8;
+        let place = |update: &Self, bits: &BigUint| {
+            let offset = update.lsb - lsb;
+            let range = ((BigUint::from(1u8) << update.width) - 1u8) << offset;
+            (range.clone(), (bits << offset) & range)
+        };
+        let (_, earlier_at_event) = place(self, &self.at_event);
+        let (range, later_at_event) = place(later, &later.at_event);
+        let taken = &range & (&later_at_event | (&all ^ &earlier_at_event));
+        let kept = &all ^ &taken;
+        let plane = |old: &BigUint, new: &BigUint| {
+            ((old << (self.lsb - lsb)) & &kept) | ((new << (later.lsb - lsb)) & &taken)
+        };
+        Self {
+            target: later.target,
+            lsb,
+            width,
+            value: (
+                plane(&self.value.0, &later.value.0),
+                plane(&self.value.1, &later.value.1),
+            ),
+            drive: true,
+            at_event: (earlier_at_event & &kept) | (later_at_event & &taken),
+        }
+    }
+
     /// Write the update into the target's value.
     pub fn merge_into(&self, target: &Value) -> Value {
         let width = self.target.width;
@@ -398,6 +508,8 @@ mod tests {
                             lsb,
                             width,
                             value: (BigUint::from(new & low_bits(width)), BigUint::default()),
+                            drive: false,
+                            at_event: Default::default(),
                         };
                         let wide =
                             update.merge_into(&(BigUint::from(old & all), BigUint::default()));

@@ -116,6 +116,7 @@ impl Ff<'_, '_> {
             sv::ir::Stmt::DelayedNonblocking {
                 control,
                 assignment,
+                re_nba,
             } => {
                 let sv::ir::Stmt::Delay {
                     amount,
@@ -137,12 +138,14 @@ impl Ff<'_, '_> {
                         lhs,
                         rhs,
                         nonblocking: true,
-                    } => self.nonblocking_delayed(std::slice::from_ref(lhs), rhs, delay)?,
+                    } => {
+                        self.nonblocking_delayed(std::slice::from_ref(lhs), rhs, delay, *re_nba)?
+                    }
                     sv::ir::Stmt::AssignConcat {
                         parts,
                         rhs,
                         nonblocking: true,
-                    } => self.nonblocking_delayed(parts, rhs, delay)?,
+                    } => self.nonblocking_delayed(parts, rhs, delay, *re_nba)?,
                     _ => return Err(unsupported("nonblocking delayed assignment target")),
                 }
                 Ok(true)
