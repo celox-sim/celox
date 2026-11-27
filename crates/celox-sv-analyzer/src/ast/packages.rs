@@ -460,6 +460,38 @@ impl Packages {
                     .or_insert_with(|| import.clone());
             }
         }
+        // The subroutines of the covergroup types of each compilation unit,
+        // which the body of an interface of the unit may call: the scope that
+        // binds an instance of the interface finds them here, whether or not
+        // it names an item of the unit itself (IEEE 1800-2023 3.12.1, 19.3).
+        // Their names hold the identity of the unit's source.
+        for unit in self.units.values() {
+            let Ok(package) = &unit.scope else {
+                continue;
+            };
+            for subroutine in &package.symbols.subroutines {
+                if !covergroups::is_class(&subroutine.name) {
+                    continue;
+                }
+                for local in subroutine_local_names(subroutine) {
+                    if let Some(local) = package
+                        .symbols
+                        .locals
+                        .iter()
+                        .find(|known| known.name == local)
+                    {
+                        design
+                            .locals
+                            .entry(local.name.clone())
+                            .or_insert_with(|| local.clone());
+                    }
+                }
+                design
+                    .subroutines
+                    .entry(subroutine.name.clone())
+                    .or_insert_with(|| subroutine.clone());
+            }
+        }
         self.design_subroutines = SharedDesignSubroutines(Some(Arc::new(design)));
     }
 
@@ -1538,6 +1570,26 @@ fn unit_visibility(tree: &SyntaxTree) -> Result<UnitVisibility, AnalyzerError> {
         }
     }
     Ok(visibility)
+}
+
+/// The names of the formals, the result and the variables of `subroutine`.
+fn subroutine_local_names(subroutine: &Subroutine) -> Vec<String> {
+    let mut names: Vec<String> = subroutine
+        .params
+        .iter()
+        .map(|param| param.name.clone())
+        .chain(subroutine.return_var.clone())
+        .chain(subroutine.automatic_locals.iter().cloned())
+        .chain(subroutine.persistent_locals.iter().cloned())
+        .collect();
+    for stmt in &subroutine.body {
+        stmt.walk(&mut |stmt| {
+            if let crate::procedural::StmtBase::Local { name, .. } = stmt {
+                names.push(name.clone());
+            }
+        });
+    }
+    names
 }
 
 #[cfg(test)]

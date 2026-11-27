@@ -440,6 +440,11 @@ impl<'a> Hierarchy<'a> {
                 }),
             );
         };
+        // A handle of a covergroup of an interface instance belongs to the
+        // body of the instance (IEEE 1800-2023 19.3, 25.3).
+        if let Some(rejection) = sv::interface_covergroup_type_reference(r#type) {
+            return Err(rejection);
+        }
         let r#type = resolved_type(elaborated, r#type).ok_or_else(|| {
             sv::AnalyzerError::Unsupported(format!(
                 "hierarchical reference `{}` to a signal of this type",

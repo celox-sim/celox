@@ -348,6 +348,12 @@ impl Binding {
         self.0.clone()
     }
 
+    /// The class of the class handle type the type is bound to, by the
+    /// name its declaration has, which needs no table to read.
+    pub(super) fn retained_class(&self) -> Option<&Arc<str>> {
+        self.0.as_ref().and_then(|retained| retained.class.as_ref())
+    }
+
     /// Whether the type is bound to a class handle type that `table` does
     /// not hold (see [`RetainedType::class_outside`]).
     pub(super) fn class_outside(&self, table: &TyTable) -> bool {
@@ -944,6 +950,20 @@ impl TyTable {
         id: TyId,
     ) -> Option<&Arc<super::unpacked_structs::UnpackedStruct>> {
         self.structs.get(&self.fixed_element(id))
+    }
+
+    /// Whether a value of type `id` may hold a handle of a class that
+    /// `class` is true of: a handle, an array or container of them, or an
+    /// unpacked structure with such a member (IEEE 1800-2023 8.4, 7.2, 7.4).
+    pub(super) fn holds_class(&self, id: TyId, class: &dyn Fn(&str) -> bool) -> bool {
+        match self.data(id) {
+            TyData::Class(Decl::Class(decl)) => class(&self.decl(*decl).name),
+            TyData::Array { element, .. } => self.holds_class(*element, class),
+            TyData::UnpackedStruct(Decl::Aggregate { members, .. }) => members
+                .iter()
+                .any(|(_, member)| self.holds_class(*member, class)),
+            _ => false,
+        }
     }
 
     /// The class of handle type `id`, or of the elements of a fixed-size

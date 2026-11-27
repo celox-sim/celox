@@ -612,6 +612,16 @@ pub(super) fn binding_names_with_prefix(
             (name, bound)
         })
         .collect();
+    // The subroutines of the interface's covergroup types read its members:
+    // each instance and port view has its own, under a name that keeps the
+    // reserved covergroup prefix (see `covergroups::instance_subroutine`).
+    for subroutine in &symbols.subroutines {
+        if let Some(bound) =
+            covergroups::instance_subroutine(&subroutine.name, &symbols.covergroups, prefix)
+        {
+            names.insert(subroutine.name.clone(), bound);
+        }
+    }
     // The members of the interface instances in the instance are members of
     // it under their own instance names, `handle.inner.member` (IEEE
     // 1800-2023 23.6, 25.3).

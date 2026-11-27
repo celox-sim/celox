@@ -38,20 +38,73 @@ pub(super) use methods::{
 pub(crate) use model::is_constructor;
 pub(super) use model::{
     Covergroup, Formal, ITEM_FORMAL, Named, build, count_formals, declare, in_covergroup_terms,
-    is_sampler, is_spawner, name_subroutines, outside_a_site, rejected,
+    instance_subroutine, is_instance_subroutine, is_sampler, is_spawner, name_subroutines,
+    outside_a_site, rejected,
 };
 
 /// The start of the reserved class name of every covergroup type.
 const PREFIX: &str = "$covergroup::";
 
-/// Whether class `name` is a covergroup type.
+/// The start of the name of every subroutine of a covergroup type of an
+/// interface in an instance or a port view of the interface (see
+/// `model::instance_subroutine`).
+const INSTANCE_PREFIX: &str = "$covergroup@";
+
+/// The call that marks a task or function of an interface called through a
+/// virtual interface with a formal or a result of a covergroup type of the
+/// interface: no scope has the subroutine, so a scope that reaches it is
+/// rejected as one that reaches a subroutine of the covergroup through a
+/// virtual interface (see `module_elaboration::reachable_imports`).
+pub(super) const THROUGH_A_VIRTUAL_INTERFACE: &str = "$covergroup@$vif::$handle";
+
+/// Whether class `name` is a covergroup type, or subroutine `name` one of a
+/// covergroup type.
 pub(super) fn is_class(name: &str) -> bool {
-    name.starts_with(PREFIX)
+    name.starts_with(PREFIX) || name.starts_with(INSTANCE_PREFIX)
 }
 
 /// What follows [`PREFIX`] in the reserved class name of every covergroup
 /// embedded in a class (see [`embedded_names`]).
 const EMBEDDED: &str = "class::";
+
+/// What follows [`PREFIX`] in the reserved class name of every covergroup
+/// declared in an interface (see [`scope_names`]).
+const INTERFACE: &str = "interface::";
+
+/// Whether class `name` is a covergroup type declared in an interface.
+pub(crate) fn is_interface_class(name: &str) -> bool {
+    name.strip_prefix(PREFIX)
+        .is_some_and(|name| name.starts_with(INTERFACE))
+}
+
+/// Whether a value of type `ty` holds a handle of a covergroup type of an
+/// interface: a handle, a fixed-size array of them, an unpacked structure
+/// with such a member, also in another structure, and a queue, dynamic or
+/// associative array of any of these, by the semantic type of `ty` where
+/// `types` has it and by the classes its retained container type names
+/// otherwise (IEEE 1800-2023 19.3, 7.2, 7.4, 7.5, 7.8, 7.10).
+pub(super) fn holds_interface_handle(
+    ty: &crate::ir::Type,
+    types: Option<&semantic_types::TyTable>,
+) -> bool {
+    ty.class().is_some_and(is_interface_class)
+        || ty
+            .structure_leaves()
+            .iter()
+            .any(|(_, leaf)| holds_interface_handle(leaf, types))
+        || types
+            .zip(ty.semantic_type())
+            .is_some_and(|(types, id)| types.holds_class(id, &is_interface_class))
+        || ty
+            .container()
+            .is_some_and(|container| container.retains_class(&is_interface_class))
+}
+
+/// [`holds_interface_handle`] where no semantic type is known: of a
+/// reference that a hierarchical name makes.
+pub(crate) fn holds_interface_handles(ty: &crate::ir::Type) -> bool {
+    holds_interface_handle(ty, None)
+}
 
 /// Whether `property` is the variable of a covergroup embedded in its class
 /// (IEEE 1800-2023 19.4): the property the declaration of the covergroup
@@ -216,13 +269,20 @@ pub(super) fn scope_names(
             // The elaborated scope by the values of its parameters (see
             // `ScopeElaboration::covergroup_scope`): instances with the same
             // values share the type, also one that takes a default and one
-            // that writes it.
+            // that writes it. A type of an interface is marked as one,
+            // `interface` being a keyword that names no scope.
             let scope = session
                 .covergroup_scope
                 .clone()
                 .or_else(|| types::unit_scope(Some(unit), session));
+            let scope = scope.as_deref().unwrap_or(&element);
+            let marker = if unit.kind == celox_sv_syntax::UnitKind::Interface {
+                INTERFACE
+            } else {
+                ""
+            };
             Names {
-                class: format!("{PREFIX}{}::{local}", scope.as_deref().unwrap_or(&element)),
+                class: format!("{PREFIX}{marker}{scope}::{local}"),
                 display: format!("{element}.{local}"),
             }
         }
@@ -328,6 +388,13 @@ pub(super) fn model(
     owner: Option<&str>,
 ) -> Converted<Arc<Covergroup>> {
     if let Some(model) = session.covergroups.get(name) {
+        // A class of an interface reads the members of the first instance
+        // of the interface in every instance (classes declared in interfaces
+        // are not told apart by instance), so it does not use the
+        // covergroups of the interface.
+        if model.interface && dimensions.class_scope.is_some() {
+            return Err(in_a_class());
+        }
         return Ok(model.clone());
     }
     if let Some(model) = scope::imported(tree)
@@ -335,6 +402,13 @@ pub(super) fn model(
         .iter()
         .find(|model| model.name == name)
     {
+        // The subroutines of a type of an interface are those of each of
+        // its instances, which the body of the instance calls; a scope
+        // that binds the instance, or receives it through a port, names
+        // none of them.
+        if model.interface {
+            return Err(outside_the_interface());
+        }
         return Ok(model.clone());
     }
     if let Some(owner) = owner
@@ -353,12 +427,154 @@ pub(super) fn model(
             .is_some_and(|name| name.starts_with(EMBEDDED))
         {
             through_expression()
+        } else if is_interface_class(name) {
+            outside_the_interface()
         } else {
             unsupported(
                 "covergroup type used outside the scopes that declare or import it (IEEE 1800-2023 19.3)",
             )
         },
     )
+}
+
+/// The rejection of a `new` or a method call of a covergroup type that an
+/// interface declares, bound outside the body of the interface.
+pub(crate) fn outside_the_interface() -> AnalyzerError {
+    unsupported(
+        "covergroup declared in an interface used from outside the interface (IEEE 1800-2023 19.3, 25.3)",
+    )
+}
+
+/// Records the names that `bound`, the symbols an interface instance or port
+/// view binds into the scope being analyzed, gives the members whose types
+/// hold handles of a covergroup type of the interface, and the tasks and
+/// functions with a formal or a result of such a type: the scope's own code
+/// may not name them (see [`reject_outside_names`]). A handle the scope read
+/// could be handed to another instance, whose subroutines of the type would
+/// sample the members of that instance (19.3).
+pub(super) fn record_outside_names(
+    session: &mut Session,
+    functions: &const_functions::ConstantFunctions,
+    bound: &scope::ScopeSymbols,
+) {
+    if !bound.covergroups.iter().any(|model| model.interface) {
+        return;
+    }
+    let mut names = Vec::new();
+    for (name, ty) in bound
+        .signals
+        .iter()
+        .map(|signal| (&signal.name, &signal.r#type))
+        .chain(bound.ports.iter().map(|port| (&port.name, &port.r#type)))
+    {
+        if semantic_types::of_type(&mut session.types, functions, ty, &ConstEnv::default())
+            .is_some_and(|id| session.types.holds_class(id, &is_interface_class))
+            || ty
+                .class_in(&session.types)
+                .is_some_and(|class| is_interface_class(&class))
+        {
+            names.push(name.clone());
+        }
+    }
+    for subroutine in &bound.subroutines {
+        if subroutine
+            .params
+            .iter()
+            .map(|param| &param.r#type)
+            .chain(&subroutine.return_type)
+            .any(|ty| holds_interface_handle(ty, Some(&session.types)))
+            && !is_class(&subroutine.name)
+        {
+            names.push(subroutine.name.clone());
+        }
+    }
+    session.interface_covergroup_names.extend(names);
+}
+
+/// Rejects the own code of the scope being analyzed, its processes and
+/// subroutines, when it names what [`record_outside_names`] recorded: a
+/// handle of a covergroup type of an interface outside the body of the
+/// instance that holds it.
+pub(super) fn reject_outside_names(
+    session: &Session,
+    subroutines: &[Subroutine],
+    comb_processes: &[CombProcess],
+    ff_processes: &[FfProcess],
+    initial_processes: &[InitialProcess],
+) -> Converted<()> {
+    if session.interface_covergroup_names.is_empty() {
+        return Ok(());
+    }
+    let marked = session
+        .interface_covergroup_names
+        .iter()
+        .map(|name| (name.clone(), format!("{name}\u{0}")))
+        .collect::<HashMap<_, _>>();
+    let renamer = scope::Renamer { names: &marked };
+    let names = subroutines
+        .iter()
+        .any(|subroutine| renamer.subroutine(subroutine.clone()) != *subroutine)
+        || comb_processes
+            .iter()
+            .any(|process| renamer.comb_process(process.clone()) != *process)
+        || ff_processes
+            .iter()
+            .any(|process| renamer.ff_process(process.clone()) != *process)
+        || initial_processes.iter().any(|process| {
+            process
+                .body
+                .iter()
+                .any(|stmt| renamer.stmt(stmt.clone()) != *stmt)
+        });
+    if names {
+        return Err(outside_the_interface());
+    }
+    Ok(())
+}
+
+/// The rejection of a use of a covergroup type of an interface in a class
+/// the interface declares, or through a handle that a property of an object
+/// holds.
+pub(super) fn in_a_class() -> AnalyzerError {
+    unsupported(
+        "covergroup declared in an interface used through a class (IEEE 1800-2023 19.3, 25.3)",
+    )
+}
+
+/// The rejection of a function that a module calls through an interface
+/// port and that constructs an instance of a covergroup type of the
+/// interface with a clocking event.
+pub(super) fn spawned_through_a_port() -> AnalyzerError {
+    unsupported(
+        "covergroup sampling event of an instance of a covergroup declared in an interface constructed by a function called through an interface port (IEEE 1800-2023 19.3, 25.5)",
+    )
+}
+
+/// The rejection of a task or function of an interface called through a
+/// virtual interface that constructs or uses an instance of a covergroup
+/// type of the interface.
+pub(super) fn through_a_virtual_interface() -> AnalyzerError {
+    unsupported(
+        "covergroup declared in an interface used by a task or function called through a virtual interface (IEEE 1800-2023 19.3, 25.9)",
+    )
+}
+
+/// The rejection of an instance of an interface that uses a covergroup type
+/// of its own, in the body of another interface.
+pub(super) fn nested_instance() -> AnalyzerError {
+    unsupported(
+        "covergroup declared in an interface instantiated in another interface (IEEE 1800-2023 19.3, 25.3)",
+    )
+}
+
+/// What the names of the hidden variables of the samplers of a scope start
+/// with (see `procedural::covergroup_sites`).
+pub(super) const HIDDEN: &str = "%covergroup_";
+
+/// Whether signal `name`, as an interface instance or port binds it, is a
+/// hidden variable of the samplers of the covergroups of the interface.
+pub(super) fn is_hidden_variable(name: &str) -> bool {
+    name.starts_with(HIDDEN) || name.contains(&format!("${HIDDEN}"))
 }
 
 /// The rejection of a use of an embedded covergroup that does not name its
@@ -437,6 +653,10 @@ pub(super) fn signatures(
     .chain(spawn)
     .collect()
 }
+
+/// The construct of the processes and procedures that sample the instances
+/// of a covergroup at its clocking event (see `procedural::covergroup_sites`).
+pub(super) const SAMPLING: &str = "covergroup sampling";
 
 /// The source name of the handle of the instance in the subroutines of a
 /// covergroup, which no identifier of a source spells.

@@ -87,10 +87,6 @@ impl ScopeElaboration<'_> {
                 &self.packed_dimensions,
                 &mut body_state,
             )?;
-            comb_processes.extend(self.imported.comb_processes.iter().cloned());
-            ff_processes.extend(self.imported.ff_processes.iter().cloned());
-            let mut initial_processes = array_initial_processes;
-            initial_processes.extend(self.imported.initial_processes.iter().cloned());
             let (scope_processes, sites) = procedural::initial_processes_from_scope(
                 syntax_tree,
                 session,
@@ -99,6 +95,19 @@ impl ScopeElaboration<'_> {
                 &self.parameter_values,
                 &mut body_state,
             )?;
+            // The scope's own code, before the processes of the interface
+            // instances it binds join it.
+            covergroups::reject_outside_names(
+                session,
+                &subroutines,
+                &comb_processes,
+                &ff_processes,
+                &scope_processes,
+            )?;
+            comb_processes.extend(self.imported.comb_processes.iter().cloned());
+            ff_processes.extend(self.imported.ff_processes.iter().cloned());
+            let mut initial_processes = array_initial_processes;
+            initial_processes.extend(self.imported.initial_processes.iter().cloned());
             initial_processes.extend(scope_processes);
             // The variables that hold the covergroup instances sampled at
             // their clocking events (IEEE 1800-2023 19.3).

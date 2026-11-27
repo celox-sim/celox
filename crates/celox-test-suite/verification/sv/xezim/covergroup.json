@@ -167,6 +167,17 @@
     },
     {
       "category": "Sequential",
+      "detail": "covergroup::covergroups_at_clocking_block_events at 1469:2: expect_output: expected [49, 48, 48, 46, 48, 48, 32, 55, 53, 46, 48, 48, 32, 55, 53, 46, 48, 48, 10], got [55, 53, 46, 48, 48, 32, 53, 48, 46, 48, 48, 32, 55, 53, 46, 48, 48, 10]",
+      "expectation": "Simulation",
+      "name": "covergroup::covergroups_at_clocking_block_events",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
       "name": "covergroup::coverpoint_guard_skips_the_sample",
@@ -348,6 +359,39 @@
       "name": "covergroup::instances_of_a_generate_loop_sample_their_own",
       "phase": "execute",
       "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "covergroup::interface_covergroups_bound_into_each_instance at 1438:2: expect_output: expected [117, 49, 32, 54, 46, 50, 53, 32, 54, 46, 50, 53, 32, 54, 46, 50, 53, 10, 117, 50, 32, 50, 53, 46, 48, 48, 32, 50, 53, 46, 48, 48, 32, 50, 53, 46, 48, 48, 10], got [117, 48, 32, 48, 46, 48, 48, 32, 48, 46, 48, 48, 32, 48, 46, 48, 48, 10]",
+      "expectation": "Simulation",
+      "name": "covergroup::interface_covergroups_bound_into_each_instance",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "covergroup::interface_covergroups_sample_at_their_clocking_events",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "covergroup::interface_covergroups_sample_their_instance at 1366:2: expect_output: expected [54, 32, 56, 32, 53, 48, 46, 48, 48, 10, 53, 32, 56, 32, 53, 48, 46, 48, 48, 10, 56, 32, 56, 32, 49, 48, 48, 46, 48, 48, 10, 56, 32, 56, 32, 49, 48, 48, 46, 48, 48, 10], got [48, 32, 48, 32, 48, 46, 48, 48, 10, 48, 32, 48, 32, 48, 46, 48, 48, 10, 48, 32, 48, 32, 48, 46, 48, 48, 10, 48, 32, 48, 32, 48, 46, 48, 48, 10]",
+      "expectation": "Simulation",
+      "name": "covergroup::interface_covergroups_sample_their_instance",
+      "phase": "execute",
+      "status": "mismatch",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []

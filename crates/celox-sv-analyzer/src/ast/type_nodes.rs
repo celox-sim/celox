@@ -113,6 +113,27 @@ impl Type {
         })
     }
 
+    /// Whether a value of the type may hold a handle of a class that `class`
+    /// is true of, as the classes its bindings retain tell, without a table:
+    /// a handle or a fixed-size array of them, a container of any of these,
+    /// or an unpacked structure with such a member (IEEE 1800-2023 8.4, 7.2,
+    /// 7.4, 7.5, 7.8, 7.10).
+    pub(in crate::ast) fn retains_class(&self, class: &dyn Fn(&str) -> bool) -> bool {
+        [&self.binding, &self.element]
+            .into_iter()
+            .filter_map(semantic_types::Binding::retained_class)
+            .any(|name| class(name))
+            || self
+                .container()
+                .is_some_and(|container| container.element.retains_class(class))
+            || self.unpacked_struct().is_some_and(|structure| {
+                structure
+                    .members()
+                    .iter()
+                    .any(|member| member.r#type.retains_class(class))
+            })
+    }
+
     /// The class of an object handle type, or of the elements of a
     /// fixed-size array of them, as its semantic type in `table` tells.
     pub(in crate::ast) fn class_in(&self, table: &semantic_types::TyTable) -> Option<Arc<str>> {

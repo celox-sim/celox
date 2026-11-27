@@ -213,13 +213,24 @@ fn point_type(
             &builder.dims.const_env,
         )
         .ok_or_else(|| unsupported("covergroup coverpoint type"))?,
-        None => expression_types::type_of(
+        None => match expression_types::type_of(
             &builder.tree,
             builder.session,
             expression,
             native,
             &builder.dims,
-        )?,
+        ) {
+            Ok(ty) => ty,
+            // A hierarchical name that the body of an interface does not
+            // declare is resolved by the scope that binds the instance
+            // (IEEE 1800-2023 23.8), which binding the value asks for. What
+            // binding rejects, such as a clockvar of a clocking block of
+            // another scope (`a.cb.x`), is rejected as binding tells it.
+            Err(error) => match builder.covergroup_value(expression, None) {
+                Err(found) => return Err(found),
+                Ok(_) => return Err(error),
+            },
+        },
     };
     let packed = match builder.session.types.data(ty) {
         semantic_types::TyData::Packed(packed) => packed.clone(),

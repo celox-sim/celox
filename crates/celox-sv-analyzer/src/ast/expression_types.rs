@@ -215,6 +215,21 @@ fn resolve(
     {
         return of_shape(session, shape);
     }
+    // A clockvar, `cb.x`, has the type of the variable that holds the value
+    // its clocking block sampled (14.13), which a read of it reads. An
+    // output clockvar, which has none, has the type of its signal: the read
+    // that binds it rejects it (14.3).
+    if let ExprKind::Member { separator, .. } = &native.expression(id).kind
+        && separator == "."
+        && let Some((block, var, members)) =
+            clocking::clockvar_path(id, native, tree, session, dims)
+        && members.is_empty()
+        && let Some(shape) = dims
+            .get(&clocking::sampled(&block, &var))
+            .or_else(|| dims.get(&var))
+    {
+        return of_shape(session, shape);
+    }
     // A member of an element of an array of interface instances or ports,
     // such as `bus[0].data` (25.3).
     if let Ok(Some(name)) =
