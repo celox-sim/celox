@@ -609,11 +609,20 @@ impl Packages {
     /// [`crate::ir::Module::constructs_covergroup`]): of the modules
     /// [`Self::specialized_state_modules`] gives.
     pub fn states_construct_covergroups(&self, design: &Design) -> bool {
+        self.specialized_state_modules_unordered(design)
+            .any(crate::ir::Module::constructs_covergroup)
+    }
+
+    /// The modules [`Self::specialized_state_modules`] gives, borrowed, in
+    /// no particular order.
+    pub fn specialized_state_modules_unordered<'a>(
+        &'a self,
+        design: &'a Design,
+    ) -> impl Iterator<Item = &'a crate::ir::Module> {
         let specialized = design.foreign.states();
         self.state_modules()
             .filter(|module| !specialized.contains_key(module.name()))
             .chain(specialized.values().map(|module| &**module))
-            .any(crate::ir::Module::constructs_covergroup)
     }
 
     pub fn specialized_state_modules(&self, design: &Design) -> Vec<crate::ir::Module> {
