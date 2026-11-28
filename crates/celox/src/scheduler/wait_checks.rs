@@ -227,40 +227,77 @@ impl Generator<'_> {
                 _ => self.check_wait(check, settled, &mut samples),
             }
         }
-        if let (Some((flags, partitions, waits)), Some(untracked)) = (gate, untracked) {
-            for (word, checks) in words {
-                let first = word * 8;
-                let count = (waits - first).min(8);
-                let width = count * SCHEDULER_FLAG_WIDTH;
-                let bytes = self.load_at(
-                    flags,
-                    celox_design::settle_wait_flag(partitions, first) * 8,
-                    width,
-                );
-                let zero = self.constant(0, width);
-                let any = self.binary(1, bytes, BinaryOp::Ne, zero);
-                let dirty = self.binary(1, any, BinaryOp::Or, untracked);
-                self.if_bit(dirty, 0, |g| {
-                    for check in checks {
-                        let offset = celox_design::settle_wait_flag(partitions, check.index) * 8;
-                        let byte = g.b.alloc_bit(SCHEDULER_FLAG_WIDTH, false);
-                        g.b.emit(SIRInstruction::Slice(
-                            byte,
-                            bytes,
-                            (check.index - first) * SCHEDULER_FLAG_WIDTH,
-                            SCHEDULER_FLAG_WIDTH,
-                        ));
-                        let zero = g.constant(0, SCHEDULER_FLAG_WIDTH);
-                        let dirty = g.binary(1, byte, BinaryOp::Ne, zero);
-                        let dirty = g.binary(1, dirty, BinaryOp::Or, untracked);
-                        g.if_bit(dirty, 0, |g| {
-                            g.store_at(flags, offset, SCHEDULER_FLAG_WIDTH, zero);
-                            g.check_wait(check, settled, &mut WaitSamples::default());
-                        });
-                    }
-                });
+        if let (Some((flags, partitions, _)), Some(untracked)) = (gate, untracked) {
+            for checks in words.values() {
+                self.check_wait_word(flags, partitions, checks, untracked, settled);
             }
         }
+    }
+
+    fn check_wait_word(
+        &mut self,
+        flags: AbsoluteAddr,
+        partitions: usize,
+        checks: &[&WaitCheck],
+        untracked: RegisterId,
+        settled: bool,
+    ) {
+        // Waits are collected in process order; a scan after one writer
+        // may check only a subset of the bytes in this word.
+        let first = checks[0].index;
+        let last = checks.last().unwrap().index;
+        let width = (last - first + 1) * SCHEDULER_FLAG_WIDTH;
+        let offset = celox_design::settle_wait_flag(partitions, first) * 8;
+        let bytes = self.load_at(flags, offset, width);
+        let zero = self.constant(0, width);
+        if let [check] = checks {
+            let notified = self.binary(1, bytes, BinaryOp::Ne, zero);
+            let dirty = self.binary(1, notified, BinaryOp::Or, untracked);
+            self.if_bit(dirty, 0, |g| {
+                g.store_at(flags, offset, width, zero);
+                g.check_wait(check, settled, &mut WaitSamples::default());
+            });
+            return;
+        }
+        let mask = checks.iter().fold(0u64, |mask, check| {
+            mask | (0xff << ((check.index - first) * SCHEDULER_FLAG_WIDTH))
+        });
+        let keep_mask = !mask & (u64::MAX >> (64 - width));
+        let all = self.constant(mask, width);
+        let selected = if keep_mask == 0 {
+            bytes
+        } else {
+            self.binary(width, bytes, BinaryOp::And, all)
+        };
+        let pending = self.b.alloc_bit(width, false);
+        self.b
+            .emit(SIRInstruction::Mux(pending, untracked, all, selected));
+        let dirty = self.binary(1, pending, BinaryOp::Ne, zero);
+        self.if_bit(dirty, 0, |g| {
+            // Observing a wait writes only scheduler-private state. Consume
+            // these flags together, keeping the bytes of any skipped waits.
+            let rest = if keep_mask == 0 {
+                zero
+            } else {
+                let keep = g.constant(keep_mask, width);
+                g.binary(width, bytes, BinaryOp::And, keep)
+            };
+            g.store_at(flags, offset, width, rest);
+            for check in checks {
+                let byte = g.b.alloc_bit(SCHEDULER_FLAG_WIDTH, false);
+                g.b.emit(SIRInstruction::Slice(
+                    byte,
+                    pending,
+                    (check.index - first) * SCHEDULER_FLAG_WIDTH,
+                    SCHEDULER_FLAG_WIDTH,
+                ));
+                let zero = g.constant(0, SCHEDULER_FLAG_WIDTH);
+                let dirty = g.binary(1, byte, BinaryOp::Ne, zero);
+                g.if_bit(dirty, 0, |g| {
+                    g.check_wait(check, settled, &mut WaitSamples::default());
+                });
+            }
+        });
     }
 
     fn waiting_for_edge(&mut self, check: &WaitCheck) -> RegisterId {
