@@ -146,3 +146,41 @@ endmodule
   (four_state)
   (top Top) (run_until 30)
   (assert_eq v4 0) (assert_eq v6 3))
+
+(case synchronous_drives_of_recursive_functions
+  ; A recursive function runs out of line, also when a task it forks drives
+  ; a clocking block output (IEEE 1800-2023 13.4.2, 14.16): the drive made
+  ; between clocking events matures at the event at 5, and the one made at
+  ; the event at 15 at that event, both in the Re-NBA region, after the
+  ; nonblocking assignment of `a` at the same edge has read `q`.
+  (source "recursive_drives.sv" #"
+module Top(output int n, output bit [7:0] q6, output bit [7:0] a6, output bit [7:0] a16,
+           output bit [7:0] q16, output bit [7:0] a26);
+    bit clk;
+    bit [7:0] q, a;
+    always #5 clk = ~clk;
+    clocking cb @(posedge clk);
+        output q;
+    endclocking
+    always @(posedge clk) a <= q;
+    task automatic drive(input int v);
+        cb.q <= v;
+    endtask
+    function automatic void walk(int depth, int base);
+        n++;
+        if (depth > 0) walk(depth - 1, base);
+        if (depth == 0) fork drive(base); join_none
+    endfunction
+    initial begin
+        walk(3, 5);
+        #6 q6 = q; a6 = a;
+        @(cb);
+        walk(2, 10);
+        #1 q16 = q; a16 = a;
+        #10 a26 = a;
+    end
+endmodule
+"#)
+  (top Top) (run_until 40)
+  (assert_eq n 7) (assert_eq q6 5) (assert_eq a6 0) (assert_eq a16 5)
+  (assert_eq q16 10) (assert_eq a26 10))
