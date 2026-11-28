@@ -349,7 +349,7 @@ pub struct Module {
     comb_processes: Vec<CombProcess>,
     ff_processes: Vec<FfProcess>,
     initial_processes: Vec<InitialProcess>,
-    locals: Vec<LocalVariable>,
+    locals: Vec<Arc<LocalVariable>>,
     subroutines: Vec<Subroutine>,
     dpi_imports: Vec<crate::ir::DpiImport>,
     /// The functions its constant expressions may call.

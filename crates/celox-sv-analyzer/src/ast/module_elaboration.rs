@@ -60,6 +60,9 @@ struct ScopeElaboration<'a> {
     parameter_values: HashMap<String, Expr>,
     functions: HashMap<String, Function>,
     locals: Vec<LocalVariable>,
+    /// The locals of the subroutines of the packages the scope uses (see
+    /// `Self::lower_imported`), shared with the packages.
+    imported_locals: Vec<Arc<LocalVariable>>,
     subroutines: Vec<Subroutine>,
     comb_processes: Vec<CombProcess>,
     ff_processes: Vec<FfProcess>,
@@ -284,6 +287,7 @@ impl Module {
                 parameter_values: HashMap::default(),
                 functions: HashMap::default(),
                 locals: Vec::new(),
+                imported_locals: Vec::new(),
                 subroutines: Vec::new(),
                 comb_processes: Vec::new(),
                 ff_processes: Vec::new(),
