@@ -861,3 +861,60 @@ fn check_four_state_fanout(registered: bool) {
         expected
     );
 }
+
+/// A pulse can return to its initial value within a process. Each wait
+/// must therefore watch its occurrence counter as well as the signal.
+#[test]
+fn wait_flags_follow_the_edge_each_process_awaits() {
+    let source = r#"`timescale 1ns/1ns
+module Top(output wire [3:0] triple, output wire [3:0] quintuple);
+    bit [1:0] data, other;
+    assign triple = data * 3;
+    assign quintuple = other * 5;
+    int changes, rises, falls, triple_seen, quintuple_seen;
+    initial forever begin @(triple); triple_seen++; end
+    initial forever begin @(quintuple); quintuple_seen++; end
+    initial #1 other = 1;
+    initial begin #1; data = 2; #1; data = 3; data = 2; #1; $finish; end
+    initial forever begin @(data); changes++; end
+    initial forever begin @(posedge data); rises++; end
+    initial forever begin @(negedge data); falls++; end
+endmodule"#;
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![(source, std::path::Path::new("wait-flags.sv"))],
+        "Top",
+    )
+    .settle_partition(SettlePartition::Always)
+    .build_native()
+    .unwrap();
+    let schema = &sim.program().runtime_schema;
+    let parts = schema.settle_partitions.as_ref().unwrap();
+    let mut checked_kinds = std::collections::BTreeSet::new();
+    for site in &schema.wait_sites {
+        let [(signal, kind)] = site.terms.as_slice() else {
+            continue;
+        };
+        let Some(watch) = schema.watches.iter().find(|watch| watch.signal == *signal) else {
+            continue;
+        };
+        let flag = celox_design::settle_wait_flag(parts.partitions as usize, site.process) as u32;
+        let marks_wait = |addr| {
+            parts
+                .marks
+                .iter()
+                .any(|(state, flags)| *state == addr && flags.contains(&flag))
+        };
+        assert!(marks_wait(*signal));
+        for (counter_kind, addr) in watch.counters() {
+            assert_eq!(marks_wait(addr), counter_kind == *kind);
+        }
+        checked_kinds.insert(*kind);
+    }
+    assert_eq!(checked_kinds.len(), 3);
+
+    sim.run_until(4).unwrap();
+    assert!(sim.is_finished());
+    for (signal, expected) in [("changes", 2u8), ("rises", 1), ("falls", 1)] {
+        assert_eq!(sim.get(sim.signal(signal)), expected.into(), "{signal}");
+    }
+}
