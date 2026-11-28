@@ -120,8 +120,27 @@ pub(super) fn effects<'a, 'd>(
     body: impl Iterator<Item = &'a Stmt>,
     definitions: &HashMap<&'d str, &'d Subroutine>,
 ) -> (bool, bool, HashSet<String>, Vec<&'d Expr>) {
-    let mut invalid = false;
-    let mut schedules_events = false;
+    expand(&walk_calls(body), definitions)
+}
+
+/// What [`effects`] finds of statements that does not depend on the
+/// subroutines their calls name: whether they may suspend, whether they
+/// schedule events, and each call with the arguments it gives, in the order
+/// of the walk.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct WalkedCalls {
+    invalid: bool,
+    schedules_events: bool,
+    /// Each call, and for each argument position whether it gives one.
+    calls: Vec<(String, Vec<bool>)>,
+}
+
+/// [`effects`] of the calls `walked` found, with `definitions`: the calls
+/// in the defaults of the arguments they omit join them.
+pub(super) fn expand<'d>(
+    walked: &WalkedCalls,
+    definitions: &HashMap<&'d str, &'d Subroutine>,
+) -> (bool, bool, HashSet<String>, Vec<&'d Expr>) {
     let mut calls = Calls {
         definitions,
         names: HashSet::default(),
@@ -129,6 +148,24 @@ pub(super) fn effects<'a, 'd>(
         expanded: HashSet::default(),
         evaluated: Vec::new(),
     };
+    for (name, present) in &walked.calls {
+        calls.record_present(name, |index| present.get(index).copied().unwrap_or(false));
+    }
+    calls.expand_defaults();
+    (
+        walked.invalid,
+        walked.schedules_events,
+        calls.names,
+        calls.evaluated,
+    )
+}
+
+/// The part of [`effects`] of `body` that does not depend on the
+/// subroutines it calls.
+pub(super) fn walk_calls<'a>(body: impl Iterator<Item = &'a Stmt>) -> WalkedCalls {
+    let mut invalid = false;
+    let mut schedules_events = false;
+    let mut calls = Vec::new();
     for statement in body {
         statement.walk_without_detached_children(&mut |statement| {
             invalid |= events::blocks(statement)
@@ -159,11 +196,11 @@ pub(super) fn effects<'a, 'd>(
                 }
             );
             if let Stmt::Call { name, args, .. } = statement {
-                calls.record(name, CallArguments::Expressions(args));
+                calls.push((name.clone(), presence(CallArguments::Expressions(args))));
             }
-            let mut call = |callee: &Callee, args| {
+            let mut call = |callee: &Callee, args: CallArguments<'_>| {
                 if let Callee::Subroutine(name) = callee {
-                    calls.record(name, args);
+                    calls.push((name.clone(), presence(args)));
                 }
             };
             for expr in lifetimes::stmt_exprs(statement) {
@@ -192,8 +229,20 @@ pub(super) fn effects<'a, 'd>(
             }
         });
     }
-    calls.expand_defaults();
-    (invalid, schedules_events, calls.names, calls.evaluated)
+    WalkedCalls {
+        invalid,
+        schedules_events,
+        calls,
+    }
+}
+
+/// For each argument position of a call, whether it gives an argument.
+fn presence(args: CallArguments<'_>) -> Vec<bool> {
+    let len = match args {
+        CallArguments::Expressions(args) => args.len(),
+        CallArguments::Constants(args) => args.len(),
+    };
+    (0..len).map(|index| args.is_present(index)).collect()
 }
 
 struct Calls<'map, 'definition> {
@@ -207,12 +256,18 @@ struct Calls<'map, 'definition> {
 
 impl Calls<'_, '_> {
     fn record(&mut self, name: &str, args: CallArguments<'_>) {
+        self.record_present(name, |index| args.is_present(index));
+    }
+
+    /// [`Self::record`] of a call that gives the arguments `present` is
+    /// true of.
+    fn record_present(&mut self, name: &str, present: impl Fn(usize) -> bool) {
         self.names.insert(name.to_owned());
         let Some(&subroutine) = self.definitions.get(name) else {
             return;
         };
         for (index, parameter) in subroutine.params.iter().enumerate() {
-            if !args.is_present(index)
+            if !present(index)
                 && let Some(default) = &parameter.default
                 && self.expanded.insert((name.to_owned(), index))
             {

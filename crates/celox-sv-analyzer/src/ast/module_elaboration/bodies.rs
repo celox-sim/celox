@@ -488,7 +488,7 @@ impl ScopeElaboration<'_> {
 
     /// Checks the references of the bodies and classifies the processes that call
     /// timed tasks.
-    pub(super) fn validate_bodies(&mut self) -> Result<(), AnalyzerError> {
+    pub(super) fn validate_bodies(&mut self, session: &mut Session) -> Result<(), AnalyzerError> {
         let nets = self
             .signals
             .iter()
@@ -520,12 +520,9 @@ impl ScopeElaboration<'_> {
             &self.subroutine_directions,
         )?;
         procedural::timed_tasks::classify(
-            self.subroutines.iter().chain(
-                self.imported
-                    .subroutines
-                    .iter()
-                    .map(|subroutine| &**subroutine),
-            ),
+            &self.subroutines,
+            &self.imported.subroutines,
+            &mut session.body_facts,
             &mut self.comb_processes,
             &mut self.ff_processes,
             &mut self.initial_processes,

@@ -1,21 +1,42 @@
 //! Propagate suspension through bound task calls before selecting process kernels.
 use super::*;
 
-pub(in crate::ast) fn classify<'a>(
-    subroutines: impl Iterator<Item = &'a Subroutine>,
+/// Classify the processes of a scope whose subroutines are its `own` and
+/// the `imported` ones, of the packages it uses: the facts of the bodies of
+/// the imported ones, which every scope that uses the same packages shares,
+/// come from `facts`.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::ast) fn classify(
+    own: &[Subroutine],
+    imported: &[std::sync::Arc<Subroutine>],
+    facts: &mut BodyFactsCache,
     comb: &mut Vec<CombProcess>,
     ff: &mut Vec<FfProcess>,
     processes: &mut Vec<InitialProcess>,
     assertion_callees: &[String],
     dpi_imports: &HashSet<&str>,
 ) -> Result<(), AnalyzerError> {
-    let subroutines: Vec<_> = subroutines.collect();
+    facts.release_unshared();
+    let subroutines: Vec<&Subroutine> = own
+        .iter()
+        .chain(imported.iter().map(|subroutine| &**subroutine))
+        .collect();
+    let body_facts: Vec<std::sync::Arc<BodyFacts>> = own
+        .iter()
+        .map(|subroutine| std::sync::Arc::new(BodyFacts::of(subroutine)))
+        .chain(imported.iter().map(|subroutine| facts.of(subroutine)))
+        .collect();
     super::final_procedures::validate(&subroutines, processes)?;
     let definitions: HashMap<_, _> = subroutines
         .iter()
         .map(|sub| (sub.name.as_str(), *sub))
         .collect();
-    let known = subroutine_effects(&subroutines, &definitions, FunctionForks::Kernel);
+    let known = subroutine_effects(
+        &subroutines,
+        &body_facts,
+        &definitions,
+        FunctionForks::Kernel,
+    );
     let timed: HashSet<String> = known
         .iter()
         .filter(|(_, effects)| effects.suspends)
@@ -23,10 +44,8 @@ pub(in crate::ast) fn classify<'a>(
         .collect();
     // A wait condition only registers the events it reads `triggered` of
     // itself; one read in a called function would miss its wakeup.
-    let triggered_readers = callers_closure(&subroutines, |subroutine, readers| {
-        reads_triggered(&subroutine.body, readers)
-    });
-    concurrent_actions(&subroutines, &definitions, comb, ff, processes)?;
+    let triggered_readers = triggered_readers(&subroutines, &body_facts);
+    concurrent_actions(&subroutines, &body_facts, &definitions, comb, ff, processes)?;
     assertion_functions(assertion_callees, &definitions, dpi_imports)?;
     if !triggered_readers.is_empty() {
         for body in bodies(&subroutines, comb, ff, processes) {
@@ -47,7 +66,7 @@ pub(in crate::ast) fn classify<'a>(
             }
         }
     }
-    for subroutine in &subroutines {
+    for (subroutine, facts) in subroutines.iter().zip(&body_facts) {
         // A task suspends through what it calls too; a function never
         // suspends, and only a fork of its own body outlives the call with
         // its formals: a fork that one of its callees spawns reads none of
@@ -56,15 +75,14 @@ pub(in crate::ast) fn classify<'a>(
         let is_timed = if subroutine.is_task {
             timed.contains(&subroutine.name)
         } else {
-            own_effects(&subroutine.body, &definitions, FunctionForks::Kernel)
+            facts
+                .own_effects(&definitions, FunctionForks::Kernel)
                 .0
                 .suspends
         };
         if !subroutine.is_task {
-            let (blocking, _, calls, _) = super::final_procedures::effects(
-                subroutine.body.iter().chain(&subroutine.sensitivity_body),
-                &definitions,
-            );
+            let (blocking, _, calls, _) =
+                super::final_procedures::expand(&facts.full_calls, &definitions);
             if blocking
                 || calls.iter().any(|name| {
                     definitions
@@ -77,34 +95,7 @@ pub(in crate::ast) fn classify<'a>(
                 ));
             }
         }
-        let mut automatic_nba = false;
-        for statement in subroutine.body.iter().chain(&subroutine.sensitivity_body) {
-            statement.walk(&mut |statement| match statement {
-                Stmt::Assign {
-                    lhs,
-                    nonblocking: true,
-                    ..
-                } => {
-                    automatic_nba |= subroutine
-                        .automatic_locals
-                        .iter()
-                        .any(|name| name == lhs.name());
-                }
-                Stmt::AssignConcat {
-                    parts,
-                    nonblocking: true,
-                    ..
-                } => {
-                    automatic_nba |= parts.iter().any(|part| {
-                        subroutine
-                            .automatic_locals
-                            .iter()
-                            .any(|name| name == part.name())
-                    });
-                }
-                _ => {}
-            });
-        }
+        let automatic_nba = facts.automatic_nba;
         // IEEE 1800-2023 13.3.2 forbids NBAs to automatic task storage,
         // including untimed callees whose caller owns a suspended activation.
         if subroutine.is_task && automatic_nba {
@@ -484,26 +475,6 @@ fn subroutine_contains_delayed(
     found
 }
 
-/// The subroutines for which `holds` is true, given those already found:
-/// a property of a body that also holds of a call of a subroutine having it.
-fn callers_closure(
-    subroutines: &[&Subroutine],
-    mut holds: impl FnMut(&Subroutine, &HashSet<String>) -> bool,
-) -> HashSet<String> {
-    let mut found = HashSet::default();
-    loop {
-        let previous = found.len();
-        for subroutine in subroutines {
-            if !found.contains(&subroutine.name) && holds(subroutine, &found) {
-                found.insert(subroutine.name.clone());
-            }
-        }
-        if previous == found.len() {
-            return found;
-        }
-    }
-}
-
 /// Every body of statements: those of subroutines and of processes.
 fn bodies<'a>(
     subroutines: &'a [&'a Subroutine],
@@ -668,6 +639,18 @@ fn own_effects(
 ) -> (Effects, HashSet<String>) {
     #[cfg(test)]
     OWN_EFFECT_WALKS.with(|count| count.set(count.get() + 1));
+    let effects = statement_effects_of(body, forks);
+    // A call evaluates the defaults of its omitted arguments.
+    let (_, _, calls, defaults) = super::final_procedures::effects(body.iter(), definitions);
+    let effects = defaults.into_iter().fold(effects, |effects, default| {
+        effects.union(expression_effects(default))
+    });
+    (effects, calls)
+}
+
+/// The effects of the statements of `body` themselves, without those of
+/// what they call (see [`own_effects`]).
+fn statement_effects_of(body: &[Stmt], forks: FunctionForks) -> Effects {
     let mut effects = Effects::default();
     for statement in body {
         match forks {
@@ -688,12 +671,167 @@ fn own_effects(
             }),
         }
     }
-    // A call evaluates the defaults of its omitted arguments.
-    let (_, _, calls, defaults) = super::final_procedures::effects(body.iter(), definitions);
-    let effects = defaults.into_iter().fold(effects, |effects, default| {
-        effects.union(expression_effects(default))
-    });
-    (effects, calls)
+    effects
+}
+
+/// What [`classify`] reads of the body of a subroutine that depends on the
+/// body alone: the effects of its statements, its calls with the arguments
+/// they give, whether it reads `triggered`, the subroutines it calls, and
+/// whether it assigns an automatic variable nonblocking. No fact resolves
+/// a name: what the calls name is resolved by the scope, through the
+/// definitions it passes, after the facts are taken.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::ast) struct BodyFacts {
+    kernel: Effects,
+    detached: Effects,
+    /// The calls of the body ([`super::final_procedures::walk_calls`]).
+    calls: super::final_procedures::WalkedCalls,
+    /// Those of the body and its sensitivity body.
+    full_calls: super::final_procedures::WalkedCalls,
+    reads_triggered: bool,
+    /// The names its statements and expressions call.
+    called: HashSet<String>,
+    automatic_nba: bool,
+}
+
+impl BodyFacts {
+    fn of(subroutine: &Subroutine) -> Self {
+        #[cfg(test)]
+        OWN_EFFECT_WALKS.with(|count| count.set(count.get() + 1));
+        let mut reads_triggered = false;
+        let mut called = HashSet::default();
+        for statement in &subroutine.body {
+            statement.walk(&mut |statement| {
+                if let Stmt::Call { name, .. } = statement {
+                    called.insert(name.clone());
+                }
+                for expr in lifetimes::stmt_exprs(statement) {
+                    reads_triggered |= events::reads_triggered(expr);
+                    const_functions::visit_expr_calls(expr, &mut |callee, _| {
+                        if let Callee::Subroutine(name) = callee {
+                            called.insert(name.clone());
+                        }
+                    });
+                }
+            });
+        }
+        let mut automatic_nba = false;
+        for statement in subroutine.body.iter().chain(&subroutine.sensitivity_body) {
+            statement.walk(&mut |statement| match statement {
+                Stmt::Assign {
+                    lhs,
+                    nonblocking: true,
+                    ..
+                } => {
+                    automatic_nba |= subroutine
+                        .automatic_locals
+                        .iter()
+                        .any(|name| name == lhs.name());
+                }
+                Stmt::AssignConcat {
+                    parts,
+                    nonblocking: true,
+                    ..
+                } => {
+                    automatic_nba |= parts.iter().any(|part| {
+                        subroutine
+                            .automatic_locals
+                            .iter()
+                            .any(|name| name == part.name())
+                    });
+                }
+                _ => {}
+            });
+        }
+        Self {
+            kernel: statement_effects_of(&subroutine.body, FunctionForks::Kernel),
+            detached: statement_effects_of(&subroutine.body, FunctionForks::Detached),
+            calls: super::final_procedures::walk_calls(subroutine.body.iter()),
+            full_calls: super::final_procedures::walk_calls(
+                subroutine.body.iter().chain(&subroutine.sensitivity_body),
+            ),
+            reads_triggered,
+            called,
+            automatic_nba,
+        }
+    }
+
+    /// [`own_effects`] of the body, with `definitions` for the defaults of
+    /// the arguments its calls omit.
+    fn own_effects(
+        &self,
+        definitions: &HashMap<&str, &Subroutine>,
+        forks: FunctionForks,
+    ) -> (Effects, HashSet<String>) {
+        let effects = match forks {
+            FunctionForks::Kernel => self.kernel,
+            FunctionForks::Detached => self.detached,
+        };
+        let (_, _, calls, defaults) = super::final_procedures::expand(&self.calls, definitions);
+        let effects = defaults.into_iter().fold(effects, |effects, default| {
+            effects.union(expression_effects(default))
+        });
+        (effects, calls)
+    }
+}
+
+/// The [`BodyFacts`] of the subroutines that scopes import, each taken
+/// once: every scope that uses the same packages imports the same
+/// subroutines. An entry keeps its subroutine, so no other one can take its
+/// address while the entry lasts.
+#[derive(Clone, Debug, Default)]
+pub(in crate::ast) struct BodyFactsCache {
+    entries: HashMap<usize, (std::sync::Arc<Subroutine>, std::sync::Arc<BodyFacts>)>,
+}
+
+impl BodyFactsCache {
+    /// The facts of `subroutine`.
+    fn of(&mut self, subroutine: &std::sync::Arc<Subroutine>) -> std::sync::Arc<BodyFacts> {
+        let key = std::sync::Arc::as_ptr(subroutine) as usize;
+        let (_, facts) = self.entries.entry(key).or_insert_with(|| {
+            (
+                std::sync::Arc::clone(subroutine),
+                std::sync::Arc::new(BodyFacts::of(subroutine)),
+            )
+        });
+        // The facts depend on the body alone: they are those of taking
+        // them again.
+        debug_assert!(
+            **facts == BodyFacts::of(subroutine),
+            "the kept facts of `{}` differ from its body's",
+            subroutine.name
+        );
+        std::sync::Arc::clone(facts)
+    }
+
+    /// Forget the subroutines that only the cache still holds: no scope
+    /// imports them any more, as when a package is analyzed again.
+    fn release_unshared(&mut self) {
+        self.entries
+            .retain(|_, (subroutine, _)| std::sync::Arc::strong_count(subroutine) > 1);
+    }
+}
+
+/// The subroutines that read `triggered`, themselves or through the
+/// subroutines they call.
+fn triggered_readers(
+    subroutines: &[&Subroutine],
+    facts: &[std::sync::Arc<BodyFacts>],
+) -> HashSet<String> {
+    let mut found = HashSet::default();
+    loop {
+        let previous = found.len();
+        for (subroutine, facts) in subroutines.iter().zip(facts) {
+            if !found.contains(&subroutine.name)
+                && (facts.reads_triggered || facts.called.iter().any(|name| found.contains(name)))
+            {
+                found.insert(subroutine.name.clone());
+            }
+        }
+        if previous == found.len() {
+            return found;
+        }
+    }
 }
 
 /// `effects` with those `known` of the subroutines `calls` names.
@@ -724,18 +862,20 @@ fn body_effects(
 /// one pass per step of the longest call chain.
 fn subroutine_effects(
     subroutines: &[&Subroutine],
+    facts: &[std::sync::Arc<BodyFacts>],
     definitions: &HashMap<&str, &Subroutine>,
     forks: FunctionForks,
 ) -> HashMap<String, Effects> {
     let own = subroutines
         .iter()
-        .map(|subroutine| {
+        .zip(facts)
+        .map(|(subroutine, facts)| {
             let forks = if subroutine.is_task {
                 FunctionForks::Kernel
             } else {
                 forks
             };
-            own_effects(&subroutine.body, definitions, forks)
+            facts.own_effects(definitions, forks)
         })
         .collect::<Vec<_>>();
     // Effects only grow, so the least fixpoint is reached by revisiting the
@@ -815,6 +955,7 @@ fn subroutine_effects(
 /// (see `celox_runtime`).
 fn concurrent_actions(
     subroutines: &[&Subroutine],
+    facts: &[std::sync::Arc<BodyFacts>],
     definitions: &HashMap<&str, &Subroutine>,
     comb: &[CombProcess],
     ff: &[FfProcess],
@@ -852,7 +993,7 @@ fn concurrent_actions(
     if actions.is_empty() {
         return Ok(());
     }
-    let known = subroutine_effects(subroutines, definitions, FunctionForks::Detached);
+    let known = subroutine_effects(subroutines, facts, definitions, FunctionForks::Detached);
     for action in actions {
         let effects = body_effects(action, &known, definitions);
         let (_, _, calls, _) = super::final_procedures::effects(action.iter(), definitions);
@@ -1155,26 +1296,6 @@ fn target_names(expr: &Expr) -> Vec<&str> {
         Expr::Concat(parts) => parts.iter().flat_map(target_names).collect(),
         _ => Vec::new(),
     }
-}
-
-/// Whether `body` reads the `triggered` state of an event, directly or
-/// through a call of one of `readers`.
-fn reads_triggered(body: &[Stmt], readers: &HashSet<String>) -> bool {
-    let mut result = false;
-    for statement in body {
-        statement.walk(&mut |statement| {
-            if let Stmt::Call { name, .. } = statement {
-                result |= readers.contains(name);
-            }
-            for expr in lifetimes::stmt_exprs(statement) {
-                result |= events::reads_triggered(expr);
-                const_functions::visit_expr_calls(expr, &mut |callee, _| {
-                    result |= matches!(callee, Callee::Subroutine(name) if readers.contains(name));
-                });
-            }
-        });
-    }
-    result
 }
 
 fn assigns_nonblocking(body: &[Stmt]) -> bool {
