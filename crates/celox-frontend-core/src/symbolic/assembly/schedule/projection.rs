@@ -27,6 +27,7 @@ pub(super) fn project_design(
     mod_vars: HashMap<ModuleId, HashMap<SourceVarId, VariableInfo>>,
     mod_path_idx: HashMap<ModuleId, HashMap<Vec<String>, Option<SourceVarId>>>,
     four_state: bool,
+    compile_workers: usize,
 ) -> Result<ScheduledRtlOutput, ParserError> {
     let Design {
         modules,
@@ -102,7 +103,22 @@ pub(super) fn project_design(
         None => project_regioned_state(source),
     };
 
+    // The function units, which a design of classes has by the thousand,
+    // are projected on their own, on up to `compile_workers` threads, the
+    // largest first; they keep their order.
+    let functions = std::mem::take(&mut source_sir.functions);
     let mut sir = source_sir.into_map_addr(project, project_regioned);
+    let mut order = (0..functions.len()).collect::<Vec<_>>();
+    order.sort_by_key(|&index| std::cmp::Reverse(functions[index].unit.blocks.len()));
+    let functions = crate::tasks::run_owned::<_, _, std::convert::Infallible>(
+        functions,
+        &order,
+        compile_workers,
+        |_, function| Ok(function.into_map_addr(project_regioned)),
+    )
+    .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    let Ok(functions) = functions;
+    sir.functions = functions;
     if !four_state {
         celox_sir::two_state::canonicalize_program(&mut sir);
     }

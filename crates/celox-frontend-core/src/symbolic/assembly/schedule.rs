@@ -505,5 +505,6 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         mod_vars,
         mod_path_idx,
         four_state,
+        parallel.compile_workers,
     )
 }
