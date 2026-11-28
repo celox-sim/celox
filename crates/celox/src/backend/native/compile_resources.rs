@@ -15,99 +15,15 @@ pub(super) fn compile_tasks<T: Send, E: Send>(
 }
 
 /// [`compile_tasks`], with state of each worker: `state` makes it in the
-/// worker, once, and the worker passes it to each task it compiles.
+/// worker, once, and the worker passes it to each task it compiles (see
+/// [`celox_frontend_core::tasks::run_ordered_with`]).
 pub(super) fn compile_tasks_with<S, T: Send, E: Send>(
     order: &[usize],
     workers: usize,
     state: impl Fn() -> S + Sync,
     compile: impl Fn(&mut S, usize) -> Result<T, E> + Sync,
 ) -> std::thread::Result<Result<Vec<T>, E>> {
-    use std::sync::atomic::Ordering;
-    use std::sync::atomic::{AtomicBool, AtomicUsize};
-    let mut results = Vec::with_capacity(order.len());
-    let mut failure = None;
-    if workers <= 1 || order.len() <= 1 {
-        let mut state = state();
-        for &index in order {
-            match compile(&mut state, index) {
-                Ok(result) => results.push((index, result)),
-                Err(error) => {
-                    failure = Some((index, error));
-                    break;
-                }
-            }
-        }
-    } else {
-        #[expect(
-            clippy::disallowed_types,
-            reason = "cross-thread: scoped compile worker threads claim the next task index from this shared counter"
-        )]
-        let next = AtomicUsize::new(0);
-        #[expect(
-            clippy::disallowed_types,
-            reason = "cross-thread: the first failing scoped compile worker sets it and the other workers stop taking tasks"
-        )]
-        let stopped = AtomicBool::new(false);
-        std::thread::scope(|scope| {
-            let handles = (0..workers.min(order.len()))
-                .map(|_| {
-                    let next = &next;
-                    let stopped = &stopped;
-                    let state = &state;
-                    let compile = &compile;
-                    scope.spawn(move || {
-                        let mut state = state();
-                        let mut results = Vec::new();
-                        let mut failure = None;
-                        while !stopped.load(Ordering::Relaxed) {
-                            let position = next.fetch_add(1, Ordering::Relaxed);
-                            let Some(&index) = order.get(position) else {
-                                break;
-                            };
-                            match compile(&mut state, index) {
-                                Ok(result) => results.push((index, result)),
-                                Err(error) => {
-                                    stopped.store(true, Ordering::Relaxed);
-                                    failure = Some((index, error));
-                                    break;
-                                }
-                            }
-                        }
-                        (results, failure)
-                    })
-                })
-                .collect::<Vec<_>>();
-            let mut panic = None;
-            for handle in handles {
-                match handle.join() {
-                    Ok((completed, failed)) => {
-                        results.extend(completed);
-                        // Of the tasks that failed before the others
-                        // stopped, the first by index.
-                        if let Some(failed) = failed
-                            && failure.as_ref().is_none_or(|(index, _)| failed.0 < *index)
-                        {
-                            failure = Some(failed);
-                        }
-                    }
-                    Err(error) => {
-                        if panic.is_none() {
-                            panic = Some(error);
-                        }
-                    }
-                }
-            }
-            match panic {
-                Some(error) => Err(error),
-                None => Ok(()),
-            }
-        })?;
-    }
-    if let Some((_, error)) = failure {
-        return Ok(Err(error));
-    }
-    results.sort_unstable_by_key(|(index, _)| *index);
-    Ok(Ok(results.into_iter().map(|(_, result)| result).collect()))
+    celox_frontend_core::tasks::run_ordered_with(order, workers, state, compile)
 }
 
 /// What compiling a unit of `blocks` blocks and `instructions` instructions
