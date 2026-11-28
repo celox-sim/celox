@@ -642,6 +642,8 @@ fn prepare_external_hierarchy_collecting(
             time_format,
             &expansion,
         ),
+        // A mixed-language hierarchy is lowered on the calling thread.
+        1,
         module_ids.len(),
         four_state,
         false,

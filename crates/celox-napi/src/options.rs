@@ -109,6 +109,9 @@ pub struct NapiOptions {
     pub dead_store_policy: Option<String>,
     /// Simulation threads, including the calling thread. Default: 1.
     pub threads: Option<u32>,
+    /// Compile threads (see `SimulatorBuilder::compile_threads`). Default:
+    /// the available parallelism of the host.
+    pub compile_threads: Option<u32>,
     /// Tiered handles compile hot execution groups incrementally (hotspot
     /// JIT). Default: true; `false` selects whole-image tiered compilation.
     pub hotspot_jit: Option<bool>,
@@ -457,6 +460,16 @@ pub(super) fn parse_options(options: &Option<NapiOptions>) -> Result<ParsedOptio
                 common
                     .optimize_options
                     .set_parallel_lanes(threads.min(celox::MAX_SIMULATION_THREADS));
+            }
+            if let Some(threads) = o.compile_threads {
+                if threads == 0 {
+                    return Err(Error::from_reason(
+                        "Invalid compileThreads 0. Expected at least 1.".to_string(),
+                    ));
+                }
+                common
+                    .optimize_options
+                    .set_compile_threads(threads as usize);
             }
             let dead_store_policy = o
                 .dead_store_policy
