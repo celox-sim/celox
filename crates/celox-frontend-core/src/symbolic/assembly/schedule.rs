@@ -186,8 +186,10 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         &actions,
         measure_graphs,
     )?;
+    let declared_domains = declared_event_domains(&design);
     let (counted, declaration_probes, occurrence_probes) = instrument_occurrences(
         &design,
+        &declared_domains,
         &mut logic,
         &mut units,
         &mut parallel_ff_units,
@@ -233,6 +235,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         analyze_clock_dependencies(
             &design.bindings,
             &mut units.updates,
+            &declared_domains,
             &logic.comb_blocks,
             &logic.global_arena,
             &design.clock_domains,

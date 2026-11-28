@@ -113,12 +113,7 @@ impl Generator<'_> {
         let mut counters: Vec<(CounterKind, AbsoluteAddr, Option<AbsoluteAddr>)> = schema
             .watches
             .iter()
-            .filter(|watch| {
-                storage(watch.signal) == target
-                    && watch.changes.is_some()
-                    && watch.rises.is_some()
-                    && watch.falls.is_some()
-            })
+            .filter(|watch| storage(watch.signal) == target)
             .flat_map(|watch| {
                 watch
                     .counters()

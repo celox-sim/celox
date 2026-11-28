@@ -5,7 +5,7 @@ use fxhash::FxHashMap as HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CounterKind, CounterSlots, DomainKind, ElaboratedDesign, EventTopology, NbaSite, ProcessSlots,
+    CounterKind, DomainKind, ElaboratedDesign, EventTopology, NbaSite, ProcessSlots,
     RuntimeEventKind, RuntimeSchema,
 };
 
@@ -55,11 +55,7 @@ pub struct ScheduleModel<A> {
 }
 
 /// A counted signal and the canonical domains its counters trigger.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CountedModel<A> {
-    pub slots: CounterSlots<A>,
-    pub domains: Vec<(A, CounterKind)>,
-}
+pub type CountedModel<A> = crate::EventWatch<A>;
 
 /// One process kernel: its control slots, its wait sites by local index
 /// and its nonblocking sites by local index.
@@ -140,21 +136,7 @@ pub struct TermModel<A> {
 
 impl<A: Copy + Eq + std::hash::Hash> ScheduleModel<A> {
     pub fn derive(design: &ElaboratedDesign<A>, schema: &RuntimeSchema<A>) -> Self {
-        let counted: Vec<CountedModel<A>> = schema
-            .watches
-            .iter()
-            .filter_map(|watch| {
-                Some(CountedModel {
-                    slots: CounterSlots {
-                        signal: watch.signal,
-                        changes: watch.changes?,
-                        rises: watch.rises?,
-                        falls: watch.falls?,
-                    },
-                    domains: watch.domains.clone(),
-                })
-            })
-            .collect();
+        let counted = schema.watches.clone();
         // Signals design code writes; the rest only the host and the
         // scheduler write.
         let driven: fxhash::FxHashSet<A> = schema.rtl_writes.iter().map(|atom| atom.id).collect();

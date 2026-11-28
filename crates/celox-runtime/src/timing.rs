@@ -78,13 +78,13 @@ fn edge(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CountedRefs {
     pub signal: SignalRef,
-    pub changes: SignalRef,
-    pub rises: SignalRef,
-    pub falls: SignalRef,
+    pub changes: Option<SignalRef>,
+    pub rises: Option<SignalRef>,
+    pub falls: Option<SignalRef>,
 }
 
 impl CountedRefs {
-    pub fn counter(&self, kind: CounterKind) -> SignalRef {
+    pub fn counter(&self, kind: CounterKind) -> Option<SignalRef> {
         match kind {
             CounterKind::Changes => self.changes,
             CounterKind::Rises => self.rises,
@@ -92,11 +92,16 @@ impl CountedRefs {
         }
     }
 
+    pub(crate) fn snapshot<B: SimBackend>(&self, backend: &B) -> [u32; 3] {
+        CounterKind::ALL.map(|kind| self.counter(kind).map_or(0, |addr| backend.get_as(addr)))
+    }
+
     /// Count the occurrences of a change from `old` to `new`.
     pub fn bump<B: SimBackend>(&self, backend: &mut B, old: &Value, new: &Value) {
         for kind in CounterKind::ALL {
-            if occurs(kind, old, new) {
-                let counter = self.counter(kind);
+            if let Some(counter) = self.counter(kind)
+                && occurs(kind, old, new)
+            {
                 let value: u32 = backend.get_as(counter);
                 backend.set(counter, value.wrapping_add(1));
             }

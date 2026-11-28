@@ -874,7 +874,9 @@ module Top(output wire [3:0] triple, output wire [3:0] quintuple);
     int changes, rises, falls, triple_seen, quintuple_seen;
     initial forever begin @(triple); triple_seen++; end
     initial forever begin @(quintuple); quintuple_seen++; end
-    initial #1 other = 1;
+    int other_rises;
+    initial forever begin @(posedge other); other_rises++; end
+    initial begin #1; other = 1; other = 0; end
     initial begin #1; data = 2; #1; data = 3; data = 2; #1; $finish; end
     initial forever begin @(data); changes++; end
     initial forever begin @(posedge data); rises++; end
@@ -889,6 +891,14 @@ endmodule"#;
     .unwrap();
     let schema = &sim.program().runtime_schema;
     let parts = schema.settle_partitions.as_ref().unwrap();
+    // All three waits read data. Only the positive edge of other is observed.
+    let other_watch = schema
+        .watches
+        .iter()
+        .find(|watch| sim.program().get_path(&watch.signal).ends_with("other"))
+        .unwrap();
+    assert!(other_watch.rises.is_some());
+    assert!(other_watch.changes.is_none() && other_watch.falls.is_none());
     let mut checked_kinds = std::collections::BTreeSet::new();
     for site in &schema.wait_sites {
         let [(signal, kind)] = site.terms.as_slice() else {
@@ -914,7 +924,12 @@ endmodule"#;
 
     sim.run_until(4).unwrap();
     assert!(sim.is_finished());
-    for (signal, expected) in [("changes", 2u8), ("rises", 1), ("falls", 1)] {
+    for (signal, expected) in [
+        ("changes", 2u8),
+        ("rises", 1),
+        ("falls", 1),
+        ("other_rises", 1),
+    ] {
         assert_eq!(sim.get(sim.signal(signal)), expected.into(), "{signal}");
     }
 }
