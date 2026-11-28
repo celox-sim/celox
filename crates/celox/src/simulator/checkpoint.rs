@@ -262,6 +262,15 @@ impl<B: SimBackend> Simulator<B> {
     /// fingerprints can exchange checkpoints.
     pub fn state_fingerprint(&self) -> u64 {
         self.checkpoint_fingerprint
+            .unwrap_or_else(|| crate::ir::state_fingerprint(self.backend.layout(), &self.program))
+    }
+
+    /// [`Self::state_fingerprint`], kept for the next calls: a differential
+    /// simulation mirrors its shadow at every step.
+    pub(crate) fn prepare_fingerprint(&mut self) -> u64 {
+        let fingerprint = self.state_fingerprint();
+        self.checkpoint_fingerprint = Some(fingerprint);
+        fingerprint
     }
 }
 

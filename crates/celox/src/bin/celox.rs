@@ -361,6 +361,8 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
     } else {
         arguments.max_steps
     };
+    // `CELOX_PHASE_TIMING` (see `celox::diagnostics`).
+    let phase_timing = std::env::var_os("CELOX_PHASE_TIMING").is_some_and(|value| value != "0");
     macro_rules! execute {
         ($build:ident $(, $report_hotspots:ident)?) => {{
             let compile_start = std::time::Instant::now();
@@ -406,6 +408,9 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
                     arguments.execution.report,
                 );
                 let elapsed = start.elapsed();
+                if phase_timing {
+                    tracing::debug!("[phase-timing] simulation: {elapsed:?}");
+                }
                 execute_counts = counters.and_then(counters::ExecuteCounters::stop);
                 (result, elapsed)
             };
@@ -456,6 +461,11 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
                 Some(&simulation.scheduler_stats()),
             )
             .map_err(|error| format!("cannot write the activation profile: {error}"))?;
+            let start = std::time::Instant::now();
+            drop(simulation);
+            if phase_timing {
+                tracing::debug!("[phase-timing] teardown: {:?}", start.elapsed());
+            }
             result
         }};
     }

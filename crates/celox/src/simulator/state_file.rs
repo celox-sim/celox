@@ -367,7 +367,19 @@ impl StateSchema {
 impl<B: SimBackend> Simulator<B> {
     /// The state objects of this design as state files name them.
     pub fn state_schema(&self) -> Arc<StateSchema> {
-        self.state_schema.clone()
+        self.state_schema
+            .clone()
+            .unwrap_or_else(|| Arc::new(Self::build_state_schema(&self.backend, &self.program)))
+    }
+
+    /// Build the state tables that saving and loading state read several
+    /// times, once: the schema and the fingerprint (see
+    /// [`Self::state_schema`], [`Self::state_fingerprint`]).
+    pub(crate) fn prepare_state_tables(&mut self) {
+        if self.state_schema.is_none() {
+            self.state_schema = Some(self.state_schema());
+        }
+        self.prepare_fingerprint();
     }
 
     /// Save the value of every state object, by path.
@@ -377,6 +389,7 @@ impl<B: SimBackend> Simulator<B> {
     /// does not include a host filesystem snapshot. File/VCD designs can be
     /// saved for inspection, but loading them is rejected.
     pub fn save_state(&mut self) -> Result<StateFile, StateError> {
+        self.prepare_state_tables();
         self.prepare_save_state()?;
         self.state_schema().capture(&self.backend)
     }
@@ -422,6 +435,7 @@ impl<B: SimBackend> Simulator<B> {
         file: &StateFile,
         time: u64,
     ) -> Result<(), StateError> {
+        self.prepare_state_tables();
         if !self.components.is_empty() {
             return Err(CheckpointError::ExternalComponents.into());
         }
