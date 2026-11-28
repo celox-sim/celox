@@ -32,6 +32,10 @@ pub(crate) struct Session {
     /// scope analysis ends after one pass, keeping what it would hand over
     /// to the specializations (see [`classes::foreign::keep_finish`]).
     pub(super) foreign_batch: bool,
+    /// The facts of the bodies of the imported subroutines that classifying
+    /// processes reads (see `procedural::timed_tasks::classify`), kept
+    /// across the scopes, which import the same ones.
+    pub(super) body_facts: procedural::timed_tasks::BodyFactsCache,
     pub(super) dimensions: dimensions::State,
     pub(super) inline_randomizations: Vec<classes::constraints::Inline>,
     pub(super) next_call_site: usize,
@@ -189,6 +193,7 @@ impl Session {
                 .or_else(|| packages.virtual_interfaces.clone()),
             virtual_interface_calls: design.virtual_interface_calls.clone(),
             types: std::mem::take(&mut design.types),
+            body_facts: std::mem::take(&mut design.body_facts),
             controls_assertions: packages.controls_assertions(),
             ..Self::default()
         }
@@ -226,6 +231,7 @@ impl Session {
         design.call_sites = self.next_call_site;
         design.foreign = self.foreign;
         design.types = self.types;
+        design.body_facts = self.body_facts;
         design.virtual_interfaces = self.virtual_interfaces;
         design.virtual_interface_calls = self.virtual_interface_calls;
     }

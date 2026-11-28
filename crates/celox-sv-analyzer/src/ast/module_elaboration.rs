@@ -309,7 +309,7 @@ impl Module {
             scope.hoist_call_actuals();
             // What checks the calls and the bodies of the subroutines of
             // covergroups reports in the terms of the covergroups.
-            scope.validate_bodies().map_err(|error| {
+            scope.validate_bodies(session).map_err(|error| {
                 crate::ast::covergroups::in_covergroup_terms(error, &session.covergroup_names)
             })?;
             scope.reject_package_samplers()?;

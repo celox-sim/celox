@@ -100,6 +100,9 @@ pub struct Design {
     /// Source-call identities shared with modules importing these package bodies.
     pub(super) call_sites: usize,
     pub(super) types: semantic_types::TyTable,
+    /// What the analyses keep of the bodies of imported subroutines (see
+    /// `Session::body_facts`).
+    pub(super) body_facts: procedural::timed_tasks::BodyFactsCache,
     /// The declarations of the interfaces virtual interface types name,
     /// with the specializations of parameterized ones the analyses have
     /// named so far (25.9).
@@ -858,6 +861,7 @@ impl Packages {
             call_sites: session.next_call_site,
             foreign: std::mem::take(&mut session.foreign),
             types: std::mem::take(&mut session.types),
+            body_facts: std::mem::take(&mut session.body_facts),
             virtual_interfaces: session.virtual_interfaces.clone(),
             virtual_interface_calls: session.virtual_interface_calls.clone(),
         };
