@@ -91,6 +91,13 @@ fn compiled_scheduler_coverage() {
     );
 }
 
+/// The suite cases without classes whose subroutines recurse at run time,
+/// which a function unit runs: an inlined body cannot call itself.
+const RECURSIVE_CASES: &[&str] = &[
+    "clocking::synchronous_drives_of_recursive_functions",
+    "timing::delayed_nonblocking_assignments_of_recursive_functions",
+];
+
 /// Without the test switch `force_out_of_line_calls`, every subroutine
 /// stays inlined in a design without classes: no suite case that declares
 /// one and no class lowers to a function unit, so such designs keep the
@@ -101,7 +108,8 @@ fn compiled_scheduler_coverage() {
 /// type that is constructed holds the descriptor of the type and is a
 /// function unit whatever is forced
 /// (`coverage_calls_keep_the_plan_of_the_design` in the simulator builder
-/// pins that).
+/// pins that). So are the cases of [`RECURSIVE_CASES`], whose recursion runs
+/// out of line.
 #[test]
 fn subroutines_stay_inlined_without_the_switch() {
     let (checked, out_of_line) = std::thread::scope(|scope| {
@@ -112,6 +120,9 @@ fn subroutines_stay_inlined_without_the_switch() {
                 let mut out_of_line = Vec::new();
                 for case in celox_test_suite::sv::cases() {
                     let design = case.design();
+                    if RECURSIVE_CASES.contains(&case.name) {
+                        continue;
+                    }
                     if !design.sources.iter().any(|source| {
                         source.text.contains("function") || source.text.contains("task")
                     }) || design.sources.iter().any(|source| {

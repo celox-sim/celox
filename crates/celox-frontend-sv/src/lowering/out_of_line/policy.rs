@@ -686,8 +686,16 @@ impl ProcModule<'_> {
                             state.yields = true;
                             state.waits = true;
                         }
+                        // So does a nonblocking assignment with an
+                        // intra-assignment delay, a synchronous drive of
+                        // a clocking block's output among them: the unit
+                        // stages it in a function site of that delay and
+                        // region (see `Ff::unit_nonblocking`).
+                        sv::ir::Stmt::DelayedNonblocking { .. } => {
+                            state.suspends = true;
+                            state.nbas = true;
+                        }
                         sv::ir::Stmt::WaitImplicit { .. }
-                        | sv::ir::Stmt::DelayedNonblocking { .. }
                         | sv::ir::Stmt::DeferActive
                         | sv::ir::Stmt::AssertionRegion { .. } => note(Reason::MaySuspend),
                         // A nonblocking assignment hands the runtime its
