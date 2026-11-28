@@ -7682,3 +7682,30 @@ module Top(output int v, output int w);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq v 3) (assert_eq w 2))
+
+; IEEE 1800-2023 6.8, 8.25: each specialization of a parameterized class has
+; its own static members, whose initializers run before any initial or
+; always procedure starts, not when the specialization is first used.
+(case specialization_static_members_initialize_before_procedures
+ (source "specialization_statics.sv" #"
+package p;
+ int made;
+ function automatic int note();
+  made++;
+  return made;
+ endfunction
+ class Box #(type T = int);
+  static int id = note();
+  static function int get();
+   return id;
+  endfunction
+ endclass
+endpackage
+module Top(output int early, output int id);
+ initial begin
+  early = p::made;
+  id = p::Box#(byte)::get();
+ end
+endmodule
+"#)
+ (top Top) (run_until 0) (assert_eq early 1) (assert_eq id 1))
