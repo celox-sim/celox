@@ -15,7 +15,7 @@ pub(super) fn project_design(
     initial_memory_values: Vec<InitialStateValue<AbsoluteAddr>>,
     runtime_comb_observers: Vec<RuntimeCombObserver<AbsoluteAddr>>,
     direct_writes_by_event: HashMap<AbsoluteAddr, Vec<VarAtomBase<RegionedAbsoluteAddr>>>,
-    counted: BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>>,
+    counted: BTreeMap<AbsoluteAddr, EventWatch<AbsoluteAddr>>,
     active_commits: Vec<AbsoluteAddr>,
     settle_flags: Option<scheduler::SettlePartitioning<AbsoluteAddr>>,
     settle_partitions: Vec<scheduler::SettlePartition<AbsoluteAddr>>,
@@ -530,7 +530,7 @@ fn rtl_writes(
 /// The watch of every counted signal: its counters and the domain its
 /// occurrences trigger.
 fn event_watches(
-    counted: &BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>>,
+    counted: &BTreeMap<AbsoluteAddr, EventWatch<AbsoluteAddr>>,
     time_precision: celox_design::TimePrecision,
     state_objects: &HashMap<StateAddr, VariableMetadata>,
     events: &EventTopology<StateAddr>,
@@ -550,7 +550,6 @@ fn event_watches(
         .values()
         .map(|slots| {
             let signal = project(slots.signal);
-            let object = &state_objects[&signal];
             let canonical = events.canonical(signal);
             let domains = event_kinds
                 .get(&canonical)
@@ -558,14 +557,12 @@ fn event_watches(
                 .map(|&kind| (canonical, CounterKind::for_domain(kind)))
                 .into_iter()
                 .collect();
+            let object = &state_objects[&signal];
             EventWatch {
-                signal,
                 width: object.width,
                 four_state: object.is_4state,
-                changes: Some(project(slots.changes)),
-                rises: Some(project(slots.rises)),
-                falls: Some(project(slots.falls)),
                 domains,
+                ..slots.map(project)
             }
         })
         .collect()

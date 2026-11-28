@@ -254,10 +254,10 @@ impl PlanBuilder<'_> {
                                         .get(&term.signal)
                                         .copied()
                                         .unwrap_or(true),
-                                model
-                                    .counted
-                                    .iter()
-                                    .any(|counted| counted.slots.signal == term.signal),
+                                model.counted.iter().any(|counted| {
+                                    counted.signal == term.signal
+                                        && counted.counter(term.kind).is_some()
+                                }),
                                 term.gate.is_some_and(|gate| gate.counters.is_some()),
                             ))
                         })
@@ -286,8 +286,8 @@ impl PlanBuilder<'_> {
                                         model
                                             .counted
                                             .iter()
-                                            .find(|counted| counted.slots.signal == term.signal)
-                                            .map(|counted| counted.slots.counter(term.kind))
+                                            .find(|counted| counted.signal == term.signal)
+                                            .and_then(|counted| counted.counter(term.kind))
                                     })
                             })
                             .collect(),
@@ -461,8 +461,8 @@ impl PlanBuilder<'_> {
                                         model
                                             .counted
                                             .iter()
-                                            .find(|counted| counted.slots.signal == signal)
-                                            .map(|counted| counted.slots.counter(kind))
+                                            .find(|counted| counted.signal == signal)
+                                            .and_then(|counted| counted.counter(kind))
                                     })
                             })
                             .collect(),

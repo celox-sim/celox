@@ -156,17 +156,41 @@ pub(super) fn for_each_ff_evaluation(
 pub(super) fn counted_signals(
     timing: &TimingMetadata,
     event_addresses: &HashSet<AbsoluteAddr>,
-) -> BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>> {
-    let waited: HashSet<AbsoluteAddr> = timing
-        .wait_sites
-        .iter()
-        .flat_map(|site| site.terms.iter().map(|(signal, _)| *signal))
-        .collect();
+    variables: &HashMap<AbsoluteAddr, (usize, bool)>,
+    declared_domain: impl Fn(AbsoluteAddr) -> bool,
+) -> BTreeMap<AbsoluteAddr, EventWatch<AbsoluteAddr>> {
+    let mut waits: HashMap<_, BTreeSet<CounterKind>> = HashMap::default();
+    for &(signal, kind) in timing.wait_sites.iter().flat_map(|site| &site.terms) {
+        waits.entry(signal).or_default().insert(kind);
+    }
     timing
         .counter_slots
         .iter()
-        .filter(|slots| event_addresses.contains(&slots.signal) || waited.contains(&slots.signal))
-        .map(|slots| (slots.signal, *slots))
+        .filter_map(|slots| {
+            let signal = slots.signal;
+            // Domain polarity is resolved after projecting clocks and aliases.
+            // For wait-only signals every counter reader is already known.
+            let kinds = waits.get(&signal);
+            let drives_update = event_addresses.contains(&signal);
+            if kinds.is_none() && !drives_update {
+                return None;
+            }
+            let domain = drives_update || declared_domain(signal);
+            let needed = |kind| domain || kinds.is_some_and(|kinds| kinds.contains(&kind));
+            let (width, four_state) = variables[&signal];
+            Some((
+                signal,
+                EventWatch {
+                    signal,
+                    width,
+                    four_state,
+                    changes: needed(CounterKind::Changes).then_some(slots.changes),
+                    rises: needed(CounterKind::Rises).then_some(slots.rises),
+                    falls: needed(CounterKind::Falls).then_some(slots.falls),
+                    domains: Vec::new(),
+                },
+            ))
+        })
         .collect()
 }
 
@@ -178,7 +202,7 @@ pub(super) fn choose_comb_alternatives(
     bindings: &PackageBindings,
     instance_modules: &HashMap<InstanceId, ModuleId>,
     modules: &HashMap<ModuleId, SimModule>,
-    counted: &BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>>,
+    counted: &BTreeMap<AbsoluteAddr, EventWatch<AbsoluteAddr>>,
     gated: &HashSet<AbsoluteAddr>,
     comb_blocks: &mut Vec<LogicPath<AbsoluteAddr>>,
 ) {
@@ -276,7 +300,7 @@ pub(super) fn gated_terms(
 /// `address`, or `None` if nothing counts them.
 pub(super) fn watch_code<A>(
     signal: AbsoluteAddr,
-    counted: &BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>>,
+    counted: &BTreeMap<AbsoluteAddr, EventWatch<AbsoluteAddr>>,
     gated: &HashMap<AbsoluteAddr, Vec<GatedTerm>>,
     variables: &HashMap<AbsoluteAddr, (usize, bool)>,
     four_state: bool,
@@ -295,11 +319,8 @@ pub(super) fn watch_code<A>(
         four_state: four_state && is_4state,
         counters: slots
             .into_iter()
-            .flat_map(|slots| {
-                CounterKind::ALL
-                    .into_iter()
-                    .map(|kind| (kind, address(slots.counter(kind))))
-            })
+            .flat_map(|watch| watch.counters())
+            .map(|(kind, counter)| (kind, address(counter)))
             .collect(),
         gated: terms
             .into_iter()
@@ -321,7 +342,7 @@ pub(super) fn watch_code<A>(
 /// signal of a `gated` term, and return `counted`; no other unit changes.
 pub(super) fn instrument_counted_signals<'u>(
     timing: &TimingMetadata,
-    counted: BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>>,
+    counted: BTreeMap<AbsoluteAddr, EventWatch<AbsoluteAddr>>,
     gated: &HashMap<AbsoluteAddr, Vec<GatedTerm>>,
     variables: &HashMap<AbsoluteAddr, (usize, bool)>,
     four_state: bool,
@@ -329,7 +350,7 @@ pub(super) fn instrument_counted_signals<'u>(
     functions: &mut [celox_sir::FunctionUnit<RegionedAbsoluteAddr>],
     comb_blocks: &mut [LogicPath<AbsoluteAddr>],
     ff_units: impl Iterator<Item = &'u mut ExecutionUnit<RegionedAbsoluteAddr>>,
-) -> BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>> {
+) -> BTreeMap<AbsoluteAddr, EventWatch<AbsoluteAddr>> {
     if counted.is_empty() && gated.is_empty() {
         return counted;
     }
@@ -362,25 +383,11 @@ pub(super) fn instrument_counted_signals<'u>(
     if counted.is_empty() {
         return counted;
     }
-    let code = |signal: AbsoluteAddr| {
-        let slots = counted.get(&signal)?;
-        let (width, is_4state) = variables[&signal];
-        Some((slots, width, four_state && is_4state))
-    };
     let working = |var: AbsoluteAddr| RegionedAbsoluteAddr::from_absolute_addr(WORKING_REGION, var);
-    let watch = |signal: AbsoluteAddr| {
-        let (slots, width, four_state) = code(signal)?;
-        Some(crate::watch::WatchCode {
-            signal: stable(slots.signal),
-            offset: celox_sir::SIROffset::Static(0),
-            width,
-            four_state,
-            counters: CounterKind::ALL
-                .into_iter()
-                .map(|kind| (kind, stable(slots.counter(kind))))
-                .collect(),
-            gated: Vec::new(),
-        })
+    let watch = |signal| {
+        counted
+            .get(&signal)
+            .map(|watch| crate::watch::WatchCode::new(watch, four_state, stable))
     };
     // A flip-flop writes its next state, and a commit publishes it. Repeated
     // writes are held back until the commit; a single write is counted at
@@ -389,8 +396,18 @@ pub(super) fn instrument_counted_signals<'u>(
         .pending_slots
         .iter()
         .filter_map(|slots| {
+            let watch = watch(slots.signal)?;
+            let edges = watch
+                .counters
+                .iter()
+                .filter_map(|(kind, _)| match kind {
+                    CounterKind::Rises => Some((*kind, stable(slots.rises))),
+                    CounterKind::Falls => Some((*kind, stable(slots.falls))),
+                    CounterKind::Changes => None,
+                })
+                .collect();
             Some(crate::watch::PendingCode {
-                watch: watch(slots.signal)?,
+                watch,
                 write: working(slots.write.write_addr(slots.signal)),
                 staged: slots.write.is_staged_nba(),
                 value: stable(slots.value),
@@ -398,10 +415,7 @@ pub(super) fn instrument_counted_signals<'u>(
                 first: stable(slots.first),
                 changed: stable(slots.changed),
                 written: stable(slots.written),
-                edges: vec![
-                    (CounterKind::Rises, stable(slots.rises)),
-                    (CounterKind::Falls, stable(slots.falls)),
-                ],
+                edges,
             })
         })
         .collect();

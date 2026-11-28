@@ -8,6 +8,7 @@ use super::*;
 /// the declaration startup and once for the runtime.
 pub(super) fn instrument_occurrences(
     design: &Design,
+    declared_domains: &BTreeSet<AbsoluteAddr>,
     logic: &mut StateGraph,
     units: &mut Units,
     parallel_ff_units: &mut FfParts,
@@ -15,7 +16,7 @@ pub(super) fn instrument_occurrences(
     variables: &HashMap<AbsoluteAddr, (usize, bool)>,
     four_state: bool,
 ) -> (
-    BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>>,
+    BTreeMap<AbsoluteAddr, EventWatch<AbsoluteAddr>>,
     Vec<(VarAtomBase<AbsoluteAddr>, AbsoluteAddr)>,
     Vec<(VarAtomBase<AbsoluteAddr>, AbsoluteAddr)>,
 ) {
@@ -58,7 +59,9 @@ pub(super) fn instrument_occurrences(
                     .map(|(alias, _)| *alias),
             )
             .collect();
-        let counted = counted_signals(timing, &event_addresses);
+        let counted = counted_signals(timing, &event_addresses, variables, |signal| {
+            declared_domains.contains(clock_domains.get(&signal).unwrap_or(&signal))
+        });
         // A combinational process writing the signal or the gate of a gated
         // wait keeps its procedural order (IEEE 1800-2023 9.4.2.3).
         let gated: HashSet<AbsoluteAddr> = timing
@@ -313,7 +316,6 @@ pub(super) fn instrument_occurrences(
             &counted,
             timing,
             &ff_multi_stored,
-            variables,
             four_state,
             updates,
             parallel_ff_units,
@@ -328,10 +330,9 @@ pub(super) fn instrument_occurrences(
 #[allow(clippy::too_many_arguments)]
 fn count_repeated_evaluation_stores(
     bindings: &PackageBindings,
-    counted: &BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>>,
+    counted: &BTreeMap<AbsoluteAddr, EventWatch<AbsoluteAddr>>,
     timing: &TimingMetadata,
     ff_multi_stored: &HashSet<AbsoluteAddr>,
-    variables: &HashMap<AbsoluteAddr, (usize, bool)>,
     four_state: bool,
     updates: &mut ScheduledUpdates,
     parallel_ff_units: &mut FfParts,
@@ -363,18 +364,10 @@ fn count_repeated_evaluation_stores(
         })
         .enumerate()
         .map(|(pass, (store_addr, slots))| {
-            let (width, is_4state) = variables[&slots.signal];
-            let code = crate::watch::WatchCode {
-                signal: regioned(WORKING_REGION, store_addr),
-                offset: celox_sir::SIROffset::Static(0),
-                width,
-                four_state: four_state && is_4state,
-                counters: CounterKind::ALL
-                    .into_iter()
-                    .map(|kind| (kind, regioned(STABLE_REGION, slots.counter(kind))))
-                    .collect(),
-                gated: Vec::new(),
-            };
+            let mut code = crate::watch::WatchCode::new(slots, four_state, |addr| {
+                regioned(STABLE_REGION, addr)
+            });
+            code.signal = regioned(WORKING_REGION, store_addr);
             (store_addr, (pass, code))
         })
         .collect();

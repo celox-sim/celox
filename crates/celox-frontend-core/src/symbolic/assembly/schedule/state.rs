@@ -7,7 +7,7 @@ use super::*;
 /// of the design.
 pub(super) fn size_scheduler_slots(
     design: &mut Design,
-    counted: &BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>>,
+    counted: &BTreeMap<AbsoluteAddr, EventWatch<AbsoluteAddr>>,
     timing: &TimingMetadata,
     four_state: bool,
 ) {
@@ -35,7 +35,7 @@ pub(super) fn size_scheduler_slots(
                 .terms
                 .iter()
                 .enumerate()
-                .map(|(index, (signal, _))| {
+                .map(|(index, (signal, kind))| {
                     let metadata = &modules[&instance_modules[&signal.instance_id]].variables
                         [&signal.var_id]
                         .metadata;
@@ -46,7 +46,10 @@ pub(super) fn size_scheduler_slots(
                     (
                         metadata.width,
                         four_state && metadata.is_4state,
-                        counted.contains_key(signal),
+                        counted
+                            .get(signal)
+                            .and_then(|watch| watch.counter(*kind))
+                            .is_some(),
                         site.gate(index).is_some_and(|gate| gate.counters.is_some()),
                     )
                 })

@@ -359,3 +359,39 @@ pub(super) fn reset_clocks(design: &Design) -> HashMap<AbsoluteAddr, AbsoluteAdd
     }
     reset_clock_map
 }
+
+/// Canonical domains declared by event-typed signals, including clocks without a flip-flop.
+pub(super) fn declared_event_domains(design: &Design) -> BTreeSet<AbsoluteAddr> {
+    let Design {
+        bindings,
+        clock_domains,
+        expanded,
+        instance_modules,
+        modules,
+        ..
+    } = design;
+    let mut domains = BTreeSet::new();
+    // Include event-typed signals even when no FF is directly driven by them.
+    // A testbench clock may only feed a combinationally gated clock, in which
+    // case it would otherwise be absent from the dependency graph entirely.
+    for id in expanded.values() {
+        let module_id = &instance_modules[id];
+        let sim_module = &modules[module_id];
+        for (var_id, var) in &sim_module.variables {
+            let kind = var.metadata.kind;
+            if !matches!(
+                kind,
+                DomainKind::ClockPosedge
+                    | DomainKind::ClockNegedge
+                    | DomainKind::ResetAsyncHigh
+                    | DomainKind::ResetAsyncLow
+            ) {
+                continue;
+            }
+            let addr = bindings.locate(*id, *var_id);
+            let canonical = clock_domains.get(&addr).copied().unwrap_or(addr);
+            domains.insert(canonical);
+        }
+    }
+    domains
+}

@@ -5,7 +5,7 @@ use celox_design::edges::{LEVEL_UNKNOWN, scheduled_edge, settled_edge};
 
 use super::round::Round;
 use super::{SimulationState, edge_level};
-use crate::{SignalRef, backend::SimBackend, timing::kind_index};
+use crate::{SignalRef, backend::SimBackend};
 
 impl<B: SimBackend> SimulationState<B> {
     /// Take the levels of the event signals as the baseline that edge
@@ -154,17 +154,16 @@ impl<B: SimBackend> SimulationState<B> {
 
     /// Mark the domains whose counters moved since they last triggered.
     pub(super) fn mark_counted_domains(&mut self, backend: &mut B, round: &mut Round) {
-        for (index, counted) in self.model.counted.iter().enumerate() {
-            for &(id, kind) in &counted.domains {
-                let value: u32 = backend.get_as(counted.refs.counter(kind));
-                let seen = &mut self.process_state.domain_counters[index][kind_index(kind)];
-                if value != *seen {
-                    *seen = value;
-                    backend.mark_triggered_bit(id);
-                    round.scheduled_trigger_ids.insert(id);
-                    round.counted_triggered.insert(id);
-                    round.track_stable_edges = true;
-                }
+        for trigger in &self.model.counted_triggers {
+            let value: u32 = backend.get_as(trigger.counter);
+            let (index, kind) = trigger.seen;
+            let seen = &mut self.process_state.domain_counters[index][kind];
+            if value != *seen {
+                *seen = value;
+                backend.mark_triggered_bit(trigger.id);
+                round.scheduled_trigger_ids.insert(trigger.id);
+                round.counted_triggered.insert(trigger.id);
+                round.track_stable_edges = true;
             }
         }
     }
