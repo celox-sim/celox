@@ -89,7 +89,7 @@ impl Module {
         &self.initial_processes
     }
 
-    pub fn locals(&self) -> &[LocalVariable] {
+    pub fn locals(&self) -> &[Arc<LocalVariable>] {
         &self.locals
     }
 
