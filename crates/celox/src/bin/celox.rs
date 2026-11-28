@@ -361,6 +361,8 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
     } else {
         arguments.max_steps
     };
+    // `CELOX_PHASE_TIMING` (see `celox::diagnostics`).
+    let phase_timing = std::env::var_os("CELOX_PHASE_TIMING").is_some_and(|value| value != "0");
     macro_rules! execute {
         ($build:ident $(, $report_hotspots:ident)?) => {{
             let compile_start = std::time::Instant::now();
@@ -456,6 +458,21 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
                 Some(&simulation.scheduler_stats()),
             )
             .map_err(|error| format!("cannot write the activation profile: {error}"))?;
+            // What dropping the simulation does outside its memory, then
+            // leave its memory to the end of the process: freeing the program
+            // of a large design takes seconds (see `Simulation::finish_outputs`).
+            let start = std::time::Instant::now();
+            if let Err(error) = simulation.finish_outputs() {
+                writeln!(
+                    std::io::stderr(),
+                    "celox: warning: cannot finish the waveform: {error}"
+                )
+                .ok();
+            }
+            std::mem::forget(simulation);
+            if phase_timing {
+                tracing::debug!("[phase-timing] teardown: {:?}", start.elapsed());
+            }
             result
         }};
     }
