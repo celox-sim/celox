@@ -111,6 +111,12 @@ pub(super) struct ExecutionArgs {
     /// Simulation threads, including the calling thread.
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=64))]
     pub threads: u32,
+    /// Compile threads: the SystemVerilog frontend and native code
+    /// generation compile independent modules and units on up to this many
+    /// threads. The compiled program is the same for every count. Default:
+    /// the available parallelism of the host.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+    pub compile_threads: Option<u32>,
     /// Emit machine-readable CELOX_* timing, configuration and result records.
     #[arg(long)]
     pub(super) report: bool,
@@ -266,6 +272,7 @@ struct Options {
     native_memory_width: usize,
     x86_slp: bool,
     threads: u32,
+    compile_threads: Option<u32>,
     always_partition: bool,
 }
 
@@ -458,6 +465,9 @@ pub(super) fn run(
         .hotspot_jit(opts.hotspot_jit)
         .threads(opts.threads as usize)
         .diagnostics_from_env();
+    if let Some(threads) = opts.compile_threads {
+        builder = builder.compile_threads(threads as usize);
+    }
     if let Some(path) = &opts.dump_settle_plan {
         builder = builder.settle_plan_output(path);
     }
@@ -653,6 +663,7 @@ fn resolve_options(
                 all(target_arch = "x86_64", not(feature = "arm64-codegen"))
             ))),
         threads: cli.threads,
+        compile_threads: cli.compile_threads,
         always_partition: cli.always_partition,
         design,
     })

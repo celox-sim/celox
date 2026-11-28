@@ -590,6 +590,13 @@ export interface SimulatorOptions {
 	 */
 	threads?: number;
 	/**
+	 * Compile threads: the SystemVerilog frontend and native code generation
+	 * compile independent modules and units on up to this many threads.
+	 * The compiled program is the same for every count. These are not the
+	 * simulation `threads`. Default: the available parallelism of the host.
+	 */
+	compileThreads?: number;
+	/**
 	 * Run tiered: execution starts on the interpreter immediately while the
 	 * host's compiled tier is prepared on a background thread, and the
 	 * simulation adopts it at the next safe point after compilation.

@@ -1227,6 +1227,7 @@ fn schedule_sources_collecting(
         }
         let package_states = lower_package_states(
             package_states,
+            parallel.compile_workers,
             module_ids.len(),
             four_state,
             parallel.enabled(),

@@ -307,6 +307,7 @@ pub(super) fn compile_program_with_outlining_threshold(
         0
     });
     let workers = super::super::compile_resources::workers_with_primary(
+        options.optimize_options.compile_threads(),
         comb_size,
         (pool_blocks, pool_instructions),
         compile_tasks.len() + pooled,
@@ -534,6 +535,7 @@ fn compile_scheduler_callees(
     let max_blocks = sizes.iter().map(|size| size.0).max().unwrap_or(0);
     let max_instructions = sizes.iter().map(|size| size.1).max().unwrap_or(0);
     let workers = super::super::compile_resources::workers_with_state(
+        options.optimize_options.compile_threads(),
         max_blocks,
         max_instructions,
         callees.len(),
@@ -642,6 +644,7 @@ fn compile_function_units(
     let max_instructions = sizes.iter().map(|size| size.1).max().unwrap_or(0);
     // Each worker compiles with a copy of the layout (below).
     let workers = super::super::compile_resources::workers_with_state(
+        options.optimize_options.compile_threads(),
         max_blocks,
         max_instructions,
         functions.len(),
@@ -807,6 +810,7 @@ fn compile_split_comb(
     let mut order = (0..sizes.len()).collect::<Vec<_>>();
     order.sort_by_key(|&index| std::cmp::Reverse(sizes[index]));
     let workers = super::super::compile_resources::workers(
+        options.optimize_options.compile_threads(),
         sizes.iter().map(|s| s.0).max().unwrap_or(0),
         sizes.iter().map(|s| s.1).max().unwrap_or(0),
         sizes.len(),
@@ -1093,6 +1097,7 @@ fn compile_remaining_processes(
         );
     }
     let process_workers = super::super::compile_resources::workers(
+        options.optimize_options.compile_threads(),
         max_process_blocks,
         max_process_instructions,
         process_sizes.len(),

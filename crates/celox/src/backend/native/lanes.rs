@@ -239,31 +239,35 @@ pub(super) fn compile_lane_kernels(
         }
         let mut lane_options = options.x86_options.clone();
         lane_options.arena_base = (lane > 0).then_some(arena_floor);
-        let compiled = compile_jobs(&jobs, |&(kernel, task)| {
-            let units = planned[kernel].task_units(task);
-            let mut footprint = None;
-            let function = compile_unit_refs_inspected(
-                &units,
-                layout,
-                options.four_state,
-                "lane_task",
-                NativeMergeKind::Partial,
-                &lane_options,
-                false,
-                &options.optimize_options.diagnostics,
-                cancel,
-                false,
-                &mut |prepared| {
-                    footprint = Some(Footprint::of_unit(prepared, layout, codegen));
-                    tracing::trace!(target: "celox::parallel", event = "native_task_sir",
+        let compiled = compile_jobs(
+            &jobs,
+            options.optimize_options.compile_threads(),
+            |&(kernel, task)| {
+                let units = planned[kernel].task_units(task);
+                let mut footprint = None;
+                let function = compile_unit_refs_inspected(
+                    &units,
+                    layout,
+                    options.four_state,
+                    "lane_task",
+                    NativeMergeKind::Partial,
+                    &lane_options,
+                    false,
+                    &options.optimize_options.diagnostics,
+                    cancel,
+                    false,
+                    &mut |prepared| {
+                        footprint = Some(Footprint::of_unit(prepared, layout, codegen));
+                        tracing::trace!(target: "celox::parallel", event = "native_task_sir",
                         schedule = planned[kernel].diagnostic_id.as_str(),
                         program = planned[kernel].diagnostic_program.as_str(),
                         kind = ?planned[kernel].kind, task, sir = ?prepared);
-                },
-            )?;
-            let footprint = footprint.unwrap_or_else(Footprint::empty);
-            Ok((function, footprint))
-        })?;
+                    },
+                )?;
+                let footprint = footprint.unwrap_or_else(Footprint::empty);
+                Ok((function, footprint))
+            },
+        )?;
         let lane_end = compiled
             .iter()
             .map(|(function, _)| function.required_state_size)
@@ -334,14 +338,17 @@ pub(super) fn compile_lane_kernels(
     }))
 }
 
-/// Compile independent jobs on up to four host threads, preserving order.
+/// Compile independent jobs on up to four host threads, and no more than the
+/// `threads` compiling may use, preserving order.
 fn compile_jobs<J: Sync, T: Send>(
     jobs: &[J],
+    threads: usize,
     compile: impl Fn(&J) -> Result<T, SimulatorError> + Sync,
 ) -> Result<Vec<T>, SimulatorError> {
     let workers = std::thread::available_parallelism()
         .map_or(1, usize::from)
         .min(4)
+        .min(threads.max(1))
         .min(jobs.len());
     if workers <= 1 {
         return jobs.iter().map(&compile).collect();

@@ -351,6 +351,7 @@ impl Compiler {
                 (blocks.max(b), instructions.max(i))
             });
         super::super::compile_resources::workers_with_state(
+            self.options.optimize_options.compile_threads(),
             blocks,
             instructions,
             functions.len(),
