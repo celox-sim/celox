@@ -67,8 +67,9 @@ trigger clock events, stay ordered exactly as in sequential simulation.
 
 Compilation has its own thread count, separate from the simulation threads
 above. The SystemVerilog frontend lowers independent modules (such as the
-state modules of packages) on these threads, and native code generation
-compiles independent units on as many of them as its memory budget allows.
+state modules of packages) on these threads, the SIR optimizer optimizes
+independent units on them, and native code generation compiles independent
+units on as many of them as its memory budget allows.
 The compiled program is the same for every count.
 
 ```rust

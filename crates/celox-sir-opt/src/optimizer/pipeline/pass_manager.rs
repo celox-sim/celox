@@ -168,14 +168,13 @@ impl ExecutionUnitPassManager {
         run: impl Fn(&Self, &mut ExecutionUnit<RegionedAbsoluteAddr>, &PassOptions) + Sync,
         options: &PassOptions,
     ) {
-        #[cfg(not(target_arch = "wasm32"))]
-        const MAX_PARALLEL_UNITS: usize = 4;
-
+        // As many workers as compiling may use (see
+        // `OptimizeOptions::compile_threads`), no more than the host has.
         #[cfg(not(target_arch = "wasm32"))]
         let worker_count = items.len().min(
             std::thread::available_parallelism()
                 .map_or(1, usize::from)
-                .min(MAX_PARALLEL_UNITS),
+                .min(options.optimize_options.compile_threads()),
         );
         #[cfg(target_arch = "wasm32")]
         let worker_count = 1;
