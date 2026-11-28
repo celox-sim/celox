@@ -168,8 +168,6 @@ pub(super) fn project_design(
         &settle_partitions,
         &settle_copies,
         &source_to_state,
-        &wait_sites,
-        &watches,
         process_count,
         project,
     );
@@ -580,8 +578,6 @@ fn project_settle_partitions(
     settle_partitions: &[scheduler::SettlePartition<AbsoluteAddr>],
     settle_copies: &[(AbsoluteAddr, AbsoluteAddr)],
     source_to_state: &HashMap<AbsoluteAddr, StateAddr>,
-    wait_sites: &[WaitSite<StateAddr>],
-    watches: &[EventWatch<StateAddr>],
     process_count: usize,
     project: impl Fn(AbsoluteAddr) -> StateAddr + Copy,
 ) -> Option<celox_design::SettlePartitions<StateAddr>> {
@@ -600,18 +596,12 @@ fn project_settle_partitions(
                 }
             }
         }
-        // A process's wait flag, for the signals its waits watch and the
-        // counters of their occurrences.
-        for site in wait_sites {
-            let flag = celox_design::settle_wait_flag(settle_partitions.len(), site.process) as u32;
-            for &(signal, _) in &site.terms {
-                marks.entry(signal).or_default().insert(flag);
-                for watch in watches.iter().filter(|watch| watch.signal == signal) {
-                    for (_, counter) in watch.counters() {
-                        marks.entry(counter).or_default().insert(flag);
-                    }
-                }
-            }
+        // Host and procedural writes notify the same waiters as settle writes.
+        for (source, readers) in &settle.external_readers {
+            let flags = marks.entry(project(*source)).or_default();
+            flags.extend(readers.iter().map(|&process| {
+                celox_design::settle_wait_flag(settle_partitions.len(), process) as u32
+            }));
         }
         let mut marks = marks
             .into_iter()
