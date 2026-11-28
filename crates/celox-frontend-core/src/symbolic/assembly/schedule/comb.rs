@@ -481,19 +481,16 @@ pub(super) fn plan_settle_flags(
                 .unwrap_or(0),
         );
         // The wait flags follow the partition flags: a partition
-        // changing a signal an edge wait watches, or one of the
-        // signal's occurrence counters, sets its process's flag
+        // changing a signal an edge wait watches, or the counter for
+        // the edge it awaits, sets its process's flag
         // (`SettlePartitions::waits`). A pulse that returns to the
         // starting value within one partition changes only the
         // counters.
         let mut external_readers: HashMap<AbsoluteAddr, Vec<usize>> = HashMap::default();
         for site in &timing.wait_sites {
-            for &(signal, _) in &site.terms {
-                let counters = counted
-                    .get(&signal)
-                    .into_iter()
-                    .flat_map(|slots| [slots.changes, slots.rises, slots.falls]);
-                for watched in std::iter::once(signal).chain(counters) {
+            for &(signal, kind) in &site.terms {
+                let counter = counted.get(&signal).map(|slots| slots.counter(kind));
+                for watched in std::iter::once(signal).chain(counter) {
                     let readers = external_readers.entry(watched).or_default();
                     if !readers.contains(&site.process) {
                         readers.push(site.process);

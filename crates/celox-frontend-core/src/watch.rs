@@ -269,9 +269,17 @@ fn occurrence<A: Clone>(
         // Case inequality distinguishes every unknown bit as well.
         return binary(b, old, BinaryOp::NeCase, new);
     }
+    if !four_state {
+        // Each masked operand is either zero or one.
+        let direction = if kind == CounterKind::Rises {
+            BinaryOp::LtU
+        } else {
+            BinaryOp::GtU
+        };
+        return binary(b, old_lsb, direction, new_lsb);
+    }
     // IEEE 1800-2023 Table 9-2: a positive edge leaves 0 or reaches 1, a
-    // negative edge leaves 1 or reaches 0, and either changes the bit. In
-    // two-state form this is `old == 0 && new == 1` for a positive edge.
+    // negative edge leaves 1 or reaches 0, and either changes the bit.
     let (from, to) = if kind == CounterKind::Rises {
         (0, 1)
     } else {
@@ -290,17 +298,8 @@ fn occurrence<A: Clone>(
 /// `counter`.
 fn bump<A: Clone>(b: &mut SIRBuilder<A>, counter: &A, occurred: RegisterId) {
     let value = load(b, counter, EVENT_COUNTER_WIDTH, false);
-    let one = b.alloc_bit(EVENT_COUNTER_WIDTH, false);
-    b.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
-    let incremented = b.alloc_bit(EVENT_COUNTER_WIDTH, false);
-    b.emit(SIRInstruction::Binary(
-        incremented,
-        value,
-        BinaryOp::Add,
-        one,
-    ));
     let next = b.alloc_bit(EVENT_COUNTER_WIDTH, false);
-    b.emit(SIRInstruction::Mux(next, occurred, incremented, value));
+    b.emit(SIRInstruction::Binary(next, value, BinaryOp::Add, occurred));
     b.emit(SIRInstruction::Store(
         counter.clone(),
         SIROffset::Static(0),
