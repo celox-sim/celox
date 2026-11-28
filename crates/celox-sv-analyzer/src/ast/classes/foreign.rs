@@ -417,6 +417,7 @@ fn build_inner(session: &mut Session, name: &str, caller: Option<&ScopeSymbols>)
             .collect(),
         foreign: std::mem::take(&mut session.foreign),
         types: std::mem::take(&mut session.types),
+        body_facts: std::mem::take(&mut session.body_facts),
         virtual_interfaces: session.virtual_interfaces.clone(),
         virtual_interface_calls: session.virtual_interface_calls.clone(),
         next_call_site: session.next_call_site,
@@ -425,6 +426,7 @@ fn build_inner(session: &mut Session, name: &str, caller: Option<&ScopeSymbols>)
     let result = specialize(&mut scope, &owner, name, caller);
     session.foreign = scope.foreign;
     session.types = scope.types;
+    session.body_facts = std::mem::take(&mut scope.body_facts);
     session.next_call_site = scope.next_call_site;
     session.virtual_interfaces = scope.virtual_interfaces.take();
     let mut symbols = result?;
