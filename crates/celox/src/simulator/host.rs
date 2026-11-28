@@ -109,10 +109,12 @@ pub struct Simulator<B: SimBackend = crate::DefaultBackend> {
     pub(crate) timed: bool,
     /// Some report site reads the time it issues its report at.
     pub(crate) timestamped_reports: bool,
-    /// Identity of the state layout, which checkpoints carry.
-    pub(super) checkpoint_fingerprint: u64,
-    /// State objects as state files name them.
-    pub(super) state_schema: Arc<state_file::StateSchema>,
+    /// Identity of the state layout, which checkpoints carry, once a
+    /// checkpoint or a mirror needed it (see [`Self::prepare_state_tables`]).
+    pub(super) checkpoint_fingerprint: Option<u64>,
+    /// State objects as state files name them, once a state file needed
+    /// them: most runs save no state, and both name every state object.
+    pub(super) state_schema: Option<Arc<state_file::StateSchema>>,
     pub(crate) diagnostics: crate::RuntimeDiagnostics,
     pub(crate) plusargs: celox_runtime::plusargs::Plusargs,
     tick_timing: TickTiming,
@@ -224,8 +226,6 @@ impl<B: SimBackend> Simulator<B> {
         // The tables of the state layout, which checkpoints, state files,
         // collections and testbench writes read through `&self`.
         let heap = super::heap::HeapRoots::new(&backend, &program);
-        let checkpoint_fingerprint = crate::ir::state_fingerprint(backend.layout(), &program);
-        let state_schema = Arc::new(Self::build_state_schema(&backend, &program));
         #[expect(
             clippy::disallowed_types,
             reason = "cross-thread: creates the pending-event queue shared with a RuntimeEventDrain thread"
@@ -258,8 +258,8 @@ impl<B: SimBackend> Simulator<B> {
             tb_counters: (0, 0, 0),
             runtime_events,
             comb_observers,
-            checkpoint_fingerprint,
-            state_schema,
+            checkpoint_fingerprint: None,
+            state_schema: None,
             diagnostics: crate::RuntimeDiagnostics::default(),
             plusargs: celox_runtime::plusargs::Plusargs::default(),
             tick_timing: TickTiming::default(),
@@ -286,8 +286,9 @@ impl<B: SimBackend> Simulator<B> {
         self.stash_runtime_events();
         let pending = other.pending_host_events.lock().unwrap().clone();
         *self.pending_host_events.lock().unwrap() = pending;
-        let fingerprint = self.state_fingerprint();
-        crate::simulator::StateImage::capture(&other.backend, other.state_fingerprint())
+        let fingerprint = self.prepare_fingerprint();
+        let other_fingerprint = other.prepare_fingerprint();
+        crate::simulator::StateImage::capture(&other.backend, other_fingerprint)
             .restore_into(&mut self.backend, fingerprint)
             .expect("a simulator of the same design");
         self.frozen = other.frozen;

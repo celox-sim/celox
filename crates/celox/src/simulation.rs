@@ -713,6 +713,7 @@ impl<B: SimBackend> Simulation<B> {
     /// Save the value of every state object by path, together with the
     /// simulation time, clocks and pending events by name.
     pub fn save_state(&mut self) -> Result<celox_runtime::StateFile, StateError> {
+        self.simulator.prepare_state_tables();
         if self.state.is_suspended() {
             return Err(CheckpointError::Stopped.into());
         }
@@ -749,6 +750,7 @@ impl<B: SimBackend> Simulation<B> {
     /// clocks and pending events. See [`Simulator::load_state`] for how
     /// objects are matched.
     pub fn load_state(&mut self, file: &celox_runtime::StateFile) -> Result<(), StateError> {
+        self.simulator.prepare_state_tables();
         let record = file.schedule.as_ref().ok_or(StateError::MissingSchedule)?;
         self.simulator.check_vcd_rewind(record.time)?;
         self.simulator
