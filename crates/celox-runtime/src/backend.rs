@@ -102,6 +102,13 @@ pub trait SimBackend {
     /// The event handle type produced by this backend.
     type Event: EventHandle;
 
+    /// Stop the background work of a backend whose simulation is done, and
+    /// report it, as dropping the backend does: its compiles stop and their
+    /// diagnostics are emitted. It does not wait for the compile threads,
+    /// whose work in flight is abandoned; the drop waits for them, and
+    /// repeats neither the stop nor the diagnostics.
+    fn finish_background_work(&mut self) {}
+
     // ── evaluation ──────────────────────────────────────────────
     fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode>;
 

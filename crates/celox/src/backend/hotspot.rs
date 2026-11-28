@@ -146,6 +146,8 @@ pub(crate) struct HotspotRuntime {
     /// Scheduler stages published.
     scheduler_stages: usize,
     options: Arc<SimulatorOptions>,
+    /// [`Self::finish_run`] ran.
+    finished: bool,
 }
 
 impl HotspotRuntime {
@@ -238,6 +240,7 @@ impl HotspotRuntime {
             scheduler_index: None,
             scheduler_program: None,
             preparer: None,
+            finished: false,
             inline_budget: crate::scheduler::INLINE_BUDGET_INSTRUCTIONS,
             scheduler_stages: 0,
             options,
@@ -822,16 +825,27 @@ fn lower_priority() {
     }
 }
 
+impl HotspotRuntime {
+    /// Stop compiling and report the execution's statistics, once, without
+    /// waiting for the threads: the drop waits for them.
+    pub(crate) fn finish_run(&mut self) {
+        if std::mem::replace(&mut self.finished, true) {
+            return;
+        }
+        self.cancel();
+        tracing::debug!(stats = ?self.stats, "hotspot execution finished");
+    }
+}
+
 impl Drop for HotspotRuntime {
     fn drop(&mut self) {
-        self.cancel();
+        self.finish_run();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
         if let Some(preparer) = self.preparer.take() {
             let _ = preparer.join();
         }
-        tracing::debug!(stats = ?self.stats, "hotspot execution finished");
     }
 }
 

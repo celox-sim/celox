@@ -473,10 +473,20 @@ impl Compiler {
     }
 }
 
-impl Drop for LazyFunctions {
-    fn drop(&mut self) {
-        self.compiler.stop();
-        if self.compiler.options.x86_options.diagnostics.phase_timing {
+impl LazyFunctions {
+    /// Stop compiling and report what was compiled, once, without waiting
+    /// for the compile threads: a compile in flight is abandoned, and the
+    /// drop waits for them.
+    pub(crate) fn finish(&self) {
+        let reported = {
+            let mut requests = self.compiler.lock();
+            requests.called.clear();
+            requests.callees.clear();
+            std::mem::replace(&mut requests.stopped, true)
+        };
+        self.compiler.cancel.cancel();
+        self.compiler.requested.notify_all();
+        if !reported && self.compiler.options.x86_options.diagnostics.phase_timing {
             let requests = self.compiler.lock();
             let speculative = requests.states.iter().filter(|state| state.speculative);
             let unused = speculative.clone().filter(|state| !state.called).count();
@@ -489,6 +499,13 @@ impl Drop for LazyFunctions {
                 Duration::from_nanos(self.compiler.wait_nanos.load(Ordering::Relaxed)),
             );
         }
+    }
+}
+
+impl Drop for LazyFunctions {
+    fn drop(&mut self) {
+        self.finish();
+        self.compiler.stop();
     }
 }
 

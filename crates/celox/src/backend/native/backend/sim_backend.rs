@@ -5,6 +5,13 @@ use super::*;
 impl super::super::super::SimBackend for NativeBackend {
     type Event = NativeEventRef;
 
+    fn finish_background_work(&mut self) {
+        #[cfg(lazy_native_functions)]
+        if let Some(functions) = self.compiled.lazy_functions() {
+            functions.finish();
+        }
+    }
+
     fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode> {
         if self.lane_comb_kernel() {
             let compiled = Arc::clone(&self.compiled);
