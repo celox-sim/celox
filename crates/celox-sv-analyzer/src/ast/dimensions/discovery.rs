@@ -23,16 +23,16 @@ pub(in crate::ast) struct State {
     /// The class method signatures that discovery last published in each
     /// scope, by arena and scope.
     class_signatures:
-        HashMap<(usize, crate::source_tree::ScopeHandle), std::rc::Rc<ClassSignatures>>,
+        HashMap<(usize, crate::source_tree::ScopeHandle), std::sync::Arc<ClassSignatures>>,
     /// The declarations a query discovered in each scope, before the parts
     /// that depend on its operand, while the query's input and the set of
     /// specializations stay the same.
-    settled: std::rc::Rc<HashMap<Key, Vec<std::rc::Rc<Settled>>>>,
+    settled: std::sync::Arc<HashMap<Key, Vec<std::sync::Arc<Settled>>>>,
     /// The last query context [`overlaid`] made, which the next query with
     /// the same base and input takes as it is: the queries of one
     /// declaration, such as the items of a parameter's assignment pattern,
     /// share both.
-    overlaid: Option<std::rc::Rc<Overlaid>>,
+    overlaid: Option<std::sync::Arc<Overlaid>>,
 }
 
 /// A query context of [`State::overlaid`]. `base` and `input` are held so
@@ -879,7 +879,7 @@ fn scope_class_signatures(
     scope: &[BodyItemId],
     key: &Key,
     base: &PackedDimensions,
-) -> Converted<std::rc::Rc<ClassSignatures>> {
+) -> Converted<std::sync::Arc<ClassSignatures>> {
     let cache_key = (
         tree.declarations() as *const _ as usize,
         tree.scope_handle(),
@@ -935,7 +935,7 @@ fn scope_class_signatures(
             .map(|(name, value)| (name.clone(), value.clone()))
             .collect()
     }
-    let signatures = std::rc::Rc::new(ClassSignatures {
+    let signatures = std::sync::Arc::new(ClassSignatures {
         const_env: base.const_env.clone(),
         type_aliases: base.type_aliases.clone(),
         function_return_types: base.function_return_types.clone(),
@@ -1696,7 +1696,7 @@ fn overlaid(
     }
     let unchanged = base.clone();
     overlay(&mut base, input);
-    state.overlaid = Some(std::rc::Rc::new(Overlaid {
+    state.overlaid = Some(std::sync::Arc::new(Overlaid {
         base: unchanged,
         input: input.clone(),
         context: base.clone(),
@@ -1891,7 +1891,7 @@ pub(in crate::ast) fn query_operand_dimensions_id(
         None => {
             let context = settle_scope(tree, session, &owners, &key, &own)?;
             let specializations = session.class_specializations.len();
-            let entries = std::rc::Rc::make_mut(&mut session.dimensions.settled)
+            let entries = std::sync::Arc::make_mut(&mut session.dimensions.settled)
                 .entry(key.clone())
                 .or_default();
             // Entries of fewer specializations are never found again.
@@ -1899,7 +1899,7 @@ pub(in crate::ast) fn query_operand_dimensions_id(
             if entries.len() == SETTLED_PER_KEY {
                 entries.remove(0);
             }
-            entries.push(std::rc::Rc::new(Settled {
+            entries.push(std::sync::Arc::new(Settled {
                 _arena: tree.declarations_incarnation(),
                 input: own,
                 specializations,

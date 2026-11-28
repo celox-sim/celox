@@ -660,7 +660,7 @@ pub(in crate::ast) fn subroutines_with_symbolic_parameters(
                 if let Some(mark) = mark {
                     lowered.classes.insert(
                         class.clone(),
-                        std::rc::Rc::new(LoweredClass::since(
+                        std::sync::Arc::new(LoweredClass::since(
                             mark,
                             methods.clone(),
                             session,

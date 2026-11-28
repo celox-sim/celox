@@ -8,7 +8,7 @@ use super::*;
 pub(super) fn enter(
     id: ExprId,
     target: Option<Destination>,
-    scope: &Option<Rc<PackedDimensions>>,
+    scope: &Option<Arc<PackedDimensions>>,
     root: ExprId,
     permits: &mut chandles::Permits,
     jobs: &mut Vec<Job>,
@@ -333,7 +333,7 @@ fn check_received(
 fn enter_kind(
     id: ExprId,
     target: Option<Destination>,
-    scope: &Option<Rc<PackedDimensions>>,
+    scope: &Option<Arc<PackedDimensions>>,
     permitted: bool,
     permits: &mut chandles::Permits,
     jobs: &mut Vec<Job>,
@@ -476,7 +476,7 @@ fn enter_kind(
             vec![(
                 *expression,
                 cast_shape(*target, native, tree, session, dimensions)?
-                    .map(Rc::new)
+                    .map(Arc::new)
                     .map(Destination::receiving),
             )],
         ),
@@ -662,7 +662,7 @@ fn enter_kind(
                 .map(|id| {
                     (
                         *id,
-                        plan.shape.clone().map(Rc::new).map(Destination::receiving),
+                        plan.shape.clone().map(Arc::new).map(Destination::receiving),
                     )
                 })
                 .collect();
@@ -800,7 +800,7 @@ fn enter_conditional(
     let target = match target.clone() {
         Some(target) => Some(target),
         None => containers::native_type(id, native, tree, session, dimensions)?
-            .map(|container| Destination::receiving(Rc::new(containers::shape(&container)))),
+            .map(|container| Destination::receiving(Arc::new(containers::shape(&container)))),
     };
     Ok((
         Finish::Mux(containers::conditional(
@@ -824,7 +824,7 @@ fn enter_conditional(
 fn enter_stream_cast(
     target: &ExprId,
     expression: &ExprId,
-    scope: &Option<Rc<PackedDimensions>>,
+    scope: &Option<Arc<PackedDimensions>>,
     jobs: &mut Vec<Job>,
     values: &mut Vec<Expr>,
     native: &Declarations,

@@ -61,7 +61,7 @@ pub struct Packages {
     /// Namespace validation must not depend on sources selected for binding.
     pub(crate) interface_names: HashSet<String>,
     /// Original syntax shared with interface instances; never generated source.
-    pub(crate) interface_sources: HashMap<String, (std::rc::Rc<SyntaxTree>, PathBuf)>,
+    pub(crate) interface_sources: HashMap<String, (std::sync::Arc<SyntaxTree>, PathBuf)>,
     pub(super) timescales: Arc<timescales::Timescales>,
     packages: HashMap<String, Arc<Package>>,
     /// The compilation unit of each source file that declares items outside

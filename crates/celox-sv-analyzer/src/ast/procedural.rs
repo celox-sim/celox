@@ -133,7 +133,7 @@ pub(super) enum ClassMethods {
 #[derive(Debug, Default)]
 pub(in crate::ast) struct Lowered {
     /// By the names of the classes.
-    classes: HashMap<String, std::rc::Rc<LoweredClass>>,
+    classes: HashMap<String, std::sync::Arc<LoweredClass>>,
     /// The classes the pass saw, of the package and of its imports.
     known: HashSet<String>,
     /// The number after those of the locals the pass named.
@@ -312,7 +312,7 @@ enum BodyContext<'t> {
     Scope(&'t AnalysisContext<'t>),
     /// The context of a block that imports packages: an enclosing one with
     /// the block's imports (IEEE 1800-2023 26.3).
-    Block(std::rc::Rc<AnalysisContext<'t>>),
+    Block(std::sync::Arc<AnalysisContext<'t>>),
 }
 
 impl<'t> std::ops::Deref for BodyContext<'t> {
@@ -1011,7 +1011,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         let context = self.tree.importing(Arc::new(layered));
         let outer = std::mem::replace(
             &mut self.tree,
-            BodyContext::Block(std::rc::Rc::new(context)),
+            BodyContext::Block(std::sync::Arc::new(context)),
         );
         self.outer_contexts.push((self.names.scopes.len(), outer));
     }
