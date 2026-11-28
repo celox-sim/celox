@@ -7,7 +7,7 @@
 //! first argument is the handle `this`; a constructor allocates the object
 //! and returns its handle.
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use super::*;
 use crate::system_functions::{ContainerKind, HandleProperty, ObjectField, ObjectOp};
@@ -1319,12 +1319,12 @@ pub(super) fn handle_type(
 
 /// Class `name` as the scope that declares it laid it out, when the current
 /// scope uses that scope (see `scope::ScopeSymbols::classes`).
-fn imported(tree: &AnalysisContext<'_>, name: &str) -> Option<Rc<Class>> {
+fn imported(tree: &AnalysisContext<'_>, name: &str) -> Option<Arc<Class>> {
     scope::imported(tree)
         .classes
         .iter()
         .find(|class| class.name == name)
-        .map(|class| Rc::new((**class).clone()))
+        .map(|class| Arc::new((**class).clone()))
 }
 
 /// The classes whose objects the current scope may see: those it declares,
@@ -1374,14 +1374,14 @@ fn handle_shape(name: &str) -> Type {
 /// Class `name` as it was laid out, unless the scope that declares it has
 /// recorded other tables since: a layout in tables the scope has replaced,
 /// such as those before its constants were all known, is not served again.
-fn laid_out(session: &Session, name: &str) -> Option<Rc<Class>> {
+fn laid_out(session: &Session, name: &str) -> Option<Arc<Class>> {
     let (class, recording) = session.classes.get(name)?;
     (*recording == specializations::declaring_recording(session, name)).then(|| class.clone())
 }
 
 /// Keep `class`, laid out as class `name`, with the recording of the tables
 /// of its declaring scope it was laid out in.
-fn keep_layout(session: &mut Session, name: &str, class: Rc<Class>) {
+fn keep_layout(session: &mut Session, name: &str, class: Arc<Class>) {
     let recording = specializations::declaring_recording(session, name);
     session.classes.insert(name.to_owned(), (class, recording));
 }
@@ -1393,7 +1393,7 @@ pub(super) fn class(
     name: &str,
     env: &ConstEnv,
     aliases: &TypeAliases,
-) -> Converted<Rc<Class>> {
+) -> Converted<Arc<Class>> {
     if let Some(class) = laid_out(session, name) {
         return Ok(class);
     }
@@ -1414,7 +1414,7 @@ pub(super) fn shared_class(
     env: &SharedEnv,
     aliases: &SharedAliases,
     session: &mut Session,
-) -> Converted<Rc<Class>> {
+) -> Converted<Arc<Class>> {
     if let Some(class) = laid_out(session, name) {
         return Ok(class);
     }
@@ -1450,7 +1450,7 @@ fn lay_out_shared_class(
     env: &SharedEnv,
     aliases: &SharedAliases,
     session: &mut Session,
-) -> Converted<Rc<Class>> {
+) -> Converted<Arc<Class>> {
     // A class of another scope is laid out in its own scope, where the
     // names it uses are declared.
     let declaration = declaration(tree, session, name).filter(|declaration| {
@@ -2082,7 +2082,7 @@ fn lay_out_shared_class(
         size: size.max(1),
     };
     class.program = class.build_constraint_program(tree, session, env);
-    let class = Rc::new(class);
+    let class = Arc::new(class);
     keep_layout(session, name, class.clone());
     Ok(class)
 }
@@ -2124,7 +2124,7 @@ fn interface_class(
     interfaces: Vec<String>,
     env: &ConstEnv,
     context: &PackedDimensions,
-) -> Converted<Rc<Class>> {
+) -> Converted<Arc<Class>> {
     let aliases = &*context.type_aliases;
     let native = tree.declarations();
     // The parameters and typedefs it declares hide inherited ones; those it
@@ -2183,7 +2183,7 @@ fn interface_class(
             is_virtual: true,
         });
     }
-    let class = Rc::new(Class {
+    let class = Arc::new(Class {
         name: name.to_owned(),
         id: class_id(name),
         covergroups: Vec::new(),
@@ -2405,7 +2405,7 @@ fn object_classes(
     ancestor: &str,
     env: &ConstEnv,
     aliases: &TypeAliases,
-) -> Converted<Vec<Rc<Class>>> {
+) -> Converted<Vec<Arc<Class>>> {
     let concrete = ConcreteClasses::of(tree, session, env, aliases);
     let mut classes = Vec::new();
     let mut ids = HashMap::default();
@@ -2431,7 +2431,7 @@ pub(super) fn concrete_derived(
     ancestor: &str,
     env: &ConstEnv,
     aliases: &TypeAliases,
-) -> Vec<(String, Rc<Class>)> {
+) -> Vec<(String, Arc<Class>)> {
     ConcreteClasses::of(tree, session, env, aliases)
         .classes
         .iter()
@@ -2445,10 +2445,11 @@ pub(super) fn concrete_derived(
 /// or implements (see [`Class::derives_from`]). A scope keeps them while no
 /// class is laid out or specialized, which is what could change them.
 pub(super) struct ConcreteClasses {
-    syntax_tree: *const SyntaxTree,
+    /// The address of the syntax tree they are of, only compared.
+    syntax_tree: usize,
     imported: Arc<scope::ScopeSymbols>,
     generation: (usize, usize),
-    classes: Vec<(String, Rc<Class>, HashSet<String>)>,
+    classes: Vec<(String, Arc<Class>, HashSet<String>)>,
 }
 
 impl ConcreteClasses {
@@ -2457,11 +2458,11 @@ impl ConcreteClasses {
         session: &mut Session,
         env: &ConstEnv,
         aliases: &TypeAliases,
-    ) -> Rc<Self> {
+    ) -> Arc<Self> {
         let generation =
             |session: &Session| (session.classes.len(), session.class_specializations.len());
         if let Some(known) = &session.concrete_classes
-            && std::ptr::eq(known.syntax_tree, tree.syntax_tree)
+            && known.syntax_tree == std::ptr::from_ref(tree.syntax_tree) as usize
             && Arc::ptr_eq(&known.imported, &tree.imported)
             && known.generation == generation(session)
         {
@@ -2479,8 +2480,8 @@ impl ConcreteClasses {
             let lineage = class.lineage(tree, session, env, aliases);
             classes.push((name, class, lineage));
         }
-        let concrete = Rc::new(Self {
-            syntax_tree: tree.syntax_tree,
+        let concrete = Arc::new(Self {
+            syntax_tree: std::ptr::from_ref(tree.syntax_tree) as usize,
             imported: tree.imported.clone(),
             generation: generation(session),
             classes,
@@ -2499,7 +2500,7 @@ pub(super) fn rand_member_classes(
     class: &Class,
     env: &ConstEnv,
     aliases: &TypeAliases,
-) -> Converted<Vec<Rc<Class>>> {
+) -> Converted<Vec<Arc<Class>>> {
     let handle_classes = |class: &Class, table: &semantic_types::TyTable| {
         class
             .properties
@@ -2534,7 +2535,7 @@ pub(super) fn rand_member_classes(
 /// The implementations of randomize hook `method` (`pre_randomize` or
 /// `post_randomize`) that the objects of each of `classes` run, by class id
 /// (IEEE 1800-2023 18.6.2).
-pub(super) fn hook_targets(classes: &[Rc<Class>], method: &str) -> Vec<(u32, String)> {
+pub(super) fn hook_targets(classes: &[Arc<Class>], method: &str) -> Vec<(u32, String)> {
     classes
         .iter()
         .filter_map(|class| {

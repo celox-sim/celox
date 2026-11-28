@@ -1105,7 +1105,7 @@ pub(in crate::ast) fn inline_subroutines(
         if !requests.iter().any(|known| known.key == request.key) {
             requests.push(classes::constraints::Inline {
                 key: request.key,
-                class: std::rc::Rc::new(request.class.clone()),
+                class: std::sync::Arc::new(request.class.clone()),
                 constraints: request.constraints.clone(),
                 inputs: request.inputs.clone(),
                 dimensions: dimensions.clone(),

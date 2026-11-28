@@ -1,7 +1,7 @@
 //! Native generate control and scope worklist.
 use super::*;
 use celox_sv_syntax::{BodyItemId, BodyItemKind, ExprKind, ForStep};
-use std::rc::Rc;
+use std::sync::Arc;
 /// The index of a scope's count of the generate constructs it has seen so
 /// far, which numbers its unnamed blocks (IEEE 1800-2023 27.6), in the
 /// counts of an elaboration.
@@ -10,25 +10,25 @@ enum Job {
     ExitScope,
     Item {
         id: BodyItemId,
-        scope: Rc<Scope>,
+        scope: Arc<Scope>,
         ordinal: Ordinal,
     },
     Block {
         id: BodyItemId,
-        parent: Rc<Scope>,
+        parent: Arc<Scope>,
         ordinal: usize,
         index: Option<(String, i128)>,
     },
     Loop {
         id: BodyItemId,
-        parent: Rc<Scope>,
+        parent: Arc<Scope>,
         ordinal: usize,
         value: i128,
     },
     Update {
         id: BodyItemId,
-        parent: Rc<Scope>,
-        iteration: Rc<Scope>,
+        parent: Arc<Scope>,
+        iteration: Arc<Scope>,
         ordinal: usize,
         value: i128,
     },
@@ -173,7 +173,7 @@ impl<'a, 'b> Elaborator<'a, 'b> {
             }
             pending.extend(nested);
         }
-        let scope = Rc::new(scope);
+        let scope = Arc::new(scope);
         let mut ordinals = vec![0];
         let ordinal = 0;
         let mut jobs = ids
@@ -250,7 +250,7 @@ impl<'a, 'b> Elaborator<'a, 'b> {
     fn item_job(
         &mut self,
         id: BodyItemId,
-        scope: Rc<Scope>,
+        scope: Arc<Scope>,
         ordinal: Ordinal,
         jobs: &mut Vec<Job>,
         ordinals: &mut [usize],
@@ -345,7 +345,7 @@ impl<'a, 'b> Elaborator<'a, 'b> {
     fn block_job(
         &mut self,
         id: BodyItemId,
-        parent: Rc<Scope>,
+        parent: Arc<Scope>,
         ordinal: usize,
         index: Option<(String, i128)>,
         jobs: &mut Vec<Job>,
@@ -418,7 +418,7 @@ impl<'a, 'b> Elaborator<'a, 'b> {
         let outer = self.tree.generate_scope.replace(Arc::new(generate));
         let prepared = self.prepare_block_contents(&children, scope, index_ref);
         self.tree.generate_scope = outer;
-        let scope = Rc::new(prepared?);
+        let scope = Arc::new(prepared?);
         jobs.push(Job::ExitScope);
         ordinals.push(0);
         let counter = ordinals.len() - 1;
@@ -434,7 +434,7 @@ impl<'a, 'b> Elaborator<'a, 'b> {
     fn loop_job(
         &mut self,
         id: BodyItemId,
-        parent: Rc<Scope>,
+        parent: Arc<Scope>,
         ordinal: usize,
         value: i128,
         jobs: &mut Vec<Job>,
@@ -479,7 +479,7 @@ impl<'a, 'b> Elaborator<'a, 'b> {
             .remaining
             .checked_sub(1)
             .ok_or_else(|| unsupported("loop-generate unroll limit exceeded"))?;
-        let iteration = Rc::new(iteration);
+        let iteration = Arc::new(iteration);
         jobs.push(Job::Update {
             id,
             parent,

@@ -5,7 +5,7 @@ use specializations::BoundArguments;
 
 #[derive(Debug)]
 struct Owner {
-    tree: Rc<SyntaxTree>,
+    tree: Arc<SyntaxTree>,
     imports: ScopeSymbols,
     timescales: Arc<timescales::Timescales>,
 }
@@ -50,20 +50,20 @@ impl DeclarationScope {
 /// `expression_types::constant_session`).
 #[derive(Clone, Debug, Default)]
 pub(in crate::ast) struct Registry {
-    owners: HashMap<String, Rc<Owner>>,
+    owners: HashMap<String, Arc<Owner>>,
     templates: HashMap<String, String>,
     requests: HashMap<String, Vec<Request>>,
-    prepared: HashMap<String, Rc<ScopeSymbols>>,
+    prepared: HashMap<String, Arc<ScopeSymbols>>,
     complete: HashSet<String>,
-    argument_symbols: Rc<ScopeSymbols>,
+    argument_symbols: Arc<ScopeSymbols>,
     active: HashSet<String>,
-    states: HashMap<String, Rc<crate::ir::Module>>,
+    states: HashMap<String, Arc<crate::ir::Module>>,
     revision: u64,
     generics: HashMap<String, String>,
-    specializations: HashMap<String, Rc<specializations::Specialization>>,
-    declarations: HashMap<String, Rc<DeclarationScope>>,
+    specializations: HashMap<String, Arc<specializations::Specialization>>,
+    declarations: HashMap<String, Arc<DeclarationScope>>,
     /// What the last analysis of each package lowered for its classes.
-    lowered: HashMap<String, Rc<crate::ast::procedural::Lowered>>,
+    lowered: HashMap<String, Arc<crate::ast::procedural::Lowered>>,
     /// Of each package, the classes whose specializations may extend a
     /// class of the scopes that ask for them, when nothing else hides a
     /// name the package qualifies with its own (see `specialize`): its
@@ -79,8 +79,8 @@ pub(in crate::ast) struct Registry {
 /// `finish`): the declarations it exports and its symbols.
 #[derive(Clone, Debug)]
 struct Kept {
-    declarations: HashMap<String, Rc<DeclarationScope>>,
-    symbols: Rc<ScopeSymbols>,
+    declarations: HashMap<String, Arc<DeclarationScope>>,
+    symbols: Arc<ScopeSymbols>,
 }
 
 impl Registry {
@@ -101,11 +101,11 @@ impl Registry {
         self.owners.contains_key(name)
     }
     /// What the last analysis of package `name` lowered for its classes.
-    pub fn lowered(&self, name: &str) -> Option<Rc<crate::ast::procedural::Lowered>> {
+    pub fn lowered(&self, name: &str) -> Option<Arc<crate::ast::procedural::Lowered>> {
         self.lowered.get(name).cloned()
     }
     pub fn record_lowered(&mut self, name: String, lowered: crate::ast::procedural::Lowered) {
-        self.lowered.insert(name, Rc::new(lowered));
+        self.lowered.insert(name, Arc::new(lowered));
     }
     pub fn has_templates(&self) -> bool {
         !self.templates.is_empty()
@@ -114,7 +114,7 @@ impl Registry {
         self.generics.get(name).cloned()
     }
     /// The specialization `name` that the scope of its class made.
-    pub fn specialization(&self, name: &str) -> Option<Rc<specializations::Specialization>> {
+    pub fn specialization(&self, name: &str) -> Option<Arc<specializations::Specialization>> {
         self.specializations.get(name).cloned()
     }
     pub fn parameter(&self, name: &str, parameter: &str) -> Option<Expr> {
@@ -124,7 +124,7 @@ impl Registry {
             .get(parameter)
             .cloned()
     }
-    pub fn declarations(&self, name: &str) -> Option<Rc<DeclarationScope>> {
+    pub fn declarations(&self, name: &str) -> Option<Arc<DeclarationScope>> {
         self.declarations.get(name).cloned()
     }
     pub fn member_type(&self, name: &str, member: &str) -> Option<Type> {
@@ -166,8 +166,8 @@ impl Registry {
         }
         self.owners.insert(
             name.into(),
-            Rc::new(Owner {
-                tree: Rc::new(tree.clone()),
+            Arc::new(Owner {
+                tree: Arc::new(tree.clone()),
                 imports: imports.clone(),
                 timescales,
             }),
@@ -244,7 +244,7 @@ impl Registry {
             symbols.declarations_only = declarations_only;
         }
     }
-    pub fn states(&self) -> &HashMap<String, Rc<crate::ir::Module>> {
+    pub fn states(&self) -> &HashMap<String, Arc<crate::ir::Module>> {
         &self.states
     }
 }
@@ -451,11 +451,11 @@ fn build_inner(session: &mut Session, name: &str, caller: Option<&ScopeSymbols>)
     registry.declarations.extend(symbols.declarations.drain());
     registry
         .prepared
-        .insert(name.into(), Rc::new(symbols.symbols));
+        .insert(name.into(), Arc::new(symbols.symbols));
     if caller.is_some() {
         registry.complete.insert(name.into());
         if let Some(module) = symbols.state_module {
-            registry.states.insert(name.into(), Rc::new(module));
+            registry.states.insert(name.into(), Arc::new(module));
         }
     }
     registry.revision += 1;
@@ -465,7 +465,7 @@ fn build_inner(session: &mut Session, name: &str, caller: Option<&ScopeSymbols>)
 /// What analyzing a package for its specializations made.
 struct Specialized {
     symbols: ScopeSymbols,
-    declarations: HashMap<String, Rc<DeclarationScope>>,
+    declarations: HashMap<String, Arc<DeclarationScope>>,
     state_module: Option<crate::ir::Module>,
 }
 
@@ -768,7 +768,7 @@ pub(in crate::ast) fn keep_finish(
     let owner = package_owner(tree);
     let kept = Kept {
         declarations,
-        symbols: Rc::new(caller.clone()),
+        symbols: Arc::new(caller.clone()),
     };
     let registry = &mut session.foreign;
     match registry.kept.iter_mut().find(|(known, _)| *known == owner) {
@@ -791,7 +791,7 @@ pub(in crate::ast) fn finish_kept(session: &mut Session) -> Converted<()> {
 /// than a package) exports, and hand its symbols `caller` over.
 fn record(
     session: &mut Session,
-    declarations: HashMap<String, Rc<DeclarationScope>>,
+    declarations: HashMap<String, Arc<DeclarationScope>>,
     caller: &ScopeSymbols,
     package_owner: Option<&str>,
 ) {
@@ -799,7 +799,7 @@ fn record(
     #[cfg(debug_assertions)]
     let mut by_scans = (*session.foreign.argument_symbols).clone();
     hand_over(
-        Rc::make_mut(&mut session.foreign.argument_symbols),
+        Arc::make_mut(&mut session.foreign.argument_symbols),
         caller,
         package_owner,
     );
@@ -817,7 +817,7 @@ fn record(
 /// symbol handed over.
 fn complete(session: &mut Session) -> Converted<()> {
     let registry = &session.foreign;
-    let caller = Rc::clone(&registry.argument_symbols);
+    let caller = Arc::clone(&registry.argument_symbols);
     let names = registry
         .requests
         .keys()

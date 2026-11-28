@@ -49,10 +49,10 @@ pub(crate) struct Session {
     /// Classes laid out so far, by name, each with the recording of the
     /// tables of its declaring scope it was laid out in (see
     /// [`classes::specializations::DeclaringScope`]).
-    pub(super) classes: HashMap<String, (std::rc::Rc<classes::Class>, Option<u64>)>,
+    pub(super) classes: HashMap<String, (std::sync::Arc<classes::Class>, Option<u64>)>,
     /// The classes whose objects dispatchers and `$cast` select from, as
     /// the scope last saw them.
-    pub(super) concrete_classes: Option<std::rc::Rc<classes::ConcreteClasses>>,
+    pub(super) concrete_classes: Option<std::sync::Arc<classes::ConcreteClasses>>,
     /// The constants and types of the scope that declares each class, which
     /// its parameter defaults and body see (IEEE 1800-2023 8.25).
     pub(super) class_declaration_scopes: HashMap<String, classes::specializations::DeclaringScope>,
@@ -96,7 +96,7 @@ pub(crate) struct Session {
     /// The specializations of classes made so far, in order.
     pub(super) class_specializations: Vec<(
         String,
-        std::rc::Rc<classes::specializations::Specialization>,
+        std::sync::Arc<classes::specializations::Specialization>,
     )>,
     /// The virtual interfaces of the design, if it has any (IEEE 1800-2023
     /// 25.9).
@@ -234,5 +234,21 @@ impl Session {
         design.body_facts = self.body_facts;
         design.virtual_interfaces = self.virtual_interfaces;
         design.virtual_interface_calls = self.virtual_interface_calls;
+    }
+}
+
+#[cfg(test)]
+mod threads {
+    fn send<T: Send>() {}
+    fn sync<T: Sync>() {}
+
+    /// The state of an analysis can move to another thread, and what the
+    /// analyses share can be read from several.
+    #[test]
+    fn analysis_state_crosses_threads() {
+        send::<super::Session>();
+        send::<crate::ast::packages::Design>();
+        sync::<crate::ast::packages::Packages>();
+        sync::<crate::parsed::ParsedSource>();
     }
 }

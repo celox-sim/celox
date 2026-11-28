@@ -5,7 +5,7 @@
 //! method's subroutine with the handle as its first argument. Inside a
 //! method, unqualified property and method names refer to `this`.
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use super::*;
 use crate::ast::classes::{self, Class, THIS};
@@ -17,7 +17,7 @@ pub(in crate::ast) fn class(
     session: &mut Session,
     dimensions: &PackedDimensions,
     name: &str,
-) -> Converted<Rc<Class>> {
+) -> Converted<Arc<Class>> {
     classes::shared_class(
         tree,
         name,
@@ -696,7 +696,7 @@ pub(in crate::ast) fn aggregate_property(
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
-) -> Converted<Option<(classes::AggregateProperty, Rc<Class>, Option<ExprId>)>> {
+) -> Converted<Option<(classes::AggregateProperty, Arc<Class>, Option<ExprId>)>> {
     let Some((class, name, receiver)) = member_chain(tree, session, id, native, dimensions)? else {
         return Ok(None);
     };
@@ -763,7 +763,7 @@ fn member_chain(
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
-) -> Converted<Option<(Rc<Class>, String, Option<ExprId>)>> {
+) -> Converted<Option<(Arc<Class>, String, Option<ExprId>)>> {
     let mut names = Vec::new();
     let mut current = ungroup(id, native);
     let (class_name, receiver) = loop {

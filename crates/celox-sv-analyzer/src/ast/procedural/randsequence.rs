@@ -33,7 +33,7 @@ use celox_sv_syntax::{
     Argument, ExprId, ExprKind, Randsequence, RsCaseItem, RsProd, RsProduction, RsRule,
     StatementId, StatementKind,
 };
-use std::rc::Rc;
+use std::sync::Arc;
 
 /// How deep `randsequence` statements in code blocks may nest.
 const MAX_DEPTH: usize = 64;
@@ -91,7 +91,7 @@ enum Frame<'p> {
         exit: Option<(u64, String)>,
         armed: bool,
         units: Option<Vec<Vec<Stmt>>>,
-        locals: Rc<Locals>,
+        locals: Arc<Locals>,
         prelude: Vec<Stmt>,
         epilogue: Vec<Stmt>,
     },
@@ -108,8 +108,8 @@ enum Frame<'p> {
         rule: usize,
         units: Vec<Vec<Vec<Vec<Stmt>>>>,
         exits: Vec<(u64, String)>,
-        rule_locals: Rc<Locals>,
-        locals: Vec<Rc<Locals>>,
+        rule_locals: Arc<Locals>,
+        locals: Vec<Arc<Locals>>,
         prelude: Vec<Stmt>,
     },
     /// The rules of a production one of which is picked by weights
@@ -124,7 +124,7 @@ enum Frame<'p> {
         weights: Vec<String>,
         width: usize,
         items: Vec<Vec<Stmt>>,
-        production: Rc<Locals>,
+        production: Arc<Locals>,
         epilogue: Vec<Stmt>,
     },
     /// An `if` production control (18.17.2) on `condition`, its `then`
@@ -146,7 +146,7 @@ enum Frame<'p> {
     /// `default`, after `prelude` evaluates the selector's effects. Its
     /// labels see `locals`, those of its rule.
     Case {
-        locals: Rc<Locals>,
+        locals: Arc<Locals>,
         prelude: Vec<Stmt>,
         kind: CaseKind,
         selector: Expr,
@@ -412,7 +412,7 @@ impl BodyBuilder<'_, '_, '_> {
                             let (prelude, production) =
                                 self.passed(&name, &signatures[&name], arguments, &locals)?;
                             sequences.push(productions[&name]);
-                            join_locals.push(Rc::new(production));
+                            join_locals.push(Arc::new(production));
                             join_prelude.extend(prelude);
                         }
                         let mut exits = Vec::new();
@@ -805,7 +805,7 @@ impl BodyBuilder<'_, '_, '_> {
         bias: Option<ExprId>,
         rule_locals: &Locals,
         sequences: &[&RsProduction],
-        locals: &[Rc<Locals>],
+        locals: &[Arc<Locals>],
         units: Vec<Vec<Vec<Vec<Stmt>>>>,
         exits: &[(u64, String)],
         statement_exit: Option<&str>,
@@ -1117,7 +1117,7 @@ impl BodyBuilder<'_, '_, '_> {
         if let [rule] = production.rules.as_slice()
             && rule.weight.is_none()
         {
-            return self.rule_frame(rule, &Rc::new(locals), signatures, prelude, epilogue);
+            return self.rule_frame(rule, &Arc::new(locals), signatures, prelude, epilogue);
         }
         let weights = production
             .rules
@@ -1140,7 +1140,7 @@ impl BodyBuilder<'_, '_, '_> {
             weights,
             width,
             items: Vec::new(),
-            production: Rc::new(locals),
+            production: Arc::new(locals),
             epilogue,
         })
     }
@@ -1262,7 +1262,7 @@ impl BodyBuilder<'_, '_, '_> {
             exit: None,
             armed: false,
             units: None,
-            locals: Rc::new(locals),
+            locals: Arc::new(locals),
             prelude,
             epilogue,
         })

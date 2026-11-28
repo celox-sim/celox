@@ -81,7 +81,7 @@ pub(super) fn enter_method_call(
                         && copied_in
             })
             .cloned()
-            .map(Rc::new)
+            .map(Arc::new)
             .map(Destination::receiving);
         children.push((value, shape));
     }
@@ -134,7 +134,7 @@ pub(super) fn enter_call(
     id: ExprId,
     expression: &ExprId,
     args: &[celox_sv_syntax::Argument],
-    scope: &Option<Rc<PackedDimensions>>,
+    scope: &Option<Arc<PackedDimensions>>,
     jobs: &mut Vec<Job>,
     values: &mut Vec<Expr>,
     native: &Declarations,
@@ -259,7 +259,7 @@ fn enter_system_call(
     id: ExprId,
     name: String,
     args: &[celox_sv_syntax::Argument],
-    scope: &Option<Rc<PackedDimensions>>,
+    scope: &Option<Arc<PackedDimensions>>,
     jobs: &mut Vec<Job>,
     values: &mut Vec<Expr>,
     native: &Declarations,
@@ -310,7 +310,7 @@ fn enter_system_call(
         if ordinary {
             let context = match &scope {
                 Some(scope) => scope.clone(),
-                None => Rc::new(dimensions::query_context_for_operand(
+                None => Arc::new(dimensions::query_context_for_operand(
                     argument, tree, session, dimensions,
                 )?),
             };
@@ -586,7 +586,7 @@ fn enter_subroutine_call(
                                 || copied_in(dimensions, &name, position)
                         })
                         .cloned()
-                        .map(Rc::new)
+                        .map(Arc::new)
                         // An output actual is not a value
                         // assigned to the formal.
                         .map(if output {

@@ -2,14 +2,14 @@
 use super::*;
 use bound_patterns::{Key, NativeKind};
 use celox_sv_syntax::{ExprId, ExprKind};
-use std::rc::Rc;
+use std::sync::Arc;
 fn mismatch() -> AnalyzerError {
     AnalyzerError::Parse("native assignment pattern disagrees with validated syntax".into())
 }
 #[derive(Clone)]
 enum Shape<'a> {
     Borrowed(&'a VariableDimensions),
-    Owned(Rc<VariableDimensions>),
+    Owned(Arc<VariableDimensions>),
 }
 impl std::ops::Deref for Shape<'_> {
     type Target = VariableDimensions;
@@ -192,7 +192,7 @@ fn select<'a>(
     }
     if let Some(dim) = shape.unpacked.first() {
         let (left, right, count) = dimension_bounds(functions, &dim.left, &dim.right, dims)?;
-        let sub = Shape::Owned(Rc::new(shape.unpacked_element(&session.types)));
+        let sub = Shape::Owned(Arc::new(shape.unpacked_element(&session.types)));
         let (kind, bindings, fill) =
             extract_type_fill(tree, session, functions, kind, bindings, &sub, dims)?;
         let items = indexed_items(
@@ -225,7 +225,7 @@ fn select<'a>(
         && !rest.is_empty()
     {
         let (left, right, count) = dimension_bounds(functions, &dim.left, &dim.right, dims)?;
-        let sub = Shape::Owned(Rc::new(VariableDimensions::new(VariableShape {
+        let sub = Shape::Owned(Arc::new(VariableDimensions::new(VariableShape {
             declared: type_names::Declared::default(),
             chandle: false,
             randomizable: true,
@@ -350,7 +350,7 @@ fn select<'a>(
                 .zip(values)
                 .map(|(member, (value, default))| Selected {
                     value,
-                    shape: Shape::Owned(Rc::new(shape.member_shape(
+                    shape: Shape::Owned(Arc::new(shape.member_shape(
                         &session.types,
                         member.name(),
                         member.r#type(),
@@ -365,7 +365,7 @@ fn select<'a>(
     }
     let width = shape_width(functions, &shape, dims)
         .ok_or_else(|| unsupported("assignment pattern target width"))?;
-    let bit = Shape::Owned(Rc::new(VariableDimensions::new(VariableShape {
+    let bit = Shape::Owned(Arc::new(VariableDimensions::new(VariableShape {
         declared: type_names::Declared::default(),
         chandle: false,
         randomizable: true,
@@ -542,7 +542,7 @@ pub(in crate::ast) fn bind_native(
                 {
                     let (_, _, count) =
                         dimension_bounds(&tree.functions, &dim.left, &dim.right, dims)?;
-                    let sub = Shape::Owned(Rc::new(shape.unpacked_element(&session.types)));
+                    let sub = Shape::Owned(Arc::new(shape.unpacked_element(&session.types)));
                     jobs.push(Job::Broadcast(count));
                     jobs.push(Job::Value(Selected {
                         value: id,
@@ -593,7 +593,7 @@ pub(in crate::ast) fn bind_native(
                         jobs.extend(members.iter().rev().map(|member| {
                             Job::Value(Selected {
                                 value: id,
-                                shape: Shape::Owned(Rc::new(shape.member_shape(
+                                shape: Shape::Owned(Arc::new(shape.member_shape(
                                     &session.types,
                                     &member.name,
                                     &member.r#type,
@@ -676,7 +676,7 @@ pub(in crate::ast) fn bind_native(
                     jobs.push(Job::Pattern(
                         id,
                         typed
-                            .map(|shape| Shape::Owned(Rc::new(shape)))
+                            .map(|shape| Shape::Owned(Arc::new(shape)))
                             .unwrap_or(shape),
                     ));
                 } else {
@@ -832,7 +832,7 @@ fn unpacked_struct_items<'a>(
         .zip(values)
         .map(|(member, (value, default))| Selected {
             value,
-            shape: Shape::Owned(Rc::new(parent.member_shape(
+            shape: Shape::Owned(Arc::new(parent.member_shape(
                 &session.types,
                 &member.name,
                 &member.r#type,

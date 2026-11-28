@@ -869,7 +869,7 @@ fn class_name(
 /// of `env` where they are not bound.
 fn class_arguments(
     class: &str,
-    specialization: Option<std::rc::Rc<classes::specializations::Specialization>>,
+    specialization: Option<std::sync::Arc<classes::specializations::Specialization>>,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,

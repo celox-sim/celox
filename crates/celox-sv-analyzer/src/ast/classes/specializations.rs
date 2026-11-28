@@ -9,7 +9,7 @@
 //! is its own only specialization.
 
 use crate::ast::Session;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use super::*;
 use celox_sv_syntax::{Argument, ExprKind, ParameterKind};
@@ -60,8 +60,8 @@ fn inherited<'a>(
 
 /// The specialization `name` and the ones it inherits from, each after
 /// those it inherits from.
-fn lineage(session: &Session, name: &str) -> Vec<Rc<Specialization>> {
-    let mut lineage: Vec<Rc<Specialization>> = Vec::new();
+fn lineage(session: &Session, name: &str) -> Vec<Arc<Specialization>> {
+    let mut lineage: Vec<Arc<Specialization>> = Vec::new();
     let mut seen = HashSet::default();
     // A class that extends itself is rejected where it is laid out.
     let mut pending = vec![(name.to_owned(), false)];
@@ -105,7 +105,7 @@ pub(in crate::ast) fn scope_key(generic: &str) -> String {
 }
 
 /// The specialization `name`, if one has been made.
-pub(in crate::ast) fn lookup(session: &Session, name: &str) -> Option<Rc<Specialization>> {
+pub(in crate::ast) fn lookup(session: &Session, name: &str) -> Option<Arc<Specialization>> {
     session
         .class_specializations
         .iter()
@@ -454,7 +454,7 @@ pub(in crate::ast) fn export_declarations(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     members: &HashMap<String, HashMap<String, Type>>,
-) -> HashMap<String, Rc<super::foreign::DeclarationScope>> {
+) -> HashMap<String, Arc<super::foreign::DeclarationScope>> {
     // Only compilation-unit and package declarations have a design-wide name.
     if tree
         .root_unit()
@@ -504,7 +504,7 @@ pub(in crate::ast) fn export_declarations(
                 scope.literals.extend(specialization.literals.clone());
             }
             scope.types = members.get(name).cloned().unwrap_or_default();
-            (name.clone(), Rc::new(scope))
+            (name.clone(), Arc::new(scope))
         })
         .collect()
 }
@@ -1258,7 +1258,7 @@ fn finish_specialization(
     }
     session.class_specializations.push((
         name.clone(),
-        Rc::new(Specialization {
+        Arc::new(Specialization {
             generic: generic.to_owned(),
             hidden: parameters
                 .own_env

@@ -101,7 +101,7 @@ pub(super) fn analyze_sources_with_requests(
             } else {
                 sv::ParsedSource::parse(code, path)?
             };
-            Ok((std::rc::Rc::new(parsed), *code, *path))
+            Ok((std::sync::Arc::new(parsed), *code, *path))
         })
         .collect::<Result<_, sv::AnalyzerError>>()?;
     step("parse");
@@ -191,7 +191,7 @@ pub(super) fn analyze_sources_with_requests(
         return Err(error.clone());
     }
     packages.set_interface_plan(elaboration.clone());
-    let packages = std::rc::Rc::new(packages);
+    let packages = std::sync::Arc::new(packages);
     let mut net_declared_modules = HashSet::default();
     for (source, code, path) in &sources {
         // The first declaration of a module name is the one analyzed.
