@@ -1,0 +1,6 @@
+Revision history for #4850:
+
+rev 2 (content) 2026-11-28 11:50 UTC — Use the repository-approved ordered set in the new regression after test-target Clippy rejected std::collections::HashSet.
+rev 1 (initial) 2026-11-28 11:50 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":4850,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"eadd3c43a6a199d89a508b575ac1621878954216","timestamp_iso":"2026-11-28T11:50:06Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"eadd3c43a6a199d89a508b575ac1621878954216","new_sha":"752cc530198a9ed14d58b234730d2cab1aa2d4e4","timestamp_iso":"2026-11-28T11:50:06Z","reason":"Use the repository-approved ordered set in the new regression after test-target Clippy rejected std::collections::HashSet.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/eadd3c43a6a199d89a508b575ac1621878954216...752cc530198a9ed14d58b234730d2cab1aa2d4e4"}]} -->
