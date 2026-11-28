@@ -2357,6 +2357,11 @@ pub(super) fn selected_element(
             && let Some(target) = native_type(*container, native, tree, session, dims)?
         {
             let ty = &target.element;
+            // An integral element wider than a container word, held in a
+            // record of one field (see `container_type`), is read and
+            // written whole through the record (see `ObjectPlace::Element`).
+            let wide =
+                target.record.is_some() && !target.element_is_unpacked_struct(&session.types);
             // A select of an element that is a container selects its
             // elements, see `set`; other elements have no bits to select.
             if ty.container().is_some()
@@ -2364,8 +2369,7 @@ pub(super) fn selected_element(
                 || ty.is_chandle()
                 || ty.is_unpacked_struct_in(&session.types)
                 || !ty.unpacked_ranges.is_empty()
-                || target.layout.handle.is_some()
-                || target.record.is_some()
+                || (!wide && (target.layout.handle.is_some() || target.record.is_some()))
                 || matches!(
                     ty.kind(),
                     TypeKind::Real
@@ -2559,7 +2563,11 @@ pub(super) fn set(
     let value = if op == "=" {
         element_value(right, tree, session, dims, &target)?
     } else {
-        compound_value(op, right, &container, &index, tree, session, dims, &target)?
+        let value = compound_value(op, right, &container, &index, tree, session, dims, &target)?;
+        match &target.record {
+            Some(record) => classes::object_call(ObjectOp::Box(record.clone()), vec![value]),
+            None => value,
+        }
     };
     Ok(Some(Stmt::Eval(call(
         ContainerOp::Set,
@@ -2588,10 +2596,12 @@ fn compound_value(
         ));
     }
     let element = &target.element;
+    // An integral element wider than a container word is a number held in a
+    // record of one field (see `container_type`); `set` boxes the result.
+    let wide = target.record.is_some() && !target.element_is_unpacked_struct(&session.types);
     if element.container().is_some()
         || target.element_class(&session.types).is_some()
-        || target.layout.handle.is_some()
-        || target.record.is_some()
+        || (!wide && (target.layout.handle.is_some() || target.record.is_some()))
     {
         return Err(unsupported(format!(
             "assignment operator `{op}` on a dynamic element that is not a number"
