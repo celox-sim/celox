@@ -408,6 +408,10 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "class::imported_member_type_dimensions"
                             | "class::imported_member_type_inheritance",
                         ) => ("compile_error", "compile", "source_0.sv:3: syntax error"),
+                        (
+                            "icarus",
+                            "class::specialization_static_members_initialize_before_procedures",
+                        ) => ("compile_error", "compile", "source_0.sv:8: syntax error"),
                         ("icarus", "class::package_constant_class_defaults") => {
                             ("compile_error", "compile", "source_0.sv:4: syntax error")
                         }
@@ -1340,6 +1344,16 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                         ("xezim", "concurrent_assertions::expect_statements") => {
                             ("mismatch", "execute", "assert_eq r2: expected 0x1, got 0x2")
                         }
+                        // xezim initializes static members of a specialization at its first
+                        // use, not before the procedures start (6.8).
+                        (
+                            "xezim",
+                            "class::specialization_static_members_initialize_before_procedures",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq early: expected 0x1, got 0x0",
+                        ),
                         ("verilator", "procedural::disable_block_in_concurrent_task") => {
                             ("mismatch", "execute", "assert_eq ok: expected 0x1, got 0x0")
                         }
