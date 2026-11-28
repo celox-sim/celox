@@ -100,8 +100,7 @@ impl<B: SimBackend> SimulationState<B> {
             .iter_mut()
             .zip(&self.model.counted)
         {
-            *saved = celox_design::CounterKind::ALL
-                .map(|kind| executor.backend().get_as::<u32>(counted.refs.counter(kind)));
+            *saved = counted.refs.snapshot(executor.backend());
         }
         self.process_wakeups
             .retain(|std::cmp::Reverse((_, index))| !declarations.contains(index));

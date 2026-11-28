@@ -319,7 +319,7 @@ pub(super) fn inline_unobserved_nets(
     parallel_ff_units: &FfParts,
     split_commits: &SplitCommits,
     topological_clocks: &[AbsoluteAddr],
-    counted: &BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>>,
+    counted: &BTreeMap<AbsoluteAddr, EventWatch<AbsoluteAddr>>,
     occurrence_probes: &[(VarAtomBase<AbsoluteAddr>, AbsoluteAddr)],
     declaration_probes: &[(VarAtomBase<AbsoluteAddr>, AbsoluteAddr)],
 ) -> Result<Vec<AbsoluteAddr>, ParserError> {
@@ -446,7 +446,7 @@ pub(super) fn plan_settle_flags(
     design: &Design,
     logic: &StateGraph,
     units: &Units,
-    counted: &BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>>,
+    counted: &BTreeMap<AbsoluteAddr, EventWatch<AbsoluteAddr>>,
     clock_nets: &HashSet<AbsoluteAddr>,
     write_domains: &HashMap<AbsoluteAddr, Vec<AbsoluteAddr>>,
 ) -> Option<scheduler::SettlePartitioning<AbsoluteAddr>> {
@@ -489,7 +489,7 @@ pub(super) fn plan_settle_flags(
         let mut external_readers: HashMap<AbsoluteAddr, Vec<usize>> = HashMap::default();
         for site in &timing.wait_sites {
             for &(signal, kind) in &site.terms {
-                let counter = counted.get(&signal).map(|slots| slots.counter(kind));
+                let counter = counted.get(&signal).and_then(|watch| watch.counter(kind));
                 for watched in std::iter::once(signal).chain(counter) {
                     let readers = external_readers.entry(watched).or_default();
                     if !readers.contains(&site.process) {

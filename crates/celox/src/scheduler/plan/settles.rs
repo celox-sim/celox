@@ -156,9 +156,12 @@ impl<'a> PlanBuilder<'a> {
                     .flat_map(celox_design::WaitGate::reads)
                     .map(storage)
             }))
-            .chain(model.counted.iter().flat_map(|counted| {
-                CounterKind::ALL.map(|kind| storage(counted.slots.counter(kind)))
-            }))
+            .chain(
+                model
+                    .counted
+                    .iter()
+                    .flat_map(|counted| counted.counters().map(|(_, addr)| storage(addr))),
+            )
             .filter(|signal| comb_stores.contains(signal))
             .collect();
         let written_homes: HashSet<_> = comb_stores.iter().copied().map(storage).collect();

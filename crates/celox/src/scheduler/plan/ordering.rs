@@ -49,7 +49,9 @@ impl<'a> PlanBuilder<'a> {
                     );
                 }
                 counted_events.push(CountedEvent {
-                    counter: counted.slots.counter(kind),
+                    counter: counted
+                        .counter(kind)
+                        .ok_or("missing domain occurrence counter")?,
                     baseline_offset,
                     events: domains,
                 });

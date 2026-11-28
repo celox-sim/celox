@@ -284,6 +284,7 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                     .domains
                     .iter()
                     .filter_map(|(event, kind)| {
+                        counted.counter(*kind)?;
                         Some((backend.resolve_event_opt(event)?.id(), *kind))
                     })
                     .collect(),
@@ -293,7 +294,7 @@ impl<B: SimBackend> ResolvedSchedule<B> {
             counted
                 .iter()
                 .find(|counted| counted.refs.signal == signal)
-                .map(|counted| counted.refs.counter(kind))
+                .and_then(|counted| counted.refs.counter(kind))
         };
         let gate_refs = |gate: &celox_design::WaitGate<AbsoluteAddr>| GateRefs {
             signal: resolve(&gate.signal),
@@ -462,7 +463,7 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                     .domains
                     .iter()
                     .map(move |&(id, kind)| CountedTrigger {
-                        counter: counted.refs.counter(kind),
+                        counter: counted.refs.counter(kind).expect("resolved counted domain"),
                         id,
                         seen: (index, crate::timing::kind_index(kind)),
                     })
@@ -582,7 +583,8 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                                                 signal.width,
                                                 backend.layout().four_state && signal.is_4state,
                                                 model.counted.iter().any(|counted| {
-                                                    counted.slots.signal == term.signal
+                                                    counted.signal == term.signal
+                                                        && counted.counter(term.kind).is_some()
                                                 }),
                                                 term.gate
                                                     .is_some_and(|gate| gate.counters.is_some()),
@@ -689,10 +691,10 @@ fn counted_refs<B: SimBackend>(
 ) -> CountedRefs {
     let resolve = |addr: &AbsoluteAddr| backend.resolve_signal(addr);
     CountedRefs {
-        signal: resolve(&counted.slots.signal),
-        changes: resolve(&counted.slots.changes),
-        rises: resolve(&counted.slots.rises),
-        falls: resolve(&counted.slots.falls),
+        signal: resolve(&counted.signal),
+        changes: counted.changes.as_ref().map(resolve),
+        rises: counted.rises.as_ref().map(resolve),
+        falls: counted.falls.as_ref().map(resolve),
     }
 }
 
