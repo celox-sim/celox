@@ -386,11 +386,11 @@ mod tests {
         (result, format!("{warnings:?}"), lines)
     }
 
-    /// Lowering the state modules of the packages on several threads makes
-    /// what lowering them one after another makes: the same SIR, warnings
-    /// and recursion report.
+    /// Lowering the specialized modules and the state modules of the
+    /// packages on several threads makes what lowering them one after
+    /// another makes: the same SIR, warnings and recursion report.
     #[test]
-    fn package_states_lower_alike_on_any_number_of_threads() {
+    fn modules_and_package_states_lower_alike_on_any_number_of_threads() {
         let packages = (0..6)
             .map(|index| {
                 format!(
@@ -413,9 +413,21 @@ mod tests {
             .collect::<String>();
         let source = format!(
             "{packages}
-             module Top(output int sum);
+             module Leaf #(parameter int W = 1)(input logic clk, output int count);
+               function automatic int step(int n);
+                 if (n > 0) return step(n - 1) + W;
+                 return 0;
+               endfunction
+               always_ff @(posedge clk) count <= count + step(2);
+             endmodule
+             module Top(input logic clk, output int sum);
+               int a, b, c, d;
+               Leaf #(1) l1(.clk(clk), .count(a));
+               Leaf #(2) l2(.clk(clk), .count(b));
+               Leaf #(3) l3(.clk(clk), .count(c));
+               Leaf #(4) l4(.clk(clk), .count(d));
                assign sum = p0::start + p1::start + p2::start + p3::start
-                 + p4::start + p5::start;
+                 + p4::start + p5::start + a + b + c + d;
              endmodule"
         );
         let sequential = schedule(&source, 1, "ok");
