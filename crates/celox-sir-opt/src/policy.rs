@@ -314,9 +314,9 @@ impl OptimizeOptions {
     }
 
     /// Compile with at most `threads` threads (at least one): the frontend
-    /// lowers independent modules on them, and native code generation
-    /// compiles independent units on as many of them as its memory budget
-    /// allows. One compiles everything on the calling thread. They are not
+    /// lowers independent modules on them, the optimizer optimizes
+    /// independent units on them, and native code generation compiles
+    /// independent units on as many of them as its memory budget allows. One compiles everything on the calling thread. They are not
     /// simulation lanes (see [`Self::set_parallel_lanes`]); the result is the
     /// same for every count. The default is the available parallelism of
     /// the host.
