@@ -111,9 +111,9 @@ pub(super) struct ExecutionArgs {
     /// Simulation threads, including the calling thread.
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=64))]
     pub threads: u32,
-    /// Compile threads: the SystemVerilog frontend and native code
-    /// generation compile independent modules and units on up to this many
-    /// threads. The compiled program is the same for every count. Default:
+    /// Compile threads: the SystemVerilog frontend, the SIR optimizer and
+    /// native code generation compile independent modules and units on up
+    /// to this many threads. The compiled program is the same for every count. Default:
     /// the available parallelism of the host.
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
     pub compile_threads: Option<u32>,

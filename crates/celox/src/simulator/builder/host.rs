@@ -473,9 +473,10 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
     }
 
     /// Compile with at most `threads` host threads (at least one). The
-    /// SystemVerilog frontend lowers independent modules on them, and
-    /// native code generation compiles independent units on as many as its
-    /// memory budget allows. One compiles on the calling thread only. The
+    /// SystemVerilog frontend lowers independent modules on them, the SIR
+    /// optimizer optimizes independent units on them, and native code
+    /// generation compiles independent units on as many as its memory
+    /// budget allows. One compiles on the calling thread only. The
     /// compiled program is the same for every count; these are not the
     /// simulation threads of [`Self::threads`]. The default is the
     /// available parallelism of the host.
