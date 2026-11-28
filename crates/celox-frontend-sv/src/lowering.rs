@@ -279,13 +279,13 @@ pub(crate) struct LoweredSvModule {
 struct AnalyzedSvModule {
     name: String,
     interface_member_paths: HashMap<String, sv::InterfaceMemberPath>,
-    source: std::rc::Rc<sv::ParsedSource>,
+    source: std::sync::Arc<sv::ParsedSource>,
     implicit_nets_allowed: bool,
     /// The positional interface of every module in all sources, used to bind
     /// positional port and parameter connections.
     interfaces: std::sync::Arc<sv::ModuleInterfaces>,
     /// The packages declared in all sources, analyzed once.
-    packages: std::rc::Rc<sv::Packages>,
+    packages: std::sync::Arc<sv::Packages>,
 }
 
 #[derive(Clone)]

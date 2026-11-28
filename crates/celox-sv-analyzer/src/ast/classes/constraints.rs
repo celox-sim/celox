@@ -3462,7 +3462,7 @@ pub(in crate::ast) fn array(
 #[derive(Clone)]
 pub(in crate::ast) struct Inline {
     pub key: usize,
-    pub class: std::rc::Rc<Class>,
+    pub class: std::sync::Arc<Class>,
     pub constraints: Vec<ConstraintExpr>,
     pub inputs: Vec<Type>,
     pub dimensions: PackedDimensions,

@@ -1,6 +1,6 @@
 //! Native expression jobs and shared semantic IR kernels.
 use super::*;
-use std::rc::Rc;
+use std::sync::Arc;
 mod enter;
 mod finish;
 mod selected_values;
@@ -711,19 +711,19 @@ struct MethodCall {
 /// value of its own.
 #[derive(Debug, Clone)]
 pub(super) struct Destination {
-    shape: Rc<VariableDimensions>,
+    shape: Arc<VariableDimensions>,
     copied_out: bool,
 }
 
 impl Destination {
-    pub(super) fn receiving(shape: Rc<VariableDimensions>) -> Self {
+    pub(super) fn receiving(shape: Arc<VariableDimensions>) -> Self {
         Self {
             shape,
             copied_out: false,
         }
     }
 
-    pub(super) fn copied_out(shape: Rc<VariableDimensions>) -> Self {
+    pub(super) fn copied_out(shape: Arc<VariableDimensions>) -> Self {
         Self {
             shape,
             copied_out: true,
@@ -745,14 +745,14 @@ impl std::ops::Deref for Destination {
 }
 
 enum Job {
-    Enter(ExprId, Option<Destination>, Option<Rc<PackedDimensions>>),
-    Finish(Finish, usize, Option<Rc<PackedDimensions>>),
+    Enter(ExprId, Option<Destination>, Option<Arc<PackedDimensions>>),
+    Finish(Finish, usize, Option<Arc<PackedDimensions>>),
     /// A streaming concatenation operand of a bit-stream cast to an integral
     /// type (IEEE 1800-2023 11.4.14).
     Stream(
         ExprId,
         Option<streams::Receiver>,
-        Option<Rc<PackedDimensions>>,
+        Option<Arc<PackedDimensions>>,
     ),
 }
 
@@ -843,7 +843,7 @@ fn bind_value_in(
     let mut permits = chandles::Permits::new(root, chandle);
     let mut jobs = vec![Job::Enter(
         root,
-        target.cloned().map(Rc::new).map(Destination::receiving),
+        target.cloned().map(Arc::new).map(Destination::receiving),
         None,
     )];
     let mut values = Vec::new();

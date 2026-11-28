@@ -12,11 +12,11 @@ use crate::{AnalyzerError, Design, Ir, ModuleInterfaces, Packages, analyze, ast,
 /// cached top-level declaration indices, without scanning unrelated bodies.
 /// No elaborated AST is cached: overrides and constant-function environments
 /// remain local to each analysis. The private parsing context is confined to
-/// its parsing thread; consumers can share it there with [`std::rc::Rc`].
+/// its parsing thread; consumers can share it there with [`std::sync::Arc`].
 pub struct ParsedSource {
-    code: std::rc::Rc<str>,
+    code: std::sync::Arc<str>,
     path: PathBuf,
-    tree: std::rc::Rc<source_tree::SourceTree>,
+    tree: std::sync::Arc<source_tree::SourceTree>,
     index: ast::module_index::ModuleIndex,
     /// Immutable declaration diagnostics, indexed once alongside module syntax.
     warnings: HashMap<String, Vec<ir::AnalyzerWarning>>,
@@ -70,7 +70,7 @@ impl ParsedSource {
         Ok(Self {
             code: code.into(),
             path: path.to_path_buf(),
-            tree: std::rc::Rc::new(tree),
+            tree: std::sync::Arc::new(tree),
             index,
             warnings,
             duplicate_modules,
