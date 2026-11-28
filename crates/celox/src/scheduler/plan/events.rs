@@ -169,12 +169,7 @@ impl<'a> PlanBuilder<'a> {
             .probes
             .iter()
             .map(|(source, _)| storage(source.id))
-            .chain(
-                model
-                    .counted
-                    .iter()
-                    .map(|counted| storage(counted.slots.signal)),
-            )
+            .chain(model.counted.iter().map(|counted| storage(counted.signal)))
             .collect();
         // Blocking results need an intermediate Active-region settle when
         // they can wake a process, move a clock, or feed stateful combinational

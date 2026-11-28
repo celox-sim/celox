@@ -23,6 +23,7 @@ pub(super) struct ClockAnalysis {
 pub(super) fn analyze_clock_dependencies(
     bindings: &PackageBindings,
     updates: &mut ScheduledUpdates,
+    declared_domains: &BTreeSet<AbsoluteAddr>,
     comb_blocks: &[LogicPath<AbsoluteAddr>],
     arena: &SLTNodeArena<AbsoluteAddr>,
     clock_domains: &HashMap<AbsoluteAddr, AbsoluteAddr>,
@@ -45,15 +46,17 @@ pub(super) fn analyze_clock_dependencies(
             .copied(),
     );
 
-    declare_event_domains(
-        bindings,
-        updates,
-        clock_domains,
-        expanded,
-        instance_modules,
-        modules,
-        &mut unique_clocks,
-    );
+    for &canonical in declared_domains {
+        unique_clocks.insert(canonical);
+        let update = updates.events.entry(canonical).or_default();
+        for at in [
+            UpdateEntry::Transition,
+            UpdateEntry::Sample,
+            UpdateEntry::Publish,
+        ] {
+            update.entry_or_default(at);
+        }
+    }
 
     record_ff_writes(
         updates,
@@ -144,49 +147,6 @@ pub(super) fn analyze_clock_dependencies(
         independent_derived,
         combinationally_read,
         level_unread_by_domain,
-    }
-}
-
-/// Make every event-typed signal an event domain, even one no flip-flop is
-/// driven by.
-fn declare_event_domains(
-    bindings: &PackageBindings,
-    updates: &mut ScheduledUpdates,
-    clock_domains: &HashMap<AbsoluteAddr, AbsoluteAddr>,
-    expanded: &HashMap<InstancePath, InstanceId>,
-    instance_modules: &HashMap<InstanceId, ModuleId>,
-    modules: &HashMap<ModuleId, SimModule>,
-    unique_clocks: &mut BTreeSet<AbsoluteAddr>,
-) {
-    // Include event-typed signals even when no FF is directly driven by them.
-    // A testbench clock may only feed a combinationally gated clock, in which
-    // case it would otherwise be absent from the dependency graph entirely.
-    for id in expanded.values() {
-        let module_id = &instance_modules[id];
-        let sim_module = &modules[module_id];
-        for (var_id, var) in &sim_module.variables {
-            let kind = var.metadata.kind;
-            if !matches!(
-                kind,
-                DomainKind::ClockPosedge
-                    | DomainKind::ClockNegedge
-                    | DomainKind::ResetAsyncHigh
-                    | DomainKind::ResetAsyncLow
-            ) {
-                continue;
-            }
-            let addr = bindings.locate(*id, *var_id);
-            let canonical = clock_domains.get(&addr).copied().unwrap_or(addr);
-            unique_clocks.insert(canonical);
-            let update = updates.events.entry(canonical).or_default();
-            for at in [
-                UpdateEntry::Transition,
-                UpdateEntry::Sample,
-                UpdateEntry::Publish,
-            ] {
-                update.entry_or_default(at);
-            }
-        }
     }
 }
 
