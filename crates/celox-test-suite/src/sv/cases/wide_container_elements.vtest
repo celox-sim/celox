@@ -120,3 +120,79 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "-1 4294967295 1 4294967295\n2 2\n"))
+
+; IEEE 1800-2023 7.4.6, 11.5.1: a bit-select or part-select of an element
+; wider than 64 bits of a queue, dynamic array or associative array writes
+; those bits of the element, which a class property may hold. An index of a
+; queue outside it ignores the write (7.10.1), and a streaming unpack writes
+; an element or a select of one as a variable (11.4.14.3).
+(case selects_write_wide_container_elements
+  (source "wide_selects.sv" #"
+module Top(output logic [127:0] beat, output logic [7:0] top, output bit [79:0] keyed,
+           output bit states, output int size, output bit streamed);
+    class tx;
+        bit [511:0] rdata [$:256];
+    endclass
+    bit [127:0] q [$];
+    logic [99:0] d [];
+    bit [79:0] a [int];
+    bit [99:0] s [$];
+    bit [7:0] b8;
+    initial begin
+        tx p;
+        p = new;
+        p.rdata.push_back(0);
+        for (int j = 0; j < 16; j++)
+            p.rdata[0][8*j+7 -: 8] = 8'h10 + j;
+        p.rdata[0][511:504] = 8'hab;
+        beat = p.rdata[0][127:0];
+        top = p.rdata[0][511:504];
+        q.push_back(0);
+        q[0][127] = 1;
+        q[0][64 +: 4] = 4'h9;
+        q[3][0] = 1;
+        size = q.size();
+        a[5][79:72] = 8'h5a;
+        a[5][0] = 1;
+        keyed = a[5];
+        d = new[1];
+        d[0][99:96] = 4'b10xz;
+        states = d[0][99:96] === 4'b10xz && d[0][95:0] === 'x;
+        s.push_back(0);
+        {>>{s[0]}} = 100'h1_2345_6789_abcd_ef01_2345_6789;
+        {>>{b8, s[0][7:0]}} = 16'hbeef;
+        streamed = s[0] == 100'h1_2345_6789_abcd_ef01_2345_67ef && b8 == 8'hbe;
+    end
+endmodule
+"#)
+  (four_state) (top Top) (run_until 0)
+  (assert_eq beat 0x1f1e1d1c1b1a19181716151413121110) (assert_eq top 0xab)
+  (assert_eq keyed 0x5a000000000000000001) (assert_eq states 1) (assert_eq size 1)
+  (assert_eq streamed 1))
+
+; IEEE 1800-2023 11.4.1: an assignment operator on an element wider than 64
+; bits of a container, or on a select of one, combines the element's value.
+(case assignment_operators_on_wide_container_elements
+  (source "wide_operators.sv" #"
+module Top(output bit [99:0] sum, output bit [99:0] product, output bit [7:0] lane);
+    bit [99:0] q [$];
+    bit [99:0] d [];
+    initial begin
+        q.push_back(100'hf);
+        q[0] += 1;
+        q[0] |= 100'h3 << 96;
+        sum = q[0];
+        d = new[1];
+        d[0] = 100'h5;
+        d[0] *= 100'h3_0000_0000_0000_0000;
+        product = d[0];
+        d[0][7:0] = 8'h01;
+        d[0][7:0] += 8'h10;
+        d[0][7:0]++;
+        lane = d[0][7:0];
+    end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (assert_eq sum 0x3000000000000000000000010) (assert_eq product 0xf0000000000000000)
+  (assert_eq lane 0x12))
