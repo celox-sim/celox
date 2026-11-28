@@ -706,6 +706,17 @@
     },
     {
       "category": "Types",
+      "detail": "class::specialization_static_members_initialize_before_procedures at 7711:26: assert_eq early: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "class::specialization_static_members_initialize_before_procedures",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "",
       "expectation": "Simulation",
       "name": "class::specializations_are_named_by_parameter_values",

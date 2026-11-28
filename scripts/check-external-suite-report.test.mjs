@@ -333,6 +333,7 @@ test("every retained baseline accepts only its existing failures", () => {
                 "class::prototype_formals_inherit_types",
                 "class::real_properties",
                 "class::scoped_typedef_handles",
+                "class::specialization_static_members_initialize_before_procedures",
                 "class::specializations_of_procedural_aggregate_types",
                 "class::specializations_of_procedural_constants",
                 "class::specialized_scope_typedef_calls",
