@@ -57,13 +57,13 @@ fn benchmark_compilation(c: &mut Criterion) {
 fn benchmark_scaling(c: &mut Criterion) {
     // Warm analyzer state before any measured span, including filtered runs.
     compile_default(COUNTER, "Top", Some(("N", 1)));
-    // Each large design runs once: no five-run warmup or adaptive resampling.
-    // Walltime uses this fixed schedule even for the largest graphs.
+    // Each large design runs twice, the fewest samples the walltime analysis
+    // accepts: no five-run warmup or adaptive resampling. Walltime uses this
+    // fixed schedule even for the largest graphs.
+    let twice = IterManualOptions::new().rounds(2);
     for n in [4, 8, 16, 32] {
         c.bench_function(&format!("compile/sorter_tree/n{n}"), |b| {
-            b.iter_manual_unstable(IterManualOptions::new(), || {
-                black_box(sorter_tree::compile(black_box(n)))
-            });
+            b.iter_manual_unstable(twice, || black_box(sorter_tree::compile(black_box(n))));
         });
     }
     macro_rules! backend {
@@ -74,7 +74,7 @@ fn benchmark_scaling(c: &mut Criterion) {
                     c.bench_function(
                         &format!("scaling/nested_write/{}/{state}/complete_{width}", $name),
                         |b| {
-                            b.iter_manual_unstable(IterManualOptions::new(), || {
+                            b.iter_manual_unstable(twice, || {
                                 nested_write::complete!($build, black_box(width), four_state)
                             })
                         },
@@ -83,7 +83,7 @@ fn benchmark_scaling(c: &mut Criterion) {
                 c.bench_function(
                     &format!("scaling/nested_write/{}/{state}/incomplete_512", $name),
                     |b| {
-                        b.iter_manual_unstable(IterManualOptions::new(), || {
+                        b.iter_manual_unstable(twice, || {
                             nested_write::incomplete!($build, black_box(512), four_state)
                         })
                     },
@@ -95,9 +95,7 @@ fn benchmark_scaling(c: &mut Criterion) {
     backend!("native", build_native);
     backend!("cranelift", build_cranelift);
     c.bench_function("scaling/nested_write/strict_reject_512", |b| {
-        b.iter_manual_unstable(IterManualOptions::new(), || {
-            nested_write::strictly_reject(black_box(512))
-        });
+        b.iter_manual_unstable(twice, || nested_write::strictly_reject(black_box(512)));
     });
 }
 

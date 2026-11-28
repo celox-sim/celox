@@ -167,15 +167,19 @@ Affected PR and full CI retain small nested-write semantic regressions on
 interpreter, native and Cranelift backends in both two-state and four-state modes,
 wide-value latch checks, and a small sorter compilation smoke test.
 The 257/512-bit per-bit graph cases and sorter sizes 4/8/16/32 are measured by
-`benches/compilation.rs` in the existing daily/manual CodSpeed workflow.
+`benches/compilation.rs` in the CodSpeed workflow.
 Compilation benchmarks use CodSpeed walltime measurement on its ARM64 Graviton
 Macro Runner: CPU simulation made
-a single 512-bit case take tens of minutes. The benchmark step has a 15-minute
-timeout and the complete job a 60-minute limit; a timeout is reported as failure.
+a single 512-bit case take tens of minutes. The same job runs `benches/scaling.rs`
+and `benches/rtlmeter.rs`; its benchmark step has a 120-minute timeout and the
+complete job a 210-minute limit; a timeout is reported as failure. The
+benchmarks build with thin LTO: fat LTO of all of them at once starved the
+32 GB runner.
 The organization runner group must allow this public repository to use CodSpeed
 Macro Runners. Simulation and walltime measurements have separate baselines.
 Nested-write benchmarks reuse the same semantic assertions as the small tests.
-Scaling cases use one iteration without per-case warmups or adaptive sampling;
+Scaling cases run twice (the fewest samples the walltime analysis accepts),
+without per-case warmups or adaptive sampling;
 a small counter warms process-global analyzer state before measurement.
 Sorter sizes are separate CodSpeed measurements; performance comparisons replace
 process-time ratio assertions in ordinary tests. Failures use the existing
@@ -184,7 +188,7 @@ CodSpeed reporting workflow.
 Build and run them with the same CodSpeed harness as CI:
 
 ```sh
-cargo codspeed build --locked --measurement-mode walltime -p celox --bench compilation
+cargo codspeed build --locked --measurement-mode walltime -p celox --features cranelift --bench compilation
 cargo codspeed run --measurement-mode walltime -p celox --bench compilation
 ```
 
@@ -452,7 +456,7 @@ Local validation uses the behavior-based matrix above.
 | Daily at 01:17 UTC (10:17 JST) | Full `ci.yml` on the default branch, with every change-classifier output enabled. Includes native/WASI NAPI, JS/browser tests, ARM64, script tests, and all ordinary Celox workspace tests. |
 | Daily from `nightly.yml` at 02:43 UTC (11:43 JST) | Dispatch the same full CI on `develop`, with detection of its Veryl dependency lane. Queue nightly packages. External simulator comparisons and Heliodor are not dispatched on `develop`. |
 | Daily at 01:47 UTC (10:47 JST) | `bench.yml` measures Rust, Verilator, and TypeScript on one host and publishes master history. Manual dispatch supports branch measurements. |
-| Daily at 02:17 UTC (11:17 JST) | `codspeed.yml` measures compile time on the default branch using CPU simulation. Execution failures and CodSpeed performance-check failures open or update a branch issue; the next healthy run closes it. Manual dispatch supports branch measurements. PRs, merge groups, and pushes do not run CodSpeed. |
+| Every push to `master`, daily at 02:17 UTC (11:17 JST), and pull requests labelled `bench` | `codspeed.yml` measures compile time, scheduler scaling, whole-design fallbacks and RTLMeter designs on CodSpeed's ARM64 Macro Runner (walltime); see [Benchmarks](docs/benchmarks/index.md). Execution failures and CodSpeed performance-check failures on `master` and `develop` open or update a branch issue; the next healthy run closes it. Manual dispatch supports branch measurements; BlackParrot runs nightly, on dispatch with `blackparrot`, or with the `bench-blackparrot` label. Other PRs and merge groups do not run CodSpeed. |
 | Daily at 02:37 UTC (11:37 JST) | `heliodor-bench.yml` runs the complete master Linux suite on x86-64 and AArch64. Explicit manual selections retain focused suite runs and ARM64 profiling. PRs do not run this workflow; its tooling tests run in `Lint & Format` with the other script tests. |
 | Every full CI run | Run the pinned upstream `common_cells` Gray code SV TB through `celox run --project`, plus an assertion negative control. Logs are retained for 14 days and failures feed the Full CI issue. See [the reproduction instructions](conformance/common-cells/README.md). |
 | Daily at 03:47 UTC (12:47 JST) on the default branch, and on demand | Independent `external-comparisons.yml` runs every shared Veryl and SystemVerilog case against Verilator, Icarus, and xezim, with locked Nix tools. Run the live adapter tests normally marked ignored because they need external tools. Preserve reports and per-case diagnostics as artifacts for 14 days, including on failure; matrix failures do not cancel the other comparisons. |

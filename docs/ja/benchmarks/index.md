@@ -60,10 +60,15 @@ Heliodor のグラフは、異なるランナー間の結果を直接比較し�
 ## ローカル実行
 
 ```bash
-# CodSpeed によるコンパイル時間ベンチマーク
+# CI と同じ CodSpeed ベンチマーク。rtlmeter ベンチマークは CELOX_RTLMETER_LAYOUT に
+# 配置したケースを実行し、未設定なら何も実行しない（PyYAML が必要。--optional で
+# BlackParrot も追加）
+python3 scripts/run-rtlmeter-bench.py prepare work/rtlmeter
+python3 scripts/run-rtlmeter-bench.py codspeed-layout work/rtlmeter work/rtlmeter-layout
+export CELOX_RTLMETER_LAYOUT=$PWD/work/rtlmeter-layout
 cargo install cargo-codspeed --locked --version 5.0.1
-cargo codspeed build --locked -p celox --bench compilation
-cargo codspeed run -p celox
+cargo codspeed build --locked -p celox --features cranelift --bench compilation --bench scaling --bench rtlmeter
+cargo codspeed run -p celox --bench compilation --bench scaling --bench rtlmeter
 
 # Rust ベンチマーク
 cargo bench -p celox
@@ -81,15 +86,38 @@ python3 scripts/compare-vcd-verilator.py
 [VCD の測定条件と結果](../../internals/vcd-performance.md#verilator-comparison)には、
 idle・sparse・dense の各負荷で、記録なし／ありを比較した結果をまとめています。
 
-CodSpeed ワークフローは毎日 02:17 UTC（11:17 JST）にデフォルトブランチで
-実行し、任意のブランチでの手動実行にも対応します。pull request、merge queue、
-push では実行しません。決定的な CPU simulation の測定結果を CodSpeed に送信し、
-リポジトリの CodSpeed 回帰しきい値に従って過去の測定と比較します。
+CodSpeed ワークフローは CodSpeed の ARM64 Macro Runner
+（`codspeed-macro-arm64-graviton-ubuntu-22-04`）上で walltime 計測を行います。
+`master` への push ごと、毎日 02:17 UTC（11:17 JST）、手動実行、`bench` ラベルの
+付いた pull request（`bench-blackparrot` では BlackParrot も計測）で実行します。
+1 回の実行でランナーを 1〜2 時間使うため、その他の pull request と merge queue では
+実行しません。結果はリポジトリの CodSpeed 回帰しきい値に従って過去の測定と比較します。
 `master` と `develop` では、実行失敗や性能解析の失敗時に
 `CodSpeed is failing on <branch>` Issue を作成・更新し、次の実行と解析が
 成功すると閉じます。解析結果の欠落や未完了も失敗として報告します。
 Issue には実行へのリンクと、性能低下の場合は比較結果とベンチマークの詳細を
 含めます。ローカル実行ではベンチマーク suite が動作することだけを確認します。
+
+| ベンチマーク | 計測内容 | 検出する回帰 |
+|---|---|---|
+| `compile/*`、`scaling/nested_write/*`、`compile/sorter_tree/*`（`compilation.rs`） | Veryl 設計のビルド時間 | コンパイル時間の悪化、超線形なパス |
+| `scaling/clock_alias/{compile,sim}/n{16,1024}`（`scaling.rs`） | それぞれ独自の `assign l1clk = clk` でクロックされる N 個のフロップ。テストベンチは `clk` を negedge で検出（VeeR-EH1 にはこのコピーが 1,451 個ある） | クロックドメイン数に比例して増えるイベントあたりのスケジューラコスト |
+| `scaling/gated_clock/{compile,sim}/n{16,1024}` | クロックゲート（negedge で `en_ff` を取り込み、`gclk = clk & en_ff`）の後ろの N 個のフロップ | ゲート・派生クロックあたりのコスト |
+| `fallback/<construct>/sim` と `fallback/baseline/sim` | 64 本の組合せレーンに、組合せ `$display`、`assert final`、`always @*` 内の DPI-C 呼び出し、`string` 配列、`final` ブロックのいずれか 1 つを追加 | 1 つの構文で設計全体が遅い経路に移る回帰（settle skip や partitioned settle の無効化、スロットごとの compiled run、reference walk）。いずれも baseline に近いままであるべき |
+| `rtlmeter/<case>/compile`（`rtlmeter.rs`） | VeeR-EL2、VeeR-EH1、XuanTie-E906 の CoreMark に対する `celox run` の解析とコード生成（BlackParrot 1x1 は `bench-blackparrot` または nightly） | 実設計でのコンパイル時間の回帰 |
+| `rtlmeter/<case>/cycle` | 固定 `+max_cycles` ウィンドウの実行時間をサイクル数で割った値（native、O2、2-state、1 スレッド。プログラムのロードなどテストベンチの起動を含む） | 設計全体を遅くする構文を含む、実設計でのサイクルあたりの回帰 |
+
+シミュレーションベンチマーク（`sim`）は 1,000 クロックサイクルの時間を報告します。
+RTLMeter ケースは `benchmarks/rtlmeter/codspeed_manifest.json`（固定した RTLMeter
+リビジョン、ウィンドウ、回数）から作ります。各実行はテストベンチの失敗なしに
+ウィンドウの終わりまで到達しなければならず、そうでなければベンチマークは失敗します。
+常駐メモリが `CELOX_RTLMETER_MEMORY_LIMIT_MIB`（CI では 20 GiB。VeeR-EH1 のピークは約 7 GB）
+または時間が `CELOX_RTLMETER_TIMEOUT_SECS` を超えた実行は強制終了され、そのベンチマークは
+失敗します。各実行は開始とピークメモリを出力します。ワークフローは CodSpeed の walltime
+プロファイラを使いません。プロファイラは celox コマンドを含むすべての計測対象プロセスを
+8 KiB のスタックコピー付きで数十分間サンプリングし、ランナー（32 GB、Cortex-A72 16 コア）が
+接続を失いました。ビルドと実行の間、メモリとディスクの使用量を毎分出力します
+（`scripts/with-resource-log.sh`）。
 
 ローカル計測は、同じマシン上で 2 つのリビジョンを比較する場合に最も有効です。
 CI 履歴は、単発の小さな差より長期的な傾向の確認に向いています。

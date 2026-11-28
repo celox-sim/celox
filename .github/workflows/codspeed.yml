@@ -1,22 +1,46 @@
-name: Compile-time Benchmarks
+name: CodSpeed Benchmarks
 
+# Compile-time, scheduler-scaling and RTLMeter benchmarks on CodSpeed's ARM64
+# Macro Runner (walltime). Every push to master is measured, so a regression
+# shows on its commit; a pull request is measured only with the `bench` label
+# (`bench-blackparrot` adds the BlackParrot case) because a run takes one to
+# two hours of the runner.
 on:
   schedule:
     - cron: "17 2 * * *"
+  push:
+    branches: [master]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+  pull_request:
+    types: [opened, reopened, synchronize, labeled]
   workflow_dispatch:
     inputs:
       runner_probe:
         description: Check Macro Runner availability without building or benchmarking
         type: boolean
         default: false
+      blackparrot:
+        description: Also measure BlackParrot 1x1 CoreMark (about an hour more)
+        type: boolean
+        default: false
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+  # One group per commit outside pull requests: GitHub keeps only one pending
+  # run per group, so a shared master group would drop the measurements of a
+  # burst of pushes. A newer push to a pull request replaces its older run.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_BENCH_DEBUG: "0"
+  # Fat LTO links of four celox binaries (three benchmarks and the CLI) at
+  # once, with the debug info CodSpeed adds, starved the 32 GB Cortex-A72
+  # runner until it lost its connection (and took over 40 minutes).
+  CARGO_PROFILE_BENCH_LTO: thin
+  PYTHONDONTWRITEBYTECODE: "1"
 
 permissions: {}
 
@@ -32,14 +56,35 @@ jobs:
 
   codspeed:
     name: CodSpeed
-    if: inputs.runner_probe != true
-    timeout-minutes: 60
+    # A pull request runs only with a benchmark label, and adding another
+    # label does not start it again.
+    if: >-
+      inputs.runner_probe != true && (github.event_name != 'pull_request' ||
+      ((contains(github.event.pull_request.labels.*.name, 'bench') ||
+      contains(github.event.pull_request.labels.*.name, 'bench-blackparrot')) &&
+      (github.event.action != 'labeled' || github.event.label.name == 'bench' ||
+      github.event.label.name == 'bench-blackparrot')))
+    timeout-minutes: 210
     runs-on: codspeed-macro-arm64-graviton-ubuntu-22-04
     outputs:
       run-id: ${{ steps.benchmarks.outputs.run-id }}
     permissions:
       contents: read
       id-token: write
+    env:
+      # BlackParrot compiles for about 8 minutes on x86-64 and loads its
+      # program for about 3 more, several times that on this runner: nightly,
+      # on request, or with the `bench-blackparrot` label.
+      BLACKPARROT: ${{ github.event_name == 'schedule' || inputs.blackparrot == true || contains(github.event.pull_request.labels.*.name, 'bench-blackparrot') }}
+      CELOX_RTLMETER_LAYOUT: ${{ github.workspace }}/work/rtlmeter-layout
+      # Each RTLMeter run is killed (and fails its benchmark) past 20 GiB
+      # resident, so one case cannot take the 32 GB runner down.
+      CELOX_RTLMETER_MEMORY_LIMIT_MIB: "20480"
+      # The walltime profiler samples every benchmarked process, the celox
+      # commands of the RTLMeter cases included, copying 8 KiB of stack per
+      # sample for tens of minutes; with it the runner lost its connection
+      # during the benchmarks. Measurements do not need it.
+      CODSPEED_PROFILER_ENABLED: "false"
     steps:
       - uses: actions/checkout@v7
 
@@ -54,16 +99,31 @@ jobs:
         with:
           tool: cargo-codspeed@5.0.1
 
-      - name: Build compile-time benchmarks
-        run: cargo codspeed build --locked --measurement-mode walltime -p celox --bench compilation
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
 
-      - name: Run compile-time benchmarks
+      - name: Lay out the pinned RTLMeter cases
+        run: |
+          python -m pip install -r benchmarks/rtlmeter/requirements.txt
+          python scripts/run-rtlmeter-bench.py prepare "$RUNNER_TEMP/rtlmeter"
+          optional=()
+          if [ "$BLACKPARROT" = true ]; then optional=(--optional); fi
+          python scripts/run-rtlmeter-bench.py codspeed-layout "$RUNNER_TEMP/rtlmeter" "$CELOX_RTLMETER_LAYOUT" "${optional[@]}"
+
+      - name: Build benchmarks
+        # `compilation` measures the Cranelift backend too. Memory and disk
+        # are logged each minute, so a starved runner leaves evidence.
+        run: bash scripts/with-resource-log.sh cargo codspeed build --locked --measurement-mode walltime -p celox --features cranelift --bench compilation --bench scaling --bench rtlmeter
+
+      - name: Run benchmarks
         id: benchmarks
-        timeout-minutes: 15
+        timeout-minutes: 120
         uses: CodSpeedHQ/action@v5
         with:
           mode: walltime
-          run: cargo codspeed run --measurement-mode walltime -p celox --bench compilation
+          # Memory and disk each minute, so a starved runner leaves evidence.
+          run: bash scripts/with-resource-log.sh cargo codspeed run --measurement-mode walltime -p celox --bench compilation --bench scaling --bench rtlmeter
 
   report:
     name: Report CodSpeed

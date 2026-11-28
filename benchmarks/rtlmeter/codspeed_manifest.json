@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "contract": "rtlmeter-codspeed-v1",
+  "repository": "https://github.com/verilator/rtlmeter.git",
+  "revision": "4fdd6c3fd154e9b99d3a9d713cf3f4977e284f94",
+  "cases": {
+    "veer-el2-cmark": {
+      "design": "VeeR-EL2",
+      "configuration": "default",
+      "test": "cmark",
+      "window": 20000,
+      "rounds": 2
+    },
+    "veer-eh1-cmark": {
+      "design": "VeeR-EH1",
+      "configuration": "default",
+      "test": "cmark",
+      "window": 20000,
+      "rounds": 2
+    },
+    "e906-cmark": {
+      "design": "XuanTie-E906",
+      "test": "cmark",
+      "window": 100000,
+      "rounds": 2
+    },
+    "blackparrot-1x1-cmark": {
+      "design": "BlackParrot",
+      "configuration": "1x1",
+      "test": "cmark",
+      "window": 20000,
+      "rounds": 2,
+      "optional": true,
+      "diagnostics": [
+        "mixed_timescale=warn",
+        "inferred_latch=warn"
+      ]
+    }
+  }
+}

@@ -46,6 +46,7 @@ workflows:
         - 'github/codeql-action@33d7b85da1a04171e211befe2c739303b9a4c066'
     '.github/workflows/codspeed.yml':
         - 'actions/checkout@v7'
+        - 'actions/setup-python@v7'
         - 'codspeedhq/action@v5'
         - 'dtolnay/rust-toolchain@master'
         - 'swatinem/rust-cache@v2'

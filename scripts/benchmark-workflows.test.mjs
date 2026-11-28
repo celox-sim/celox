@@ -29,12 +29,26 @@ function runs(name, event, ref, inputs = {}, validation = event === "workflow_di
   ));
 }
 
+// The `if` of a CodSpeed job, evaluated for one event.
+function codspeedRuns(name, { event = "schedule", action, label, labels = [], inputs = {} } = {}) {
+  const condition = expression(job(codspeed, name), "if")
+    .replaceAll("github.event.pull_request.labels.*.name", "labels");
+  return Boolean(new Function("github", "inputs", "labels", "contains", "always", `return (${condition});`)(
+    { event_name: event, ref_name: "master", event: { action, label: label && { name: label } } },
+    inputs, labels, (list, item) => list.includes(item), () => true,
+  ));
+}
+
 test("benchmarks run daily and manually; required lint tests the Heliodor tooling", () => {
   for (const workflow of [heliodor, bench, codspeed]) {
     const triggers = workflow.match(/^on:\n([\s\S]*?)\n\S/m)[1];
-    assert.doesNotMatch(triggers, /^\s+(push|pull_request|merge_group):/m);
+    assert.doesNotMatch(triggers, /^\s+merge_group:/m);
     assert.match(triggers, /^\s+schedule:/m);
     assert.match(triggers, /^\s+workflow_dispatch:/m);
+  }
+  for (const workflow of [heliodor, bench]) {
+    const triggers = workflow.match(/^on:\n([\s\S]*?)\n\S/m)[1];
+    assert.doesNotMatch(triggers, /^\s+(push|pull_request):/m);
   }
   const scriptTests = read("ci").match(/name: Test repository scripts\n[\s\S]*?\n\n/)[0];
   for (const fixture of ["convert-heliodor-bench", "run-heliodor-bench-results", "run-heliodor-bench-gate"]) {
@@ -50,7 +64,7 @@ test("CodSpeed reports the current upload even after failure or cancellation", (
   const benchmark = job(codspeed, "codspeed");
   const report = job(codspeed, "report");
   assert.match(benchmark, /run-id: \$\{\{ steps\.benchmarks\.outputs\.run-id \}\}/);
-  assert.match(benchmark, /id: benchmarks\n\s+timeout-minutes: 15\n\s+uses: CodSpeedHQ\/action@v5/);
+  assert.match(benchmark, /id: benchmarks\n\s+timeout-minutes: 120\n\s+uses: CodSpeedHQ\/action@v5/);
   assert.match(report, /needs: codspeed/);
   assert.match(report, /checks: read/);
   assert.match(report, /issues: write/);
@@ -58,7 +72,17 @@ test("CodSpeed reports the current upload even after failure or cancellation", (
   assert.match(report, /CODSPEED_RUN_ID: \$\{\{ needs\.codspeed\.outputs\.run-id \}\}/);
   assert.match(report, /run: node scripts\/report-codspeed\.mjs/);
   assert.doesNotMatch(codspeed, /continue-on-error:/);
-  assert.match(codspeed, /cancel-in-progress: false/);
+  // Master keeps every commit's run: one concurrency group per commit, since
+  // a group holds only one pending run. Only pull request runs replace each other.
+  assert.match(codspeed, /cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}/);
+  const group = new Function("github", `return (${
+    codspeed.match(/^  group: \$\{\{ github\.workflow \}\}-\$\{\{ (.+) \}\}$/m)[1]
+  });`);
+  const push = sha => group({ event_name: "push", ref: "refs/heads/master", sha });
+  assert.notEqual(push("a1"), push("b2"));
+  assert.equal(group({ event_name: "schedule", ref: "refs/heads/master", sha: "a1" }), "a1");
+  const pr = sha => group({ event_name: "pull_request", ref: "refs/pull/1/merge", sha });
+  assert.equal(pr("a1"), pr("b2"));
   const condition = new Function("github", "always", "inputs", `return (${expression(report, "if")});`);
   for (const branch of ["master", "develop", "feature"]) {
     assert.equal(condition({ ref_name: branch }, () => true, { runner_probe: false }), branch !== "feature");
@@ -169,13 +193,60 @@ test("profiling reuse rejects pre-CLI artifacts before capture", () => {
 
 test("compilation scaling uses walltime consistently and has a bounded execution", () => {
   const benchmark = job(codspeed, "codspeed");
+  const benches = "-p celox --bench compilation --bench scaling --bench rtlmeter";
   assert.match(benchmark, /runs-on: codspeed-macro-arm64-graviton-ubuntu-22-04/);
-  assert.match(benchmark, /timeout-minutes: 60/);
-  assert.match(benchmark, /cargo codspeed build --locked --measurement-mode walltime -p celox --bench compilation/);
-  assert.match(benchmark, /id: benchmarks\n        timeout-minutes: 15\n        uses: CodSpeedHQ\/action@v5/);
+  assert.match(benchmark, /timeout-minutes: 210/);
+  assert.ok(benchmark.includes(`cargo codspeed build --locked --measurement-mode walltime -p celox --features cranelift ${benches.slice(9)}\n`));
+  // Fat LTO of four binaries at once starved the 32 GB runner.
+  assert.match(codspeed, /^  CARGO_PROFILE_BENCH_LTO: thin$/m);
+  // The layout exists before the run, which reads it from the job environment.
+  assert.match(benchmark, /^      CELOX_RTLMETER_LAYOUT: /m);
+  assert.ok(benchmark.indexOf("codspeed-layout") < benchmark.indexOf("cargo codspeed run"));
+  assert.match(benchmark, /id: benchmarks\n        timeout-minutes: 120\n        uses: CodSpeedHQ\/action@v5/);
   assert.match(benchmark, /mode: walltime/);
-  assert.match(benchmark, /run: cargo codspeed run --measurement-mode walltime -p celox --bench compilation/);
+  assert.ok(benchmark.includes(`run: bash scripts/with-resource-log.sh cargo codspeed run --measurement-mode walltime ${benches}\n`));
+  // One RTLMeter case cannot take the runner down, and the profiler does not
+  // sample the celox commands for tens of minutes.
+  assert.match(benchmark, /^      CELOX_RTLMETER_MEMORY_LIMIT_MIB: "20480"$/m);
+  assert.match(benchmark, /^      CODSPEED_PROFILER_ENABLED: "false"$/m);
   assert.doesNotMatch(benchmark, /simulation|continue-on-error/);
+});
+
+test("RTLMeter cases come from the pinned manifest; BlackParrot only when asked", () => {
+  const benchmark = job(codspeed, "codspeed");
+  assert.match(benchmark, /run-rtlmeter-bench\.py prepare "\$RUNNER_TEMP\/rtlmeter"/);
+  assert.match(benchmark, /codspeed-layout "\$RUNNER_TEMP\/rtlmeter" "\$CELOX_RTLMETER_LAYOUT" "\$\{optional\[@\]\}"/);
+  assert.match(benchmark, /if \[ "\$BLACKPARROT" = true \]; then optional=\(--optional\); fi/);
+  const blackparrot = new Function("github", "inputs", "contains", `return (${
+    benchmark.match(/BLACKPARROT: \$\{\{ (.+) \}\}/)[1].replaceAll("github.event.pull_request.labels.*.name", "github.labels")
+  });`);
+  const contains = (list, item) => (list ?? []).includes(item);
+  assert.equal(blackparrot({ event_name: "schedule" }, {}, contains), true);
+  assert.equal(blackparrot({ event_name: "push" }, {}, contains), false);
+  assert.equal(blackparrot({ event_name: "workflow_dispatch" }, { blackparrot: true }, contains), true);
+  assert.equal(blackparrot({ event_name: "workflow_dispatch" }, { blackparrot: false }, contains), false);
+  assert.equal(blackparrot({ event_name: "pull_request", labels: ["bench"] }, {}, contains), false);
+  assert.equal(blackparrot({ event_name: "pull_request", labels: ["bench-blackparrot"] }, {}, contains), true);
+});
+
+test("CodSpeed measures master pushes and labelled pull requests only", () => {
+  const triggers = codspeed.match(/^on:\n([\s\S]*?)\n\S/m)[1];
+  assert.match(triggers, /^  push:\n    branches: \[master\]/m);
+  assert.match(triggers, /^  pull_request:\n    types: \[opened, reopened, synchronize, labeled\]/m);
+  assert.equal(codspeedRuns("codspeed", { event: "push" }), true);
+  assert.equal(codspeedRuns("codspeed", { event: "schedule" }), true);
+  assert.equal(codspeedRuns("codspeed", { event: "workflow_dispatch", inputs: { runner_probe: true } }), false);
+  for (const action of ["opened", "reopened", "synchronize"]) {
+    assert.equal(codspeedRuns("codspeed", { event: "pull_request", action }), false, action);
+    assert.equal(codspeedRuns("codspeed", { event: "pull_request", action, labels: ["bench"] }), true, action);
+    assert.equal(codspeedRuns("codspeed", { event: "pull_request", action, labels: ["bench-blackparrot"] }), true, action);
+  }
+  for (const label of ["bench", "bench-blackparrot"]) {
+    assert.equal(codspeedRuns("codspeed", { event: "pull_request", action: "labeled", label, labels: [label] }), true, label);
+  }
+  // Another label on a benchmarked pull request does not measure it again.
+  assert.equal(codspeedRuns("codspeed", { event: "pull_request", action: "labeled", label: "merge-ready", labels: ["bench", "merge-ready"] }), false);
+  assert.equal(codspeedRuns("codspeed", { event: "pull_request", action: "labeled", label: "merge-ready", labels: ["merge-ready"] }), false);
 });
 
 
@@ -186,13 +257,11 @@ test("runner probe cannot build or benchmark and does not report a skipped bench
   assert.doesNotMatch(probe, /checkout|cargo|CodSpeedHQ\/action/);
   assert.match(probe, /timeout-minutes: 2/);
   const probeCondition = new Function("github", "inputs", `return (${expression(probe, "if")});`);
-  const benchCondition = new Function("inputs", `return (${expression(job(codspeed, "codspeed"), "if")});`);
-  const reportCondition = new Function("github", "inputs", "always", `return (${expression(job(codspeed, "report"), "if")});`);
   for (const runner_probe of [true, false]) {
     const inputs = { runner_probe };
     assert.equal(Boolean(probeCondition({ event_name: "workflow_dispatch" }, inputs)), runner_probe);
-    assert.equal(benchCondition(inputs), !runner_probe);
-    assert.equal(reportCondition({ ref_name: "master" }, inputs, () => true), !runner_probe);
+    assert.equal(codspeedRuns("codspeed", { event: "workflow_dispatch", inputs }), !runner_probe);
+    assert.equal(codspeedRuns("report", { event: "workflow_dispatch", inputs }), !runner_probe);
   }
-  assert.equal(benchCondition({}), true);
+  assert.equal(codspeedRuns("codspeed", { event: "workflow_dispatch" }), true);
 });
