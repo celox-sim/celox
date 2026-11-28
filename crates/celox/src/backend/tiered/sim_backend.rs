@@ -3,6 +3,17 @@
 use super::*;
 
 impl SimBackend for TieredBackend {
+    fn finish_background_work(&mut self) {
+        // The drop waits for the worker.
+        self.cancel.cancel();
+        self.derived_compile_request = None;
+        match &mut self.phase {
+            Phase::Interpreting(Some(interp)) => interp.finish_background_work(),
+            Phase::Interpreting(None) => {}
+            Phase::Compiled(tier) => tier.finish_background_work(),
+        }
+    }
+
     /// Only generated code runs the scheduler unit faster than the
     /// runtime's loop.
     fn runs_compiled_scheduler(&self) -> bool {

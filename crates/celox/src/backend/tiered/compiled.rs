@@ -36,6 +36,20 @@ impl CompiledCode {
 }
 
 impl CompiledTier {
+    /// [`SimBackend::finish_background_work`] of the compiled backend.
+    pub(super) fn finish_background_work(&mut self) {
+        match self {
+            #[cfg(feature = "cranelift")]
+            Self::Jit(backend) => backend.finish_background_work(),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Self::Native(backend) => backend.finish_background_work(),
+        }
+    }
+
     /// Bind compiled code to a live simulation state handed over by the
     /// interpreter during promotion.
     ///

@@ -694,6 +694,36 @@ impl<B: SimBackend> Simulation<B> {
         self.simulator.file_io()
     }
 
+    /// Do everything dropping this simulation, which is done, does outside
+    /// its memory, so that a host ending the process may leak it rather than
+    /// drop it (freeing a large design's program takes seconds):
+    /// - finalize the waveform, the header and blackout block of an FST file
+    ///   and the buffer of a VCD file, and report a failure to write it;
+    /// - close the files the design opened, which also removes the working
+    ///   copies a checkpointing file system keeps;
+    /// - destroy the instances of external components;
+    /// - stop the backend's background compiles, which report what they did
+    ///   (see [`SimBackend::finish_background_work`]);
+    /// - the same for the shadow of a differential simulation.
+    ///
+    /// Final procedures are not run here: [`Self::finish`] runs them. A drop
+    /// after this repeats none of it.
+    pub fn finish_outputs(&mut self) -> std::io::Result<()> {
+        let waveform = self
+            .simulator
+            .vcd_writer
+            .take()
+            .map(crate::WaveformWriter::into_inner)
+            .transpose();
+        self.replace_file_io(celox_runtime::file_io::FileIo::default());
+        self.simulator.components = Default::default();
+        self.simulator.backend.finish_background_work();
+        if let Some(shadow) = &mut self.shadow {
+            shadow.finish_outputs()?;
+        }
+        waveform.map(|_| ())
+    }
+
     /// Install a host-prepared file-I/O handler at an execution boundary.
     pub fn replace_file_io(&mut self, file_io: celox_runtime::file_io::FileIo) {
         self.simulator.replace_file_io(file_io);
