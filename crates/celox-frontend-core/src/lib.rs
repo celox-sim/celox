@@ -6,6 +6,7 @@ pub mod process;
 mod sdk;
 pub mod shared;
 pub mod symbolic;
+pub mod tasks;
 mod trace;
 pub mod watch;
 
