@@ -322,16 +322,16 @@ impl ScopeElaboration<'_> {
                 .filter(|local| {
                     !unreached_locals.contains(&local.name) && known.insert(local.name.as_str())
                 })
-                .map(|local| (**local).clone())
+                .cloned()
                 .collect::<Vec<_>>();
             if let Some(design) = &design {
                 for name in &foreign_locals {
                     if known.insert(name.as_str()) {
-                        missing.push((*design.locals[name]).clone());
+                        missing.push(Arc::clone(&design.locals[name]));
                     }
                 }
             }
-            self.locals.extend(missing);
+            self.imported_locals.extend(missing);
         }
         for import in &self.imported.dpi_imports {
             if !self
@@ -577,7 +577,12 @@ impl ScopeElaboration<'_> {
             comb_processes: self.comb_processes,
             ff_processes: self.ff_processes,
             initial_processes: self.initial_processes,
-            locals: self.locals,
+            locals: self
+                .locals
+                .into_iter()
+                .map(Arc::new)
+                .chain(self.imported_locals)
+                .collect(),
             subroutines: self.subroutines,
             dpi_imports: self.dpi_imports,
             constant_functions: syntax_tree.functions.clone(),

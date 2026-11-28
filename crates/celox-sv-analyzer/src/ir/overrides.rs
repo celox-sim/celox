@@ -600,9 +600,9 @@ impl Module {
                 .map(|local| match renamed.get(&local.name) {
                     Some(name) => LocalVariable {
                         name: name.clone(),
-                        ..local.clone()
+                        ..(**local).clone()
                     },
-                    None => local.clone(),
+                    None => (**local).clone(),
                 })
                 .collect();
             let mut read: Vec<&str> = read.into_iter().collect();
@@ -765,7 +765,7 @@ impl Module {
             }
             for local in &export.locals {
                 if locals.insert(local.name.clone()) {
-                    self.locals.push(local.clone());
+                    self.locals.push(Arc::new(local.clone()));
                 }
             }
             for signal in &export.signals {

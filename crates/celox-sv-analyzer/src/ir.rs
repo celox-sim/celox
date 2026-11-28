@@ -1,6 +1,7 @@
 //! Analyzer IR produced after SystemVerilog semantic analysis.
 
 use crate::{ast, symbol::ModuleId, typecheck};
+use std::sync::Arc;
 
 mod overrides;
 pub use crate::ast::module_overrides::MODULE_HANDLE;
@@ -120,7 +121,8 @@ pub struct Module {
     comb_processes: Vec<CombProcess>,
     ff_processes: Vec<FfProcess>,
     initial_processes: Vec<InitialProcess>,
-    locals: Vec<LocalVariable>,
+    /// Shared with the scopes that import them, as a class library's are.
+    locals: Vec<Arc<LocalVariable>>,
     subroutines: Vec<Subroutine>,
     declaration_subroutines: Vec<Subroutine>,
     dpi_imports: Vec<DpiImport>,
@@ -339,7 +341,7 @@ impl Module {
 
     /// Declare a variable local to a procedural block (see [`Self::locals`]).
     pub fn add_local(mut self, local: LocalVariable) -> Self {
-        self.locals.push(local);
+        self.locals.push(Arc::new(local));
         self
     }
 
@@ -381,7 +383,7 @@ impl Module {
         comb_processes: Vec<CombProcess>,
         ff_processes: Vec<FfProcess>,
         initial_processes: Vec<InitialProcess>,
-        locals: Vec<LocalVariable>,
+        locals: Vec<Arc<LocalVariable>>,
         subroutines: Vec<Subroutine>,
     ) -> Self {
         Self {
@@ -528,7 +530,7 @@ impl Module {
     }
 
     /// Variables declared inside procedural blocks and subroutines.
-    pub fn locals(&self) -> &[LocalVariable] {
+    pub fn locals(&self) -> &[Arc<LocalVariable>] {
         &self.locals
     }
 
@@ -550,7 +552,7 @@ impl Module {
     ) {
         self.subroutines.extend(subroutines);
         self.signals.extend(signals);
-        self.locals.extend(locals);
+        self.locals.extend(locals.into_iter().map(Arc::new));
         self.dpi_imports.extend(dpi_imports);
     }
 
