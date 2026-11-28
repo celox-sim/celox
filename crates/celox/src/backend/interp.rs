@@ -2036,6 +2036,13 @@ impl InterpBackend {
 }
 
 impl SimBackend for InterpBackend {
+    fn finish_background_work(&mut self) {
+        #[cfg(hotspot_jit)]
+        if let Some(hotspots) = &mut self.hotspots {
+            hotspots.finish_run();
+        }
+    }
+
     /// Interpreting the scheduler unit costs more than the runtime's loop
     /// (sched_bench (d): about 9% more per cycle).
     fn runs_compiled_scheduler(&self) -> bool {

@@ -2448,3 +2448,58 @@ fn sv_coverage_report_of_a_cdsp_session() {
         ]
     );
 }
+
+/// The CLI leaks the simulation at its end instead of dropping it, after
+/// finishing its outputs (`Simulation::finish_outputs`): the waveform is
+/// complete, the file the design opened holds what it wrote, and the working
+/// copies of the checkpointing file system the CLI installs are removed.
+#[test]
+fn outputs_are_finished_when_the_run_ends() {
+    let outputs = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let text = outputs.path().join("out.txt");
+    let waveform = outputs.path().join("wave.fst");
+    let source = format!(
+        r#"
+        module Top;
+            timeunit 1ns; timeprecision 1ns;
+            logic [3:0] value;
+            integer file;
+            initial begin
+                file = $fopen("{}", "w");
+                $dumpfile("{}");
+                $dumpvars(0, Top.value);
+                value = 4'b0001;
+                $fdisplay(file, "value %b", value);
+                #1 $dumpoff; value = 4'b0010;
+                #1 $dumpon; value = 4'b0100;
+                $fdisplay(file, "value %b", value);
+                #1 $finish;
+            end
+        endmodule
+    "#,
+        text.display(),
+        waveform.display()
+    );
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("top.sv");
+    std::fs::write(&path, source).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_celox"))
+        .arg("run")
+        .arg(&path)
+        .args(["--top", "Top"])
+        .env("TMPDIR", scratch.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        std::fs::read_to_string(&text).unwrap(),
+        "value 0001\nvalue 0100\n"
+    );
+    // The writer finished: an FST file starts with its header block, which
+    // a writer that never finished leaves out of an empty dump only.
+    let fst = std::fs::read(&waveform).unwrap();
+    assert!(fst.len() > 64 && fst[0] == 0, "{} bytes", fst.len());
+    let left = std::fs::read_dir(scratch.path()).unwrap().count();
+    assert_eq!(left, 0, "temporary files left");
+}

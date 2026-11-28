@@ -1198,6 +1198,10 @@
     "sv_covergroup_clocking_block_event": {
       "title": "A covergroup whose clocking event is a clocking block event samples before the nonblocking assignments of the block's clocking event, and its coverpoint of a clockvar reads another value than a sample in a process waiting for the same event",
       "standard": "IEEE 1800-2023 14.10, 14.13, 19.3"
+    },
+    "sv_specialization_static_initializers_lazy": {
+      "title": "A static member initializer of a parameterized class specialization runs at the specialization's first use, not before any initial or always procedure starts",
+      "standard": "IEEE 1800-2023 6.8, 8.25"
     }
   },
   "cases": [
@@ -6166,6 +6170,14 @@
       "classification": "xezim_bug",
       "bug": "sv_covergroup_clocking_block_event",
       "note": "14.10, 19.3: @(cb) follows the Observed region of the clocking event at 5, 15, 25 and 35, after x <= x + 1 made x 1 to 4, so X of [1:4] is 100.00; cb.x holds the values sampled at the events, 0 to 3, so S is 75.00 in the covergroup of @(cb) and in the one an always @(cb) samples (Verilator 5.054 displays the same). xezim 0.11.4 displays 75.00 50.00 75.00: its @(cb) covergroup counts three bins of x, as if it read x before the update, and two of cb.x, while the covergroup that the process waiting for @(cb) samples reads cb.x as expected (not narrowed further)."
+    },
+    {
+      "suite": "sv",
+      "name": "class::specialization_static_members_initialize_before_procedures",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_specialization_static_initializers_lazy",
+      "note": "6.8: setting the initial value of a static class member shall occur before any initial or always procedure starts, and each specialization has its own static members (8.25), so `static int id = note();` of p::Box#(byte) has already incremented p::made when the initial procedure reads it: early is 1, id 1. xezim 0.11.4 gives early 0: it runs the initializer when p::Box#(byte)::get() first names the specialization. In UVM this moves the object ids of uvm_resource#(T)::my_type into the first uvm_config_db#(T)::set (AXI4 AVIP topology ids)."
     }
   ]
 }

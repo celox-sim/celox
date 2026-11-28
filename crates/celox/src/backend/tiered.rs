@@ -1428,13 +1428,20 @@ impl TieredBackend {
     }
 }
 
-impl Drop for TieredBackend {
-    fn drop(&mut self) {
+impl TieredBackend {
+    /// Stop the background compile and wait for its worker.
+    fn stop_compiler(&mut self) {
         self.cancel.cancel();
         self.derived_compile_request = None;
         if let Some(worker) = self.compiler_worker.take() {
             let _ = worker.join();
         }
+    }
+}
+
+impl Drop for TieredBackend {
+    fn drop(&mut self) {
+        self.stop_compiler();
     }
 }
 
