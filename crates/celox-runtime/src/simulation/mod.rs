@@ -23,7 +23,6 @@ mod wait;
 use std::{cmp::Reverse, collections::BinaryHeap};
 
 use bit_set::BitSet;
-use celox_design::CounterKind;
 
 pub(crate) use batch::{edge_level, event_level};
 pub use host::{CompiledSlots, HostBoundary, HostWatch, SimulationExecutor, UnitExecutor};
@@ -278,9 +277,7 @@ impl<B: SimBackend> SimulationState<B> {
             domain_counters: model
                 .counted
                 .iter()
-                .map(|counted| {
-                    CounterKind::ALL.map(|kind| backend.get_as::<u32>(counted.refs.counter(kind)))
-                })
+                .map(|counted| counted.refs.snapshot(backend))
                 .collect(),
             ..ProcessState::default()
         };
