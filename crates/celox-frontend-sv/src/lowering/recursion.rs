@@ -459,7 +459,11 @@ pub(super) fn report(module: &sv::ir::Module, graph: &CallGraph) -> Vec<String> 
 
 /// Append the report of `module` to `path`.
 pub(super) fn append(module: &sv::ir::Module, graph: &CallGraph, path: &Path) {
-    let lines = report(module, graph);
+    append_lines(&report(module, graph), path);
+}
+
+/// Append the `lines` of a report (see [`report`]) to `path`.
+pub(super) fn append_lines(lines: &[String], path: &Path) {
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
