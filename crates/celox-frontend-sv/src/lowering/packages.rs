@@ -91,6 +91,15 @@ pub(super) fn package_states(
     }
 }
 
+/// What lowering one package state module made: the warnings and the
+/// recursion report lines it gave, which [`lower_package_states`] passes on
+/// in the order of the modules, and the module or the error.
+struct PackageLowering {
+    warnings: Vec<crate::warning::PendingWarning>,
+    report: Option<Vec<String>>,
+    lowered: Result<(String, ModuleId, LoweredSvModule), sv::AnalyzerError>,
+}
+
 pub(super) fn lower_package_states(
     states: PackageStates,
     first: usize,
@@ -105,99 +114,150 @@ pub(super) fn lower_package_states(
         states,
         global_precision,
     } = states;
-    states
-        .into_iter()
-        .enumerate()
-        .map(|(index, (module, time_scale))| {
-            let name = module.name().to_string();
-            // The subroutines that the package's initializers call go out of
-            // line as a module's do, recursive ones included.
-            let mut calls = Some(recursion::CallGraph::new(
-                force_out_of_line,
-                recursion_report.is_some(),
-            ));
-            // And call the root's functions instead where they serve (see
-            // `out_of_line::Home`), when the two keep time alike.
-            if let (Some(home), Ok(time_scale), Some(functions)) = (
-                &home,
-                &time_scale,
-                calls.as_mut().and_then(|graph| graph.out_of_line.as_mut()),
-            ) && home.time_scale == *time_scale
-            {
-                functions.home = Some(out_of_line::HomeLink::new(
-                    std::sync::Arc::clone(home),
-                    &name,
-                ));
-            }
-            let report_source = recursion_report.map(|_| module.clone());
-            let lowered = lower_module(
-                std::borrow::Cow::Owned(module),
+    // Each module is lowered on its own; what they give is passed on in
+    // their order, up to the first that fails, as lowering them one after
+    // another would.
+    let order = (0..states.len()).collect::<Vec<_>>();
+    let lowerings = celox_frontend_core::tasks::run_owned::<_, _, std::convert::Infallible>(
+        states,
+        &order,
+        1,
+        |index, (module, time_scale)| {
+            let mut warnings = Vec::new();
+            let mut report = None;
+            let lowered = lower_package_state(
+                module,
+                time_scale,
+                ModuleId(first + index),
                 four_state,
-                true,
                 ff_parts,
-                NextStateOptions::default(),
-                warnings,
-                &[],
-                LevelLists::Processes,
-                &HashMap::default(),
-                &HashMap::default(),
-                SharedAlways::default(),
-                &HashSet::default(),
-                &[],
-                calls.as_mut(),
+                global_precision,
+                &mut warnings,
+                force_out_of_line,
+                recursion_report.is_some().then_some(&mut report),
+                home.as_ref(),
             );
-            if let (Some(graph), Some(path), Some(module)) =
-                (&calls, recursion_report, &report_source)
-            {
-                recursion::append(module, graph, path);
-            }
-            let mut lowered = lowered?;
-            if let Some(functions) = calls.as_ref().and_then(|graph| graph.out_of_line.as_ref()) {
-                out_of_line::attach_functions(&mut lowered.sim_module, functions);
-                // The variables that name those of the root's function
-                // sites (see `ProcModule::list_home_sites`).
-                if let Some(link) = &functions.home {
-                    for (own, target) in &link.bound {
-                        match target {
-                            out_of_line::Mirror::Home(id) => {
-                                lowered.sim_module.hierarchical_bindings.insert(
-                                    *own,
-                                    celox_frontend_core::symbolic::artifact::HierarchicalBinding {
-                                        start: celox_frontend_core::symbolic::artifact::HierarchicalStart::Root,
-                                        path: Vec::new(),
-                                        targets: vec![(link.home.module, *id)],
-                                    },
-                                );
-                            }
-                            out_of_line::Mirror::Package(package, variable) => lowered
-                                .package_variables
-                                .push((*own, package.clone(), variable.clone())),
-                        }
+            Ok(PackageLowering {
+                warnings,
+                report,
+                lowered,
+            })
+        },
+    )
+    .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    let Ok(lowerings) = lowerings;
+    let mut lowered = Vec::with_capacity(lowerings.len());
+    for lowering in lowerings {
+        warnings.extend(lowering.warnings);
+        if let (Some(lines), Some(path)) = (&lowering.report, recursion_report) {
+            recursion::append_lines(lines, path);
+        }
+        lowered.push(lowering.lowered?);
+    }
+    Ok(lowered)
+}
+
+/// Lower the state `module` of a package as the module `id`, with the
+/// recursion report lines of its call graph in `report` when one is asked
+/// for.
+#[allow(clippy::too_many_arguments)]
+fn lower_package_state(
+    module: sv::ir::Module,
+    time_scale: Result<celox_design::TimeScale, sv::AnalyzerError>,
+    id: ModuleId,
+    four_state: bool,
+    ff_parts: bool,
+    global_precision: i32,
+    warnings: &mut Vec<crate::warning::PendingWarning>,
+    force_out_of_line: bool,
+    report: Option<&mut Option<Vec<String>>>,
+    home: Option<&std::sync::Arc<out_of_line::Home>>,
+) -> Result<(String, ModuleId, LoweredSvModule), sv::AnalyzerError> {
+    let name = module.name().to_string();
+    // The subroutines that the package's initializers call go out of
+    // line as a module's do, recursive ones included.
+    let mut calls = Some(recursion::CallGraph::new(
+        force_out_of_line,
+        report.is_some(),
+    ));
+    // And call the root's functions instead where they serve (see
+    // `out_of_line::Home`), when the two keep time alike.
+    if let (Some(home), Ok(time_scale), Some(functions)) = (
+        home,
+        &time_scale,
+        calls.as_mut().and_then(|graph| graph.out_of_line.as_mut()),
+    ) && home.time_scale == *time_scale
+    {
+        functions.home = Some(out_of_line::HomeLink::new(
+            std::sync::Arc::clone(home),
+            &name,
+        ));
+    }
+    let report_source = report.is_some().then(|| module.clone());
+    let lowered = lower_module(
+        std::borrow::Cow::Owned(module),
+        four_state,
+        true,
+        ff_parts,
+        NextStateOptions::default(),
+        warnings,
+        &[],
+        LevelLists::Processes,
+        &HashMap::default(),
+        &HashMap::default(),
+        SharedAlways::default(),
+        &HashSet::default(),
+        &[],
+        calls.as_mut(),
+    );
+    if let (Some(graph), Some(report), Some(module)) = (&calls, report, &report_source) {
+        *report = Some(recursion::report(module, graph));
+    }
+    let mut lowered = lowered?;
+    if let Some(functions) = calls.as_ref().and_then(|graph| graph.out_of_line.as_ref()) {
+        out_of_line::attach_functions(&mut lowered.sim_module, functions);
+        // The variables that name those of the root's function
+        // sites (see `ProcModule::list_home_sites`).
+        if let Some(link) = &functions.home {
+            for (own, target) in &link.bound {
+                match target {
+                    out_of_line::Mirror::Home(id) => {
+                        lowered.sim_module.hierarchical_bindings.insert(
+                            *own,
+                            celox_frontend_core::symbolic::artifact::HierarchicalBinding {
+                                start: celox_frontend_core::symbolic::artifact::HierarchicalStart::Root,
+                                path: Vec::new(),
+                                targets: vec![(link.home.module, *id)],
+                            },
+                        );
                     }
+                    out_of_line::Mirror::Package(package, variable) => lowered
+                        .package_variables
+                        .push((*own, package.clone(), variable.clone())),
                 }
             }
-            lowered.sim_module.time_precision = Some(
-                celox_design::TimePrecision::try_from(global_precision)
-                    .map_err(|reason| sv::AnalyzerError::Unsupported(reason.to_string()))?,
-            );
-            lowered.sim_module.time_scale = time_scale?;
-            // Declaration initializers run before every `initial` block
-            // (IEEE 1800-2023 6.8, 10.5): one that is not folded into an
-            // initial value runs as a declaration initializer, and any other
-            // process would run among the `initial` blocks.
-            if lowered
-                .sim_module
-                .processes
-                .iter()
-                .any(|process| process.slots.kind != celox_design::ProcessKind::Initializer)
-            {
-                return Err(sv::AnalyzerError::Unsupported(format!(
-                    "package variable initializer that is not constant in package `{name}`"
-                )));
-            }
-            Ok((name, ModuleId(first + index), lowered))
-        })
-        .collect()
+        }
+    }
+    lowered.sim_module.time_precision = Some(
+        celox_design::TimePrecision::try_from(global_precision)
+            .map_err(|reason| sv::AnalyzerError::Unsupported(reason.to_string()))?,
+    );
+    lowered.sim_module.time_scale = time_scale?;
+    // Declaration initializers run before every `initial` block
+    // (IEEE 1800-2023 6.8, 10.5): one that is not folded into an
+    // initial value runs as a declaration initializer, and any other
+    // process would run among the `initial` blocks.
+    if lowered
+        .sim_module
+        .processes
+        .iter()
+        .any(|process| process.slots.kind != celox_design::ProcessKind::Initializer)
+    {
+        return Err(sv::AnalyzerError::Unsupported(format!(
+            "package variable initializer that is not constant in package `{name}`"
+        )));
+    }
+    Ok((name, id, lowered))
 }
 
 /// Add the keys of the class properties that the level waits of the state
