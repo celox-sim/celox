@@ -43,13 +43,17 @@ const MIN_TASK_MEMORY: u64 = 128 * 1024 * 1024;
 /// one worker.
 const ASSUMED_BUDGET: u64 = 2 * 1024 * 1024 * 1024;
 
-pub(super) fn workers(blocks: usize, instructions: usize, tasks: usize) -> usize {
-    workers_with_state(blocks, instructions, tasks, 0)
+/// How many of `threads` (the compile threads of the options, see
+/// `OptimizeOptions::compile_threads`) compile `tasks` tasks of at most
+/// `blocks` blocks and `instructions` instructions.
+pub(super) fn workers(threads: usize, blocks: usize, instructions: usize, tasks: usize) -> usize {
+    workers_with_state(threads, blocks, instructions, tasks, 0)
 }
 
 /// [`workers`] for tasks that each worker compiles with state of its own,
 /// such as a copy of the layout, of `state` bytes.
 pub(super) fn workers_with_state(
+    threads: usize,
     blocks: usize,
     instructions: usize,
     tasks: usize,
@@ -59,10 +63,18 @@ pub(super) fn workers_with_state(
         blocks,
         instructions,
         tasks,
-        std::thread::available_parallelism().map_or(1, usize::from),
+        cpus(threads),
         available_memory(),
         state,
     )
+}
+
+/// The host threads compiling may use: `threads` of the options, no more
+/// than the host has.
+fn cpus(threads: usize) -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(threads.max(1))
 }
 
 /// About the heap a copy of `table` takes. A hash table holds a control byte
@@ -91,17 +103,12 @@ pub(super) fn layout_bytes<A>(layout: &celox_state_layout::MemoryLayout<A>) -> u
 /// One primary circuit and a queue of smaller independent event functions.
 /// Reserve the primary once, rather than charging its size to every worker.
 pub(super) fn workers_with_primary(
+    threads: usize,
     primary: (usize, usize),
     secondary: (usize, usize),
     tasks: usize,
 ) -> usize {
-    choose_workers_with_primary(
-        primary,
-        secondary,
-        tasks,
-        std::thread::available_parallelism().map_or(1, usize::from),
-        available_memory(),
-    )
+    choose_workers_with_primary(primary, secondary, tasks, cpus(threads), available_memory())
 }
 
 fn choose_workers_with_primary(

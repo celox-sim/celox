@@ -339,11 +339,15 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
         let partition = self.options.optimize_options.parallel_partition();
         let settle = self.options.optimize_options.settle_partition();
         let watched = self.watched_objects();
+        let compile_threads = self.options.optimize_options.requested_compile_threads();
         self.options.optimize_options = crate::optimizer::OptimizeOptions::new(level)
             .with_parallel_lanes(lanes)
             .with_parallel_partition(partition)
             .with_settle_partition(settle)
             .with_value_change_objects(watched);
+        if let Some(threads) = compile_threads {
+            self.options.optimize_options.set_compile_threads(threads);
+        }
         self.options.cranelift_options = crate::backend::CraneliftOptions::for_speed_optimization(
             level != crate::optimizer::OptLevel::O0,
         );
@@ -379,6 +383,7 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
         let partition = self.options.optimize_options.parallel_partition();
         let settle = self.options.optimize_options.settle_partition();
         let watched = self.watched_objects();
+        let compile_threads = self.options.optimize_options.requested_compile_threads();
         self.options.optimize_options = if enable {
             crate::optimizer::OptimizeOptions::all()
         } else {
@@ -388,6 +393,9 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
         .with_parallel_partition(partition)
         .with_settle_partition(settle)
         .with_value_change_objects(watched);
+        if let Some(threads) = compile_threads {
+            self.options.optimize_options.set_compile_threads(threads);
+        }
         self
     }
 
@@ -427,11 +435,17 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
         } else {
             options.value_change_objects().to_vec()
         };
+        let compile_threads = options
+            .requested_compile_threads()
+            .or_else(|| self.options.optimize_options.requested_compile_threads());
         self.options.optimize_options = options
             .with_parallel_lanes(lanes)
             .with_parallel_partition(partition)
             .with_settle_partition(settle)
             .with_value_change_objects(watched);
+        if let Some(threads) = compile_threads {
+            self.options.optimize_options.set_compile_threads(threads);
+        }
         self
     }
 
@@ -455,6 +469,18 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
                 .clamp(1, crate::MAX_SIMULATION_THREADS)
         };
         self.options.optimize_options.set_parallel_lanes(lanes);
+        self
+    }
+
+    /// Compile with at most `threads` host threads (at least one). The
+    /// SystemVerilog frontend lowers independent modules on them, and
+    /// native code generation compiles independent units on as many as its
+    /// memory budget allows. One compiles on the calling thread only. The
+    /// compiled program is the same for every count; these are not the
+    /// simulation threads of [`Self::threads`]. The default is the
+    /// available parallelism of the host.
+    pub fn compile_threads(mut self, threads: usize) -> Self {
+        self.options.optimize_options.set_compile_threads(threads);
         self
     }
 

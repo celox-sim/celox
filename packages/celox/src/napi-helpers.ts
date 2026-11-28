@@ -192,6 +192,7 @@ export interface NapiOptions {
 	parameters?: NapiParamOverride[];
 	deadStorePolicy?: string;
 	threads?: number;
+	compileThreads?: number;
 	hotspotJit?: boolean;
 }
 
@@ -561,6 +562,10 @@ export function buildNapiOpts(
 	}
 	if (options.threads != null && options.threads !== 1) {
 		napiOpts.threads = options.threads;
+		hasOpt = true;
+	}
+	if (options.compileThreads != null) {
+		napiOpts.compileThreads = options.compileThreads;
 		hasOpt = true;
 	}
 	if (options.hotspotJit === false) {

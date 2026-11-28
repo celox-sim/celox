@@ -191,6 +191,9 @@ pub struct OptimizeOptions {
     disabled: HashSet<SirPass>,
     max_native_memory_width: usize,
     parallel_lanes: u32,
+    /// See [`Self::compile_threads`]; `None` takes the available
+    /// parallelism.
+    compile_threads: Option<usize>,
     parallel_partition: ParallelPartition,
     settle_partition: SettlePartition,
     settle_profile: bool,
@@ -241,6 +244,7 @@ impl OptimizeOptions {
                 64
             },
             parallel_lanes: 1,
+            compile_threads: None,
             parallel_partition: ParallelPartition::Estimated,
             settle_partition: SettlePartition::Estimated,
             settle_profile: false,
@@ -307,6 +311,34 @@ impl OptimizeOptions {
     /// Number of simulation lanes requested for partitioned execution.
     pub fn parallel_lanes(&self) -> u32 {
         self.parallel_lanes.max(1)
+    }
+
+    /// Compile with at most `threads` threads (at least one): the frontend
+    /// lowers independent modules on them, and native code generation
+    /// compiles independent units on as many of them as its memory budget
+    /// allows. One compiles everything on the calling thread. They are not
+    /// simulation lanes (see [`Self::set_parallel_lanes`]); the result is the
+    /// same for every count. The default is the available parallelism of
+    /// the host.
+    pub fn with_compile_threads(mut self, threads: usize) -> Self {
+        self.set_compile_threads(threads);
+        self
+    }
+
+    pub fn set_compile_threads(&mut self, threads: usize) {
+        self.compile_threads = Some(threads.max(1));
+    }
+
+    /// The compile threads set with [`Self::with_compile_threads`], if any.
+    pub fn requested_compile_threads(&self) -> Option<usize> {
+        self.compile_threads
+    }
+
+    /// The threads compiling may use (see [`Self::with_compile_threads`]).
+    pub fn compile_threads(&self) -> usize {
+        self.compile_threads.unwrap_or_else(|| {
+            std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+        })
     }
 
     pub fn with_parallel_partition(mut self, partition: ParallelPartition) -> Self {

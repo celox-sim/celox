@@ -295,6 +295,10 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
         .signal_access(arguments.design.signal_access.clone())
         .plusargs(arguments.plusargs.iter().cloned())
         .defer_initialization(arguments.save_state.restore_checkpoint.is_some());
+    let builder = match arguments.execution.compile_threads {
+        Some(threads) => builder.compile_threads(threads as usize),
+        None => builder,
+    };
     // Live waveform reads need every signal store, including unused internal nets.
     let builder = if arguments.cdsp.is_some() {
         builder.dead_store_policy(celox::DeadStorePolicy::Off)

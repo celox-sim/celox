@@ -63,6 +63,29 @@ result. Each measurement costs a few dozen calls of the slower version.
 Runtime events such as `$display` and assertions, and stores that can
 trigger clock events, stay ordered exactly as in sequential simulation.
 
+## Compile threads
+
+Compilation has its own thread count, separate from the simulation threads
+above. The SystemVerilog frontend lowers independent modules (such as the
+state modules of packages) on these threads, and native code generation
+compiles independent units on as many of them as its memory budget allows.
+The compiled program is the same for every count.
+
+```rust
+let mut sim = Simulator::builder(code, "Top")
+    .compile_threads(8)
+    .build()?;
+```
+
+```typescript
+const sim = await Simulator.create(module, { compileThreads: 8 });
+```
+
+On the command line it is `celox run --compile-threads 8`. The default is the
+available parallelism of the host; `1` compiles everything on the calling
+thread. Lower it when many simulators compile at the same time, as test
+runners do.
+
 ## Backends
 
 Parallel execution is available on the native x86-64 and AArch64 backends

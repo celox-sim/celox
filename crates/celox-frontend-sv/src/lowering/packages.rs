@@ -100,8 +100,12 @@ struct PackageLowering {
     lowered: Result<(String, ModuleId, LoweredSvModule), sv::AnalyzerError>,
 }
 
+/// Each state module is lowered on its own, on up to `workers` threads, the
+/// largest first.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn lower_package_states(
     states: PackageStates,
+    workers: usize,
     first: usize,
     four_state: bool,
     ff_parts: bool,
@@ -116,12 +120,14 @@ pub(super) fn lower_package_states(
     } = states;
     // Each module is lowered on its own; what they give is passed on in
     // their order, up to the first that fails, as lowering them one after
-    // another would.
-    let order = (0..states.len()).collect::<Vec<_>>();
+    // another would. The largest start first: a package of a class library
+    // such as UVM carries thousands of subroutines.
+    let mut order = (0..states.len()).collect::<Vec<_>>();
+    order.sort_by_key(|&index| std::cmp::Reverse(states[index].0.subroutines().len()));
     let lowerings = celox_frontend_core::tasks::run_owned::<_, _, std::convert::Infallible>(
         states,
         &order,
-        1,
+        workers,
         |index, (module, time_scale)| {
             let mut warnings = Vec::new();
             let mut report = None;
@@ -336,4 +342,91 @@ pub(super) fn bind_package_variables<'a>(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{FrontendTraceOptions, schedule_sources_with_options, sv};
+    use std::sync::Arc;
+
+    /// The SIR, or the error, and the warnings and recursion report lines of
+    /// scheduling `source` with `workers` compile threads.
+    fn schedule(source: &str, workers: usize, name: &str) -> (String, String, String) {
+        let report = std::env::temp_dir().join(format!(
+            "celox-package-states-{}-{name}-{workers}.txt",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&report);
+        let mut warnings = Vec::new();
+        let scheduled = schedule_sources_with_options(
+            &[(source, std::path::Path::new("packages.sv"))],
+            "Top",
+            &[],
+            &[],
+            &[],
+            false,
+            &celox_frontend_core::ParallelScheduleOptions {
+                compile_workers: workers,
+                ..Default::default()
+            },
+            &FrontendTraceOptions::default(),
+            None,
+            &mut warnings,
+            sv::AnalysisOptions {
+                recursion_report: Some(Arc::from(report.as_path())),
+                ..sv::AnalysisOptions::default()
+            },
+        );
+        let result = match scheduled {
+            Ok(output) => format!("{:?}", output.scheduled.sir),
+            Err(error) => format!("error {error:?}"),
+        };
+        let lines = std::fs::read_to_string(&report).unwrap_or_default();
+        let _ = std::fs::remove_file(&report);
+        (result, format!("{warnings:?}"), lines)
+    }
+
+    /// Lowering the state modules of the packages on several threads makes
+    /// what lowering them one after another makes: the same SIR, warnings
+    /// and recursion report.
+    #[test]
+    fn package_states_lower_alike_on_any_number_of_threads() {
+        let packages = (0..6)
+            .map(|index| {
+                format!(
+                    "package p{index};
+                       int counter = {index};
+                       class C{index};
+                         static int made = 0;
+                         function new(); made = made + 1; endfunction
+                         virtual function int value(int n);
+                           if (n > 0) return value(n - 1) + {index};
+                           return counter;
+                         endfunction
+                       endclass
+                       C{index} first = new();
+                       int start = first.value(2);
+                     endpackage
+                    "
+                )
+            })
+            .collect::<String>();
+        let source = format!(
+            "{packages}
+             module Top(output int sum);
+               assign sum = p0::start + p1::start + p2::start + p3::start
+                 + p4::start + p5::start;
+             endmodule"
+        );
+        let sequential = schedule(&source, 1, "ok");
+        assert!(!sequential.0.starts_with("error "), "{}", sequential.0);
+        assert!(!sequential.2.is_empty(), "no recursion report");
+        for workers in [2, 4, 16] {
+            assert_eq!(
+                schedule(&source, workers, "ok"),
+                sequential,
+                "{workers} threads"
+            );
+        }
+    }
 }

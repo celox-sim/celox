@@ -169,6 +169,7 @@ fn native_handle_dumps_consume_activity_until_memory_is_exposed() {
             parameters: None,
             dead_store_policy: None,
             threads: None,
+            compile_threads: None,
             hotspot_jit: None,
         });
         let mut handle = if mode == "tiered" {
@@ -234,6 +235,7 @@ fn fst_option_records_a_parseable_waveform_and_conflicts_with_vcd() {
             parameters: None,
             dead_store_policy: None,
             threads: None,
+            compile_threads: None,
             hotspot_jit: None,
         })
     }

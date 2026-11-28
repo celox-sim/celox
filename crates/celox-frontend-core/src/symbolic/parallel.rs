@@ -39,6 +39,11 @@ pub struct ParallelScheduleOptions {
     /// value between paths leave the program (`celox_slt::net_inline`).
     /// [`DeadStorePolicy::Off`] keeps every net.
     pub unobserved_nets: DeadStorePolicy,
+    /// The threads the frontend may lower independent modules on, at least
+    /// one: one lowers them in order on the calling thread. They are not
+    /// simulation lanes; what the frontend makes is the same for every
+    /// count.
+    pub compile_workers: usize,
 }
 
 /// Whether a settle is partitioned ([`ParallelScheduleOptions::settle`]).
@@ -62,6 +67,7 @@ impl ParallelScheduleOptions {
         settle: SettlePartitionMode::Off,
         settle_profile: false,
         unobserved_nets: DeadStorePolicy::Off,
+        compile_workers: 1,
     };
 
     /// Request `lanes` simulation lanes with the default cost model.
