@@ -367,6 +367,7 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
             Ok(laid_out) => laid_out.into_runtime(),
             Err(shared) => shared.runtime().clone(),
         };
+        let start = options.diagnostics.phase_timing.then(crate::timing::now);
         let mut simulation = Self::start_simulation(
             backend,
             runtime,
@@ -375,6 +376,9 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
             vcd_path,
             injected_components,
         )?;
+        if let Some(start) = start {
+            tracing::debug!("[phase-timing] start_simulation: {:?}", start.elapsed());
+        }
         if let Some(shadow) = shadow {
             simulation.set_shadow(shadow);
         }
@@ -502,8 +506,15 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
     ) -> Result<crate::Simulation<B>, SimulatorError> {
         // Initial kernels must keep their time-zero gates until the timed
         // scheduler starts them; ordinary Simulator builders release them.
+        let timed = |phase: &str, start: Option<std::time::Instant>| {
+            if let Some(start) = start {
+                tracing::debug!("[phase-timing] {phase}: {:?}", start.elapsed());
+            }
+        };
+        let start = options.diagnostics.phase_timing.then(crate::timing::now);
         let mut sim =
             Simulator::with_backend_and_program_for_simulation(backend, program, warnings);
+        timed("simulator_setup", start);
         sim.components.set_injected(injected_components);
         sim.diagnostics = options.diagnostics.clone();
         sim.set_plusargs(options.plusargs.clone());
@@ -522,6 +533,7 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
             })?;
             sim.vcd_writer = Some(vcd_writer);
         }
+        let start = options.diagnostics.phase_timing.then(crate::timing::now);
         sim.apply_initial_values();
         // Runtime static declarations precede every comb activation.
         if !options.defer_initialization
@@ -536,8 +548,13 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
                 SimulatorError::from(error).with_warnings(std::mem::take(&mut sim.warnings))
             })?;
         }
+        timed("initial_values", start);
+        let start = options.diagnostics.phase_timing.then(crate::timing::now);
         let warnings = std::mem::take(&mut sim.warnings);
-        match crate::Simulation::try_new_with_initialization(sim, !options.defer_initialization) {
+        let simulation =
+            crate::Simulation::try_new_with_initialization(sim, !options.defer_initialization);
+        timed("initialization", start);
+        match simulation {
             Ok(mut simulation) => {
                 simulation.simulator.warnings = warnings;
                 simulation.state.set_scheduler_mode(options.scheduler);
