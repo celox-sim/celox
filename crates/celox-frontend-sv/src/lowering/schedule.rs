@@ -933,70 +933,124 @@ fn schedule_sources_collecting(
     let no_foreign_references = HashSet::default();
     let mut reported_forces = false;
     loop {
-        let mut specialize = |key: &LoweredSvModuleKey,
-                              module_id: ModuleId|
-         -> Result<LoweredSvModule, FrontendError> {
-            let base = analyzed
-                .get(&key.name)
-                .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
-            let level_lists = LevelLists::Lowered {
-                demoted: demoted.get(&module_id).unwrap_or(&no_demotions),
-            };
-            let signals: Vec<_> = references
-                .get(&module_id)
-                .into_iter()
-                .flatten()
-                .map(|reference: &hierarchy::HierarchicalReference| reference.signal.clone())
-                .collect();
-            // Move out the discovery result: final lowering owns its source
-            // module, so keeping another complete IR through retries is needless.
-            let discovery_analysis = discovery_analyses.remove(&module_id);
-            Ok(specialize_module(
-                base,
-                &mut design,
-                key,
-                four_state,
-                parallel.enabled(),
-                warnings,
-                level_lists,
-                HierarchicalNames {
-                    signals: &signals,
-                    foreign_writes: foreign_writes.get(&module_id).unwrap_or(&no_foreign_writes),
-                    forced: forced.get(&module_id).map_or(&[], Vec::as_slice),
-                    analyzed: analyses.get(&module_id),
-                    recursion_report: analysis_options.recursion_report.as_deref(),
-                    force_out_of_line: analysis_options.force_out_of_line_calls,
-                    home: module_id == root_id && !hidden_root,
-                    next_state: NextStateOptions {
-                        report: analysis_options.ff_next_state_report.as_deref(),
-                        forms: analysis_options.ff_next_state,
-                    },
-                    properties: &properties,
-                    time_format,
-                    instances: Instances::Known(&expansion),
-                    shared: SharedAlways {
-                        temporaries: analysis_options.shared_always_temporaries,
-                        foreign_references: foreign_references
+        // Each specialization still to lower is prepared in the order of
+        // `module_ids`, which may analyze it, and then lowered on its own,
+        // on up to `compile_workers` threads, the largest first. What they
+        // give is passed on in that order, up to the first that fails, as
+        // lowering them one after another would.
+        let pending: Vec<(&LoweredSvModuleKey, ModuleId)> = module_ids
+            .iter()
+            .filter(|(_, module_id)| !lowered_modules.contains_key(*module_id))
+            .map(|(key, &module_id)| (key, module_id))
+            .collect();
+        // The signals of other instances each one's names denote.
+        let signals: Vec<Vec<_>> = pending
+            .iter()
+            .map(|(_, module_id)| {
+                references
+                    .get(module_id)
+                    .into_iter()
+                    .flatten()
+                    .map(|reference: &hierarchy::HierarchicalReference| reference.signal.clone())
+                    .collect()
+            })
+            .collect();
+        let mut prepared = Vec::with_capacity(pending.len());
+        let mut failure = None;
+        for (&(key, module_id), signals) in pending.iter().zip(&signals) {
+            let mut prepare = || -> Result<_, FrontendError> {
+                let base = analyzed
+                    .get(&key.name)
+                    .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
+                let level_lists = LevelLists::Lowered {
+                    demoted: demoted.get(&module_id).unwrap_or(&no_demotions),
+                };
+                // Move out the discovery result: final lowering owns its source
+                // module, so keeping another complete IR through retries is needless.
+                let discovery_analysis = discovery_analyses.remove(&module_id);
+                let mut warnings = Vec::new();
+                let specialization = prepare_specialization(
+                    base,
+                    &mut design,
+                    key,
+                    four_state,
+                    parallel.enabled(),
+                    &mut warnings,
+                    level_lists,
+                    HierarchicalNames {
+                        signals,
+                        foreign_writes: foreign_writes
+                            .get(&module_id)
+                            .unwrap_or(&no_foreign_writes),
+                        forced: forced.get(&module_id).map_or(&[], Vec::as_slice),
+                        analyzed: analyses.get(&module_id),
+                        recursion_report: analysis_options.recursion_report.as_deref(),
+                        force_out_of_line: analysis_options.force_out_of_line_calls,
+                        home: module_id == root_id && !hidden_root,
+                        next_state: NextStateOptions {
+                            report: analysis_options.ff_next_state_report.as_deref(),
+                            forms: analysis_options.ff_next_state,
+                        },
+                        properties: &properties,
+                        time_format,
+                        instances: Instances::Known(&expansion),
+                        shared: SharedAlways {
+                            temporaries: analysis_options.shared_always_temporaries,
+                            foreign_references: foreign_references
+                                .get(&module_id)
+                                .unwrap_or(&no_foreign_references),
+                            no_covergroups,
+                        },
+                        same_instance_aliased: same_instance_aliased
                             .get(&module_id)
                             .unwrap_or(&no_foreign_references),
-                        no_covergroups,
+                        same_instance_alias_groups: same_instance_alias_groups
+                            .get(&module_id)
+                            .map_or(&[], Vec::as_slice),
                     },
-                    same_instance_aliased: same_instance_aliased
-                        .get(&module_id)
-                        .unwrap_or(&no_foreign_references),
-                    same_instance_alias_groups: same_instance_alias_groups
-                        .get(&module_id)
-                        .map_or(&[], Vec::as_slice),
-                },
-                discovery_analysis,
-            )?)
-        };
-        for (key, &module_id) in &module_ids {
-            if let std::collections::hash_map::Entry::Vacant(entry) =
-                lowered_modules.entry(module_id)
-            {
-                entry.insert(specialize(key, module_id)?);
+                    discovery_analysis,
+                );
+                Ok((warnings, specialization))
+            };
+            match prepare() {
+                Ok((warnings, Ok(specialization))) => prepared.push((warnings, specialization)),
+                Ok((warnings, Err(error))) => {
+                    failure = Some((warnings, FrontendError::from(error)));
+                    break;
+                }
+                Err(error) => {
+                    failure = Some((Vec::new(), error));
+                    break;
+                }
             }
+        }
+        let mut order = (0..prepared.len()).collect::<Vec<_>>();
+        order.sort_by_key(|&index| std::cmp::Reverse(prepared[index].1.size()));
+        let lowerings = celox_frontend_core::tasks::run_owned::<_, _, std::convert::Infallible>(
+            prepared,
+            &order,
+            parallel.compile_workers,
+            |_, (mut warnings, specialization)| {
+                let mut report = None;
+                let lowered = lower_specialization(specialization, &mut warnings, &mut report);
+                Ok((warnings, report, lowered))
+            },
+        )
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        let Ok(lowerings) = lowerings;
+        for ((_, module_id), (lowering_warnings, report, lowered)) in pending.iter().zip(lowerings)
+        {
+            warnings.extend(lowering_warnings);
+            if let (Some(lines), Some(path)) =
+                (&report, analysis_options.recursion_report.as_deref())
+            {
+                recursion::append_lines(lines, path);
+            }
+            lowered_modules.insert(*module_id, lowered?);
+        }
+        if let Some((failure_warnings, error)) = failure {
+            warnings.extend(failure_warnings);
+            return Err(error);
         }
         // Every instance of a forced specialization carries its force
         // controls; report the specializations that more than one instance

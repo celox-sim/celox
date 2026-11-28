@@ -146,6 +146,90 @@ pub(super) fn specialize_module(
     hierarchical: HierarchicalNames<'_>,
     owned_analysis: Option<sv::Ir>,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
+    let prepared = prepare_specialization(
+        module,
+        design,
+        key,
+        four_state,
+        ff_parts,
+        warnings,
+        level_lists,
+        hierarchical,
+        owned_analysis,
+    )?;
+    let mut report = None;
+    let lowered = lower_specialization(prepared, warnings, &mut report);
+    if let (Some(lines), Some(path)) = (&report, hierarchical.recursion_report) {
+        recursion::append_lines(lines, path);
+    }
+    lowered
+}
+
+/// The analysis a specialization is lowered from (see
+/// [`PreparedSpecialization`]).
+enum SpecializedSource<'a> {
+    /// The module of an analysis shared with other lowerings.
+    Shared(&'a sv::ir::Module),
+    /// An analysis of the module's own, kept whole for the recursion report
+    /// after a failed lowering.
+    Reported(sv::Ir),
+    /// The module of an analysis of its own.
+    Owned(Box<sv::ir::Module>),
+}
+
+/// What [`lower_specialization`] lowers a specialization from: its analysis
+/// and what lowering reads of the analyzed module and the packages, made by
+/// [`prepare_specialization`] on the calling thread, which may analyze it.
+/// Lowering needs nothing else of the analysis, so it can run on any
+/// thread.
+pub(super) struct PreparedSpecialization<'a> {
+    name: String,
+    source: SpecializedSource<'a>,
+    implicit_nets_allowed: bool,
+    interface_member_paths: &'a HashMap<String, sv::InterfaceMemberPath>,
+    force_signals: &'a [String],
+    four_state: bool,
+    ff_parts: bool,
+    level_lists: LevelLists<'a>,
+    hierarchical: HierarchicalNames<'a>,
+    /// The packages whose state modules may call the root's units (see
+    /// `out_of_line::Home`), for the root.
+    scope_callers: Option<Vec<String>>,
+    time_precision: Result<celox_design::TimePrecision, sv::AnalyzerError>,
+    time_scale: Result<celox_design::TimeScale, sv::AnalyzerError>,
+}
+
+impl PreparedSpecialization<'_> {
+    /// How large lowering the specialization is: the subroutines of its
+    /// module, which a class library brings by the thousand.
+    pub(super) fn size(&self) -> usize {
+        match &self.source {
+            SpecializedSource::Shared(module) => module.subroutines().len(),
+            SpecializedSource::Reported(ir) => ir
+                .modules()
+                .iter()
+                .find(|candidate| candidate.name() == self.name)
+                .map_or(0, |module| module.subroutines().len()),
+            SpecializedSource::Owned(module) => module.subroutines().len(),
+        }
+    }
+}
+
+/// The analysis of specialization `key` of `module`, analyzing it now when
+/// neither `hierarchical` nor `owned_analysis` has it, with what lowering it
+/// reads of `module` and its packages (see [`lower_specialization`]).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn prepare_specialization<'a>(
+    module: &'a AnalyzedSvModule,
+    design: &mut sv::Design,
+    key: &'a LoweredSvModuleKey,
+    four_state: bool,
+    ff_parts: bool,
+    warnings: &mut Vec<crate::warning::PendingWarning>,
+    level_lists: LevelLists<'a>,
+    hierarchical: HierarchicalNames<'a>,
+    owned_analysis: Option<sv::Ir>,
+) -> Result<PreparedSpecialization<'a>, sv::AnalyzerError> {
     #[cfg(test)]
     tests::record_specialization(key, level_lists);
     let unsupported = || sv::AnalyzerError::Unsupported(format!("module `{}`", module.name));
@@ -154,23 +238,15 @@ pub(super) fn specialize_module(
             .iter()
             .find(|candidate| candidate.name() == name)
     }
-    // The module lowered, and the same module when the recursion report
-    // needs it after a failed lowering (it keeps the shared analysis then).
-    let owned;
-    let (specialized, reported): (
-        std::borrow::Cow<'_, sv::ir::Module>,
-        Option<&sv::ir::Module>,
-    ) = match (hierarchical.analyzed, owned_analysis) {
+    let source = match (hierarchical.analyzed, owned_analysis) {
         (Some(ir), _) => {
             warnings.extend(crate::warning::analyzer_warnings(ir.warnings()));
-            let specialized = find(ir, &module.name).ok_or_else(unsupported)?;
-            (std::borrow::Cow::Borrowed(specialized), Some(specialized))
+            SpecializedSource::Shared(find(ir, &module.name).ok_or_else(unsupported)?)
         }
         (None, Some(ir)) if hierarchical.recursion_report.is_some() => {
-            owned = ir;
-            warnings.extend(crate::warning::analyzer_warnings(owned.warnings()));
-            let specialized = find(&owned, &module.name).ok_or_else(unsupported)?;
-            (std::borrow::Cow::Borrowed(specialized), Some(specialized))
+            warnings.extend(crate::warning::analyzer_warnings(ir.warnings()));
+            find(&ir, &module.name).ok_or_else(unsupported)?;
+            SpecializedSource::Reported(ir)
         }
         (None, owned_analysis) => {
             let ir = match owned_analysis {
@@ -199,14 +275,146 @@ pub(super) fn specialize_module(
                 }
             };
             warnings.extend(crate::warning::analyzer_warnings(ir.warnings()));
-            let specialized = ir
-                .into_modules()
-                .into_iter()
-                .find(|candidate| candidate.name() == module.name)
-                .ok_or_else(unsupported)?;
-            (std::borrow::Cow::Owned(specialized), None)
+            SpecializedSource::Owned(Box::new(
+                ir.into_modules()
+                    .into_iter()
+                    .find(|candidate| candidate.name() == module.name)
+                    .ok_or_else(unsupported)?,
+            ))
         }
     };
+    // The packages whose state modules may call the root's units: those
+    // that keep time as the root does (see `out_of_line::Home`).
+    let scope_callers = hierarchical.home.then(|| {
+        let time_scale = scope_time_scale(&module.packages, &module.name).ok();
+        let mut callers: Vec<String> = module
+            .packages
+            .names()
+            .filter(|package| scope_time_scale(&module.packages, package).ok() == time_scale)
+            .map(str::to_string)
+            .collect();
+        callers.sort_unstable();
+        callers
+    });
+    Ok(PreparedSpecialization {
+        name: module.name.clone(),
+        source,
+        implicit_nets_allowed: module.implicit_nets_allowed,
+        interface_member_paths: &module.interface_member_paths,
+        force_signals: &key.force_signals,
+        four_state,
+        ff_parts,
+        level_lists,
+        hierarchical,
+        scope_callers,
+        time_precision: celox_design::TimePrecision::try_from(
+            module.packages.global_time_precision(),
+        )
+        .map_err(|reason| sv::AnalyzerError::Unsupported(reason.to_string())),
+        time_scale: scope_time_scale(&module.packages, &module.name),
+    })
+}
+
+/// Lower a specialization [`prepare_specialization`] prepared. When the
+/// lowering fails and a recursion report is asked for, `report` gets the
+/// report lines of the graph recorded up to the error, for the caller to
+/// append (see `recursion::append_lines`).
+pub(super) fn lower_specialization(
+    prepared: PreparedSpecialization<'_>,
+    warnings: &mut Vec<crate::warning::PendingWarning>,
+    report: &mut Option<Vec<String>>,
+) -> Result<LoweredSvModule, sv::AnalyzerError> {
+    let PreparedSpecialization {
+        name,
+        source,
+        implicit_nets_allowed,
+        interface_member_paths,
+        force_signals,
+        four_state,
+        ff_parts,
+        level_lists,
+        hierarchical,
+        scope_callers,
+        time_precision,
+        time_scale,
+    } = prepared;
+    // The module lowered, and the same module when the recursion report
+    // needs it after a failed lowering (it keeps the shared analysis then).
+    let (specialized, reported): (
+        std::borrow::Cow<'_, sv::ir::Module>,
+        Option<&sv::ir::Module>,
+    ) = match &source {
+        SpecializedSource::Shared(module) => (std::borrow::Cow::Borrowed(*module), Some(*module)),
+        SpecializedSource::Reported(ir) => {
+            let module = ir
+                .modules()
+                .iter()
+                .find(|candidate| candidate.name() == name)
+                .expect("prepared with the module");
+            (std::borrow::Cow::Borrowed(module), Some(module))
+        }
+        SpecializedSource::Owned(_) => {
+            let SpecializedSource::Owned(module) = source else {
+                unreachable!()
+            };
+            return lower_specialized(
+                std::borrow::Cow::Owned(*module),
+                None,
+                &name,
+                implicit_nets_allowed,
+                interface_member_paths,
+                force_signals,
+                four_state,
+                ff_parts,
+                level_lists,
+                hierarchical,
+                scope_callers,
+                time_precision,
+                time_scale,
+                warnings,
+                report,
+            );
+        }
+    };
+    lower_specialized(
+        specialized,
+        reported,
+        &name,
+        implicit_nets_allowed,
+        interface_member_paths,
+        force_signals,
+        four_state,
+        ff_parts,
+        level_lists,
+        hierarchical,
+        scope_callers,
+        time_precision,
+        time_scale,
+        warnings,
+        report,
+    )
+}
+
+/// [`lower_specialization`] of the module `specialized`, with `reported`
+/// for the recursion report after a failed lowering.
+#[allow(clippy::too_many_arguments)]
+fn lower_specialized(
+    specialized: std::borrow::Cow<'_, sv::ir::Module>,
+    reported: Option<&sv::ir::Module>,
+    name: &str,
+    implicit_nets_allowed: bool,
+    interface_member_paths: &HashMap<String, sv::InterfaceMemberPath>,
+    force_signals: &[String],
+    four_state: bool,
+    ff_parts: bool,
+    level_lists: LevelLists<'_>,
+    hierarchical: HierarchicalNames<'_>,
+    scope_callers: Option<Vec<String>>,
+    time_precision: Result<celox_design::TimePrecision, sv::AnalyzerError>,
+    time_scale: Result<celox_design::TimeScale, sv::AnalyzerError>,
+    warnings: &mut Vec<crate::warning::PendingWarning>,
+    report: &mut Option<Vec<String>>,
+) -> Result<LoweredSvModule, sv::AnalyzerError> {
     // Each module may store or wait on a watched property.
     let own;
     let properties = if matches!(hierarchical.instances, Instances::Discovery) {
@@ -240,12 +448,10 @@ pub(super) fn specialize_module(
     } else {
         specialized
     };
-    let local_forces = key
-        .force_signals
+    let local_forces = force_signals
         .iter()
         .map(|path| {
-            module
-                .interface_member_paths
+            interface_member_paths
                 .iter()
                 .find(|(_, segments)| segments.segments.join(".") == *path)
                 .map_or_else(|| path.clone(), |(flat, _)| flat.clone())
@@ -263,31 +469,21 @@ pub(super) fn specialize_module(
     ));
     if let Some(functions) = calls.as_mut().and_then(|graph| graph.out_of_line.as_mut()) {
         functions.foreign = hierarchical.shared.foreign_references.clone();
-        // The packages whose state modules may call the root's units: those
-        // that keep time as the root does (see `out_of_line::Home`).
-        if hierarchical.home {
-            let time_scale = scope_time_scale(&module.packages, &module.name).ok();
-            let mut callers: Vec<String> = module
-                .packages
-                .names()
-                .filter(|package| scope_time_scale(&module.packages, package).ok() == time_scale)
-                .map(str::to_string)
-                .collect();
-            callers.sort_unstable();
+        if let Some(callers) = scope_callers {
             functions.scope_callers = callers;
         }
     }
     let lowered = lower_module(
         specialized,
         four_state,
-        module.implicit_nets_allowed,
+        implicit_nets_allowed,
         ff_parts,
         hierarchical.next_state,
         warnings,
         &local_forces,
         level_lists,
         hierarchical.foreign_writes,
-        &module.interface_member_paths,
+        interface_member_paths,
         hierarchical.shared,
         hierarchical.same_instance_aliased,
         hierarchical.same_instance_alias_groups,
@@ -296,19 +492,17 @@ pub(super) fn specialize_module(
     let mut lowered = match (lowered, &calls, hierarchical.recursion_report, reported) {
         (Ok(lowered), _, _, _) => lowered,
         // Report the graph recorded up to the error.
-        (Err(error), Some(graph), Some(path), Some(specialized)) => {
-            recursion::append(specialized, graph, path);
+        (Err(error), Some(graph), Some(_), Some(specialized)) => {
+            *report = Some(recursion::report(specialized, graph));
             return Err(error);
         }
         (Err(error), ..) => return Err(error),
     };
     lowered.calls = calls;
-    propagate_force_signals(&mut lowered.instances, &key.force_signals);
-    lowered.sim_module.time_precision = Some(
-        celox_design::TimePrecision::try_from(module.packages.global_time_precision())
-            .map_err(|reason| sv::AnalyzerError::Unsupported(reason.to_string()))?,
-    );
-    lowered.sim_module.time_scale = scope_time_scale(&module.packages, &module.name)?;
+    propagate_force_signals(&mut lowered.instances, force_signals);
+    let _ = name;
+    lowered.sim_module.time_precision = Some(time_precision?);
+    lowered.sim_module.time_scale = time_scale?;
     Ok(lowered)
 }
 
