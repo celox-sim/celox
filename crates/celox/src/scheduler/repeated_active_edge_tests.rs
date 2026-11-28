@@ -95,6 +95,51 @@ endmodule"#;
 }
 
 #[test]
+fn interleaved_wait_flags_wake_only_the_matching_processes() {
+    let mut source = String::from(
+        "`timescale 1ns/1ns\nmodule Top; bit a; bit [7:0] data;
+         initial begin #2; a = 1; #2; data = 1; #2; a = 0; data = 0; #2; a = 1; #1; $finish; end\n",
+    );
+    // Alternate the two sensitivity lists across a full word and a tail.
+    for i in 0..11 {
+        let input = if i % 2 == 0 { "a" } else { "data" };
+        let factor = 2 * i + 3;
+        source.push_str(&format!(
+            "wire [7:0] signal_{i} = {input} * {factor};
+             int hits_{i}; initial forever begin @(signal_{i}); hits_{i}++; end\n"
+        ));
+    }
+    source.push_str("endmodule");
+    let mut sim = crate::Simulation::from_sv_sources(
+        vec![(source.as_str(), std::path::Path::new("wait-subset.sv"))],
+        "Top",
+    )
+    .settle_partition(crate::SettlePartition::Always)
+    .settle_check(true)
+    .scheduler_mode(crate::SchedulerMode::Differential)
+    .build_native()
+    .unwrap();
+    let flags = sim
+        .program()
+        .runtime_schema
+        .settle_partitions
+        .as_ref()
+        .unwrap();
+    assert!(flags.waits > 8);
+    sim.run_until(10).unwrap();
+    assert!(sim.is_finished());
+    for i in 0..11 {
+        let expected = if i % 2 == 0 { 3u8 } else { 2 };
+        assert_eq!(sim.get(sim.signal(&format!("hits_{i}"))), expected.into());
+    }
+    let stats = sim.scheduler_stats();
+    assert_eq!(stats.unchecked, None, "{stats:?}");
+    assert!(stats.checked_steps > 0, "{stats:?}");
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    assert!(stats.compiled_slots > 0, "{stats:?}");
+}
+
+#[test]
 fn unknown_then_known_clock_counts_both_four_state_posedges() {
     for four_state in [false, true] {
         let expected = if four_state { 2 } else { 1 };
